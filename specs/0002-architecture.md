@@ -304,7 +304,8 @@ task (ADR 0017).
   `core.spawn` (returns a `TaskId`); `core.wait` waits and returns the exit reason,
   `core.kill` requests termination by id. The queue holds 1024 pending requests by
   default — a compile-time constant, overridable at build time. Each request carries a
-  path and a fixed `string[1024]` argument; the kernel does not parse it.
+  path and a fixed `string[1024]` argument; the kernel does not parse it, and passes it to
+  the child's `main(args: const string[1024])`.
 - For each request the service resolves the path, reads the source, compiles it, computes
   the manifest, allocates `code`/`state`/`stack`, creates the task with the reserved id
   and enqueues it. The kernel allocates before the task starts, exactly as the memory
@@ -406,7 +407,7 @@ task; after that, shutdown.
 | `shell` missing or fails to compile | Try `entrypoint`; if that also fails, write `no entry` and halt |
 | Spawn path not found | `Status.NotFound`; no task created |
 | Spawn compile error | `Status.Invalid`; no task created |
-| Request queue full | `Status.Full` or block (open question 9) |
+| Request queue full | `Status.Full`; `run` blocks only on the child, never on the queue |
 | `wait` on an unknown or evicted id | `Status.NotFound` |
 | `kill` on a terminated or unknown id | `Status.NotFound` |
 | Parent terminates with live children | Children continue (ADR 0017 addendum 2) |
@@ -427,8 +428,8 @@ task; after that, shutdown.
 | 6 | Debug/introspection surface (task listing, counters, trace) | Deferred; not part of the first host interface. |
 | 7 | ~~Whether to reserve one core for the REPL/system when realtime tasks are admitted~~ | **Resolved** — no reservation; realtime may occupy every core (ADR 0016 addendum). |
 | 8 | ~~Shell boot fallback: drop to a built-in prompt, or boot without a UI~~ | **Resolved** — try `shell`, then `entrypoint`; otherwise `no entry` and halt (ADR 0017 addendum). |
-| 9 | Exit-reason ring size and whether `run` may block on a full queue | REPL service resource bounds (ADR 0017 addendum 2). |
-| 10 | Whether the argument string is exposed as `core.arguments` or as a `main` parameter | Language surface; `core.arguments` is the working assumption. |
+| 9 | ~~Exit-reason ring size and whether `run` may block on a full queue~~ | **Resolved** — ring default 64 (compile-time constant); a full request queue returns `Status.Full` (ADR 0017 addendum 2). |
+| 10 | ~~Whether the argument string is exposed as `core.arguments` or as a `main` parameter~~ | **Resolved** — `main(args: const string[1024])` (ADR 0017 addendum 2). |
 
 ## Changelog
 

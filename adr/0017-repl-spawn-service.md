@@ -146,10 +146,10 @@ no-reserved-core decision (ADR 0016 addendum) and is accepted.
   `no entry` to the console and halts the system. `entrypoint` is for custom images that
   want to boot straight into an application instead of a shell; it has no special
   semantics beyond being the second name tried.
-- **Arguments.** `run` and `spawn` carry a fixed `string[1024]`. The child reads it with
-  `core.arguments(var buf: string[1024])`. Splitting, quoting or interpreting the string
-  is entirely the child's decision; the kernel never parses it. The 1024-byte capacity is
-  a compile-time constant, not a per-call choice.
+- **Arguments.** `run` and `spawn` carry a fixed `string[1024]`. The loader passes it to
+  the child's `main(args: const string[1024])`. Splitting, quoting or interpreting the
+  string is entirely the child's decision; the kernel never parses it. The 1024-byte
+  capacity is a compile-time constant, not a per-call choice.
 - **Queue capacity.** The request queue holds 1024 pending requests. It is a compile-time
   constant with a build-time override, in the spirit of `-DQUEUE_CAPACITY=1024`; the Rust
   form is a `build.rs`-generated constant or an `option_env!` parse, not a Cargo feature.

@@ -86,7 +86,7 @@ var
   name: string[MaxName];
   count: int;
 
-procedure main;
+procedure main(args: const string[1024]);
 begin
   name := "igis";             // construction, not allocation
   count := 0;
@@ -275,6 +275,15 @@ if st <> Ok then
 - **M5 (SHOULD):** Top-level declarations are visible to importers; private helpers are
   not part of the first milestone (open question 2).
 
+### Entry point
+
+- **EP1 (MUST):** The entry point is `procedure main(args: const string[1024]);`. The
+  loader passes the request's argument; an empty string if none.
+- **EP2 (MUST):** `args` is read-only. To modify or split it, the application copies it
+  into its own buffer.
+- **EP3 (MUST):** Exactly one `main` exists per application, in the unit named by the
+  manifest.
+
 ## Concurrency
 
 - **C1 (MUST):** An application is single-threaded. There are no threads, no `async`, and
@@ -298,9 +307,9 @@ if st <> Ok then
   kernel REPL service (ADR 0017).
 - **C8 (MUST):** A spawned child is a separate application instance with its own regions.
   It shares no memory with the parent; communication is through streams.
-- **C9 (MUST):** The argument passed to `run`/`spawn` is a fixed `string[1024]`. The child
-  reads it with `core.arguments(var buf: string[1024])`; splitting, quoting and
-  interpreting it is the child's decision. The kernel never parses it.
+- **C9 (MUST):** The argument passed to `run`/`spawn` is a fixed `string[1024]`, delivered
+  as `main(args: const string[1024])`. Splitting, quoting and interpreting it is the
+  child's decision; the kernel never parses it. An empty string means no arguments.
 
 ## Hardware access (`syslib`)
 
@@ -411,9 +420,9 @@ end;
 
 `core` (native, Rust) provides the primitives that must be fast or that touch the host
 interface: console read/write, `yield`, stream send/receive/try, monotonic clock,
-`sleep_until`, realtime promotion and `heartbeat`, `run`/`spawn`/`wait`/`kill` and
-`arguments`, byte and string copy/compare/find, integer math, formatting primitives, and
-the checked conversions. `stdlib` (written in the language) provides arrays, rings, maps, UTF-8
+`sleep_until`, realtime promotion and `heartbeat`, `run`/`spawn`/`wait`/`kill`, byte and
+string copy/compare/find, integer math, formatting primitives, and the checked
+conversions. `stdlib` (written in the language) provides arrays, rings, maps, UTF-8
 helpers, parsing, formatting, and typed stream views. `syslib` (native, Rust) provides
 ports, MMIO handles and future block/DMA access.
 
@@ -464,5 +473,5 @@ is the signal.
 | 2026-11-12 | Full design pass: Pascal-like syntax; nominal types; built-in parametric collections; `bytes`/`string` split; `Status` errors; `core`/`stdlib`/`syslib` namespaces; streams plus `yield`; typed `syslib` handles; `const` expressions; compiler-generated manifests; at-least-N parameters; diagnostics in `fault`/`exit`. |
 | 2026-11-12 | Added the realtime class and `WatchdogTimeout`: one-way `core.realtime_on()`, mandatory `core.heartbeat()` (ADR 0016). |
 | 2026-11-12 | Added task spawning and `run`/`spawn`/`wait`/`kill`; `spawn` starts a separate application instance, not a thread (ADR 0017). |
-| 2026-11-12 | Added the fixed `string[1024]` argument and `core.arguments` (ADR 0017 addendum). |
+| 2026-11-12 | Added the fixed `string[1024]` argument, delivered as `main(args)` (ADR 0017 addendum). |
 | 2026-11-12 | Replaced task handles with global `TaskId`s; `spawn` returns an id, `wait`/`kill` take one; no per-task handle table (ADR 0017 addendum 2). |

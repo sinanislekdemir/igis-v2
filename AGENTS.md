@@ -135,8 +135,8 @@ Highest-leverage unresolved items:
 | 6 | Bytecode format and compiler/runtime split | implementation |
 | 7 | AP bring-up details: trampoline, IPI, per-core stacks | arch |
 | 8 | ext2 subset edge cases and corruption handling | loader |
-| 9 | Exit-reason ring size (64?) and whether `run` blocks on a full queue | REPL service |
-| 10 | Whether the argument string is `core.arguments` or a `main` parameter | language |
+| 9 | ~~Exit-reason ring size and whether `run` blocks on a full queue~~ | **Resolved** — ring 64; a full request queue returns `Status.Full`. |
+| 10 | ~~Argument surface~~ | **Resolved** — `main(args: const string[1024])`. |
 
 ## Status log
 
@@ -156,3 +156,4 @@ Highest-leverage unresolved items:
 | 2026-11-12 | REPL model settled: a kernel service compiles and starts applications from a request queue; the shell is an ordinary application; `run`/`spawn`/`wait`/`kill` with global task ids (ADR 0017). |
 | 2026-11-12 | REPL details settled: `shell` then `entrypoint`, `no entry` halt, fixed `string[1024]` arguments, queue capacity 1024, orphan children continue (ADR 0017 addendum). |
 | 2026-11-12 | Per-task handles replaced by global `TaskId`s and a 64-entry exit-reason ring; no per-task handle table (ADR 0017 addendum 2). |
+| 2026-11-12 | Argument delivery settled as `main(args: const string[1024])`; a full request queue returns `Status.Full`, and `run` blocks only on the child. |

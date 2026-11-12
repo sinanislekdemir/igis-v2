@@ -227,9 +227,9 @@ There are no zombies. A terminated task leaves nothing behind.
 - A request creates a task: the service resolves the path in ext2, reads the source,
   compiles it, allocates `code`/`state`/`stack`, builds the task record, and enqueues it
   as `Runnable`.
-- The task record stores the fixed `string[1024]` argument; the child reads it with
-  `core.arguments`. The queue holds 1024 pending requests by default, a compile-time
-  constant.
+- The task record stores the fixed `string[1024]` argument; the loader passes it to the
+  child's `main(args: const string[1024])`. The queue holds 1024 pending requests by
+  default, a compile-time constant.
 - The request carries the reserved task id. On child termination the id and exit reason
   go to the global ring, and the parent is woken if it is blocked in `wait`/`run`.
 - Child regions are reclaimed at termination; the exit reason survives in the global ring
@@ -301,7 +301,7 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | Realtime promotion with no free core | `Status.Full`; the task stays normal |
 | Realtime task misses its heartbeat | Terminate at safe point; `fault(WatchdogTimeout)`; recovery rejected; `exit`; reclaim |
 | Every core held by realtime tasks | Normal tasks wait, including a REPL; accepted tradeoff |
-| Spawn request queue full | `Status.Full` or block (open question) |
+| Spawn request queue full | `Status.Full`; `run` blocks only on the child |
 | Argument longer than 1024 bytes | `Status.CapacityExceeded`; no request enqueued |
 | Child terminates while parent is in `wait` | Parent wakes with the child's `ExitReason` |
 | `wait` on an unknown or evicted id | `Status.NotFound` |
@@ -330,8 +330,8 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 7 | ~~Whether to reserve one core for the REPL/system~~ | **Resolved** — no reservation; realtime may occupy every core (ADR 0016 addendum). |
 | 8 | Heartbeat interval (one second) and whether it is configurable per task | Detection latency versus overhead. |
 | 9 | Whether the service dispatcher runs before every claim or only when the runnable set is empty | Compile latency versus scheduling overhead. |
-| 10 | Exit-reason ring size (64?) and whether `run` may block on a full queue | REPL service bounds (ADR 0017 addendum 2). |
-| 11 | Whether the argument string is `core.arguments` or a `main` parameter | Language surface. |
+| 10 | ~~Exit-reason ring size (64?) and whether `run` may block on a full queue~~ | **Resolved** — ring default 64; a full request queue returns `Status.Full`. |
+| 11 | ~~Whether the argument string is `core.arguments` or a `main` parameter~~ | **Resolved** — `main(args: const string[1024])`. |
 
 ## Changelog
 
@@ -340,4 +340,4 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 2026-11-12 | Initial draft: per-core loops, atomic claim, quantum versus budget, blocking and wake-up, deterministic termination, SMP bring-up within the first milestone. |
 | 2026-11-12 | Added the realtime class: one-way promotion, priority, no quantum preemption, admission by core count, heartbeat with `WatchdogTimeout` (ADR 0016). |
 | 2026-11-12 | Added the service opportunity and REPL task creation: `run`/`spawn`/`wait`/`kill`, task ids and the exit-reason ring (ADR 0017). |
-| 2026-11-12 | Task creation carries the fixed `string[1024]` argument; queue capacity 1024; orphan children continue (ADR 0017 addendum). |
+| 2026-11-12 | Task creation carries the fixed `string[1024]` argument, delivered as `main(args)`; queue capacity 1024; orphan children continue (ADR 0017 addendum). |

@@ -69,7 +69,6 @@ The interface is split into two namespaces:
 | `spawn` | `fn spawn(path: &str, args: &str, id: &mut TaskId) -> Status` | no; reserves an id and returns |
 | `wait` | `fn wait(id: TaskId, reason: &mut ExitReason) -> Status` | yes if the task is live |
 | `kill` | `fn kill(id: TaskId) -> Status` | no; requests termination |
-| `arguments` | `fn arguments(buf: &mut [u8]) -> Status` | no; reads the current task's argument string |
 
 - `realtime_on` promotes the calling task, one way, to the realtime class: it is claimed
   before normal tasks and is not released at quantum expiry. It returns `Status.Full` when
@@ -86,8 +85,8 @@ The interface is split into two namespaces:
 - `TaskId` is a global, monotonically increasing `u64`, never reused; zero is invalid.
   `spawn` reserves one at request time. There is no per-task handle table.
 - The argument is a fixed `string[1024]`. The kernel copies it into the request and
-  returns it to the child through `core.arguments`; it never parses it. A longer argument
-  is `Status.CapacityExceeded`.
+  passes it to the child's `main(args: const string[1024])`; it never parses it. A longer
+  argument is `Status.CapacityExceeded`.
 - `wait` is `wait(id)`. If the task is live it blocks; if it has terminated, the exit
   reason is served from a small global ring (64 entries by default); if the record has
   been evicted or the id is unknown, it returns `Status.NotFound`.
@@ -155,7 +154,6 @@ trait Host {
     fn spawn(&mut self, path: &str, args: &str, id: &mut TaskId) -> Status;
     fn wait(&mut self, id: TaskId, reason: &mut ExitReason) -> Status;
     fn kill(&mut self, id: TaskId) -> Status;
-    fn arguments(&mut self, buf: &mut [u8]) -> Status;
 }
 
 trait Syslib {
@@ -186,7 +184,7 @@ signal for origin and cost (`0003-language.md`).
 | `run`/`spawn` path not found | `Status.NotFound`; no task created |
 | Argument longer than 1024 bytes | `Status.CapacityExceeded`; no request enqueued |
 | `run`/`spawn` compile error | `Status.Invalid`; the diagnostic is written where the caller can read it (open question 7) |
-| Request queue full | `Status.Full` or block |
+| Request queue full | `Status.Full`; `run` blocks only on the child |
 | `wait` on an unknown or evicted id | `Status.NotFound` |
 | `kill` on a terminated or unknown id | `Status.NotFound` |
 | Child terminates while the parent is blocked in `wait` | Parent wakes with the child's `ExitReason` |
@@ -209,8 +207,8 @@ signal for origin and cost (`0003-language.md`).
 | 7 | Compile-error diagnostics: a fixed buffer, a stream, or a status only | The shell must display errors; the ABI shape is open. |
 | 8 | ~~`run`/`spawn` arguments, working directory and environment~~ | **Resolved** — fixed `string[1024]`; the child parses it (ADR 0017 addendum). |
 | 9 | ~~Parent death with live children~~ | **Resolved** — children continue (ADR 0017 addendum). |
-| 10 | Exit-reason ring size (64?) and whether `run` blocks on a full queue | Resource bounds. |
-| 11 | Whether the argument string is `core.arguments` or a `main` parameter | Language surface; `core.arguments` is the working assumption. |
+| 10 | ~~Exit-reason ring size (64?) and whether `run` blocks on a full queue~~ | **Resolved** — ring default 64; a full request queue returns `Status.Full`. |
+| 11 | ~~Whether the argument string is `core.arguments` or a `main` parameter~~ | **Resolved** — `main(args: const string[1024])`. |
 
 ## Changelog
 
@@ -218,4 +216,4 @@ signal for origin and cost (`0003-language.md`).
 |------|--------|
 | 2026-11-12 | Initial draft: core and syslib namespaces, blocking semantics, mockability, absence of allocation and spawn. |
 | 2026-11-12 | Added realtime promotion and heartbeat. |
-| 2026-11-12 | Added `run`/`spawn`/`wait`/`kill`, fixed `string[1024]` arguments, global task ids and the exit-reason ring; removed per-task handles (ADR 0017 and addendum 2). |
+| 2026-11-12 | Added `run`/`spawn`/`wait`/`kill`, fixed `string[1024]` arguments delivered as `main(args)`, global task ids and the exit-reason ring; removed per-task handles (ADR 0017 and addenda 1–2). |
