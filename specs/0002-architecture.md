@@ -83,6 +83,9 @@ calls, and builtin entry):
 1. whether the current quantum is exhausted, and
 2. whether the task's total budget is exhausted.
 
+**Quantum** is OS jargon for a scheduling slice (unrelated to physics); `0007-scheduler.md`
+distinguishes it from the total budget and the handler budget.
+
 Two limits exist and they mean different things:
 
 - **Quantum** — fairness. When it expires the core releases the task at the next safe

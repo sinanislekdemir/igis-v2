@@ -45,6 +45,22 @@ ADR 0011 concrete.
 
 ## Design
 
+### Terminology: three limits, one confusing word
+
+The word **quantum** is operating-systems jargon for a discrete scheduling slice, borrowed
+from physics; it has nothing to do with quantum mechanics. It is easy to conflate with the
+two other limits in the system, so they are stated together once:
+
+| Limit | Measured over | On expiry |
+|-------|---------------|-----------|
+| **Quantum** | one claim: one run of one task on one core | Release at a safe point and re-enqueue; not a fault |
+| **Total CPU budget** | the task's whole lifetime, blocked time excluded | Terminate unconditionally at a safe point |
+| **Handler budget** | one `fault` or `exit` invocation | Abandon the handler and reclaim the task |
+
+A quantum is measured in interpreter steps (bytecodes), with a time fallback; it is not
+measured in source lines. The total budget is the watchdog. The handler budget is the
+emergency allowance for teardown and diagnosis.
+
 ### Task states
 
 ```
