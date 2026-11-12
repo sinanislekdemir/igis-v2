@@ -45,6 +45,7 @@ constraints learned there.
 .
 ├── AGENTS.md          # this file: operational facts and conventions
 ├── IDEAS.md           # unstructured inbox
+├── OPEN-QUESTIONS.md  # parked decisions and unresolved questions
 ├── adr/               # decision log (immutable once accepted)
 ├── specs/             # normative specifications (living)
 └── src/ ...           # (to be created once the architecture spec is accepted)
@@ -122,21 +123,9 @@ commands here (`cargo xtask build`, `cargo xtask run`, `cargo xtask test`).
 
 ## Open questions
 
-See `specs/0001-vision.md` for the closed table and the individual specs for the rest.
-Highest-leverage unresolved items:
-
-| # | Question | Needed for |
-|---|----------|------------|
-| 1 | Quantum size and total budget value | tuning after the first workloads |
-| 2 | Console read granularity: bytes, lines, or key events | host interface |
-| 3 | Explicit stream close; multiple endpoints per name | streams |
-| 4 | Floating point (`f32`/`f64`) in the first milestone | language |
-| 5 | Unit visibility and private declarations | language |
-| 6 | Bytecode format and compiler/runtime split | implementation |
-| 7 | AP bring-up details: trampoline, IPI, per-core stacks | arch |
-| 8 | ext2 subset edge cases and corruption handling | loader |
-| 9 | ~~Exit-reason ring size and whether `run` blocks on a full queue~~ | **Resolved** — ring 64; a full request queue returns `Status.Full`. |
-| 10 | ~~Argument surface~~ | **Resolved** — `main(args: const string[1024])`. |
+See [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) for the full parked register. It groups
+tuning constants, host interface, streams, language, boot and REPL items by trigger.
+When an item is resolved, record the answer in its spec or a new ADR and remove it there.
 
 ## Status log
 
@@ -157,3 +146,4 @@ Highest-leverage unresolved items:
 | 2026-11-12 | REPL details settled: `shell` then `entrypoint`, `no entry` halt, fixed `string[1024]` arguments, queue capacity 1024, orphan children continue (ADR 0017 addendum). |
 | 2026-11-12 | Per-task handles replaced by global `TaskId`s and a 64-entry exit-reason ring; no per-task handle table (ADR 0017 addendum 2). |
 | 2026-11-12 | Argument delivery settled as `main(args: const string[1024])`; a full request queue returns `Status.Full`, and `run` blocks only on the child. |
+| 2026-11-12 | Remaining unresolved items parked in `OPEN-QUESTIONS.md`; session paused before code. |

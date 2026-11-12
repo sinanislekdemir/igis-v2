@@ -23,4 +23,5 @@ The project is currently in the specification phase — there is no code yet.
 | [`AGENTS.md`](AGENTS.md) | Operational guide: conventions, toolchain, current phase. |
 | [`specs/`](specs/README.md) | Normative specifications (what the system shall do). |
 | [`adr/`](adr/README.md) | Architecture decision records (why, and what was rejected). |
+| [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) | Parked decisions and unresolved questions. |
 | [`IDEAS.md`](IDEAS.md) | Unstructured inbox for ideas not yet worth designing. |
