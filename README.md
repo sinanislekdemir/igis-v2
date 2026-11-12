@@ -11,7 +11,9 @@ x86_64 first, with architecture-specific code isolated so other ISAs can follow
 hand-written long-mode transition ([ADR 0014](adr/0014-grub-multiboot2-boot.md)).
 Applications arrive on a read-only ext2 image ([ADR 0015](adr/0015-read-only-ext2-delivery.md))
 and are advanced by per-core interpreter loops that steal work; nothing is pinned
-([ADR 0011](adr/0011-work-stealing-interpreters.md)).
+([ADR 0011](adr/0011-work-stealing-interpreters.md)). The shell is itself an application:
+a kernel REPL service compiles it at boot and starts it, and applications start others
+through a `run`/`spawn` request queue ([ADR 0017](adr/0017-repl-spawn-service.md)).
 
 The project is currently in the specification phase — there is no code yet.
 

@@ -96,6 +96,7 @@ Runnable ──────────▶ Running ─────────�
 
 ```
 loop {
+    service_opportunity()               // REPL: at most one pending request
     task = runnable_set.pop()           // atomic; the pop is the claim
     if task.is_none() {
         halt_until_ipi_or_interrupt()
@@ -217,6 +218,25 @@ On budget expiry or an unrecovered fault:
 
 There are no zombies. A terminated task leaves nothing behind.
 
+### Services and task creation
+
+- Before claiming a task — and whenever the runnable set is empty — the loop calls the
+  kernel service dispatcher. The REPL service processes at most one pending
+  compile-and-run request per opportunity (`0002-architecture.md`, ADR 0017). This bounds
+  the time a core spends compiling.
+- A request creates a task: the service resolves the path in ext2, reads the source,
+  compiles it, allocates `code`/`state`/`stack`, builds the task record, and enqueues it
+  as `Runnable`.
+- The requesting task's handle slot is linked to the new task. On child termination the
+  exit reason is stored in the slot and the parent is woken if it is blocked in
+  `join`/`run`.
+- Child regions are reclaimed at termination; the handle slot survives until `join` or
+  until the parent terminates.
+- `kill` marks the child for termination at its next safe point; it does not wait.
+- If every core is held by a realtime task, the service gets no opportunity and no
+  application starts. This is the accepted no-reserved-core tradeoff (ADR 0016
+  addendum).
+
 ### Per-core state
 
 Each core has:
@@ -277,6 +297,11 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | Realtime promotion with no free core | `Status.Full`; the task stays normal |
 | Realtime task misses its heartbeat | Terminate at safe point; `fault(WatchdogTimeout)`; recovery rejected; `exit`; reclaim |
 | Every core held by realtime tasks | Normal tasks wait, including a REPL; accepted tradeoff |
+| Spawn request queue full | `Status.Full` or block (open question) |
+| Handle table full | `Status.Full`; no request enqueued |
+| Child terminates while parent is in `join` | Parent wakes with the child's `ExitReason` |
+| Parent terminates with live children | Children continue (open question) |
+| Compile fails in the REPL service | Request completes with `Status.Invalid`; no task created |
 | Task blocks | Leaves the runnable set; no CPU consumed |
 | Wake with all cores halted | IPI to one core; `need_resched` set before the IPI |
 | Task terminates while owning a stream endpoint | Endpoint closes; queued data discarded; peer sees `Closed` |
@@ -298,6 +323,8 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 6 | Whether a task can be pinned for debugging | A debug feature, not a scheduling model. |
 | 7 | ~~Whether to reserve one core for the REPL/system~~ | **Resolved** — no reservation; realtime may occupy every core (ADR 0016 addendum). |
 | 8 | Heartbeat interval (one second) and whether it is configurable per task | Detection latency versus overhead. |
+| 9 | Whether the service dispatcher runs before every claim or only when the runnable set is empty | Compile latency versus scheduling overhead. |
+| 10 | `run`/`spawn` arguments, queue capacity, handle table size, parent-death policy | REPL service bounds (ADR 0017). |
 
 ## Changelog
 
@@ -305,3 +332,4 @@ fn terminate(task: TaskRef, reason: FaultCode);
 |------|--------|
 | 2026-11-12 | Initial draft: per-core loops, atomic claim, quantum versus budget, blocking and wake-up, deterministic termination, SMP bring-up within the first milestone. |
 | 2026-11-12 | Added the realtime class: one-way promotion, priority, no quantum preemption, admission by core count, heartbeat with `WatchdogTimeout` (ADR 0016). |
+| 2026-11-12 | Added the service opportunity and REPL task creation: `run`/`spawn`/`join`/`kill`, handle slots and exit reasons (ADR 0017). |

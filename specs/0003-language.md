@@ -149,6 +149,9 @@ Rules:
 - **Stream endpoints:** `in_stream[N]` (receive only) and `out_stream[N]` (send only),
   N bytes of queue capacity. Distinct nominal types, so a receive endpoint cannot be sent
   to.
+- **Task handles:** `TaskHandle`, opaque, owned by the task that spawned the child.
+  `join` reaps it; a reaped handle is invalid. Handles are values (copying one is allowed)
+  but only one `join` succeeds.
 
 There are **no user-defined generics**. The parametric types above are built in; the
 compiler knows their layout and operations. Generic algorithms are either built-ins
@@ -274,8 +277,9 @@ if st <> Ok then
 
 ## Concurrency
 
-- **C1 (MUST):** An application is single-threaded. There are no threads, no `spawn`, no
-  `async`.
+- **C1 (MUST):** An application is single-threaded. There are no threads, no `async`, and
+  no shared-memory concurrency. `spawn` starts a *separate application instance* with its
+  own footprint; it does not share the caller's regions.
 - **C2 (MUST):** Communication is through `in_stream`/`out_stream` endpoints declared at
   unit level. The variable name is the stream name recorded in the manifest.
 - **C3 (MUST):** `send` and `receive` block by default; `try_send` and `try_receive`
@@ -287,6 +291,12 @@ if st <> Ok then
 - **C6 (MUST):** A task may call `core.realtime_on()` once to enter the realtime class and
   must then call `core.heartbeat()` at least once per second of non-blocked time. There is
   no way back to the normal class. The model is soft realtime (ADR 0016).
+- **C7 (MUST):** `core.run(path, var reason)` blocks until the child terminates.
+  `core.spawn(path, var handle)` returns a `TaskHandle` immediately; `core.join(handle,
+  var reason)` waits and reaps; `core.kill(handle)` requests termination and does not
+  wait. The request is handled by the kernel REPL service (ADR 0017).
+- **C8 (MUST):** A spawned child is a separate application instance with its own regions.
+  It shares no memory with the parent; communication is through streams.
 
 ## Hardware access (`syslib`)
 
@@ -397,11 +407,11 @@ end;
 
 `core` (native, Rust) provides the primitives that must be fast or that touch the host
 interface: console read/write, `yield`, stream send/receive/try, monotonic clock,
-`sleep_until`, realtime promotion and `heartbeat`, byte and string copy/compare/find,
-integer math, formatting primitives, and the checked conversions. `stdlib` (written in the
-language) provides arrays, rings, maps, UTF-8 helpers, parsing, formatting, and typed
-stream views. `syslib` (native, Rust) provides ports, MMIO handles and future block/DMA
-access.
+`sleep_until`, realtime promotion and `heartbeat`, `run`/`spawn`/`join`/`kill`, byte and
+string copy/compare/find, integer math, formatting primitives, and the checked
+conversions. `stdlib` (written in the language) provides arrays, rings, maps, UTF-8
+helpers, parsing, formatting, and typed stream views. `syslib` (native, Rust) provides
+ports, MMIO handles and future block/DMA access.
 
 A function moves from `stdlib` to `core` only when measurement justifies it; the namespace
 is the signal.
@@ -420,6 +430,10 @@ is the signal.
 | Send on a receive endpoint | Compile error (distinct types) |
 | Send on a closed endpoint | `Status.Closed` |
 | Realtime heartbeat missed | `fault(WatchdogTimeout)`; recovery rejected |
+| `run`/`spawn` path not found | `Status.NotFound` |
+| `run`/`spawn` compile error | `Status.Invalid`; no child |
+| Handle table full | `Status.Full` |
+| `join` on a reaped handle | `Status.Invalid` |
 | Discarded `Status` | Compile warning |
 | Import cycle | Compile error |
 | Capacity mismatch in assignment | Compile error |
@@ -444,3 +458,4 @@ is the signal.
 | 2026-11-03 | Created as a constraints-only seed. |
 | 2026-11-12 | Full design pass: Pascal-like syntax; nominal types; built-in parametric collections; `bytes`/`string` split; `Status` errors; `core`/`stdlib`/`syslib` namespaces; streams plus `yield`; typed `syslib` handles; `const` expressions; compiler-generated manifests; at-least-N parameters; diagnostics in `fault`/`exit`. |
 | 2026-11-12 | Added the realtime class and `WatchdogTimeout`: one-way `core.realtime_on()`, mandatory `core.heartbeat()` (ADR 0016). |
+| 2026-11-12 | Added task handles and `run`/`spawn`/`join`/`kill`; `spawn` starts a separate application instance, not a thread (ADR 0017). |

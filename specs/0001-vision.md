@@ -4,7 +4,7 @@
 - **Scope:** whole system (kernel, runtime, language, tooling)
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0001, 0002, 0003, 0004, 0005, 0006, 0007, 0011, 0012, 0013, 0014, 0015, 0016
+- **ADRs:** 0001, 0002, 0003, 0004, 0005, 0006, 0007, 0011, 0012, 0013, 0014, 0015, 0016, 0017
 - **Updated:** 2026-11-12
 
 ## Context
@@ -80,9 +80,9 @@ kernel is not written in the new language. Self-hosting the kernel is out of sco
 - **R1 (MUST):** All kernel and application code executes at CPL 0. There is no ring 3
   code, no user mode, and no privilege-transition instruction in the execution path.
 - **R2 (MUST):** The kernel contains the language runtime, a runtime `core` of native
-  primitives, a `stdlib` written in the application language, and a `syslib` exposing
-  hardware. System services are reachable from applications as runtime primitives, not
-  as syscalls.
+  primitives, a `stdlib` written in the application language, a `syslib` exposing
+  hardware, and a REPL service that compiles and starts applications. System services are
+  reachable from applications as runtime primitives, not as syscalls.
 - **R3 (MUST):** Applications are distributed and loaded as source text. No native
   application binaries are loaded or executed. An internal intermediate representation
   (bytecode) is permitted (ADR 0005); native code generation is not planned.
@@ -115,13 +115,16 @@ kernel is not written in the new language. Self-hosting the kernel is out of sco
   follow without changing the application model or the tooling contract (ADR 0015).
 - **R14 (MUST):** There is no capability or permission model. Any application may use any
   `syslib` primitive. Isolation is limited to interpreter-enforced memory ownership.
-- **R15 (SHOULD):** The system should remain usable interactively: a REPL is the native
-  execution model, and a running application can be inspected and terminated without
-  rebooting.
+- **R15 (SHOULD):** The system should remain usable interactively: the shell is an
+  ordinary application started by the REPL service, and a running application can be
+  inspected and terminated without rebooting.
 - **R16 (MUST):** A task may request the realtime class once. Realtime tasks are not
   preempted by the quantum, are exempt from the total CPU budget, and must call
   `core.heartbeat()` at least once per second of non-blocked time; a missed heartbeat is
   terminal. Admission is limited to one realtime task per online core (ADR 0016).
+- **R17 (MUST):** Applications may run other applications through `core.run` (blocking)
+  or `core.spawn` (returns a task handle). The kernel REPL service resolves the path,
+  compiles the source, allocates the footprint and creates the task (ADR 0017).
 
 ## Non-goals
 
@@ -139,6 +142,7 @@ layer 2   applications (source text, custom language)
               |  evaluated by
 layer 1   +-------------------------------------------------------+
           | interpreter   values, frames, bytecode, safe points   |
+          | repl          compile-and-run service, request queue  |
           | core          native primitives (Rust): text, math,   |
           |               streams, time, console                  |
           | stdlib        written in the language: collections,   |
@@ -171,6 +175,9 @@ Two parallel workstreams:
    tooling. Runs on the host first, behind the host interface, so it does not block on
    the kernel.
 
+The first application is `shell`, compiled by the REPL service from the image root. It is
+not privileged: it is the system's first proof that a useful program is just source text.
+
 The contract between them is the **host interface**: the enumerated set of operations the
 runtime may invoke (write console, yield, send/receive on a stream, read the clock,
 sleep, map MMIO, ...). It is this system's syscall ABI in all but name, and it is
@@ -196,11 +203,14 @@ specified independently in `0005-host-interface.md`.
 - Deterministic memory accounting and deterministic cleanup; a killed app leaves nothing
   behind.
 - Cross-architecture applications come for free.
-- A REPL is the native execution model, not a feature.
+- Interactive evaluation is the native execution model, not a feature: the shell is an
+  ordinary application, compiled and started by the kernel.
 - Work stealing means no idle core while work is runnable, and no load-balancing policy
   to tune.
 - A hardware controller can run without time-slicing, while a frozen controller is still
   detected within about a second.
+- The first useful program is source text compiled by the kernel: the boot path itself
+  demonstrates the thesis.
 
 **Negative**
 
@@ -220,6 +230,8 @@ specified independently in `0005-host-interface.md`.
 - Realtime admission and the heartbeat are another contract to get wrong; a realtime task
   can hold a core for up to a second, and enough of them can starve normal tasks by
   design — no core is reserved.
+- The REPL compiles on a core, so a large source stalls it, and a broken image can boot
+  without a shell.
 
 **Neutral**
 
@@ -255,6 +267,7 @@ specified independently in `0005-host-interface.md`.
 | 19 | Streams: copy through the kernel, or true shared ring buffers? Message- or byte-oriented? | **Resolved** — byte FIFO, copied through the kernel, typed views above it (`0006-streams.md`). |
 | 20 | Can a task's time budget be configured, and by whom? | **Resolved** — a single kernel constant in the first milestone; applications cannot negotiate. |
 | 21 | What happens to a task's streams when the peer dies mid-frame? | **Resolved** — sends are atomic, so there is no mid-frame; queued data is discarded immediately and the peer observes `Closed` (`0006-streams.md`). |
+| 22 | How does the shell run, and how do applications start other applications? | **Resolved** — the REPL is a kernel service; the shell is an application; `run`/`spawn` enqueue requests that the service compiles and starts (ADR 0017). |
 
 ## Changelog
 
@@ -264,3 +277,4 @@ specified independently in `0005-host-interface.md`.
 | 2026-11-03 | Added layer model, per-core cooperative concurrency, static memory model, stream IPC, loader abstraction. |
 | 2026-11-12 | Recorded the 2005 origin (modem front-end, ring-boundary friction) and the personal-system goal. Replaced core pinning with work stealing (ADR 0011). Resolved delivery (ext2), output (framebuffer), isolation (no capability model), boot (GRUB/multiboot2), stdlib split (`core`/`stdlib`) and all remaining open questions. |
 | 2026-11-12 | Added the realtime class: one-way promotion, no quantum preemption, admission by core count, one-second heartbeat and `WatchdogTimeout` (ADR 0016). |
+| 2026-11-12 | Added the REPL service and the spawn queue: the shell is an application, applications start others with `run`/`spawn`, and the kernel compiles and allocates (ADR 0017). |
