@@ -1,0 +1,66 @@
+# igis-v2 Specifications
+
+Normative documents describing what igis-v2 **shall** do. Specs are living: they are
+revised as understanding improves, and their history lives in git.
+
+## Index
+
+| ID   | Title | Status | Scope | Updated |
+|------|-------|--------|-------|---------|
+| 0001 | [Vision and guiding principles](0001-vision.md) | Draft | whole system | 2026-11-03 |
+| 0002 | [System architecture](0002-architecture.md) | Draft | kernel, runtime, execution/memory model | 2026-11-03 |
+| 0003 | [Language and standard library](0003-language.md) | Draft | application language | 2026-11-03 |
+| 0004 | [Application memory model](0004-memory-model.md) | Draft | mm, loader, interpreter, language | 2026-11-03 |
+
+## Lifecycle
+
+    idea  ──▶  draft  ──▶  accepted  ──▶  implemented
+                  │                         │
+                  └──▶  withdrawn           └──▶  superseded by NNNN
+
+- **Draft** — being written, not authoritative. Anything may change.
+- **Accepted** — reviewed and agreed. Implementation may proceed against it.
+- **Implemented** — the system matches the spec; changes now require a spec revision
+  (or a new superseding spec).
+- **Withdrawn** — abandoned before acceptance; kept for the record.
+- **Superseded by NNNN** — replaced; kept as history, never deleted.
+
+Only **Accepted** and **Implemented** specs are authoritative. If code and an accepted
+spec disagree, that is a bug in one of them — fix it explicitly.
+
+## Numbering and naming
+
+- Four digits, assigned monotonically, never reused: `0042-scheduler.md`.
+- Prefer short, specific titles: `page-table-isolation`, not `memory-management-part-3`.
+- Keep the tree flat while it is small. Split into subdirectories
+  (`kernel/`, `arch/`, `abi/`, `user/`) only when the flat list gets hard to scan.
+
+## Required sections
+
+Use `0000-template.md`. Every spec states:
+
+1. **Status and scope** — where the rules apply (which crates, which architectures).
+2. **Context** — the problem and constraints, including what we are *not* solving.
+3. **Requirements** — numbered, testable, using MUST / SHOULD / MAY.
+4. **Design** — the chosen approach and the important invariants.
+5. **Interfaces** — the contracts other components depend on.
+6. **Failure modes** — what happens when things go wrong.
+7. **Open questions** — unresolved items, with an owner or a trigger for resolution.
+
+## Requirements keywords
+
+Use RFC 2119 semantics strictly:
+
+- **MUST** — mandatory; violating it is a defect.
+- **SHOULD** — expected, but a documented reason may justify deviation.
+- **MAY** — genuinely optional.
+
+## Relationship to ADRs
+
+Specs say *what*. ADRs (`../adr/`) record *why* a significant choice was made and what
+was rejected. A spec may reference an ADR; an ADR never restates a spec.
+
+## Relationship to code
+
+Every spec that is Accepted SHOULD name the crate(s) implementing it, so drift is
+visible. Implementation is not started before the governing spec is Accepted.

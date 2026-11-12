@@ -1,0 +1,37 @@
+# Architecture Decision Records
+
+A numbered log of significant technical decisions. Each ADR captures the context, the
+decision, and the alternatives that were rejected — the reasoning that is otherwise
+lost once code exists.
+
+## Rules
+
+- **Immutable once accepted.** Do not rewrite an accepted ADR. If the decision changes,
+  write a new ADR and mark the old one `Superseded by NNNN`.
+- **One decision per ADR.** "Use Rust and a microkernel" is two ADRs.
+- **Record the losers.** The rejected options and *why* are the most valuable part.
+- **Small is fine.** A page is enough; this is not a design document.
+- ADRs do not restate requirements — link to the spec instead.
+
+## Status values
+
+`Proposed` · `Accepted` · `Rejected` · `Deprecated` · `Superseded by NNNN`
+
+## Numbering
+
+Four digits, monotonic, never reused: `0007-uefi-boot.md`.
+
+## Index
+
+| ID | Title | Status | Date |
+|----|-------|--------|------|
+| 0001 | [Single privilege level (ring 0 only)](0001-single-privilege-ring0.md) | Accepted | 2026-11-03 |
+| 0002 | [Applications are interpreted source, not native binaries](0002-interpreted-applications.md) | Accepted | 2026-11-03 |
+| 0003 | [Per-core cooperative scheduling with core-pinned tasks](0003-cooperative-pinned-tasks.md) | Accepted | 2026-11-03 |
+| 0004 | [Static, preallocated application memory](0004-static-application-memory.md) | Accepted | 2026-11-03 |
+| 0005 | [Internal bytecode representation is permitted](0005-internal-bytecode.md) | Accepted | 2026-11-03 |
+| 0006 | [Use MMU hardening at ring 0 (provisional)](0006-mmu-hardening.md) | Accepted (provisional) | 2026-11-03 |
+| 0007 | [Fully static memory placement — no runtime allocation of any kind](0007-fully-static-placement.md) | Accepted | 2026-11-03 |
+| 0008 | [Fatal faults invoke an application exit handler, then the task is reclaimed](0008-exit-handler.md) | Accepted (amended by 0010) | 2026-11-03 |
+| 0009 | [Exit handlers may transfer control to an application recovery point](0009-exit-recovery-point.md) | Superseded by 0010 | 2026-11-03 |
+| 0010 | [Separate exit (teardown) and fault (recovery) handlers; no retry](0010-exit-and-fault-handlers.md) | Accepted | 2026-11-03 |
