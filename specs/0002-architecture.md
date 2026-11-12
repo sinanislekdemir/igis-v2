@@ -4,8 +4,8 @@
 - **Scope:** kernel internals, runtime hosting, execution and memory model
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0001, 0002, 0003, 0004, 0006
-- **Updated:** 2026-11-03
+- **ADRs:** 0001, 0002, 0003, 0004, 0006, 0011, 0012, 0013, 0014, 0015
+- **Updated:** 2026-11-12
 
 ## Context
 
@@ -15,92 +15,117 @@ deliberately about *mechanism*, not language syntax — the language is specifie
 separately in `0003-language.md`.
 
 The constraints inherited from the vision that shape everything here: single privilege
-level, single address space, no application allocator, no migration between cores, and
-a language runtime embedded in the kernel.
+level, single address space, no application allocator, no core affinity, and a language
+runtime embedded in the kernel.
 
 ## Layering
 
 | Layer | Component | Written in | Responsibility |
 |-------|-----------|------------|----------------|
-| 1 | `arch/<isa>` | Rust + asm | Boot entry, GDT/IDT/TSS, paging, context switch, APIC/timer, SMP bring-up |
+| 1 | `arch/<isa>` | Rust + asm | Boot entry, long-mode transition, GDT/IDT/TSS, paging, stack switch, APIC/timer, SMP bring-up |
 | 1 | `platform/<machine>` | Rust | Memory map, ACPI parsing, device discovery, machine quirks |
-| 1 | `drivers` | Rust | Console, timer, input, block, bus enumeration — in-kernel, monolithic |
-| 1 | `mm` | Rust | Frame allocator, app arenas, kernel heap, stream buffers, guard pages |
-| 1 | `sched` | Rust | Per-core scheduler threads, run queues, task states, budgets, termination |
-| 1 | `vfs` / `fs` | Rust | Loader providers: ramdisk first, block device and filesystem later |
+| 1 | `drivers` | Rust | Framebuffer console, keyboard, timer, block devices — in-kernel, monolithic |
+| 1 | `mm` | Rust | Frame allocator, application regions, kernel heap, stream buffers, guard pages |
+| 1 | `sched` | Rust | Per-core interpreter loops, global runnable set, claim/release, quantum, budgets, termination |
+| 1 | `vfs` / `fs` | Rust | Loader providers: read-only ext2 over `BlockDevice` first; writable filesystems later |
 | 1 | `interpreter` | Rust | Parse/compile, bytecode execution, safe points, builtin dispatch |
-| 1 | `stdlib` | Rust *or* the language (OQ 14) | Values, strings, collections, math, formatting |
-| 1 | `syslib` | Rust (later) | Privileged services: raw hardware access, disk, streams, time |
-| 2 | applications | Custom language | Everything else |
+| 1 | `core` | Rust | Native primitives: text and bytes, math, formatting core, console binding, stream binding, clock |
+| 1 | `stdlib` | The application language | Collections, parsing, formatting, UTF-8 helpers, typed stream views |
+| 1 | `syslib` | Rust | Privileged services: port I/O, MMIO mapping, DMA buffers, block access |
+| 2 | applications | The application language | Everything else |
 
-`syslib` is deliberately a separate namespace rather than part of `stdlib`: it is the
-surface that would eventually be permission-gated, and it is the only place where raw
-hardware concepts (addresses, ports, MMIO, DMA) are exposed.
+The three namespaces are visible to applications and deliberately distinct:
+`core.*` is a native builtin (fast, part of the trusted base), `stdlib.*` is written in
+the language (portable, inspectable, slower), and `syslib.*` reaches hardware. The split
+tells a developer what a call costs and where it comes from.
+
+`syslib` is **not** permission-gated. Every application may call it (vision R14). It is
+a separate namespace for clarity and performance, not for security.
 
 ## Execution model
 
-### Per-core scheduler thread
+### Per-core interpreter loop
 
-At boot, the kernel creates one scheduler thread per CPU core. That thread is a normal
-kernel execution context; it is not an application task. It owns a run queue of tasks
-pinned to its core and loops:
+At boot, the kernel starts one interpreter loop on each online core. The loop is a normal
+kernel execution context; it is not an application task. It owns no application. It
+loops:
 
 ```
 loop {
-    task = pick_next(core.run_queue)        // cooperative, priority-aware
-    if task.is_none() { idle() }            // halt until interrupt
-    run_interpreter_until_safe_point(task)  // yields, blocks, or exhausts budget
+    task = runnable_set.claim()          // atomic; exclusive ownership
+    if task.is_none() { halt_until_ipi() }
+    run_quantum(task)                    // N bytecodes or ~1 ms
+    task.release()                       // at a safe point; state is in memory
 }
 ```
 
-Applications never migrate. Core assignment happens at task creation and is fixed
-(assignment policy is OQ 17). This makes an application's execution deterministic with
-respect to which core's state it touches, at the cost of load balancing.
+A task is claimed by exactly one core at a time. The claim word is the only
+synchronisation needed to execute application code. Release is a memory-ordering
+boundary: everything the previous owner wrote is visible to the next owner.
+
+Applications have no affinity. Any core may claim any runnable application. Migration is
+invisible to the application: it sees no core identity, no thread ID and no affinity.
+ADR 0011 records the reasoning and the rejected alternatives.
 
 ### Task states
 
 `Runnable` · `Running` · `Blocked(stream | timer)` · `Terminated`
 
-A task yields explicitly, blocks on a stream or timer, or is preempted by the budget
-mechanism. There is no involuntary context switch into a different task without the
-interpreter's cooperation; the interpreter is the only place a task boundary is crossed.
+A task yields explicitly, blocks on a stream or timer, exhausts its quantum, or is
+terminated by the budget. Only `Running` is owned by a core; `Runnable` sits in the
+global set; `Blocked` consumes no CPU.
 
-### Safe points and budgets
+### Safe points, quanta and budgets
 
 The interpreter checks, at defined safe points (bytecode boundaries, backward branches,
 calls, and builtin entry):
 
-1. a cooperative yield request (kernel or scheduler initiated), and
-2. the task's remaining time budget.
+1. whether the current quantum is exhausted, and
+2. whether the task's total budget is exhausted.
 
-A per-core timer interrupt updates time and marks a budget as expired if the running
-task exceeded it. The interrupt handler does not switch tasks; it only sets state. The
-interpreter observes the flag at its next safe point.
+Two limits exist and they mean different things:
 
-**Termination rule (as specified by the project owner):** if a task exceeds its budget
-*and* other tasks are waiting on the same core, the task is terminated rather than
-suspended. If no task is waiting, it may continue. Termination is immediate at a safe
-point.
+- **Quantum** — fairness. When it expires the core releases the task at the next safe
+  point and re-enqueues it. This is preemption by cooperation, not a kill.
+- **Total budget** — watchdog. Cumulative CPU time consumed by the task, with blocked
+  time excluded. It is a single kernel-wide constant in the first milestone; applications
+  cannot negotiate it (vision OQ 20). Expiry terminates the task **unconditionally** at
+  the next safe point: `fault(BudgetExceeded)`, recovery rejected, `exit`, reclaim.
 
-Termination must be deterministic: the task's arena is released as a whole, its stream
-endpoints are closed and their references invalidated, and its entry is removed from all
-run queues. There are no zombies and no GC.
+The unconditional rule replaces the conditional "terminate if another task is waiting on
+the same core" rule of ADR 0003. Under work stealing there is no "same core" to reason
+about.
+
+A per-core timer interrupt updates time and marks budgets as expired. The interrupt
+handler does not switch tasks; it only sets state. The interpreter observes the flag at
+its next safe point.
+
+Termination is deterministic: the task's regions are released as a whole, its stream
+endpoints are closed, its references invalidated, and its entry removed from all queues.
+There are no zombies and no GC.
 
 ### Blocking builtins
 
 A cooperative model cannot tolerate a builtin that spins or sleeps uninterruptibly: it
-would stall the core and defeat the watchdog. Therefore every builtin that can take
-unbounded time must either complete in bounded time or transition the task to `Blocked`
-and return to the scheduler. This is a requirement, not a guideline, and it is the main
-reason `syslib` must be designed against the scheduler rather than beside it.
+would stall the core and defeat both the quantum and the watchdog. Every builtin that can
+take unbounded time must either complete in bounded time or transition the task to
+`Blocked` and return to the loop. This is a requirement, not a guideline, and it is the
+main reason `syslib` is designed against the scheduler rather than beside it.
 
 ### Interrupts
 
 Hardware interrupts still preempt the interpreter. Handlers must be short and must not
 mutate application-visible memory in ways the interpreter cannot tolerate; work that
-needs more time is deferred to a bottom-half drained by the scheduler thread. This is
-the standard split, but it matters more here because there is no separate kernel thread
-that can be rescheduled independently.
+needs more time is deferred to a bottom half drained by the interpreter loop. This is the
+standard split, but it matters more here because there is no separate kernel thread that
+can be rescheduled independently.
+
+### SMP
+
+The model is designed for N cores and boots with one. Within the first milestone,
+additional cores are brought up through the APIC path and join the same global runnable
+set. The claim protocol is identical on one core and on many; a single-core run is the
+degenerate case, not a different design.
 
 ## Memory model
 
@@ -113,27 +138,27 @@ application's entire writable world.
 
 ```
 application manifest
-  └─ arena size, stack size, stream endpoints, entry point
+  └─ region sizes, stack size, stream endpoints, entry point
         │
         ▼
-  mm: reserve frames → map into kernel address space → zero
+  mm: reserve frames → map into the shared address space → zero
         │
         ▼
-  task: { arena, stack, streams, bytecode }
+  task: { code, state, stack, streams, bytecode }
 ```
 
-No runtime growth, no `malloc`, no realloc, no GC.
+No runtime growth, no `malloc`, no realloc, no GC, no runtime placement.
 
 ### Addresses and handles
 
 Because everything shares one address space, an application must never be given a raw
-address that would let it name another application's memory. The intended model is that
-application-visible references are **handles or offsets relative to the task's arena**,
-translated and bounds-checked by the interpreter on every access. Raw addresses are
-confined to `syslib`, behind a capability.
+address that would let it name another application's memory. Application-visible
+references are **handles or offsets relative to the task's regions**, translated and
+bounds-checked by the interpreter on every access. Raw addresses are confined to
+`syslib`.
 
-This is the only mechanism providing "isolation" (vision OQ 7): logical, interpreter-
-enforced, not hardware-enforced.
+This is the only mechanism providing "isolation": logical, interpreter-enforced, not
+hardware-enforced.
 
 ### Trust model, precisely
 
@@ -141,10 +166,11 @@ enforced, not hardware-enforced.
 |--------|---------|
 | Hardware protection | None. All code is CPL 0 in one address space; a single wrong pointer can reach any byte. |
 | Application memory access | Every load/store is a bytecode operation performed by the interpreter. The app holds handles and offsets, never raw addresses. The interpreter checks ownership and bounds before touching memory. |
-| What it protects | Accidental bugs in cooperative applications: overruns, wild indices, use-after-close. One app cannot corrupt another's arena through normal language operations. |
+| What it protects | Accidental bugs in cooperative applications: overruns, wild indices, use-after-close. One app cannot corrupt another's regions through normal language operations. |
 | What it does not protect | Hostile code, the kernel from the interpreter, or anything from a bug in a bounds check. The guarantee fails **open**: one wrong check means no protection at all. |
-| Escape hatches | `syslib` raw hardware access, DMA-capable devices, any interpreter builtin that takes a raw address, and every `unsafe` block in the kernel. |
-| Why fixed arenas help | No allocator metadata, no realloc, no cross-task free lists. An app's memory bugs stay within its own arena even when the interpreter does not notice them. |
+| Escape hatches | `syslib` hardware access, DMA-capable devices, any interpreter builtin that takes a raw address, and every `unsafe` block in the kernel. |
+| Why fixed regions help | No allocator metadata, no realloc, no cross-task free lists. An app's memory bugs stay within its own regions even when the interpreter does not notice them. |
+| Capability model | None. Every application may call every `syslib` primitive (vision R14). |
 
 Consequence: the interpreter and `syslib` are the trusted computing base. Their `unsafe`
 surface must stay small, enumerated, and auditable, because there is no second line of
@@ -168,23 +194,24 @@ a more privileged ring under a different name — i.e. reintroducing the boundar
 project removes.
 
 **What the MMU can still do at ring 0**, and should: read-only kernel text (`CR0.WP`),
-non-executable data and arenas (NX is meaningless for interpreted code, but harmless),
+non-executable data and regions (NX is meaningless for interpreted code, but harmless),
 and not-present guard pages that fault even at CPL 0. These harden the kernel against its
-own bugs; they cannot distinguish "the interpreter writing app A's arena" from "the
-interpreter writing app B's arena", because both are ordinary supervisor writes.
+own bugs; they cannot distinguish "the interpreter writing app A's region" from "the
+interpreter writing app B's region", because both are ordinary supervisor writes.
 
 ### Sub-allocation
 
-Whether an application may run its own bump/slab allocator *inside* its fixed arena is
-OQ 13. Either way there is no growth: at worst, an application manages a fixed pool and
-resets it explicitly.
+Resolved: none. There is no runtime placement of any kind (ADR 0007). Every offset is
+chosen by the compiler; constructors write into caller-provided storage.
 
 ### Stacks
 
-Each task has a preallocated stack. With no inter-app paging protection, a silent stack
-overflow corrupts whatever follows, so one of two mechanisms is required (OQ 18): a
-non-present guard page that raises a page fault even at CPL 0, or interpreter-side
-call-depth and frame-size accounting against a declared maximum.
+Each task has a preallocated native stack, sized in the manifest. The interpreter's own
+frames live on this stack, so application recursion depth is bounded by the declared
+stack size. A not-present guard page at the growing end raises a page fault even at CPL 0
+(ADR 0006, H2); a fault inside a known guard range terminates that task instead of
+panicking the kernel. Large locals are allowed in frames; the manifest declares the stack
+that must hold the worst case.
 
 ### Hardening (provisional, ADR 0006)
 
@@ -195,7 +222,7 @@ measures are adopted provisionally — accepted only for as long as they stay ch
 - **H2 (MUST):** Every task stack has a not-present guard page at its growing end. A fault
   inside a known guard range terminates that task; any other fault is a kernel panic.
 - **H3 (MUST):** NX is enabled (`EFER.NXE`); kernel data, task stacks and application
-  arenas are mapped non-executable.
+  regions are mapped non-executable.
 - **H4 (MUST):** All of this lives in the single shared address space: no per-task page
   tables and no CR3 switching.
 - **H5 (MUST):** If any measure requires per-task mappings, address-space switching, or a
@@ -204,24 +231,25 @@ measures are adopted provisionally — accepted only for as long as they stay ch
 
 ## Streams and IPC
 
-Applications communicate through kernel-owned shared-memory streams with **fixed
-capacity** (vision R11). A stream is created before use, with a declared element size
-and count; it never grows.
+Applications communicate through kernel-owned byte FIFOs with fixed capacity. The buffers
+are never mapped into an application's addressable regions; the application holds an
+endpoint handle that permits only send/receive operations. Data is copied through the
+kernel.
 
-Properties to be specified in a dedicated spec:
+- Sends are **atomic**: a send of N bytes either enqueues all N bytes or none. The maximum
+  record is therefore the queue capacity.
+- Blocking send/receive transition the task to `Blocked`; `try_*` variants return
+  `WouldBlock`.
+- When a peer dies, queued data is discarded immediately and the surviving endpoint
+  observes `Closed`. There is no partial record, because sends are atomic.
+- Typed views (integers, strings) are built in `stdlib` on top of the byte FIFO.
 
-- Two endpoints, each owned by at most one task at a time.
-- Blocking and non-blocking send/receive; blocking transitions the task to `Blocked`.
-- Backpressure: a full queue blocks or fails the sender, never expands.
-- Close semantics: endpoints close on task termination; the peer observes closure.
-- Whether data is copied through the kernel or genuinely shared via a ring buffer with
-  atomics is an open question (OQ 19). Copying is simpler and keeps handles opaque;
-  a shared ring is faster and matches the "shared memory" wording.
+The full contract is in `0006-streams.md`.
 
 ## Application loading and delivery
 
-Loading is behind a provider interface (vision R13), so delivery can evolve without
-touching the runtime:
+Loading is behind a provider interface, so delivery can evolve without touching the
+runtime:
 
 ```rust
 trait SourceProvider {
@@ -230,25 +258,41 @@ trait SourceProvider {
 }
 ```
 
-- **v1:** ramdisk or GRUB module containing application source plus manifests.
-- **Next:** block device + filesystem provider, same interface.
-- **Tooling:** one manifest format, two image builders (ramdisk, disk), so neither path
-  becomes a dead end.
+- **First:** read-only ext2 image delivered as a GRUB module and read through an in-memory
+  `BlockDevice` (ADR 0015).
+- **Next:** block devices (virtio-blk or ATA) implement the same `BlockDevice`; the
+  filesystem driver does not change.
+- **Tooling:** one manifest format, produced by the compiler; two image builders
+  (module now, disk later), so neither path becomes a dead end.
 
-The manifest is part of the application contract: footprint, entry point, declared
-streams, and (later) capability requests.
+The manifest is part of the application contract: region sizes, stack size, entry point,
+declared stream endpoints, and the capacity profile. It is generated by the compiler, not
+written by hand (`0003-language.md`).
+
+## Host interface
+
+The runtime never calls the kernel directly. It calls the **host interface**: the
+enumerated set of primitives it may invoke. In the first milestone these are console
+read/write, `yield`, stream send/receive/try, a monotonic clock and `sleep_until`.
+`syslib` adds port I/O and MMIO handles. The interface is specified in
+`0005-host-interface.md` and is mockable, so the language track runs on the host (vision
+R7).
 
 ## Boot
 
-1. GRUB loads a multiboot2 kernel ELF (and the initial payload) and enters 32-bit
-   protected mode.
-2. A 32-bit stub enables long mode and jumps to the 64-bit entry point.
-3. Early kernel init: GDT/IDT, paging and direct map, serial/framebuffer console, frame
-   allocator.
-4. Platform discovery: memory map, ACPI, APIC, timers, console devices.
-5. Scheduler thread for the boot core; optional AP bring-up (OQ 16).
-6. Loader registers the ramdisk provider, runtime initializes, REPL or entry application
-   starts.
+1. GRUB loads a multiboot2 kernel ELF and the ext2 application image as a module, and
+   enters 32-bit protected mode.
+2. A 32-bit stub validates the multiboot2 information, builds identity and higher-half
+   page tables, enables PAE, long mode and paging, and jumps to the 64-bit entry point in
+   the higher half.
+3. Early kernel init: GDT/IDT, paging and direct map, framebuffer console from the
+   multiboot2 framebuffer tag, serial debug, frame allocator.
+4. Platform discovery: memory map, ACPI, APIC, timers, keyboard.
+5. Interpreter loop on the boot core; AP bring-up within the milestone.
+6. Loader registers the ext2 provider, runtime initializes, REPL starts.
+
+UEFI and real-hardware boot are out of scope (ADR 0014). The boot path lives entirely in
+`arch/x86_64`.
 
 ## Fatal fault path
 
@@ -256,7 +300,7 @@ Two entry points, one terminal state:
 
 ```
 main returns normally
-        └─→ exit(Ok) → reclaim
+        └─→ exit(Ok, diag) → reclaim
 
 fault detected (interpreter, guard page, budget)
         │
@@ -264,19 +308,19 @@ fault detected (interpreter, guard page, budget)
 abandon frames back to the application's main level
         │
         ▼
-fault(code) on the scheduler's kernel stack, bounded budget
+fault(code, diag) on the current core's kernel stack, bounded budget
         │
-        ├─ returns / faults / overruns → exit(code) → reclaim
+        ├─ returns / faults / overruns → exit(Faulted(code), diag) → reclaim
         └─ jumps to a main-level recovery label (first fault only)
                  → reset frame stack, resume; budget is not reset
 ```
 
-`fault` and `exit` run on the kernel stack because the task stack may be exhausted. A
-handler is never re-entered while running; a fault inside it is abandoned rather than
+`fault` and `exit` run on the core's kernel stack because the task stack may be exhausted.
+A handler is never re-entered while running; a fault inside it is abandoned rather than
 escalated. A task gets at most one recovery: after a recovery, the next fault is terminal
-and `fault` is not called again. `BudgetExceeded` may be logged by `fault`, but recovery is
-rejected. `exit` is always attempted at termination, with a small emergency budget; it is
-best-effort, not guaranteed (ADR 0010).
+and `fault` is not called again. `BudgetExceeded` may be logged by `fault`, but recovery
+is rejected. `exit` is always attempted at termination, with a small emergency budget; it
+is best-effort, not guaranteed (ADR 0010).
 
 The limit is deliberate: a programmer's infinite-loop or repeated-fault bug must not be
 able to force the kernel into repeated fault handling. The kernel processes one fault per
@@ -286,19 +330,25 @@ task; after that, shutdown.
 
 | Situation | Behaviour |
 |-----------|-----------|
-| Task exceeds budget with others waiting | Terminate at next safe point; `fault(BudgetExceeded)`; recovery rejected; `exit`; reclaim |
-| Application fault detected by interpreter (out of bounds, capacity, illegal operation) | Abort operation; `fault(code)`; if it returns, `exit(code)` then reclaim; if it jumps, resume |
-| Stack overflow | Guard-page fault; `fault(StackOverflow)` on kernel stack; same outcomes as above |
-| `fault` returns | Terminal: `exit(code)` then reclaim |
+| Task exceeds total budget | Terminate unconditionally at next safe point; `fault(BudgetExceeded)`; recovery rejected; `exit`; reclaim |
+| Task exhausts its quantum | Release at next safe point; re-enqueue; no fault |
+| Application fault detected by interpreter (out of bounds, capacity, illegal operation) | Abort operation; `fault(code, diag)`; if it returns, `exit(Faulted(code), diag)` then reclaim; if it jumps, resume |
+| Stack overflow | Guard-page fault; `fault(StackOverflow, diag)` on kernel stack; same outcomes as above |
+| `fault` returns | Terminal: `exit(Faulted(code), diag)` then reclaim |
 | `fault` jumps to a recovery label | Reset frame stack to the label; resume; budget not reset; one recovery per task |
 | Second fault after a recovery | Terminal; `fault` is not called again; `exit` then reclaim |
 | `fault` faults or exceeds its budget | Abandon handler; `exit` is still attempted; reclaim |
 | `exit` faults or exceeds its budget | Abandon handler immediately; reclaim task |
 | No `fault` handler defined | Fault is terminal: `exit` then reclaim |
 | No `exit` handler defined | Task ends silently; reclaim |
-| Task blocks on a stream forever | Remains `Blocked`; no CPU consumed; a timeout API may be added later |
-| Stream full | Sender blocks or receives an error; never grows |
+| Task blocks on a stream forever | Remains `Blocked`; no CPU consumed; a timeout may be added later |
+| Stream full | Sender blocks or `try_send` returns `WouldBlock`; never grows |
+| Stream empty | Receiver blocks or `try_receive` returns `WouldBlock` |
+| Stream peer dies | Queued data discarded; surviving endpoint returns `Closed`; blocked peer wakes with `Closed` |
 | Arena request cannot be satisfied at load | Application refused; no runtime out-of-memory path |
+| ext2 image missing or corrupt | Mount refused; no applications load; kernel still boots to a diagnostic |
+| Claim protocol violation | Two cores advance the same task; silent corruption. Prevented by the claim word; treated as a TCB defect |
+| All cores idle | Each core halts until an IPI or interrupt |
 | Interpreter bug (bad pointer, wrong bounds) | Undefined; may corrupt kernel. No recovery boundary exists |
 | Kernel panic | Log to serial, halt (or reboot) |
 
@@ -306,17 +356,16 @@ task; after that, shutdown.
 
 | # | Question | Blocking what |
 |---|----------|---------------|
-| 12 | Watchdog semantics: unconditional kill vs. kill only when others wait; grace period; cleanup callback? | scheduler spec |
-| 13 | Sub-allocation within a fixed arena, or fully static placement? | **Resolved** — fully static (ADR 0007). |
-| 16 | SMP enabled in milestone 1 or only designed for? | boot and locking work |
-| 17 | One task per application, or several tasks on the same core? Core assignment policy? | scheduler and manifest |
-| 18 | Stack overflow: guard page or interpreter accounting? | mm and interpreter |
-| 19 | Streams: copy-through-kernel or true shared ring buffers? Message vs byte-oriented? | IPC and syslib |
-| 20 | Can a task's budget be configured, and by whom? | scheduler and manifests |
-| 21 | What happens to a task's streams when the peer dies mid-frame? | IPC semantics |
+| 1 | Quantum size and total budget value | Tuning, not structure; both are compile-time constants. |
+| 2 | Global run queue vs per-core deques with stealing | Performance only; claim semantics are unchanged. |
+| 3 | Stream endpoint naming and pairing strictness | `0006-streams.md`; first choice is name-based pairing by the loader. |
+| 4 | Console input semantics: byte stream, line buffering, or key events | `0005-host-interface.md`. |
+| 5 | AP bring-up details: trampoline vs INIT-SIPI, per-core stacks | `arch/x86_64`, second half of the first milestone. |
+| 6 | Debug/introspection surface (task listing, counters, trace) | Deferred; not part of the first host interface. |
 
 ## Changelog
 
-| Date | Change |
-|------|--------|
-| 2026-11-03 | Initial draft from vision discussion. |
+| Date | Changes |
+|------|---------|
+| 2026-11-03 | Initial draft. |
+| 2026-11-12 | Replaced pinned tasks with work-stealing interpreter loops (ADR 0011); split the runtime into `core`/`stdlib`/`syslib`; byte-FIFO streams; read-only ext2 delivery; framebuffer console; GRUB/multiboot2 boot with own long-mode transition; unconditional budget kill; no capability model. |
