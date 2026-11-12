@@ -132,8 +132,9 @@ trait Syslib {
 }
 ```
 
-The language sees these as `core.*` and `syslib.*`. The namespace split is the
-developer-visible signal for origin and cost (`0003-language.md`).
+The language sees these as `core.*` and `syslib.*`: `console_write` is `core.write`,
+`monotonic_ns` is `core.clock`, and so on. The namespace split is the developer-visible
+signal for origin and cost (`0003-language.md`).
 
 ## Failure modes
 
