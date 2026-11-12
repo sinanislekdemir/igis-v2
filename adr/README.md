@@ -40,3 +40,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0013 | [x86_64 first, with a multi-architecture layout from day one](0013-x86_64-first-multi-arch.md) | Accepted | 2026-11-12 |
 | 0014 | [Boot via GRUB and multiboot2, with a hand-written long-mode transition](0014-grub-multiboot2-boot.md) | Accepted | 2026-11-12 |
 | 0015 | [Deliver applications on a read-only ext2 image over an in-memory block device](0015-read-only-ext2-delivery.md) | Accepted | 2026-11-12 |
+| 0016 | [Realtime tasks run without quantum preemption under a heartbeat contract](0016-realtime-heartbeat.md) | Accepted | 2026-11-12 |

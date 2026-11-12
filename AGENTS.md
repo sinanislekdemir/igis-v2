@@ -117,6 +117,7 @@ commands here (`cargo xtask build`, `cargo xtask run`, `cargo xtask test`).
 | `core` (Rust) / `stdlib` (language) / `syslib` (hardware) split | specs 0002, 0003 |
 | `bytes` (raw) and `string` (UTF-8) as distinct types | spec 0003 |
 | One task per application instance; REPL-only in the first milestone | specs 0001, 0007 |
+| Realtime class: no quantum preemption, one-second heartbeat, admission by core count | ADR 0016 (Accepted) |
 
 ## Open questions
 
@@ -133,6 +134,7 @@ Highest-leverage unresolved items:
 | 6 | Bytecode format and compiler/runtime split | implementation |
 | 7 | AP bring-up details: trampoline, IPI, per-core stacks | arch |
 | 8 | ext2 subset edge cases and corruption handling | loader |
+| 9 | Reserve one core for the REPL/system when realtime tasks are admitted | scheduler policy |
 
 ## Status log
 
@@ -147,3 +149,4 @@ Highest-leverage unresolved items:
 | 2026-11-03 | `exit(reason)` as top-level catch: frames abandon to main level, handler may reclaim or transfer to a validated recovery label (ADR 0008 amended by 0009); aliasing forbidden, no views, capacity-typed strings. |
 | 2026-11-03 | Handlers split: `fault(code)` decides terminate/recover, `exit(reason)` always tears down; one recovery per task, no retry (ADR 0010, supersedes 0009). |
 | 2026-11-12 | Origin recorded: 2005 front-end for a quantum-cryptography modem; the ring boundary was the friction that produced ring 0. Execution changed to per-core interpreter loops with work stealing (ADR 0011). Rust, x86_64-first, GRUB/multiboot2 and read-only ext2 recorded (ADR 0012–0015). Specs 0001–0004 updated; host interface (0005), streams (0006) and scheduler (0007) added. |
+| 2026-11-12 | Realtime class added: one-way promotion, no quantum preemption, admission by core count, one-second heartbeat with `WatchdogTimeout` (ADR 0016). |

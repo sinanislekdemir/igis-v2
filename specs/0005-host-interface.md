@@ -63,7 +63,17 @@ The interface is split into two namespaces:
 | `try_receive` | `fn try_receive(ep: Endpoint, buf: &mut [u8]) -> Result<usize, Status>` | no |
 | `clock` | `fn monotonic_ns() -> u64` | no |
 | `sleep_until` | `fn sleep_until(deadline_ns: u64)` | yes, until deadline |
+| `realtime_on` | `fn realtime_on() -> Status` | no; `Full` if no core is available |
+| `heartbeat` | `fn heartbeat()` | no; resets the realtime deadline |
 
+- `realtime_on` promotes the calling task, one way, to the realtime class: it is claimed
+  before normal tasks and is not released at quantum expiry. It returns `Status.Full` when
+  the number of realtime tasks would exceed the number of online cores. A promoted task
+  must call `heartbeat` at least once per second of non-blocked time; otherwise it is
+  terminated with `fault(WatchdogTimeout)` (`0007-scheduler.md`, ADR 0016).
+- `heartbeat` is a progress claim, not a liveness check: the interpreter already shows
+  that a task is executing at every safe point. The application is saying "one control
+  cycle completed", which is what catches a livelocked controller.
 - Time is monotonic nanoseconds since boot. It does not wrap in any realistic uptime;
   the comparison is unsigned and the deadline is absolute.
 - `console_read` returns a byte count and never blocks past the next input event; line
@@ -121,6 +131,8 @@ trait Host {
     fn try_receive(&mut self, ep: Endpoint, buf: &mut [u8]) -> Result<usize, Status>;
     fn monotonic_ns(&self) -> u64;
     fn sleep_until(&mut self, deadline_ns: u64);
+    fn realtime_on(&mut self) -> Status;
+    fn heartbeat(&mut self);
 }
 
 trait Syslib {
@@ -146,6 +158,8 @@ signal for origin and cost (`0003-language.md`).
 | `receive` from an empty queue | Blocks; `try_receive` returns `WouldBlock` |
 | Endpoint peer dead | `Closed`; blocked peer wakes with `Closed` |
 | `sleep_until` in the past | Returns immediately |
+| Realtime requested with no free core | `Status.Full`; the task stays normal |
+| Realtime task misses its heartbeat | Terminate at the next safe point; `fault(WatchdogTimeout)`; recovery rejected; `exit`; reclaim |
 | `mmio_map` of an invalid or conflicting range | `Status` error; no partial mapping |
 | `mmio_read/write` out of range | Fault (`OutOfBounds`); the handle is bounds-checked |
 | Host mock asked for hardware | `Status` error, never a panic |
@@ -160,6 +174,7 @@ signal for origin and cost (`0003-language.md`).
 | 3 | Whether a minimal debug/introspection primitive is worth adding to the first milestone | After the REPL exists; not assumed. |
 | 4 | Whether `syslib` needs its own trait or shares the host trait | Implementation layout; no semantic impact. |
 | 5 | DMA and block primitives | When the first real device is added. |
+| 6 | Whether one core is reserved for the REPL/system so realtime tasks cannot starve it | Realtime admission needs a policy when cores are few. |
 
 ## Changelog
 

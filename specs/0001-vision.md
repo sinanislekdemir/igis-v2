@@ -4,7 +4,7 @@
 - **Scope:** whole system (kernel, runtime, language, tooling)
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0001, 0002, 0003, 0004, 0005, 0006, 0007, 0011, 0012, 0013, 0014, 0015
+- **ADRs:** 0001, 0002, 0003, 0004, 0005, 0006, 0007, 0011, 0012, 0013, 0014, 0015, 0016
 - **Updated:** 2026-11-12
 
 ## Context
@@ -118,6 +118,10 @@ kernel is not written in the new language. Self-hosting the kernel is out of sco
 - **R15 (SHOULD):** The system should remain usable interactively: a REPL is the native
   execution model, and a running application can be inspected and terminated without
   rebooting.
+- **R16 (MUST):** A task may request the realtime class once. Realtime tasks are not
+  preempted by the quantum, are exempt from the total CPU budget, and must call
+  `core.heartbeat()` at least once per second of non-blocked time; a missed heartbeat is
+  terminal. Admission is limited to one realtime task per online core (ADR 0016).
 
 ## Non-goals
 
@@ -195,6 +199,8 @@ specified independently in `0005-host-interface.md`.
 - A REPL is the native execution model, not a feature.
 - Work stealing means no idle core while work is runnable, and no load-balancing policy
   to tune.
+- A hardware controller can run without time-slicing, while a frozen controller is still
+  detected within about a second.
 
 **Negative**
 
@@ -211,6 +217,8 @@ specified independently in `0005-host-interface.md`.
   invalidation are real costs.
 - The claim/release protocol is a new correctness surface in the trusted base: a mistake
   means silent corruption, not a crash.
+- Realtime admission and the heartbeat are another contract to get wrong; a realtime task
+  can hold a core for up to a second, and enough of them can starve normal tasks.
 
 **Neutral**
 
@@ -236,7 +244,7 @@ specified independently in `0005-host-interface.md`.
 | 9 | x86_64 under QEMU only, or eventual real-hardware boot? | **Resolved** — QEMU only for now; the platform layer keeps the door open. |
 | 10 | Language identity beyond "typed": syntax family, type system details, memory model details. | **Resolved** — Pascal-like, nominal types, no user generics; see `0003-language.md`. |
 | 11 | BIOS + multiboot2, or UEFI under QEMU? | **Resolved** — GRUB + multiboot2 on BIOS, hand-written long-mode transition (ADR 0014). |
-| 12 | Watchdog semantics: is termination unconditional on budget overrun, and how do blocking builtins interact with budgets? | **Resolved** — quantum expiry releases, total CPU budget terminates unconditionally; blocked time does not count; blocking builtins transition to `Blocked` (`0007-scheduler.md`). |
+| 12 | Watchdog semantics: is termination unconditional on budget overrun, and how do blocking builtins interact with budgets? | **Resolved** — quantum expiry releases, total CPU budget terminates unconditionally; blocked time does not count; blocking builtins transition to `Blocked`. Realtime tasks replace the total budget with a one-second heartbeat (`0007-scheduler.md`, ADR 0016). |
 | 13 | Is sub-allocation inside a fixed arena allowed? | **Resolved** — fully static, no runtime placement of any kind (ADR 0007). |
 | 14 | Is the standard library written in Rust or in the custom language? | **Resolved** — native primitives in `core` (Rust), everything above them in `stdlib` (the language). |
 | 15 | Filesystem: custom minimal design, FAT32, or read-only images only? | **Resolved** — read-only ext2 (ADR 0015). |
@@ -254,3 +262,4 @@ specified independently in `0005-host-interface.md`.
 | 2026-11-03 | Initial draft from vision discussion. |
 | 2026-11-03 | Added layer model, per-core cooperative concurrency, static memory model, stream IPC, loader abstraction. |
 | 2026-11-12 | Recorded the 2005 origin (modem front-end, ring-boundary friction) and the personal-system goal. Replaced core pinning with work stealing (ADR 0011). Resolved delivery (ext2), output (framebuffer), isolation (no capability model), boot (GRUB/multiboot2), stdlib split (`core`/`stdlib`) and all remaining open questions. |
+| 2026-11-12 | Added the realtime class: one-way promotion, no quantum preemption, admission by core count, one-second heartbeat and `WatchdogTimeout` (ADR 0016). |

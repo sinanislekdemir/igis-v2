@@ -4,7 +4,7 @@
 - **Scope:** application language, type system, memory model, standard library
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0002, 0004, 0005, 0007, 0010, 0011
+- **ADRs:** 0002, 0004, 0005, 0007, 0010, 0011, 0016
 - **Updated:** 2026-11-12
 
 ## Context
@@ -284,6 +284,9 @@ if st <> Ok then
   correctness requirement: the quantum already releases the task.
 - **C5 (MUST):** Sends are atomic and bounded by the endpoint capacity; the language does
   not expose partial sends.
+- **C6 (MUST):** A task may call `core.realtime_on()` once to enter the realtime class and
+  must then call `core.heartbeat()` at least once per second of non-blocked time. There is
+  no way back to the normal class. The model is soft realtime (ADR 0016).
 
 ## Hardware access (`syslib`)
 
@@ -382,6 +385,7 @@ end;
 | `DivideByZero` | Integer division by zero |
 | `StackOverflow` | Guard-page fault |
 | `BudgetExceeded` | Watchdog termination (recovery rejected) |
+| `WatchdogTimeout` | Realtime heartbeat missed (recovery rejected) |
 | `IllegalOperation` | Invalid opcode or type operation |
 | `StreamError` | Invalid or closed endpoint |
 | `IoError` | Loader or device failure |
@@ -393,10 +397,11 @@ end;
 
 `core` (native, Rust) provides the primitives that must be fast or that touch the host
 interface: console read/write, `yield`, stream send/receive/try, monotonic clock,
-`sleep_until`, byte and string copy/compare/find, integer math, formatting primitives, and
-the checked conversions. `stdlib` (written in the language) provides arrays, rings, maps,
-UTF-8 helpers, parsing, formatting, and typed stream views. `syslib` (native, Rust)
-provides ports, MMIO handles and future block/DMA access.
+`sleep_until`, realtime promotion and `heartbeat`, byte and string copy/compare/find,
+integer math, formatting primitives, and the checked conversions. `stdlib` (written in the
+language) provides arrays, rings, maps, UTF-8 helpers, parsing, formatting, and typed
+stream views. `syslib` (native, Rust) provides ports, MMIO handles and future block/DMA
+access.
 
 A function moves from `stdlib` to `core` only when measurement justifies it; the namespace
 is the signal.
@@ -414,6 +419,7 @@ is the signal.
 | Recursion past the declared stack | Guard-page fault; `fault(StackOverflow)` |
 | Send on a receive endpoint | Compile error (distinct types) |
 | Send on a closed endpoint | `Status.Closed` |
+| Realtime heartbeat missed | `fault(WatchdogTimeout)`; recovery rejected |
 | Discarded `Status` | Compile warning |
 | Import cycle | Compile error |
 | Capacity mismatch in assignment | Compile error |
@@ -437,3 +443,4 @@ is the signal.
 |------|--------|
 | 2026-11-03 | Created as a constraints-only seed. |
 | 2026-11-12 | Full design pass: Pascal-like syntax; nominal types; built-in parametric collections; `bytes`/`string` split; `Status` errors; `core`/`stdlib`/`syslib` namespaces; streams plus `yield`; typed `syslib` handles; `const` expressions; compiler-generated manifests; at-least-N parameters; diagnostics in `fault`/`exit`. |
+| 2026-11-12 | Added the realtime class and `WatchdogTimeout`: one-way `core.realtime_on()`, mandatory `core.heartbeat()` (ADR 0016). |

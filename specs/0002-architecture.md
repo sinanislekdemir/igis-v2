@@ -4,7 +4,7 @@
 - **Scope:** kernel internals, runtime hosting, execution and memory model
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0001, 0002, 0003, 0004, 0006, 0011, 0012, 0013, 0014, 0015
+- **ADRs:** 0001, 0002, 0003, 0004, 0006, 0011, 0012, 0013, 0014, 0015, 0016
 - **Updated:** 2026-11-12
 
 ## Context
@@ -106,6 +106,17 @@ its next safe point.
 Termination is deterministic: the task's regions are released as a whole, its stream
 endpoints are closed, its references invalidated, and its entry removed from all queues.
 There are no zombies and no GC.
+
+### Realtime tasks
+
+A task that controls hardware may promote itself, once, to the realtime class with
+`core.realtime_on()`. Realtime tasks are claimed before normal tasks, are not released at
+quantum expiry, and are exempt from the total CPU budget. In exchange they must call
+`core.heartbeat()` at least once per second of non-blocked time; a missed deadline is
+terminal (`fault(WatchdogTimeout)`). Admission is limited to one realtime task per online
+core, so they cannot oversubscribe the machine. The model is soft realtime: it removes
+time-slicing and adds priority, but does not promise deadlines. The full contract is in
+`0007-scheduler.md`; the decision and its alternatives are in ADR 0016.
 
 ### Blocking builtins
 
@@ -335,6 +346,8 @@ task; after that, shutdown.
 |-----------|-----------|
 | Task exceeds total budget | Terminate unconditionally at next safe point; `fault(BudgetExceeded)`; recovery rejected; `exit`; reclaim |
 | Task exhausts its quantum | Release at next safe point; re-enqueue; no fault |
+| Realtime promotion with no free core | `Status.Full`; task stays normal |
+| Realtime task misses its heartbeat | Terminate at next safe point; `fault(WatchdogTimeout)`; recovery rejected; `exit`; reclaim |
 | Application fault detected by interpreter (out of bounds, capacity, illegal operation) | Abort operation; `fault(code, diag)`; if it returns, `exit(Faulted(code), diag)` then reclaim; if it jumps, resume |
 | Stack overflow | Guard-page fault; `fault(StackOverflow, diag)` on kernel stack; same outcomes as above |
 | `fault` returns | Terminal: `exit(Faulted(code), diag)` then reclaim |
@@ -365,6 +378,7 @@ task; after that, shutdown.
 | 4 | Console input semantics: byte stream, line buffering, or key events | `0005-host-interface.md`. |
 | 5 | AP bring-up details: trampoline vs INIT-SIPI, per-core stacks | `arch/x86_64`, second half of the first milestone. |
 | 6 | Debug/introspection surface (task listing, counters, trace) | Deferred; not part of the first host interface. |
+| 7 | Whether to reserve one core for the REPL/system when realtime tasks are admitted | Realtime starvation policy. |
 
 ## Changelog
 
@@ -372,3 +386,4 @@ task; after that, shutdown.
 |------|---------|
 | 2026-11-03 | Initial draft. |
 | 2026-11-12 | Replaced pinned tasks with work-stealing interpreter loops (ADR 0011); split the runtime into `core`/`stdlib`/`syslib`; byte-FIFO streams; read-only ext2 delivery; framebuffer console; GRUB/multiboot2 boot with own long-mode transition; unconditional budget kill; no capability model. |
+| 2026-11-12 | Added the realtime class: no quantum preemption, admission by core count, one-second heartbeat and `WatchdogTimeout` (ADR 0016). |

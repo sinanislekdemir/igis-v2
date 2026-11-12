@@ -5,7 +5,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0003 (cooperative model, budget intent), 0006 (guard pages), 0011 (work
-  stealing)
+  stealing), 0016 (realtime class)
 - **Updated:** 2026-11-12
 
 ## Context
@@ -42,24 +42,38 @@ ADR 0011 concrete.
   same milestone; the protocol is identical in both cases.
 - **Sch12 (SHOULD):** Fairness is FIFO. There are no priorities, no affinity and no load
   balancing policy in the first milestone.
+- **Sch13 (MUST):** A task may promote itself once to the realtime class with
+  `core.realtime_on()`. Promotion is refused with `Status.Full` if the number of realtime
+  tasks would exceed the number of online cores.
+- **Sch14 (MUST):** A realtime task is claimed before normal tasks and is not released at
+  quantum expiry. It releases when it yields, blocks or terminates; until then it holds
+  the core that claimed it. It is not pinned: any core may claim it next.
+- **Sch15 (MUST):** A realtime task is exempt from the total CPU budget and must call
+  `core.heartbeat()` at least once per second of non-blocked time. A missed deadline
+  terminates it at the next safe point with `fault(WatchdogTimeout)`; recovery is
+  rejected, `exit` runs, regions are reclaimed.
+- **Sch16 (MUST):** The realtime class is soft realtime. It removes time-slicing and adds
+  priority; it does not promise deadlines or deterministic timing.
 
 ## Design
 
-### Terminology: three limits, one confusing word
+### Terminology: four limits, one confusing word
 
 The word **quantum** is operating-systems jargon for a discrete scheduling slice, borrowed
 from physics; it has nothing to do with quantum mechanics. It is easy to conflate with the
-two other limits in the system, so they are stated together once:
+other limits in the system, so they are stated together once:
 
 | Limit | Measured over | On expiry |
 |-------|---------------|-----------|
 | **Quantum** | one claim: one run of one task on one core | Release at a safe point and re-enqueue; not a fault |
 | **Total CPU budget** | the task's whole lifetime, blocked time excluded | Terminate unconditionally at a safe point |
 | **Handler budget** | one `fault` or `exit` invocation | Abandon the handler and reclaim the task |
+| **Realtime heartbeat** | one second of non-blocked realtime time | Terminate with `WatchdogTimeout`; recovery rejected |
 
 A quantum is measured in interpreter steps (bytecodes), with a time fallback; it is not
-measured in source lines. The total budget is the watchdog. The handler budget is the
-emergency allowance for teardown and diagnosis.
+measured in source lines. The total budget is the watchdog for normal tasks. The handler
+budget is the emergency allowance for teardown and diagnosis. The heartbeat is the
+liveness/progress contract that replaces the total budget for realtime tasks.
 
 ### Task states
 
@@ -144,6 +158,42 @@ another core.
   hole the cooperative model accepts, and it is why blocking builtins are forbidden
   (`0002`).
 
+### Realtime tasks
+
+A task that controls hardware can ask for a stronger guarantee than the fair quantum:
+
+```
+core.realtime_on()   // one way; Status.Full if the realtime class is full
+core.heartbeat()     // at least once per second of non-blocked time
+```
+
+- **Promotion is one-way.** There is no `realtime_off()`; returning to the normal class
+  would either reset the total budget or leave an unaccounted task. Calling
+  `realtime_on()` again is a no-op that returns `Ok`.
+- **Admission is by core count.** The number of realtime tasks may not exceed the number
+  of online cores. A blocked realtime task still occupies its slot, so an oversubscribed
+  set cannot appear when it wakes.
+- **Priority.** The runnable set has a realtime queue and a normal queue; a core claims
+  from the realtime queue first.
+- **No quantum preemption.** A claimed realtime task is not released at quantum expiry.
+  It releases on yield, block or termination, and then any core may claim it again. It is
+  not pinned; it simply holds the core it was claimed on until it lets go.
+- **No total budget.** The heartbeat replaces it, because a controller may legitimately
+  run for hours.
+- **Heartbeat.** The deadline is one second of non-blocked time: `Running` and `Runnable`
+  advance it, `Blocked` pauses it. A controller waiting for a device is not frozen. A
+  missed deadline terminates the task at the next safe point with
+  `fault(WatchdogTimeout)`; recovery is rejected, as for `BudgetExceeded`.
+- **Progress, not liveness.** The interpreter already shows that a task is executing at
+  every safe point. The heartbeat is the application saying "one control cycle
+  completed"; that is what catches a livelocked controller.
+- **Starvation is possible.** If every online core is held by realtime tasks, normal
+  tasks wait, including a REPL. Whether to reserve one core for the system is an open
+  question; the first milestone does not reserve one.
+
+This is soft realtime: no slices in the middle of a protocol, but interpretation, claim
+overhead and interrupt handling still add jitter.
+
 ### Blocking and wake-up
 
 - A blocking primitive sets `Blocked(reason)`, records the wait condition, and returns to
@@ -223,6 +273,9 @@ fn terminate(task: TaskRef, reason: FaultCode);
 |-----------|-----------|
 | Quantum expires | Release at safe point; re-enqueue; no fault |
 | Budget expires | Terminate at safe point; `fault(BudgetExceeded)`; recovery rejected; `exit`; reclaim |
+| Realtime promotion with no free core | `Status.Full`; the task stays normal |
+| Realtime task misses its heartbeat | Terminate at safe point; `fault(WatchdogTimeout)`; recovery rejected; `exit`; reclaim |
+| Every core held by realtime tasks | Normal tasks wait; a REPL may starve (open question) |
 | Task blocks | Leaves the runnable set; no CPU consumed |
 | Wake with all cores halted | IPI to one core; `need_resched` set before the IPI |
 | Task terminates while owning a stream endpoint | Endpoint closes; queued data discarded; peer sees `Closed` |
@@ -242,9 +295,12 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 4 | IPC mechanism: fixed-vector IPI vs APIC shorthand | `arch/x86_64` implementation detail. |
 | 5 | Timer source: PIT, HPET or APIC timer | `arch/x86_64`; the APIC timer is the likely choice. |
 | 6 | Whether a task can be pinned for debugging | A debug feature, not a scheduling model. |
+| 7 | Whether to reserve one core for the REPL/system | Realtime admission and starvation; the first milestone does not reserve. |
+| 8 | Heartbeat interval (one second) and whether it is configurable per task | Detection latency versus overhead. |
 
 ## Changelog
 
 | Date | Change |
 |------|--------|
 | 2026-11-12 | Initial draft: per-core loops, atomic claim, quantum versus budget, blocking and wake-up, deterministic termination, SMP bring-up within the first milestone. |
+| 2026-11-12 | Added the realtime class: one-way promotion, priority, no quantum preemption, admission by core count, heartbeat with `WatchdogTimeout` (ADR 0016). |
