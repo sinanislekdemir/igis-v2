@@ -114,3 +114,16 @@ second".
 | Pin a realtime task to a dedicated core | Strongest latency, but reintroduces core affinity, conflicts with work stealing, and needs a core-assignment policy; admission by count gives most of the benefit. |
 | Kernel-level realtime scheduler | Not achievable for interpreted code without hard timing guarantees; promises more than the system can keep. |
 | Watchdog with no application heartbeat (kernel resets on any safe point) | Measures interpreter liveness, not application progress; a livelocked controller would look healthy forever. |
+
+## Addendum (2026-11-12): no reserved core
+
+Admission allows one realtime task per online core, and **no core is reserved** for normal
+tasks or for the REPL. If N realtime tasks occupy N cores, normal tasks wait until one of
+them terminates or blocks. This is a deliberate trade in favour of realtime: the owner
+prefers giving N controllers a chance simultaneously over guaranteeing a core for the
+shell.
+
+The cost is accepted. A set of realtime tasks can keep the machine from responding
+interactively, and the only recovery is for one of them to end (or a reset). The system is
+single-user and the owner is trusted; this is not a hostile-code containment boundary.
+Reserving a core was considered and rejected for the first milestone.

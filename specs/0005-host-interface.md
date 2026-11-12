@@ -174,7 +174,7 @@ signal for origin and cost (`0003-language.md`).
 | 3 | Whether a minimal debug/introspection primitive is worth adding to the first milestone | After the REPL exists; not assumed. |
 | 4 | Whether `syslib` needs its own trait or shares the host trait | Implementation layout; no semantic impact. |
 | 5 | DMA and block primitives | When the first real device is added. |
-| 6 | Whether one core is reserved for the REPL/system so realtime tasks cannot starve it | Realtime admission needs a policy when cores are few. |
+| 6 | ~~Whether one core is reserved for the REPL/system so realtime tasks cannot starve it~~ | **Resolved** — no reservation; realtime may occupy every core (ADR 0016 addendum). |
 
 ## Changelog
 

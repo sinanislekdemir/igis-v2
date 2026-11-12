@@ -218,7 +218,8 @@ specified independently in `0005-host-interface.md`.
 - The claim/release protocol is a new correctness surface in the trusted base: a mistake
   means silent corruption, not a crash.
 - Realtime admission and the heartbeat are another contract to get wrong; a realtime task
-  can hold a core for up to a second, and enough of them can starve normal tasks.
+  can hold a core for up to a second, and enough of them can starve normal tasks by
+  design — no core is reserved.
 
 **Neutral**
 

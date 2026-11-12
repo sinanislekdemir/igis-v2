@@ -187,9 +187,10 @@ core.heartbeat()     // at least once per second of non-blocked time
 - **Progress, not liveness.** The interpreter already shows that a task is executing at
   every safe point. The heartbeat is the application saying "one control cycle
   completed"; that is what catches a livelocked controller.
-- **Starvation is possible.** If every online core is held by realtime tasks, normal
-  tasks wait, including a REPL. Whether to reserve one core for the system is an open
-  question; the first milestone does not reserve one.
+- **Starvation is accepted.** Admission allows one realtime task per core, so N realtime
+  tasks on N cores can leave no core for normal tasks, including a REPL. If one
+  terminates, a core becomes available. Reserving a core was considered and rejected: the
+  tradeoff is deliberately in favour of realtime (ADR 0016 addendum).
 
 This is soft realtime: no slices in the middle of a protocol, but interpretation, claim
 overhead and interrupt handling still add jitter.
@@ -275,7 +276,7 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | Budget expires | Terminate at safe point; `fault(BudgetExceeded)`; recovery rejected; `exit`; reclaim |
 | Realtime promotion with no free core | `Status.Full`; the task stays normal |
 | Realtime task misses its heartbeat | Terminate at safe point; `fault(WatchdogTimeout)`; recovery rejected; `exit`; reclaim |
-| Every core held by realtime tasks | Normal tasks wait; a REPL may starve (open question) |
+| Every core held by realtime tasks | Normal tasks wait, including a REPL; accepted tradeoff |
 | Task blocks | Leaves the runnable set; no CPU consumed |
 | Wake with all cores halted | IPI to one core; `need_resched` set before the IPI |
 | Task terminates while owning a stream endpoint | Endpoint closes; queued data discarded; peer sees `Closed` |
@@ -295,7 +296,7 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 4 | IPC mechanism: fixed-vector IPI vs APIC shorthand | `arch/x86_64` implementation detail. |
 | 5 | Timer source: PIT, HPET or APIC timer | `arch/x86_64`; the APIC timer is the likely choice. |
 | 6 | Whether a task can be pinned for debugging | A debug feature, not a scheduling model. |
-| 7 | Whether to reserve one core for the REPL/system | Realtime admission and starvation; the first milestone does not reserve. |
+| 7 | ~~Whether to reserve one core for the REPL/system~~ | **Resolved** — no reservation; realtime may occupy every core (ADR 0016 addendum). |
 | 8 | Heartbeat interval (one second) and whether it is configurable per task | Detection latency versus overhead. |
 
 ## Changelog

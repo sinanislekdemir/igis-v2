@@ -114,9 +114,11 @@ A task that controls hardware may promote itself, once, to the realtime class wi
 quantum expiry, and are exempt from the total CPU budget. In exchange they must call
 `core.heartbeat()` at least once per second of non-blocked time; a missed deadline is
 terminal (`fault(WatchdogTimeout)`). Admission is limited to one realtime task per online
-core, so they cannot oversubscribe the machine. The model is soft realtime: it removes
-time-slicing and adds priority, but does not promise deadlines. The full contract is in
-`0007-scheduler.md`; the decision and its alternatives are in ADR 0016.
+core, so they cannot oversubscribe the machine. No core is reserved: N realtime tasks on
+N cores can starve normal tasks, including the REPL; the tradeoff is accepted (ADR 0016
+addendum). The model is soft realtime: it removes time-slicing and adds priority, but does
+not promise deadlines. The full contract is in `0007-scheduler.md`; the decision and its
+alternatives are in ADR 0016.
 
 ### Blocking builtins
 
@@ -378,7 +380,7 @@ task; after that, shutdown.
 | 4 | Console input semantics: byte stream, line buffering, or key events | `0005-host-interface.md`. |
 | 5 | AP bring-up details: trampoline vs INIT-SIPI, per-core stacks | `arch/x86_64`, second half of the first milestone. |
 | 6 | Debug/introspection surface (task listing, counters, trace) | Deferred; not part of the first host interface. |
-| 7 | Whether to reserve one core for the REPL/system when realtime tasks are admitted | Realtime starvation policy. |
+| 7 | ~~Whether to reserve one core for the REPL/system when realtime tasks are admitted~~ | **Resolved** — no reservation; realtime may occupy every core (ADR 0016 addendum). |
 
 ## Changelog
 
