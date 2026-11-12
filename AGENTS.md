@@ -118,7 +118,7 @@ commands here (`cargo xtask build`, `cargo xtask run`, `cargo xtask test`).
 | `bytes` (raw) and `string` (UTF-8) as distinct types | spec 0003 |
 | One task per application instance; REPL-only in the first milestone | specs 0001, 0007 |
 | Realtime class: no quantum preemption, one-second heartbeat, admission by core count, no reserved core | ADR 0016 (Accepted) |
-| REPL is a kernel service; boot tries `shell` then `entrypoint`; `run`/`spawn` carry `string[1024]` args through a 1024-slot queue | ADR 0017 (Accepted + addendum) |
+| REPL is a kernel service; boot tries `shell` then `entrypoint`; `run`/`spawn` carry `string[1024]` args through a 1024-slot queue and return global task ids | ADR 0017 (Accepted + addenda) |
 
 ## Open questions
 
@@ -135,7 +135,7 @@ Highest-leverage unresolved items:
 | 6 | Bytecode format and compiler/runtime split | implementation |
 | 7 | AP bring-up details: trampoline, IPI, per-core stacks | arch |
 | 8 | ext2 subset edge cases and corruption handling | loader |
-| 9 | Handle table size (8?) and whether `run` blocks on a full queue | REPL service |
+| 9 | Exit-reason ring size (64?) and whether `run` blocks on a full queue | REPL service |
 | 10 | Whether the argument string is `core.arguments` or a `main` parameter | language |
 
 ## Status log
@@ -153,5 +153,6 @@ Highest-leverage unresolved items:
 | 2026-11-12 | Origin recorded: 2005 front-end for a quantum-cryptography modem; the ring boundary was the friction that produced ring 0. Execution changed to per-core interpreter loops with work stealing (ADR 0011). Rust, x86_64-first, GRUB/multiboot2 and read-only ext2 recorded (ADR 0012–0015). Specs 0001–0004 updated; host interface (0005), streams (0006) and scheduler (0007) added. |
 | 2026-11-12 | Realtime class added: one-way promotion, no quantum preemption, admission by core count, one-second heartbeat with `WatchdogTimeout` (ADR 0016). |
 | 2026-11-12 | Realtime admission deliberately allows occupying every core; no core is reserved for the REPL. Tradeoff recorded in the ADR 0016 addendum. |
-| 2026-11-12 | REPL model settled: a kernel service compiles and starts applications from a request queue; the shell is an ordinary application; `run`/`spawn`/`join`/`kill` with task handles (ADR 0017). |
+| 2026-11-12 | REPL model settled: a kernel service compiles and starts applications from a request queue; the shell is an ordinary application; `run`/`spawn`/`wait`/`kill` with global task ids (ADR 0017). |
 | 2026-11-12 | REPL details settled: `shell` then `entrypoint`, `no entry` halt, fixed `string[1024]` arguments, queue capacity 1024, orphan children continue (ADR 0017 addendum). |
+| 2026-11-12 | Per-task handles replaced by global `TaskId`s and a 64-entry exit-reason ring; no per-task handle table (ADR 0017 addendum 2). |

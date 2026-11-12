@@ -149,9 +149,9 @@ Rules:
 - **Stream endpoints:** `in_stream[N]` (receive only) and `out_stream[N]` (send only),
   N bytes of queue capacity. Distinct nominal types, so a receive endpoint cannot be sent
   to.
-- **Task handles:** `TaskHandle`, opaque, owned by the task that spawned the child.
-  `join` reaps it; a reaped handle is invalid. Handles are values (copying one is allowed)
-  but only one `join` succeeds.
+- **Task ids:** `TaskId` (an `int`), global, monotonically increasing, never reused;
+  zero is invalid. The application stores the id in its own `state` only if it wants to
+  `wait` or `kill` the child later; there is no per-task handle table.
 
 There are **no user-defined generics**. The parametric types above are built in; the
 compiler knows their layout and operations. Generic algorithms are either built-ins
@@ -292,10 +292,10 @@ if st <> Ok then
   must then call `core.heartbeat()` at least once per second of non-blocked time. There is
   no way back to the normal class. The model is soft realtime (ADR 0016).
 - **C7 (MUST):** `core.run(path, args, var reason)` blocks until the child terminates.
-  `core.spawn(path, args, var handle)` returns a `TaskHandle` immediately;
-  `core.join(handle, var reason)` waits and reaps; `core.kill(handle)` requests
-  termination and does not wait. The request is handled by the kernel REPL service
-  (ADR 0017).
+  `core.spawn(path, args, var id)` reserves a global `TaskId` and returns immediately;
+  `core.wait(id, var reason)` blocks if the task is live and returns its exit reason;
+  `core.kill(id)` requests termination and does not wait. The request is handled by the
+  kernel REPL service (ADR 0017).
 - **C8 (MUST):** A spawned child is a separate application instance with its own regions.
   It shares no memory with the parent; communication is through streams.
 - **C9 (MUST):** The argument passed to `run`/`spawn` is a fixed `string[1024]`. The child
@@ -411,7 +411,7 @@ end;
 
 `core` (native, Rust) provides the primitives that must be fast or that touch the host
 interface: console read/write, `yield`, stream send/receive/try, monotonic clock,
-`sleep_until`, realtime promotion and `heartbeat`, `run`/`spawn`/`join`/`kill` and
+`sleep_until`, realtime promotion and `heartbeat`, `run`/`spawn`/`wait`/`kill` and
 `arguments`, byte and string copy/compare/find, integer math, formatting primitives, and
 the checked conversions. `stdlib` (written in the language) provides arrays, rings, maps, UTF-8
 helpers, parsing, formatting, and typed stream views. `syslib` (native, Rust) provides
@@ -437,8 +437,8 @@ is the signal.
 | `run`/`spawn` path not found | `Status.NotFound` |
 | Argument longer than 1024 bytes | `Status.CapacityExceeded` |
 | `run`/`spawn` compile error | `Status.Invalid`; no child |
-| Handle table full | `Status.Full` |
-| `join` on a reaped handle | `Status.Invalid` |
+| `wait` on an unknown or evicted id | `Status.NotFound` |
+| `kill` on an unknown or terminated id | `Status.NotFound` |
 | Discarded `Status` | Compile warning |
 | Import cycle | Compile error |
 | Capacity mismatch in assignment | Compile error |
@@ -463,5 +463,6 @@ is the signal.
 | 2026-11-03 | Created as a constraints-only seed. |
 | 2026-11-12 | Full design pass: Pascal-like syntax; nominal types; built-in parametric collections; `bytes`/`string` split; `Status` errors; `core`/`stdlib`/`syslib` namespaces; streams plus `yield`; typed `syslib` handles; `const` expressions; compiler-generated manifests; at-least-N parameters; diagnostics in `fault`/`exit`. |
 | 2026-11-12 | Added the realtime class and `WatchdogTimeout`: one-way `core.realtime_on()`, mandatory `core.heartbeat()` (ADR 0016). |
-| 2026-11-12 | Added task handles and `run`/`spawn`/`join`/`kill`; `spawn` starts a separate application instance, not a thread (ADR 0017). |
+| 2026-11-12 | Added task spawning and `run`/`spawn`/`wait`/`kill`; `spawn` starts a separate application instance, not a thread (ADR 0017). |
 | 2026-11-12 | Added the fixed `string[1024]` argument and `core.arguments` (ADR 0017 addendum). |
+| 2026-11-12 | Replaced task handles with global `TaskId`s; `spawn` returns an id, `wait`/`kill` take one; no per-task handle table (ADR 0017 addendum 2). |

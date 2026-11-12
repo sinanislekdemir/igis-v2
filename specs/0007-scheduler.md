@@ -230,14 +230,13 @@ There are no zombies. A terminated task leaves nothing behind.
 - The task record stores the fixed `string[1024]` argument; the child reads it with
   `core.arguments`. The queue holds 1024 pending requests by default, a compile-time
   constant.
-- The requesting task's handle slot is linked to the new task. On child termination the
-  exit reason is stored in the slot and the parent is woken if it is blocked in
-  `join`/`run`.
-- Child regions are reclaimed at termination; the handle slot survives until `join` or
-  until the parent terminates.
+- The request carries the reserved task id. On child termination the id and exit reason
+  go to the global ring, and the parent is woken if it is blocked in `wait`/`run`.
+- Child regions are reclaimed at termination; the exit reason survives in the global ring
+  until `wait` consumes it or it is evicted.
 - `kill` marks the child for termination at its next safe point; it does not wait.
 - A spawned child is independent: if the parent terminates, the child continues. The
-  parent's handle slots vanish; the child keeps running.
+  parent's memory is reclaimed; the child keeps running.
 - If every core is held by a realtime task, the service gets no opportunity and no
   application starts. This is the accepted no-reserved-core tradeoff (ADR 0016
   addendum).
@@ -304,8 +303,9 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | Every core held by realtime tasks | Normal tasks wait, including a REPL; accepted tradeoff |
 | Spawn request queue full | `Status.Full` or block (open question) |
 | Argument longer than 1024 bytes | `Status.CapacityExceeded`; no request enqueued |
-| Handle table full | `Status.Full`; no request enqueued |
-| Child terminates while parent is in `join` | Parent wakes with the child's `ExitReason` |
+| Child terminates while parent is in `wait` | Parent wakes with the child's `ExitReason` |
+| `wait` on an unknown or evicted id | `Status.NotFound` |
+| `kill` on an unknown or terminated id | `Status.NotFound` |
 | Parent terminates with live children | Children continue (open question) |
 | Compile fails in the REPL service | Request completes with `Status.Invalid`; no task created |
 | Task blocks | Leaves the runnable set; no CPU consumed |
@@ -330,7 +330,7 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 7 | ~~Whether to reserve one core for the REPL/system~~ | **Resolved** — no reservation; realtime may occupy every core (ADR 0016 addendum). |
 | 8 | Heartbeat interval (one second) and whether it is configurable per task | Detection latency versus overhead. |
 | 9 | Whether the service dispatcher runs before every claim or only when the runnable set is empty | Compile latency versus scheduling overhead. |
-| 10 | Handle table size and whether `run` may block on a full queue | REPL service bounds (ADR 0017 addendum). |
+| 10 | Exit-reason ring size (64?) and whether `run` may block on a full queue | REPL service bounds (ADR 0017 addendum 2). |
 | 11 | Whether the argument string is `core.arguments` or a `main` parameter | Language surface. |
 
 ## Changelog
@@ -339,5 +339,5 @@ fn terminate(task: TaskRef, reason: FaultCode);
 |------|--------|
 | 2026-11-12 | Initial draft: per-core loops, atomic claim, quantum versus budget, blocking and wake-up, deterministic termination, SMP bring-up within the first milestone. |
 | 2026-11-12 | Added the realtime class: one-way promotion, priority, no quantum preemption, admission by core count, heartbeat with `WatchdogTimeout` (ADR 0016). |
-| 2026-11-12 | Added the service opportunity and REPL task creation: `run`/`spawn`/`join`/`kill`, handle slots and exit reasons (ADR 0017). |
+| 2026-11-12 | Added the service opportunity and REPL task creation: `run`/`spawn`/`wait`/`kill`, task ids and the exit-reason ring (ADR 0017). |
 | 2026-11-12 | Task creation carries the fixed `string[1024]` argument; queue capacity 1024; orphan children continue (ADR 0017 addendum). |

@@ -66,10 +66,10 @@ The interface is split into two namespaces:
 | `realtime_on` | `fn realtime_on() -> Status` | no; `Full` if no core is available |
 | `heartbeat` | `fn heartbeat()` | no; resets the realtime deadline |
 | `run` | `fn run(path: &str, args: &str, reason: &mut ExitReason) -> Status` | yes, until the child terminates |
-| `spawn` | `fn spawn(path: &str, args: &str, handle: &mut TaskHandle) -> Status` | no; enqueues and returns a handle |
+| `spawn` | `fn spawn(path: &str, args: &str, id: &mut TaskId) -> Status` | no; reserves an id and returns |
+| `wait` | `fn wait(id: TaskId, reason: &mut ExitReason) -> Status` | yes if the task is live |
+| `kill` | `fn kill(id: TaskId) -> Status` | no; requests termination |
 | `arguments` | `fn arguments(buf: &mut [u8]) -> Status` | no; reads the current task's argument string |
-| `join` | `fn join(handle: TaskHandle, reason: &mut ExitReason) -> Status` | yes, until the child terminates |
-| `kill` | `fn kill(handle: TaskHandle) -> Status` | no; requests termination |
 
 - `realtime_on` promotes the calling task, one way, to the realtime class: it is claimed
   before normal tasks and is not released at quantum expiry. It returns `Status.Full` when
@@ -80,16 +80,18 @@ The interface is split into two namespaces:
   that a task is executing at every safe point. The application is saying "one control
   cycle completed", which is what catches a livelocked controller.
 - `run` and `spawn` enqueue a compile-and-run request for the kernel REPL service
-  (`0002-architecture.md`, ADR 0017). `run` is `spawn` + `join`. The request queue holds
+  (`0002-architecture.md`, ADR 0017). `run` is `spawn` + `wait`. The request queue holds
   1024 pending requests by default; it is a compile-time constant, overridable at build
   time. A full queue returns `Status.Full` or blocks.
+- `TaskId` is a global, monotonically increasing `u64`, never reused; zero is invalid.
+  `spawn` reserves one at request time. There is no per-task handle table.
 - The argument is a fixed `string[1024]`. The kernel copies it into the request and
   returns it to the child through `core.arguments`; it never parses it. A longer argument
   is `Status.CapacityExceeded`.
-- `TaskHandle` is opaque and owned by the requesting task. Each task has a fixed-size
-  handle table (first choice: 8). `join` reaps the handle; a reaped handle returns
-  `Status.Invalid`. A terminated child's regions are reclaimed immediately; only the exit
-  reason survives until `join`.
+- `wait` is `wait(id)`. If the task is live it blocks; if it has terminated, the exit
+  reason is served from a small global ring (64 entries by default); if the record has
+  been evicted or the id is unknown, it returns `Status.NotFound`.
+- Any application may wait on or kill any id; there is no capability check (vision R14).
 - Time is monotonic nanoseconds since boot. It does not wrap in any realistic uptime;
   the comparison is unsigned and the deadline is absolute.
 - `console_read` returns a byte count and never blocks past the next input event; line
@@ -150,9 +152,9 @@ trait Host {
     fn realtime_on(&mut self) -> Status;
     fn heartbeat(&mut self);
     fn run(&mut self, path: &str, args: &str, reason: &mut ExitReason) -> Status;
-    fn spawn(&mut self, path: &str, args: &str) -> Result<TaskHandle, Status>;
-    fn join(&mut self, handle: TaskHandle) -> Result<ExitReason, Status>;
-    fn kill(&mut self, handle: TaskHandle) -> Status;
+    fn spawn(&mut self, path: &str, args: &str, id: &mut TaskId) -> Status;
+    fn wait(&mut self, id: TaskId, reason: &mut ExitReason) -> Status;
+    fn kill(&mut self, id: TaskId) -> Status;
     fn arguments(&mut self, buf: &mut [u8]) -> Status;
 }
 
@@ -184,11 +186,11 @@ signal for origin and cost (`0003-language.md`).
 | `run`/`spawn` path not found | `Status.NotFound`; no task created |
 | Argument longer than 1024 bytes | `Status.CapacityExceeded`; no request enqueued |
 | `run`/`spawn` compile error | `Status.Invalid`; the diagnostic is written where the caller can read it (open question 7) |
-| Handle table full | `Status.Full`; no request enqueued |
-| Request queue full | `Status.Full` or block (open question 3) |
-| `join` on a reaped handle | `Status.Invalid` |
-| Child terminates while the parent is blocked in `join` | Parent wakes with the child's `ExitReason` |
-| Parent terminates with live children | Children continue (open question 4) |
+| Request queue full | `Status.Full` or block |
+| `wait` on an unknown or evicted id | `Status.NotFound` |
+| `kill` on a terminated or unknown id | `Status.NotFound` |
+| Child terminates while the parent is blocked in `wait` | Parent wakes with the child's `ExitReason` |
+| Parent terminates with live children | Children continue (ADR 0017 addendum 2) |
 | `mmio_map` of an invalid or conflicting range | `Status` error; no partial mapping |
 | `mmio_read/write` out of range | Fault (`OutOfBounds`); the handle is bounds-checked |
 | Host mock asked for hardware | `Status` error, never a panic |
@@ -207,7 +209,7 @@ signal for origin and cost (`0003-language.md`).
 | 7 | Compile-error diagnostics: a fixed buffer, a stream, or a status only | The shell must display errors; the ABI shape is open. |
 | 8 | ~~`run`/`spawn` arguments, working directory and environment~~ | **Resolved** — fixed `string[1024]`; the child parses it (ADR 0017 addendum). |
 | 9 | ~~Parent death with live children~~ | **Resolved** — children continue (ADR 0017 addendum). |
-| 10 | Handle table size (8?) and whether `run` blocks on a full queue | Resource bounds. |
+| 10 | Exit-reason ring size (64?) and whether `run` blocks on a full queue | Resource bounds. |
 | 11 | Whether the argument string is `core.arguments` or a `main` parameter | Language surface; `core.arguments` is the working assumption. |
 
 ## Changelog
@@ -215,3 +217,5 @@ signal for origin and cost (`0003-language.md`).
 | Date | Change |
 |------|--------|
 | 2026-11-12 | Initial draft: core and syslib namespaces, blocking semantics, mockability, absence of allocation and spawn. |
+| 2026-11-12 | Added realtime promotion and heartbeat. |
+| 2026-11-12 | Added `run`/`spawn`/`wait`/`kill`, fixed `string[1024]` arguments, global task ids and the exit-reason ring; removed per-task handles (ADR 0017 and addendum 2). |

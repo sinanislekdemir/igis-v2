@@ -8,6 +8,10 @@
 - **Extends:** ADR 0002 (applications are source), ADR 0007 (static placement), ADR 0015
   (delivery)
 
+> **Note.** The per-task `TaskHandle` model in the Decision section is superseded by
+> Addendum 2: tasks are named by global `TaskId`s and there is no per-task handle table.
+> Where this document says `join`, read `wait`.
+
 ## Context
 
 The only permanently resident code in the system is the kernel. Everything else — the
@@ -47,7 +51,7 @@ task's footprint, so it would be a kernel task in disguise).
 - Once started, the shell is an ordinary task: it is migratable, preemptible and
   killable like any other.
 - If `shell` is missing or fails to compile, the kernel logs the reason and continues
-  without an interactive interface (open question 5).
+  without an interactive interface (see Addendum 1).
 
 ### Requests
 
@@ -99,7 +103,7 @@ no-reserved-core decision (ADR 0016 addendum) and is accepted.
 - Allocation for a new task happens in the kernel, before the task starts, exactly as the
   memory model requires.
 - `run` and `spawn` share one queue and one loader path; `run` is a convenience over
-  spawn + join.
+  spawn + wait.
 - The request queue decouples the caller from compilation time: the caller blocks on the
   child, not on the compiler.
 
@@ -107,8 +111,8 @@ no-reserved-core decision (ADR 0016 addendum) and is accepted.
 
 - The REPL compiles on a core, so that core is not running application code during a
   compile. Large sources create latency spikes.
-- Handle tables, exit-reason slots and a request queue are new kernel state with new
-  failure modes (full table, full queue, orphan children).
+- Task ids, the exit-reason ring and a request queue are new kernel state with new
+  failure modes (full ring, full queue, orphan children).
 - Parent death leaves children running; a spawned server can outlive the shell that
   started it, with no supervisor.
 - The shell is not privileged; if it is starved (for example by realtime tasks), the
@@ -118,7 +122,7 @@ no-reserved-core decision (ADR 0016 addendum) and is accepted.
 
 ### Neutral / follow-up work
 
-- `run` may be implemented as spawn + join in `core` rather than as a separate queue
+- `run` may be implemented as spawn + wait in `core` rather than as a separate queue
   operation.
 - Arguments, working directory and environment are not passed in the first milestone
   (see the addendum).
@@ -151,6 +155,28 @@ no-reserved-core decision (ADR 0016 addendum) and is accepted.
   form is a `build.rs`-generated constant or an `option_env!` parse, not a Cargo feature.
 - **Orphan policy.** A spawned child is independent: if the parent terminates, the child
   continues. There is no reparenting and no parent-death kill in the first milestone. The
-  parent's handle slots vanish; the child keeps running.
+  parent's regions are reclaimed; the child keeps running.
 - **Handle table.** The per-task handle table size remains open; eight is the working
-  assumption.
+  assumption. **Superseded by Addendum 2 below.**
+
+## Addendum 2 (2026-11-12): task ids, not per-task handles
+
+The per-task handle table and `TaskHandle` are removed. Every task has a global,
+monotonically increasing `TaskId` (`u64`; zero is invalid; ids are never reused).
+
+- `core.spawn(path, args, var id)` reserves an id at request time and returns it
+  immediately. The application may store the id in its own `state` or forget it; the
+  child runs independently either way.
+- `core.wait(id, var reason)` blocks if the task is live and returns its exit reason.
+  `core.kill(id)` requests termination and does not wait. `core.run` is `spawn` + `wait`.
+- `wait` and `kill` are requests to the REPL queue; the service looks the id up in the
+  global task table. There is no per-task table and no generation counter, because ids are
+  never reused.
+- When a task terminates, its id and `ExitReason` are written to a small global ring
+  (64 entries by default, compile-time constant). `wait` consumes the record if present;
+  otherwise it blocks if the task is live, and returns `NotFound` if it is neither live
+  nor in the ring. The oldest record is evicted when the ring is full. This is bounded
+  kernel state, not a zombie task: the regions are already reclaimed.
+- Any application may wait on or kill any id. There is no capability model; the system is
+  single-user and trusted. A stray id can stop another application's child, which is
+  consistent with the trust model.

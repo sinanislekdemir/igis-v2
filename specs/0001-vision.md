@@ -124,7 +124,7 @@ kernel is not written in the new language. Self-hosting the kernel is out of sco
   `core.heartbeat()` at least once per second of non-blocked time; a missed heartbeat is
   terminal. Admission is limited to one realtime task per online core (ADR 0016).
 - **R17 (MUST):** Applications may run other applications through `core.run` (blocking)
-  or `core.spawn` (returns a task handle), carrying a fixed `string[1024]` argument. The
+  or `core.spawn` (returns a task id), carrying a fixed `string[1024]` argument. The
   kernel REPL service resolves the path, compiles the source, allocates the footprint and
   creates the task (ADR 0017).
 
