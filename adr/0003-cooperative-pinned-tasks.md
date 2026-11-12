@@ -1,9 +1,13 @@
 # 0003: Per-core cooperative scheduling with core-pinned tasks
 
-- **Status:** Accepted
+- **Status:** Accepted (core-pinning clause superseded by 0011)
 - **Date:** 2026-11-03
 - **Deciders:** project owner
 - **Related specs:** 0001 (vision), 0002 (architecture)
+
+> **Note (2026-11-12).** ADR 0011 removes core pinning: tasks migrate between cores at
+> safe points. The cooperative model, safe points, per-core interpreter loops, budgets
+> and deterministic termination in this ADR still stand.
 
 ## Context
 

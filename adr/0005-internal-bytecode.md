@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-03
 - **Deciders:** project owner
-- **Related specs:** 0001 (vision), 0002 (architecture), 0003 (architecture)
+- **Related specs:** 0001 (vision), 0002 (architecture), 0003 (language)
 
 ## Context
 

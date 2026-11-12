@@ -5,6 +5,10 @@
 - **Deciders:** project owner
 - **Related specs:** 0001 (vision)
 
+> **Note (2026-11-12).** One consequence below — that the kernel must carry a garbage
+> collector — predates ADR 0004 and ADR 0007. The application memory model is static and
+> has no collector. The decision in this ADR is unaffected; only that estimate was wrong.
+
 ## Context
 
 If applications were native binaries, the system would need a loader, an executable
