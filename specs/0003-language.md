@@ -291,12 +291,16 @@ if st <> Ok then
 - **C6 (MUST):** A task may call `core.realtime_on()` once to enter the realtime class and
   must then call `core.heartbeat()` at least once per second of non-blocked time. There is
   no way back to the normal class. The model is soft realtime (ADR 0016).
-- **C7 (MUST):** `core.run(path, var reason)` blocks until the child terminates.
-  `core.spawn(path, var handle)` returns a `TaskHandle` immediately; `core.join(handle,
-  var reason)` waits and reaps; `core.kill(handle)` requests termination and does not
-  wait. The request is handled by the kernel REPL service (ADR 0017).
+- **C7 (MUST):** `core.run(path, args, var reason)` blocks until the child terminates.
+  `core.spawn(path, args, var handle)` returns a `TaskHandle` immediately;
+  `core.join(handle, var reason)` waits and reaps; `core.kill(handle)` requests
+  termination and does not wait. The request is handled by the kernel REPL service
+  (ADR 0017).
 - **C8 (MUST):** A spawned child is a separate application instance with its own regions.
   It shares no memory with the parent; communication is through streams.
+- **C9 (MUST):** The argument passed to `run`/`spawn` is a fixed `string[1024]`. The child
+  reads it with `core.arguments(var buf: string[1024])`; splitting, quoting and
+  interpreting it is the child's decision. The kernel never parses it.
 
 ## Hardware access (`syslib`)
 
@@ -407,9 +411,9 @@ end;
 
 `core` (native, Rust) provides the primitives that must be fast or that touch the host
 interface: console read/write, `yield`, stream send/receive/try, monotonic clock,
-`sleep_until`, realtime promotion and `heartbeat`, `run`/`spawn`/`join`/`kill`, byte and
-string copy/compare/find, integer math, formatting primitives, and the checked
-conversions. `stdlib` (written in the language) provides arrays, rings, maps, UTF-8
+`sleep_until`, realtime promotion and `heartbeat`, `run`/`spawn`/`join`/`kill` and
+`arguments`, byte and string copy/compare/find, integer math, formatting primitives, and
+the checked conversions. `stdlib` (written in the language) provides arrays, rings, maps, UTF-8
 helpers, parsing, formatting, and typed stream views. `syslib` (native, Rust) provides
 ports, MMIO handles and future block/DMA access.
 
@@ -431,6 +435,7 @@ is the signal.
 | Send on a closed endpoint | `Status.Closed` |
 | Realtime heartbeat missed | `fault(WatchdogTimeout)`; recovery rejected |
 | `run`/`spawn` path not found | `Status.NotFound` |
+| Argument longer than 1024 bytes | `Status.CapacityExceeded` |
 | `run`/`spawn` compile error | `Status.Invalid`; no child |
 | Handle table full | `Status.Full` |
 | `join` on a reaped handle | `Status.Invalid` |
@@ -459,3 +464,4 @@ is the signal.
 | 2026-11-12 | Full design pass: Pascal-like syntax; nominal types; built-in parametric collections; `bytes`/`string` split; `Status` errors; `core`/`stdlib`/`syslib` namespaces; streams plus `yield`; typed `syslib` handles; `const` expressions; compiler-generated manifests; at-least-N parameters; diagnostics in `fault`/`exit`. |
 | 2026-11-12 | Added the realtime class and `WatchdogTimeout`: one-way `core.realtime_on()`, mandatory `core.heartbeat()` (ADR 0016). |
 | 2026-11-12 | Added task handles and `run`/`spawn`/`join`/`kill`; `spawn` starts a separate application instance, not a thread (ADR 0017). |
+| 2026-11-12 | Added the fixed `string[1024]` argument and `core.arguments` (ADR 0017 addendum). |

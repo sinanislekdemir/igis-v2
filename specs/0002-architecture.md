@@ -296,17 +296,22 @@ task (ADR 0017).
 - It is invoked by the interpreter loop at a service opportunity: before claiming the next
   task, or when the runnable set is empty. It processes at most one request per
   opportunity, so a compile cannot hold a core indefinitely.
-- At boot it reads `shell` from the ext2 root, compiles it, allocates its footprint and
-  starts it on the boot core. After that the shell is an ordinary, migratable task.
+- At boot it tries `shell` in the ext2 root; if absent, it tries `entrypoint`. If neither
+  exists, or the chosen one fails to compile, it writes `no entry` to the console and
+  halts the system. `entrypoint` is for images that boot straight into an application
+  instead of a shell. Once started, the chosen task is ordinary and migratable.
 - Applications enqueue compile-and-run requests through `core.run` (blocking) or
   `core.spawn` (returns a `TaskHandle`); `core.join` waits and reaps, `core.kill` requests
-  termination. The queue is kernel-owned and fixed-capacity.
+  termination. The queue holds 1024 pending requests by default — a compile-time
+  constant, overridable at build time. Each request carries a path and a fixed
+  `string[1024]` argument; the kernel does not parse it.
 - For each request the service resolves the path, reads the source, compiles it, computes
   the manifest, allocates `code`/`state`/`stack`, creates the task and attaches it to the
   requester's handle slot. The kernel allocates before the task starts, exactly as the
   memory model requires.
 - A terminated child's regions are reclaimed immediately; only its exit reason survives
-  in the handle slot until `join`. There is no zombie task.
+  in the handle slot until `join`. There is no zombie task. Children are independent: if
+  the parent terminates, the child continues.
 - If every core is held by realtime tasks, the service gets no opportunity and no
   application starts. This follows from the no-reserved-core decision (ADR 0016
   addendum).
@@ -397,7 +402,7 @@ task; after that, shutdown.
 | Stream peer dies | Queued data discarded; surviving endpoint returns `Closed`; blocked peer wakes with `Closed` |
 | Arena request cannot be satisfied at load | Application refused; no runtime out-of-memory path |
 | ext2 image missing or corrupt | Mount refused; no applications load; kernel still boots to a diagnostic |
-| `shell` missing or fails to compile | Kernel logs the reason; no interactive interface, but the kernel runs |
+| `shell` missing or fails to compile | Try `entrypoint`; if that also fails, write `no entry` and halt |
 | Spawn path not found | `Status.NotFound`; no task created |
 | Spawn compile error | `Status.Invalid`; no task created |
 | Handle table full | `Status.Full`; no request enqueued |
@@ -419,8 +424,9 @@ task; after that, shutdown.
 | 5 | AP bring-up details: trampoline vs INIT-SIPI, per-core stacks | `arch/x86_64`, second half of the first milestone. |
 | 6 | Debug/introspection surface (task listing, counters, trace) | Deferred; not part of the first host interface. |
 | 7 | ~~Whether to reserve one core for the REPL/system when realtime tasks are admitted~~ | **Resolved** — no reservation; realtime may occupy every core (ADR 0016 addendum). |
-| 8 | Shell boot fallback: drop to a built-in prompt, or boot without a UI | The image can be broken; the kernel should stay diagnosable. |
-| 9 | `run`/`spawn` arguments, handle table size, queue capacity, parent-death policy | REPL service resource bounds (ADR 0017). |
+| 8 | ~~Shell boot fallback: drop to a built-in prompt, or boot without a UI~~ | **Resolved** — try `shell`, then `entrypoint`; otherwise `no entry` and halt (ADR 0017 addendum). |
+| 9 | Handle table size and whether `run` may block on a full queue | REPL service resource bounds (ADR 0017 addendum). |
+| 10 | Whether the argument string is exposed as `core.arguments` or as a `main` parameter | Language surface; `core.arguments` is the working assumption. |
 
 ## Changelog
 
@@ -430,3 +436,4 @@ task; after that, shutdown.
 | 2026-11-12 | Replaced pinned tasks with work-stealing interpreter loops (ADR 0011); split the runtime into `core`/`stdlib`/`syslib`; byte-FIFO streams; read-only ext2 delivery; framebuffer console; GRUB/multiboot2 boot with own long-mode transition; unconditional budget kill; no capability model. |
 | 2026-11-12 | Added the realtime class: no quantum preemption, admission by core count, one-second heartbeat and `WatchdogTimeout` (ADR 0016). |
 | 2026-11-12 | Added the REPL service: kernel-side compile-and-run, `run`/`spawn`/`join`/`kill`, task handles and the boot shell (ADR 0017). |
+| 2026-11-12 | REPL service details: `shell` then `entrypoint` boot fallback, `no entry` halt, fixed `string[1024]` arguments, queue capacity 1024, independent children (ADR 0017 addendum). |

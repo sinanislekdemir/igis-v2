@@ -116,15 +116,17 @@ kernel is not written in the new language. Self-hosting the kernel is out of sco
 - **R14 (MUST):** There is no capability or permission model. Any application may use any
   `syslib` primitive. Isolation is limited to interpreter-enforced memory ownership.
 - **R15 (SHOULD):** The system should remain usable interactively: the shell is an
-  ordinary application started by the REPL service, and a running application can be
-  inspected and terminated without rebooting.
+  ordinary application started by the REPL service, which tries `shell` then `entrypoint`
+  in the image root, and a running application can be inspected and terminated without
+  rebooting.
 - **R16 (MUST):** A task may request the realtime class once. Realtime tasks are not
   preempted by the quantum, are exempt from the total CPU budget, and must call
   `core.heartbeat()` at least once per second of non-blocked time; a missed heartbeat is
   terminal. Admission is limited to one realtime task per online core (ADR 0016).
 - **R17 (MUST):** Applications may run other applications through `core.run` (blocking)
-  or `core.spawn` (returns a task handle). The kernel REPL service resolves the path,
-  compiles the source, allocates the footprint and creates the task (ADR 0017).
+  or `core.spawn` (returns a task handle), carrying a fixed `string[1024]` argument. The
+  kernel REPL service resolves the path, compiles the source, allocates the footprint and
+  creates the task (ADR 0017).
 
 ## Non-goals
 
@@ -267,7 +269,7 @@ specified independently in `0005-host-interface.md`.
 | 19 | Streams: copy through the kernel, or true shared ring buffers? Message- or byte-oriented? | **Resolved** — byte FIFO, copied through the kernel, typed views above it (`0006-streams.md`). |
 | 20 | Can a task's time budget be configured, and by whom? | **Resolved** — a single kernel constant in the first milestone; applications cannot negotiate. |
 | 21 | What happens to a task's streams when the peer dies mid-frame? | **Resolved** — sends are atomic, so there is no mid-frame; queued data is discarded immediately and the peer observes `Closed` (`0006-streams.md`). |
-| 22 | How does the shell run, and how do applications start other applications? | **Resolved** — the REPL is a kernel service; the shell is an application; `run`/`spawn` enqueue requests that the service compiles and starts (ADR 0017). |
+| 22 | How does the shell run, and how do applications start other applications? | **Resolved** — the REPL is a kernel service; boot tries `shell` then `entrypoint`; the shell is an application; `run`/`spawn` enqueue requests with a fixed `string[1024]` argument (ADR 0017 and addendum). |
 
 ## Changelog
 
@@ -278,3 +280,4 @@ specified independently in `0005-host-interface.md`.
 | 2026-11-12 | Recorded the 2005 origin (modem front-end, ring-boundary friction) and the personal-system goal. Replaced core pinning with work stealing (ADR 0011). Resolved delivery (ext2), output (framebuffer), isolation (no capability model), boot (GRUB/multiboot2), stdlib split (`core`/`stdlib`) and all remaining open questions. |
 | 2026-11-12 | Added the realtime class: one-way promotion, no quantum preemption, admission by core count, one-second heartbeat and `WatchdogTimeout` (ADR 0016). |
 | 2026-11-12 | Added the REPL service and the spawn queue: the shell is an application, applications start others with `run`/`spawn`, and the kernel compiles and allocates (ADR 0017). |
+| 2026-11-12 | REPL details: `shell` then `entrypoint` boot fallback with `no entry` halt, fixed `string[1024]` arguments, queue capacity 1024, independent children (ADR 0017 addendum). |

@@ -65,8 +65,9 @@ The interface is split into two namespaces:
 | `sleep_until` | `fn sleep_until(deadline_ns: u64)` | yes, until deadline |
 | `realtime_on` | `fn realtime_on() -> Status` | no; `Full` if no core is available |
 | `heartbeat` | `fn heartbeat()` | no; resets the realtime deadline |
-| `run` | `fn run(path: &str, reason: &mut ExitReason) -> Status` | yes, until the child terminates |
-| `spawn` | `fn spawn(path: &str, handle: &mut TaskHandle) -> Status` | no; enqueues and returns a handle |
+| `run` | `fn run(path: &str, args: &str, reason: &mut ExitReason) -> Status` | yes, until the child terminates |
+| `spawn` | `fn spawn(path: &str, args: &str, handle: &mut TaskHandle) -> Status` | no; enqueues and returns a handle |
+| `arguments` | `fn arguments(buf: &mut [u8]) -> Status` | no; reads the current task's argument string |
 | `join` | `fn join(handle: TaskHandle, reason: &mut ExitReason) -> Status` | yes, until the child terminates |
 | `kill` | `fn kill(handle: TaskHandle) -> Status` | no; requests termination |
 
@@ -79,8 +80,12 @@ The interface is split into two namespaces:
   that a task is executing at every safe point. The application is saying "one control
   cycle completed", which is what catches a livelocked controller.
 - `run` and `spawn` enqueue a compile-and-run request for the kernel REPL service
-  (`0002-architecture.md`, ADR 0017). `run` is `spawn` + `join`. The request queue is
-  kernel-owned and fixed-capacity; a full queue returns `Status.Full` or blocks.
+  (`0002-architecture.md`, ADR 0017). `run` is `spawn` + `join`. The request queue holds
+  1024 pending requests by default; it is a compile-time constant, overridable at build
+  time. A full queue returns `Status.Full` or blocks.
+- The argument is a fixed `string[1024]`. The kernel copies it into the request and
+  returns it to the child through `core.arguments`; it never parses it. A longer argument
+  is `Status.CapacityExceeded`.
 - `TaskHandle` is opaque and owned by the requesting task. Each task has a fixed-size
   handle table (first choice: 8). `join` reaps the handle; a reaped handle returns
   `Status.Invalid`. A terminated child's regions are reclaimed immediately; only the exit
@@ -144,10 +149,11 @@ trait Host {
     fn sleep_until(&mut self, deadline_ns: u64);
     fn realtime_on(&mut self) -> Status;
     fn heartbeat(&mut self);
-    fn run(&mut self, path: &str, reason: &mut ExitReason) -> Status;
-    fn spawn(&mut self, path: &str) -> Result<TaskHandle, Status>;
+    fn run(&mut self, path: &str, args: &str, reason: &mut ExitReason) -> Status;
+    fn spawn(&mut self, path: &str, args: &str) -> Result<TaskHandle, Status>;
     fn join(&mut self, handle: TaskHandle) -> Result<ExitReason, Status>;
     fn kill(&mut self, handle: TaskHandle) -> Status;
+    fn arguments(&mut self, buf: &mut [u8]) -> Status;
 }
 
 trait Syslib {
@@ -176,6 +182,7 @@ signal for origin and cost (`0003-language.md`).
 | Realtime requested with no free core | `Status.Full`; the task stays normal |
 | Realtime task misses its heartbeat | Terminate at the next safe point; `fault(WatchdogTimeout)`; recovery rejected; `exit`; reclaim |
 | `run`/`spawn` path not found | `Status.NotFound`; no task created |
+| Argument longer than 1024 bytes | `Status.CapacityExceeded`; no request enqueued |
 | `run`/`spawn` compile error | `Status.Invalid`; the diagnostic is written where the caller can read it (open question 7) |
 | Handle table full | `Status.Full`; no request enqueued |
 | Request queue full | `Status.Full` or block (open question 3) |
@@ -198,9 +205,10 @@ signal for origin and cost (`0003-language.md`).
 | 5 | DMA and block primitives | When the first real device is added. |
 | 6 | ~~Whether one core is reserved for the REPL/system so realtime tasks cannot starve it~~ | **Resolved** — no reservation; realtime may occupy every core (ADR 0016 addendum). |
 | 7 | Compile-error diagnostics: a fixed buffer, a stream, or a status only | The shell must display errors; the ABI shape is open. |
-| 8 | `run`/`spawn` arguments, working directory and environment | First milestone passes a path only. |
-| 9 | Parent death with live children: continue, kill the tree, or reparent | Orphan policy. |
-| 10 | Handle table size, request queue capacity, and whether `run` blocks on a full queue | Resource bounds. |
+| 8 | ~~`run`/`spawn` arguments, working directory and environment~~ | **Resolved** — fixed `string[1024]`; the child parses it (ADR 0017 addendum). |
+| 9 | ~~Parent death with live children~~ | **Resolved** — children continue (ADR 0017 addendum). |
+| 10 | Handle table size (8?) and whether `run` blocks on a full queue | Resource bounds. |
+| 11 | Whether the argument string is `core.arguments` or a `main` parameter | Language surface; `core.arguments` is the working assumption. |
 
 ## Changelog
 

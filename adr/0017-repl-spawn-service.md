@@ -65,8 +65,8 @@ message queue:
 - The REPL resolves the path in ext2, reads the source, compiles it, computes the
   manifest, allocates `code`/`state`/`stack`, creates the task, and attaches it to the
   requester's handle slot. On failure it completes the request with a `Status` error.
-- The queue has a fixed capacity; enqueueing blocks or returns `Status.Full` (open
-  question 3).
+- The queue has a fixed capacity; enqueueing blocks or returns `Status.Full` (see the
+  addendum).
 
 ### Handles
 
@@ -80,7 +80,7 @@ message queue:
 - `kill` requests termination at the child's next safe point; it does not wait. `join`
   observes the result.
 - Children are independent: parent termination does not kill them in the first milestone
-  (open question 4).
+  (see the addendum).
 
 ### Starvation
 
@@ -121,7 +121,7 @@ no-reserved-core decision (ADR 0016 addendum) and is accepted.
 - `run` may be implemented as spawn + join in `core` rather than as a separate queue
   operation.
 - Arguments, working directory and environment are not passed in the first milestone
-  (open question 1).
+  (see the addendum).
 - The shell can implement command history, completion and line editing itself; none of
   that is kernel work.
 
@@ -134,3 +134,23 @@ no-reserved-core decision (ADR 0016 addendum) and is accepted.
 | REPL as a task | It still needs the compiler and the ability to allocate another task's footprint; it would be a kernel task with a scheduler identity. |
 | REPL executes the child inline on its own stack | No isolation, no scheduling, and the child would share the REPL's fate. |
 | Kernel-thread REPL with its own context | Violates the one-interpreter-loop-per-core model (ADR 0011) for a service that is bounded work. |
+
+## Addendum (2026-11-12): boot fallback, arguments, queue capacity, orphans
+
+- **Boot fallback.** The REPL tries `shell` in the ext2 root. If it is absent, it tries
+  `entrypoint`. If neither exists, or the chosen one fails to compile, it writes
+  `no entry` to the console and halts the system. `entrypoint` is for custom images that
+  want to boot straight into an application instead of a shell; it has no special
+  semantics beyond being the second name tried.
+- **Arguments.** `run` and `spawn` carry a fixed `string[1024]`. The child reads it with
+  `core.arguments(var buf: string[1024])`. Splitting, quoting or interpreting the string
+  is entirely the child's decision; the kernel never parses it. The 1024-byte capacity is
+  a compile-time constant, not a per-call choice.
+- **Queue capacity.** The request queue holds 1024 pending requests. It is a compile-time
+  constant with a build-time override, in the spirit of `-DQUEUE_CAPACITY=1024`; the Rust
+  form is a `build.rs`-generated constant or an `option_env!` parse, not a Cargo feature.
+- **Orphan policy.** A spawned child is independent: if the parent terminates, the child
+  continues. There is no reparenting and no parent-death kill in the first milestone. The
+  parent's handle slots vanish; the child keeps running.
+- **Handle table.** The per-task handle table size remains open; eight is the working
+  assumption.
