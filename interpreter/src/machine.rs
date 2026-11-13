@@ -73,6 +73,7 @@ pub struct Machine {
     operand_off: usize,
     frame_size: usize,
     yield_requested: bool,
+    executed: u64,
 }
 
 impl Default for Machine {
@@ -95,12 +96,22 @@ impl Machine {
             operand_off: 0,
             frame_size: 0,
             yield_requested: false,
+            executed: 0,
         }
     }
 
     /// Returns the exit reason if the machine has stopped.
     pub fn halted(&self) -> Option<ExitReason> {
         self.halted
+    }
+
+    /// Total bytecodes executed since the machine was created.
+    ///
+    /// The scheduler uses this for the hard step cap of the total CPU budget:
+    /// the 1 ms clock cannot resolve a sub-millisecond quantum, so time alone
+    /// under-counts (spec 0007, "Budget").
+    pub fn steps(&self) -> u64 {
+        self.executed
     }
 
     /// Asks the machine to return [`Outcome::Yielded`] at the next instruction
@@ -187,6 +198,7 @@ impl Machine {
                 return Outcome::Yielded;
             }
             steps -= 1;
+            self.executed = self.executed.wrapping_add(1);
             match self.step(program, host, state, stack, args) {
                 Ok(Some(reason)) => {
                     self.halted = Some(reason);

@@ -168,6 +168,8 @@ another core.
   termination.
 - The quantum is small enough that a runnable task waits a bounded number of quanta, not
   so small that claim overhead dominates.
+- The first milestone uses **10 000 bytecodes per claim** (`QUANTUM_STEPS`, kernel
+  `sched.rs`). This is provisional and chosen for measurement, not tuned (Q1).
 
 ### Budget
 
@@ -180,6 +182,11 @@ another core.
 - A task that never reaches a safe point cannot be terminated; that is the one liveness
   hole the cooperative model accepts, and it is why blocking builtins are forbidden
   (`0002`).
+- The first milestone uses **10 s of CPU time** (`TOTAL_BUDGET_NS`) with a hard cap of
+  **200 000 000 executed bytecodes** (`TOTAL_BUDGET_STEPS`). The 1 ms clock cannot resolve
+  a sub-millisecond quantum, so time alone under-counts; until the clock is finer, the
+  step cap is the watchdog that actually fires and the time budget is the backstop for
+  slow builtins. Both values are provisional (Q2).
 
 ### Realtime tasks
 
@@ -375,7 +382,7 @@ fn terminate(task: TaskRef, reason: FaultCode);
 
 | # | Question | Trigger / owner |
 |---|----------|-----------------|
-| 1 | Quantum size (steps and time) and the total budget value | Tuning after the first measurable workloads. |
+| 1 | ~~Quantum size (steps and time) and the total budget value~~ | **Resolved (provisional)** — 10 000 bytecodes per claim and a 10 s CPU budget with a 200 000 000-step cap; tune after measurement (see Quantum and Budget). |
 | 2 | Global queue vs per-core deques with stealing | Performance; claim semantics do not change. |
 | 3 | Priority or deadline scheduling | Not planned; budgets are the only policy. |
 | 4 | ~~IPC mechanism: fixed-vector IPI vs APIC shorthand~~ | **Resolved** — one fixed vector (0x40), fixed delivery to a physical destination, all-excluding-self shorthand for any-core wakes. |
@@ -398,3 +405,4 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 2026-11-13 | Time fixed as one global nanosecond counter advanced by the boot core's 1 kHz APIC timer tick; no TSC, because per-vCPU TSC drift would corrupt budget and heartbeat accounting; 1 ms resolution is accepted. |
 | 2026-11-13 | Claim and release save and restore SSE state with `FXSAVE`/`FXRSTOR` into a per-task `fpu` region; Sch5 now names the FPU context explicitly (ADR 0018). |
 | 2026-11-13 | Boot and service details fixed: INIT-SIPI-SIPI through a sub-1 MiB trampoline with `MAX_CORES` static per-core state; one IPI vector (0x40); the dispatcher runs before every claim and a compile is not interrupted (ADR 0019); realtime admission counts the cores online at call time; `kill` cancels a queued request and records `Killed`; request paths are validated (relative, no `..`, regular files only). |
+| 2026-11-13 | First scheduler implementation: 10 000-bytecode quantum and a 10 s / 200 000 000-step total budget, both provisional (Q1); the step cap is the effective watchdog while the clock ticks at 1 ms. |

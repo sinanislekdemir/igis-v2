@@ -10,7 +10,9 @@ mod frame;
 mod mb2;
 mod module;
 mod repl;
+mod sched;
 mod sync;
+mod task;
 
 use arch_x86_64::{apic, gdt, idt, serial};
 
@@ -170,7 +172,10 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
                         Err(status) => println!("ext2: shell: {}", status.name()),
                     }
 
-                    repl::boot(&fs);
+                    // The REPL leaves the boot task in the runnable set; the
+                    // scheduler loop owns it from here.
+                    let boot_task = repl::boot(&fs);
+                    sched::run_forever(boot_task);
                 }
                 Err(status) => {
                     println!("ext2: mount refused ({})", status.name());

@@ -32,10 +32,14 @@ constraints learned there.
   slice now runs: `xtask image` builds a 4 MiB ext2 image from `samples/apps/` and attaches
   it as a GRUB module, the kernel mounts it read-only, reads `shell` (falling back to
   `entrypoint`), compiles the source in the kernel with `compiler::compile_into`, places
-  `code`/`state`/`stack` in contiguous frames, verifies and runs the package in the
-  interpreter, prints the application output, reclaims the frames, prints `exit: Ok` and
-  halts. The compiler is `no_std` and allocation-free; the kernel path adds no heap. The
-  next piece is the real scheduler (claim/release, quantum) and console input.
+  `code`/`state`/`stack` in contiguous frames, verifies the package and enqueues the task
+  in a 64-slot global runnable set. The boot core then runs the scheduler loop: claim by
+  value move under a per-slot spin lock, a 10 000-bytecode quantum, per-task CPU accounting
+  with a 10 s / 200 000 000-step watchdog, and release or deterministic termination. The
+  boot application crosses many quanta, prints its output, exits `Ok`, and the system
+  prints the claim/yield/exit summary and halts. The compiler is `no_std` and
+  allocation-free; the scheduler path adds no heap. The next pieces are console input and
+  the REPL request service, then APs and blocking/wake-up.
 
 ## Ground rules
 
@@ -168,6 +172,7 @@ host tools are unaffected.
 | ext2 subset: 1/4 KiB blocks, double indirect, regular root files, metadata validated; unsupported images refuse the mount | specs 0002, 0007 |
 | `ExitReason.Killed`; dispatcher before every claim; admission counts cores online at call time; relative paths without `..` | specs 0003, 0005, 0007 |
 | Bytecode: one package per application, 4-byte-word stack VM, split `compiler`/`interpreter` crates over `abi`, structural verification | spec 0008 (Draft) |
+| Scheduler: slot table of 64 tasks, claim takes the value under a per-slot spin lock, 10 000-step quantum, 10 s / 200M-step budget | spec 0007, ADR 0011 |
 | Delivery is source-only, permanently: the image never carries bytecode and packages live only in memory | ADR 0019 (Accepted) |
 
 ## Open questions
@@ -210,3 +215,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-13 | Host language slice: `abi` (ABI v1 opcodes/headers), `compiler` (lexer → parser → type/capacity check → deterministic package), `interpreter` (structural verifier, allocation-free machine, `Host` trait), `langhost` runner; 50 tests, kernel untouched. Spec 0008 open questions 1 and 3 resolved. |
 | 2026-11-13 | Compiler made `no_std` and allocation-free (B11): a bump arena over the caller's `&mut [u8]`, source-borrowing tokens and AST, arena-backed lists instead of `Vec`/`HashMap`, fixed-buffer diagnostics, and `compile_into(source, path, arena, code, manifest) -> Package<'a>` writing into caller buffers. Packages are byte-identical to the previous build; 54 tests; `langhost` keeps a std helper that allocates the caps. |
 | 2026-11-13 | First in-kernel vertical slice: `xtask image` stages `samples/apps/` into a 4 MiB ext2 image attached as the `apps` GRUB module; the kernel finds the module tag, mounts the image read-only (validated superblock, group descriptors, inodes, directories, direct/single/double indirect), reads `shell`, compiles it with `compile_into`, places `code`/`state`/`stack` in contiguous frames, verifies and runs it (`exit: Ok`), reclaims the frames and halts. Boot stack raised 16 KiB → 64 KiB after the in-kernel compiler overflowed into the boot page tables. |
+| 2026-11-13 | Scheduler loop: `task.rs` owns the record and a 64-slot runnable table (claim/release by value move), `sched.rs` runs claim → quantum → release/terminate on the boot core. The REPL only compiles and enqueues; the boot application crosses 181 claims over a 10 000-step quantum, then `exit Ok` and an idle summary. Budgets are provisional: 10 s of CPU time plus a 200M-step cap because the 1 ms clock cannot resolve a quantum. |

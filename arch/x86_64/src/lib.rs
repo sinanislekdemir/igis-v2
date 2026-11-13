@@ -17,6 +17,16 @@ pub mod serial;
 /// Virtual base of the kernel image; physical addresses map through this offset.
 pub const KERNEL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
 
+/// Wait for the next interrupt, then return with interrupts enabled.
+///
+/// `sti` takes effect after the following instruction, so `sti; hlt` has no
+/// window in which an interrupt can arrive between the two (spec 0007, idle).
+pub fn wait_for_interrupt() {
+    // SAFETY: `sti`/`hlt` are legal at ring 0; the kernel is idle and only an
+    // interrupt (timer or IPI) can make progress.
+    unsafe { core::arch::asm!("sti", "hlt", options(nomem, nostack, preserves_flags)) }
+}
+
 /// Stop this core forever. Interrupts are disabled.
 pub fn halt() -> ! {
     loop {

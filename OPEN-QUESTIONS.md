@@ -17,8 +17,6 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 
 | # | Question | Options / recommendation | Trigger |
 |---|----------|--------------------------|---------|
-| Q1 | Quantum size | 1 ms or 10 000 bytecodes; compile-time constant; measure later | first scheduler implementation |
-| Q2 | Total CPU budget | 10 s default; compile-time constant; blocked time excluded | first scheduler implementation |
 | Q3 | Handler emergency budget | 1 ms or 10 000 steps for `fault`/`exit` | fault/exit implementation |
 | Q4 | Realtime heartbeat interval | 1 s default; configurable per task? | realtime implementation |
 | Q42 | Kernel stack bound for in-kernel compilation | the recursive compiler runs on the boot stack (now 64 KiB); needs a guard page or a bounded recursion depth before untrusted source is accepted | before the REPL takes `run` requests |
@@ -108,11 +106,15 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
   terminates a live task at its next safe point; request paths are relative with no `..` and
   must name regular files; a shell may start another shell; a full queue is reported, not
   retried (Q31–Q33, Q36–Q38).
+- **Quantum and total budget are provisional (Q1/Q2).** 10 000 bytecodes per claim; 10 s of
+  CPU time plus a hard cap of 200 000 000 executed bytecodes, because the 1 ms clock cannot
+  measure a sub-millisecond quantum. The step cap is the effective watchdog until the clock
+  is finer. Tune after measurement (spec 0007, "Quantum" and "Budget").
 - **Already decided, removed from the table:** Q25 (timer source, closed by Q6), Q28 and
   Q29 (ADR 0017 addendum), Q34 (children continue), Q35 (64-entry exit ring).
-- Q5, Q6, Q7, Q11–Q13 and Q15–Q38 are resolved and removed from the table; only the
-  tuning constants, the deferred debug/DMA/streams items and the two float follow-ups
-  remain.
+- Q5, Q6, Q7, Q11–Q13 and Q15–Q38 are resolved and removed from the table; Q1 and Q2 are
+  now closed provisionally, so only the handler budget and heartbeat (Q3/Q4), the deferred
+  debug/DMA/streams items and the two float follow-ups remain.
 
 ## Decided in the 2026-11-12 session
 
@@ -148,6 +150,9 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
 7. ~~In-kernel REPL slice~~ — done: `xtask image` builds the ext2 `apps` module, the kernel
    mounts it read-only, compiles `shell` in the kernel, places `code`/`state`/`stack` frames,
    verifies and runs it, prints `exit: Ok`, reclaims and halts.
-8. Next: the real scheduler loop (global runnable set, claim/release, quantum, budget) and
-   console input; then streams and the `run`/`spawn` request queue.
-9. Pick the tuning constants (Q1–Q4) when the scheduler first runs.
+8. ~~Real scheduler loop~~ — done: a 64-slot global runnable set with claim/release by
+   value move, a 10 000-step quantum, per-task budget accounting and a step-cap watchdog;
+   the boot application crosses ~180 claims before `exit Ok`.
+9. ~~Pick the tuning constants~~ — Q1/Q2 chosen provisionally: 10 000 steps, 10 s / 200M
+   steps. Next: console input; then streams and the `run`/`spawn` request queue; then APs,
+   blocking/wake-up and the realtime class (Q3/Q4 when their features land).
