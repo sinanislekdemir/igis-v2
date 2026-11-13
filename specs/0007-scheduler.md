@@ -5,7 +5,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0003 (cooperative model, budget intent), 0006 (guard pages), 0011 (work
-  stealing), 0016 (realtime class)
+  stealing), 0016 (realtime class), 0018 (floating point)
 - **Updated:** 2026-11-13
 
 ## Context
@@ -27,8 +27,9 @@ ADR 0011 concrete.
   runnable set is not running; a running task is not in the set.
 - **Sch4 (MUST):** A core runs a claimed task for a quantum of N bytecodes or about one
   millisecond, whichever comes first, and releases it at the next safe point.
-- **Sch5 (MUST):** At release the complete execution state is in the task's regions. No
-  live application state remains in a core's registers.
+- **Sch5 (MUST):** At release the complete execution state is in the task's regions,
+  including the SSE state saved into the task's `fpu` region. No live application state
+  remains in a core's registers.
 - **Sch6 (MUST):** The interpreter has no global mutable state. Per-core scratch is the
   only core-local data.
 - **Sch7 (MUST):** Exhausting the quantum releases the task and re-enqueues it; it does
@@ -105,7 +106,9 @@ loop {
 
     core.current = task
     switch_to_task_stack(task)
+    restore_fpu(task)                   // FXRSTOR from the task's fpu region
     run_quantum(task)                   // steps N or ~1 ms
+    save_fpu(task)                      // FXSAVE into the task's fpu region
     switch_to_core_stack()
     core.current = none
 
@@ -123,6 +126,9 @@ loop {
   release path.
 - A task that terminates inside `run_quantum` is reclaimed by the termination path and is
   never re-enqueued.
+- `save_fpu` runs before the task can be re-enqueued and `restore_fpu` runs after the
+  claim, so the `fpu` region is current whenever the task is not running. Every task pays
+  the 512-byte save and restore, whether or not it uses floats (ADR 0018).
 
 ### Time
 
@@ -266,6 +272,9 @@ Each core has:
 - a quantum counter and the last budget check,
 - scratch space that must never hold application state across a release.
 
+The SSE registers are not part of that scratch: they belong to the claimed task and are
+saved into its `fpu` region before the core looks for the next task.
+
 There is no per-core ownership of any application region.
 
 ### SMP bring-up
@@ -358,3 +367,4 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 2026-11-12 | Added the service opportunity and REPL task creation: `run`/`spawn`/`wait`/`kill`, task ids and the exit-reason ring (ADR 0017). |
 | 2026-11-12 | Task creation carries the fixed `string[1024]` argument, delivered as `main(args)`; queue capacity 1024; orphan children continue (ADR 0017 addendum). |
 | 2026-11-13 | Time fixed as one global nanosecond counter advanced by the boot core's 1 kHz APIC timer tick; no TSC, because per-vCPU TSC drift would corrupt budget and heartbeat accounting; 1 ms resolution is accepted. |
+| 2026-11-13 | Claim and release save and restore SSE state with `FXSAVE`/`FXRSTOR` into a per-task `fpu` region; Sch5 now names the FPU context explicitly (ADR 0018). |

@@ -4,8 +4,8 @@
 - **Scope:** kernel internals, runtime hosting, execution and memory model
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0001, 0002, 0003, 0004, 0006, 0011, 0012, 0013, 0014, 0015, 0016
-- **Updated:** 2026-11-12
+- **ADRs:** 0001, 0002, 0003, 0004, 0006, 0011, 0012, 0013, 0014, 0015, 0016, 0018
+- **Updated:** 2026-11-13
 
 ## Context
 
@@ -161,10 +161,15 @@ application manifest
   mm: reserve frames → map into the shared address space → zero
         │
         ▼
-  task: { code, state, stack, streams, bytecode }
+  task: { code, state, stack, fpu, streams, bytecode }
 ```
 
 No runtime growth, no `malloc`, no realloc, no GC, no runtime placement.
+
+Floating point adds a fifth region: a 512-byte `fpu` image holding the task's SSE state
+(ADR 0018). The scheduler `FXSAVE`s into it on release and `FXRSTOR`s from it on claim, so
+a migratable task carries its float registers in memory like everything else. The region is
+kernel-owned and never nameable by the application, exactly like a stream buffer.
 
 ### Addresses and handles
 
@@ -440,3 +445,4 @@ task; after that, shutdown.
 | 2026-11-12 | Added the realtime class: no quantum preemption, admission by core count, one-second heartbeat and `WatchdogTimeout` (ADR 0016). |
 | 2026-11-12 | Added the REPL service: kernel-side compile-and-run, `run`/`spawn`/`wait`/`kill`, task ids and the boot shell (ADR 0017). |
 | 2026-11-12 | REPL service details: `shell` then `entrypoint` boot fallback, `no entry` halt, fixed `string[1024]` arguments, queue capacity 1024, independent children (ADR 0017 addendum). |
+| 2026-11-13 | Floating point is part of the first milestone: `f64` with a kernel-owned per-task `fpu` region, saved on release and restored on claim (ADR 0018). |

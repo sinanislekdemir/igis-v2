@@ -47,6 +47,8 @@ types. A byte FIFO is one implementation for every payload; the type system and 
   views are `stdlib` code.
 - **S11 (MUST):** A stream name is unique across the whole application. Two units may not
   declare the same name, even with different directions; the compiler rejects it.
+- **S12 (MUST):** A stream name is at most 31 bytes matching `[a-z][a-z0-9_]*`; a capacity
+  is between 1 and 65536 bytes. Both are compile-time facts recorded in the manifest.
 
 ## Design
 
@@ -152,6 +154,9 @@ var
 
 - The loader reads every manifest, then pairs one `out` with one `in` of the same name.
   The two capacities must match; a mismatch is a load error.
+- A name is at most 31 bytes of `[a-z][a-z0-9_]*`; anything else is a compile error.
+  Capacities are `1..=65536` bytes, and the loader refuses an application whose declared
+  streams the kernel's stream-buffer budget cannot cover.
 - A stream name is an application-wide identifier. Two units may not declare the same
   name, even with different directions: the compiler sees every unit of the application
   and rejects the duplicate, so the loader never has to guess which declaration was meant.
@@ -228,3 +233,4 @@ fn try_receive(ep: Endpoint, buf: &mut [u8]) -> Result<usize, Status>;
 |------|--------|
 | 2026-11-12 | Initial draft: byte FIFO, kernel-owned and copied, atomic sends, blocking plus try variants, immediate discard on peer death, manifest-based pairing, typed views in `stdlib`. |
 | 2026-11-13 | Stream names are unique application-wide (S11); one sender and one receiver are fixed, a shared type would be a separate addition; `stdlib` framing uses length prefixes by default and newline delimiters for text; explicit close is deferred to v2 with the constraint that closed state is independent of owner lifetime. |
+| 2026-11-13 | Stream names are `string[32]` matching `[a-z][a-z0-9_]*` and capacities are `1..=65536` bytes (S12). |

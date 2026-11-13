@@ -3,7 +3,7 @@
 Operational guide for humans and coding agents working in this repository.
 Keep this file short and current. It points at documents; it does not duplicate them.
 
-**Last updated:** 2026-11-12
+**Last updated:** 2026-11-13
 
 ## What this is
 
@@ -122,6 +122,8 @@ commands here (`cargo xtask build`, `cargo xtask run`, `cargo xtask test`).
 | REPL is a kernel service; boot tries `shell` then `entrypoint`; `run`/`spawn` carry `string[1024]` args through a 1024-slot queue and return global task ids | ADR 0017 (Accepted + addenda) |
 | Console is a byte stream (no echo, no key events); one global nanosecond clock at 1 ms resolution, no TSC; compile diagnostics via a caller-owned `Diagnostic` out-parameter | specs 0003, 0005, 0007 |
 | Streams are single-producer/single-consumer; names are unique per application; framing helpers live in `stdlib` | spec 0006 (Draft) |
+| Floating point in the first milestone: one `f64` type, IEEE-754, with a kernel-owned per-task `fpu` region | ADR 0018 (Accepted) |
+| No visibility modifiers: every top-level declaration is public; conversions are `T(x)` casts; maps use FNV-1a with linear probing | specs 0003, 0004 |
 
 ## Open questions
 
@@ -151,3 +153,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-12 | Remaining unresolved items parked in `OPEN-QUESTIONS.md`; session paused before code. |
 | 2026-11-13 | Host interface settled: console is a byte stream, one global nanosecond clock (no TSC), caller-owned compile diagnostics; Q5–Q7 closed (specs 0003, 0005, 0007). |
 | 2026-11-13 | Streams settled: unique application-wide names, one sender and one receiver, `stdlib` framing helpers; explicit close deferred to v2; Q11–Q13 closed (spec 0006). |
+| 2026-11-13 | Floating point added to the first milestone: `f64` with a per-task FXSAVE region (ADR 0018). Language settled: no visibility modifiers, `T(x)` casts, FNV-1a maps, `core.bit_*`, `Diagnostic` only; Q15–Q23 closed (specs 0002–0004, 0006, 0007). |

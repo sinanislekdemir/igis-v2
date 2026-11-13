@@ -4,7 +4,7 @@
 - **Scope:** application language, type system, memory model, standard library
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0002, 0004, 0005, 0007, 0010, 0011, 0016
+- **ADRs:** 0002, 0004, 0005, 0007, 0010, 0011, 0016, 0018
 - **Updated:** 2026-11-13
 
 ## Context
@@ -66,9 +66,16 @@ Two constraints dominate the design:
 - Comments: `{ ... }` and `// ...`.
 - Statements end with `;`. Blocks are `begin ... end`.
 - Assignment `:=`; equality `=`; inequality `<>`; comparisons `<`, `<=`, `>`, `>=`.
-- Boolean operators are `and`, `or`, `not`; they short-circuit.
+- Boolean operators are `and`, `or`, `not`; they take `bool` operands and short-circuit.
+  Integer bitwise operations are named functions, not operators: `core.bit_and`,
+  `core.bit_or`, `core.bit_xor`, `core.shl`, `core.shr`.
 - Integer operators are `+`, `-`, `*`, `div`, `mod`. Integer overflow is a fault, never
-  wraparound.
+  wraparound. Float operands use `+`, `-`, `*` and `/`, following IEEE-754.
+- Precedence, highest first: unary `not` and `-`; `*`, `/`, `div`, `mod`; `+`, `-`;
+  relational `<`, `<=`, `>`, `>=`; equality `=` and `<>`; `and`; `or`. Parentheses
+  override. `and` and `or` bind looser than comparisons, so `a > 0 and b > 0` means what
+  it reads like.
+- A shift count outside `0..63` is `fault(IllegalOperation)`.
 - String literals use double quotes with escapes (`\n`, `\t`, `\\`, `\"`, `\xNN`). A
   literal is typed by its destination: a `string` destination validates UTF-8 at compile
   time; a `bytes` destination accepts raw bytes.
@@ -109,9 +116,44 @@ end;
 | `byte` | 1 byte | unsigned |
 | `int` | 8 bytes | signed, two's complement |
 | `uint` | 8 bytes | unsigned |
+| `f64` | 8 bytes | IEEE-754 binary64 (ADR 0018) |
 
-No implicit numeric conversions. A conversion is explicit and checked; a narrowing that
-does not fit faults. Floating point is not part of the first milestone (open question 1).
+No implicit numeric conversions, including between the integer types and `f64`.
+Conversions are written as a type applied to a value:
+
+```text
+f64(x)   int(x)   uint(x)   byte(x)
+```
+
+- `f64(x)` from an integer is ordinary IEEE conversion. Values that need more than 53 bits
+  of mantissa round; that is not a fault.
+- `int(x)`, `uint(x)` and `byte(x)` truncate toward zero and fault `Overflow` when the
+  value is `NaN` or does not fit the destination.
+- `string`/`bytes` conversion is not a cast. It can fail as data, so it is the checked
+  `stdlib.utf8_decode_into` function returning `Status` (T3).
+
+### Floating point
+
+- `f64` is the only float type in the first milestone. `f32` is not included (ADR 0018).
+- Arithmetic follows IEEE-754: `+`, `-`, `*`, `/`, with `Inf` and `NaN` as ordinary
+  results. Float division by zero produces `Inf`/`NaN`; it is not a fault. Integer
+  division by zero remains `fault(DivideByZero)`.
+- Comparisons are IEEE: `NaN` is unequal to everything, including itself; `<`, `<=`, `>`
+  and `>=` are false when an operand is `NaN`; `<>` is true. There is no literal for `NaN`
+  or infinity; arithmetic produces them.
+- Literals contain a decimal point or an exponent: `1.0`, `2.5e10`, `1e-3`. Hexadecimal
+  float literals are not part of the first milestone.
+- Rounding is round-to-nearest-even with exceptions masked; the compiler emits no fused
+  multiply-add and never uses x87 extended precision. The bits a computation produces are
+  therefore the same on any x86_64 core.
+- Text conversion is fixed-point in the first milestone:
+  `core.format_f64_into(dst, value, frac_digits)` and `stdlib.parse_f64_into(text, var
+  value)`, which parses decimal text and returns `Status`. Shortest round-trip formatting
+  and full IEEE text parsing are deferred.
+- Transcendental and other math helpers (`sqrt`, `sin`, ...) live in `stdlib` and are
+  written in the language; a helper moves to `core` only when measurement justifies it.
+- `f64` may appear in records, sum types, arrays, rings and map values. It is not a map
+  key.
 
 ### Fixed-capacity buffers
 
@@ -148,7 +190,10 @@ Rules:
   restricted to `int`, `bytes[N]` or `string[N]`.
 - **Stream endpoints:** `in_stream[N]` (receive only) and `out_stream[N]` (send only),
   N bytes of queue capacity. Distinct nominal types, so a receive endpoint cannot be sent
-  to.
+  to. The declaration's variable name is the stream name: at most 31 bytes matching
+  `[a-z][a-z0-9_]*`, case-sensitive, and unique across the whole application. `N` is a
+  compile-time constant in `1..=65536`; the loader refuses an application whose declared
+  streams the kernel buffer pool cannot cover.
 - **Task ids:** `TaskId` (an `int`), global, monotonically increasing, never reused;
   zero is invalid. The application stores the id in its own `state` only if it wants to
   `wait` or `kill` the child later; there is no per-task handle table.
@@ -237,6 +282,13 @@ point where the value is created, instead of at every call site.
 All three are value types with deterministic layout. Iteration order of `map` is not
 specified and must not be relied on.
 
+`map` hashes with FNV-1a (64-bit) over the key's bytes: the eight little-endian bytes of
+an `int`, or the bytes of a `bytes[N]`/`string[N]` key up to its runtime length. The table
+size is the next power of two that is at least twice N, probing is linear, and deletion is
+backward-shift. There is no random seed, so the hash is deterministic per build. A
+deliberately bad key set can degrade lookup to O(N); the system is single-user, N is
+small, and no adversary is assumed.
+
 ## Errors
 
 Fatal conditions are faults and follow the `fault`/`exit` model (ADR 0010). Non-fatal
@@ -272,8 +324,8 @@ if st <> Ok then
   `stdlib.*` (written in the language), `syslib.*` (hardware). The namespace tells the
   reader where the code and the cost come from.
 - **M4 (MUST):** Import cycles are a compile error.
-- **M5 (SHOULD):** Top-level declarations are visible to importers; private helpers are
-  not part of the first milestone (open question 2).
+- **M5 (MUST):** Every top-level declaration is visible to importers. The language has no
+  `private`, `protected` or `public` modifier; visibility is not part of the type system.
 
 ### Entry point
 
@@ -307,7 +359,8 @@ if st <> Ok then
   returns immediately; `core.wait(id, var reason)` blocks if the task is live and returns
   its exit reason; `core.kill(id)` requests termination and does not wait. The request is
   handled by the kernel REPL service (ADR 0017). `diag` is filled on a compile error and
-  cleared otherwise.
+  cleared otherwise. `path` is at most 256 bytes and is interpreted relative to the image
+  root (`0005-host-interface.md`).
 - **C8 (MUST):** A spawned child is a separate application instance with its own regions.
   It shares no memory with the parent; communication is through streams.
 - **C9 (MUST):** The argument passed to `run`/`spawn` is a fixed `string[1024]`, delivered
@@ -341,7 +394,8 @@ procedure syslib.mmio_write32(region: MmioRegion; offset: uint; value: uint);
 ## Constants and manifests
 
 `const` declarations are compile-time expressions over literals, other constants, and the
-four arithmetic operators. They may size types, arrays and manifests. There are no macros,
+arithmetic and comparison operators. They may size types, arrays and manifests. There are
+no macros,
 no comptime code generation, and no reflection.
 
 ```text
@@ -407,6 +461,10 @@ The same record carries compile diagnostics. `core.run` and `core.spawn` take a
 column and message; on any other status it is cleared. The compiler writes into the
 caller's buffer, so there is no global error slot and no diagnostic stream.
 
+There is no stack trace in the first milestone. Frames carry no debug metadata, and a trace
+would need an unwind table in the manifest; `Diagnostic` plus the serial log is the
+observability budget.
+
 **Fault codes.** `fault` receives one of:
 
 | Code | Meaning |
@@ -414,7 +472,7 @@ caller's buffer, so there is no global error slot and no diagnostic stream.
 | `GenericFault` | Unclassified interpreter fault |
 | `OutOfBounds` | Access outside an owned region |
 | `CapacityExceeded` | Buffer or collection operation would exceed capacity |
-| `Overflow` | Arithmetic overflow |
+| `Overflow` | Integer arithmetic overflow, or a float value that does not fit an integer conversion |
 | `DivideByZero` | Integer division by zero |
 | `StackOverflow` | Guard-page fault |
 | `BudgetExceeded` | Watchdog termination (recovery rejected) |
@@ -431,10 +489,11 @@ caller's buffer, so there is no global error slot and no diagnostic stream.
 `core` (native, Rust) provides the primitives that must be fast or that touch the host
 interface: console read/write, `yield`, stream send/receive/try, monotonic clock,
 `sleep_until`, realtime promotion and `heartbeat`, `run`/`spawn`/`wait`/`kill`, byte and
-string copy/compare/find, integer math, formatting primitives, and the checked
-conversions. `stdlib` (written in the language) provides arrays, rings, maps, UTF-8
-helpers, parsing, formatting, and typed stream views. `syslib` (native, Rust) provides
-ports, MMIO handles and future block/DMA access.
+string copy/compare/find, integer and `f64` math, formatting primitives (integer and
+fixed-point float), and the checked conversions. `stdlib` (written in the language)
+provides arrays, rings, maps, UTF-8 helpers, parsing (including decimal `f64`), formatting,
+and typed stream views. `syslib` (native, Rust) provides ports, MMIO handles and future
+block/DMA access.
 
 A function moves from `stdlib` to `core` only when measurement justifies it; the namespace
 is the signal.
@@ -447,8 +506,15 @@ is the signal.
 | `string`/`bytes` write past capacity | `fault(CapacityExceeded)`; no truncation, no growth |
 | `ring` push on full, `map` put on full | `Status.Full` (non-fatal) or explicit failure, never growth |
 | Invalid UTF-8 conversion | `Status.Invalid`; no invalid `string` can be constructed |
-| Arithmetic overflow | `fault(Overflow)` |
+| Integer arithmetic overflow | `fault(Overflow)` |
 | Integer division by zero | `fault(DivideByZero)` |
+| Float division by zero | `Inf`/`NaN` per IEEE-754; not a fault |
+| `int(f)`, `uint(f)` or `byte(f)` with `NaN` or out of range | `fault(Overflow)` |
+| `f64` used as a map key | Compile error |
+| Shift count outside `0..63` | `fault(IllegalOperation)` |
+| Duplicate or malformed stream name | Compile error |
+| Stream capacity outside `1..=65536` | Compile error |
+| Path longer than 256 bytes | `Status.CapacityExceeded` |
 | Recursion past the declared stack | Guard-page fault; `fault(StackOverflow)` |
 | Send on a receive endpoint | Compile error (distinct types) |
 | Send on a closed endpoint | `Status.Closed` |
@@ -467,13 +533,13 @@ is the signal.
 
 | # | Question | Why it matters |
 |---|----------|----------------|
-| 1 | Floating point: `f32`/`f64` in the first milestone, or integer-only? | Layout and interpreter arithmetic; integer-only is smaller, but the personal-system goal implies real math eventually. |
-| 2 | Unit visibility: are all top-level declarations public, or is a `private` section needed? | API hygiene versus compiler simplicity. |
-| 3 | Explicit type conversion syntax and narrowing rules (`int(x)`, checked casts, or `core.to_*` functions). | Error messages and the shape of numeric code. |
-| 4 | Map hash and probe details; iteration order is unspecified, but the hash must be deterministic per build. | Reproducibility and `stdlib` portability. |
-| 5 | Whether `fault` may inspect more than the `Diagnostic` record (for example a small stack trace). | Observability versus ABI size. |
-| 6 | Exact precedence table and whether `and`/`or` accept integer operands. | Parser and readability. |
-| 7 | Bytecode format and the compiler/runtime split; not part of the language, but it constrains diagnostics and safe points. | Implementation plan. |
+| 1 | ~~Floating point: `f32`/`f64` in the first milestone, or integer-only?~~ | **Resolved** — `f64` only, IEEE-754, with a per-task FXSAVE region (ADR 0018); `f32` deferred. |
+| 2 | ~~Unit visibility: are all top-level declarations public, or is a `private` section needed?~~ | **Resolved** — every top-level declaration is public; the language has no visibility modifiers (M5). |
+| 3 | ~~Explicit type conversion syntax and narrowing rules~~ | **Resolved** — `T(x)` casts for numeric conversions, checked; `string`/`bytes` conversion is a `Status`-returning `stdlib` function. |
+| 4 | ~~Map hash and probe details~~ | **Resolved** — FNV-1a 64, power-of-two table of at least 2N, linear probing, backward-shift deletion. |
+| 5 | ~~Whether `fault` may inspect more than the `Diagnostic` record~~ | **Resolved** — no; `Diagnostic` only, no stack trace in the first milestone. |
+| 6 | ~~Exact precedence table and whether `and`/`or` accept integer operands~~ | **Resolved** — comparisons bind tighter than `and`/`or`; both are boolean-only; bitwise operations are `core.bit_*` functions. |
+| 7 | ~~Bytecode format and the compiler/runtime split~~ | **Moved** — specified in `0008-bytecode.md` (to be written). |
 
 ## Changelog
 
@@ -487,3 +553,4 @@ is the signal.
 | 2026-11-12 | Replaced task handles with global `TaskId`s; `spawn` returns an id, `wait`/`kill` take one; no per-task handle table (ADR 0017 addendum 2). |
 | 2026-11-13 | `Diagnostic` gained a `message: string[96]` field and is caller-owned; `core.run`/`core.spawn` take a `var diag` out-parameter filled on compile errors (spec 0005, whose OQ 7 is now closed). |
 | 2026-11-13 | Stream endpoint names are application-wide unique (spec 0006, S11); `stdlib` framing defaults to a length prefix with newline-delimited helpers for text. |
+| 2026-11-13 | Floating point added to the first milestone: `f64` only, IEEE-754, per-task 512-byte FXSAVE region (ADR 0018); explicit `T(x)` casts, IEEE float semantics; every top-level declaration is public with no visibility modifiers; FNV-1a maps with linear probing; comparisons bind tighter than `and`/`or` and bitwise operations are `core` functions; `Diagnostic` only, no stack trace; stream names are `string[32]` and capacities are `1..=65536`; `run`/`spawn` paths are limited to 256 bytes. |

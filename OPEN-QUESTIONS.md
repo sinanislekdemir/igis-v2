@@ -5,7 +5,7 @@ Parked decisions for igis-v2. This is the working register; each spec's own
 resolved, record the answer in the relevant spec or in a new ADR, then remove it here.
 
 **Status:** specification phase, no code. Last updated: 2026-11-13.
-**Snapshot:** specs 0001–0007, ADRs 0001–0017.
+**Snapshot:** specs 0001–0007, ADRs 0001–0018.
 
 ## How to use
 
@@ -41,15 +41,8 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 
 | # | Question | Options / recommendation | Trigger |
 |---|----------|--------------------------|---------|
-| Q15 | Floating point | `f32`/`f64` in M1, or integer-only? | language implementation |
-| Q16 | Unit visibility | all top-level declarations public, or a `private` section | language implementation |
-| Q17 | Explicit conversions | `int(x)`, checked casts, or `core.to_*` | compiler |
-| Q18 | Map hash and probe details | deterministic per build; iteration order unspecified | `stdlib` |
-| Q19 | Diagnostics beyond `Diagnostic` | stack trace? source snippet? | language/runtime |
-| Q20 | Operator precedence; integer `and`/`or` | parser and readability | compiler |
-| Q21 | Bytecode format and compiler/runtime split | implementation plan; not part of the language | before the interpreter |
-| Q22 | Path capacity for `run`/`spawn` | `string[256]`? fixed capacity in the manifest? | host interface |
-| Q23 | Stream endpoint and name lengths | manifest and compiler constants | loader |
+| Q40 | `f32` support | not in M1; additive later, but it needs its own opcode and conversion rules | when single precision is needed |
+| Q41 | Float text beyond fixed decimal | shortest round-trip formatting and full decimal parsing are deferred | when float output must round-trip losslessly |
 
 ## E. Boot and platform
 
@@ -99,7 +92,29 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
   newline-delimited helpers for text. Explicit close is deferred to streams v2, with the
   constraint that closed state is independent of the owner's lifetime and that `close`
   drains before `Closed` (spec 0006, S11).
-- Q5, Q6, Q7, Q11, Q12 and Q13 are resolved and removed from the table.
+- **Floating point is in the first milestone.** One type, `f64` (IEEE-754 binary64), with
+  a kernel-owned 512-byte `fpu` region per task; `FXSAVE` on release, `FXRSTOR` on claim,
+  no lazy FPU, no x87, no FMA. Explicit `T(x)` casts only; float division by zero is
+  `Inf`/`NaN`; `int(f)` faults `Overflow` on `NaN` or out-of-range. Text conversion is
+  fixed-decimal in M1 (ADR 0018, specs 0002–0004, 0007).
+- **The language has no visibility modifiers.** Every top-level declaration is public;
+  there is no `private`, `protected` or `public` (Q16, spec 0003 M5).
+- **Conversions are `T(x)` casts.** Widening to `f64` is IEEE conversion; narrowing
+  truncates and faults `Overflow` when it does not fit. `string`/`bytes` conversion stays a
+  checked `stdlib` function returning `Status` (Q17).
+- **Maps are FNV-1a with linear probing.** Power-of-two table of at least `2N`,
+  backward-shift deletion, deterministic per build, iteration order unspecified (Q18).
+- **Observability stops at `Diagnostic`.** No stack trace in M1; frames carry no debug
+  metadata (Q19).
+- **Comparisons bind tighter than `and`/`or`.** Both are boolean-only and short-circuit;
+  bitwise operations are `core.bit_*`/`core.shl`/`core.shr`, and a shift count outside
+  `0..63` faults `IllegalOperation` (Q20).
+- **Bytecode format moved to its own spec.** `0008-bytecode.md` will cover encoding,
+  constant pool, frames, the compiler/runtime split and ABI versioning (Q21).
+- **Request limits.** A `run`/`spawn` path is at most 256 bytes and relative to the image
+  root (Q22); a stream name is `string[32]` matching `[a-z][a-z0-9_]*`, and a stream
+  capacity is `1..=65536` bytes (Q23, spec 0006 S12).
+- Q5, Q6, Q7, Q11–Q13 and Q15–Q23 are resolved and removed from the table.
 
 ## Decided in the 2026-11-12 session
 

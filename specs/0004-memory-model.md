@@ -5,8 +5,8 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0004 (static application memory), 0006 (MMU hardening), 0007 (fully static
-  placement), 0011 (work stealing), 0015 (delivery)
-- **Updated:** 2026-11-12
+  placement), 0011 (work stealing), 0015 (delivery), 0018 (floating point)
+- **Updated:** 2026-11-13
 
 ## Context
 
@@ -45,7 +45,8 @@ From ADR 0011:
 - **C8:** Regions belong to the task, not to a core. Any core may access them while it
   owns the task; nothing is per-core except scratch.
 - **C9:** At every release point the task's execution state is in its regions; no
-  application state lives in a core's registers.
+  application state lives in a core's registers. SSE state is saved into the task's `fpu`
+  region (ADR 0018).
 
 From ADR 0015:
 
@@ -78,6 +79,7 @@ A task owns a small, fixed set of regions rather than one undifferentiated arena
 | `state` | read-write, NX | task | all top-level variables at static offsets |
 | `stack` | read-write, NX | task | native stack for interpreter frames and locals |
 | guard page | not present | task | one page below the stack's growing end |
+| `fpu` | kernel-only | task | 512-byte FXSAVE image of the task's SSE state; the application never names it |
 | stream buffers | kernel-only | endpoint | byte FIFO storage; the app sees only endpoint handles |
 | `syslib` regions | kernel-only | mapping or buffer | MMIO windows and DMA buffers, accessed through typed handles |
 
@@ -283,6 +285,8 @@ milestone. Raw physical addresses never reach application-visible values.
   owns the task.
 - A region is never mapped or unmapped per core; the address space is shared.
 - Stream buffers and `syslib` regions are outside the application's nameable regions.
+- The `fpu` region holds the task's SSE state between claims; it is kernel-owned and never
+  appears in the application's handle table.
 
 ## Failure modes
 
@@ -319,6 +323,7 @@ milestone. Raw physical addresses never reach application-visible values.
 | D14 | May a reference outlive the expression | **Resolved** — no; references are call-scoped parameters only. |
 | D15 | Exact per-type alignment rules | Compiler detail; documented with the layout algorithm. |
 | D16 | Whether `code` sharing ever returns | Future optimisation; requires a read-only shared region and a lifetime rule. |
+| D17 | Where the floating-point context lives | **Resolved** — a kernel-owned 512-byte FXSAVE region per task, saved on release and restored on claim (ADR 0018). |
 
 ## Changelog
 
@@ -328,3 +333,4 @@ milestone. Raw physical addresses never reach application-visible values.
 | 2026-11-03 | Option A selected (ADR 0007); added static-model rules, worked examples, and accepted costs. |
 | 2026-11-03 | Destination-form construction specified: `dst := a + b` compiles to `concat_into`, with static capacity proof and no temporaries. |
 | 2026-11-12 | Resolved D2-D14: no first-class slices, one `state` region, per-instance code, frames for large locals, compiler-computed alignment, `syslib`-owned MMIO/DMA, build-parameter capacities, `bytes`/`string` split, at-least-N parameters. Added task-level ownership for work stealing (ADR 0011) and ext2 delivery (ADR 0015). |
+| 2026-11-13 | Added the `fpu` region: a kernel-owned 512-byte FXSAVE image per task, outside the application's nameable regions; C9 now includes SSE state (ADR 0018, D17). |
