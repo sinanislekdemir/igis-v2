@@ -28,7 +28,8 @@ runtime embedded in the kernel.
 | 1 | `mm` | Rust | Frame allocator, application regions, kernel heap, stream buffers, guard pages |
 | 1 | `sched` | Rust | Per-core interpreter loops, global runnable set, claim/release, quantum, budgets, termination |
 | 1 | `vfs` / `fs` | Rust | Loader providers: read-only ext2 over `BlockDevice` first; writable filesystems later |
-| 1 | `interpreter` | Rust | Parse/compile, bytecode execution, safe points, builtin dispatch |
+| 1 | `compiler` | Rust | Lex, parse, type and capacity check, bytecode and manifest emission |
+| 1 | `interpreter` | Rust | Bytecode execution, safe points, builtin dispatch, diagnostics |
 | 1 | `repl` | Rust | Compile-and-run service: request queue, loader, task creation |
 | 1 | `core` | Rust | Native primitives: text and bytes, math, formatting core, console binding, stream binding, clock |
 | 1 | `stdlib` | The application language | Collections, parsing, formatting, UTF-8 helpers, typed stream views |
@@ -473,3 +474,4 @@ task; after that, shutdown.
 | 2026-11-12 | REPL service details: `shell` then `entrypoint` boot fallback, `no entry` halt, fixed `string[1024]` arguments, queue capacity 1024, independent children (ADR 0017 addendum). |
 | 2026-11-13 | Floating point is part of the first milestone: `f64` with a kernel-owned per-task `fpu` region, saved on release and restored on claim (ADR 0018). |
 | 2026-11-13 | Loader and boot fixed: read-only ext2 subset (1/4 KiB blocks, double indirect, regular root files, validated metadata); request paths validated as relative with no `..`; the multiboot2 framebuffer tag is mandatory; APs come up through a sub-1 MiB trampoline. |
+| 2026-11-13 | The interpreter layer is split into a `compiler` and an `interpreter` crate over a shared `abi` (spec 0008). |

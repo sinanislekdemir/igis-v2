@@ -5,7 +5,7 @@ Parked decisions for igis-v2. This is the working register; each spec's own
 resolved, record the answer in the relevant spec or in a new ADR, then remove it here.
 
 **Status:** specification phase, no code. Last updated: 2026-11-13.
-**Snapshot:** specs 0001–0007, ADRs 0001–0018.
+**Snapshot:** specs 0001–0008, ADRs 0001–0018.
 
 ## How to use
 
@@ -84,8 +84,8 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 - **Comparisons bind tighter than `and`/`or`.** Both are boolean-only and short-circuit;
   bitwise operations are `core.bit_*`/`core.shl`/`core.shr`, and a shift count outside
   `0..63` faults `IllegalOperation` (Q20).
-- **Bytecode format moved to its own spec.** `0008-bytecode.md` will cover encoding,
-  constant pool, frames, the compiler/runtime split and ABI versioning (Q21).
+- **Bytecode format moved to its own spec.** `0008-bytecode.md` covers encoding, constant
+  pool, frames, semantic splits, verification and ABI versioning (Q21).
 - **Request limits.** A `run`/`spawn` path is at most 256 bytes and relative to the image
   root (Q22); a stream name is `string[32]` matching `[a-z][a-z0-9_]*`, and a stream
   capacity is `1..=65536` bytes (Q23, spec 0006 S12).
@@ -131,8 +131,8 @@ These are no longer open; they were recorded in specs and ADRs:
 ## Suggested next step
 
 1. Review and mark specs 0001 and 0002 **Accepted** (they are the governing documents).
-2. Write `specs/0008-bytecode.md`: instruction encoding, constant pool, frame layout,
-   calling convention, compiler/runtime split and ABI versioning (Q21).
+2. Review `specs/0008-bytecode.md` (drafted): instruction encoding, constant pool, frame
+   layout, calling convention, compiler/runtime split and ABI versioning (Q21).
 3. Create the workspace and the first bootable skeleton: linker script, multiboot2
    header, 32-bit stub, long-mode transition, 64-bit entry, serial + framebuffer console.
 4. Pick the tuning constants (Q1–Q4) when the scheduler first runs.

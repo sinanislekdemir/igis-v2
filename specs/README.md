@@ -14,6 +14,7 @@ revised as understanding improves, and their history lives in git.
 | 0005 | [Host interface](0005-host-interface.md) | Draft | core, syslib, interpreter, runtime | 2026-11-13 |
 | 0006 | [Streams and inter-application IPC](0006-streams.md) | Draft | mm, sched, core/stdlib, loader | 2026-11-13 |
 | 0007 | [Scheduler](0007-scheduler.md) | Draft | sched, arch timer/IPI, interpreter | 2026-11-13 |
+| 0008 | [Bytecode format and the compiler/runtime split](0008-bytecode.md) | Draft | abi, compiler, interpreter, repl | 2026-11-13 |
 
 ## Lifecycle
 

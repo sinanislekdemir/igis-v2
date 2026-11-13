@@ -58,7 +58,8 @@ into the core:
 arch/<isa>/         # ISA-specific: boot, long mode, paging, stack switch, IDT, APIC, ...
 platform/<machine>/ # machine-specific: memory map, device layout, boot protocol
 kernel/             # arch-agnostic core
-interpreter/        # parse/compile, bytecode execution, safe points
+compiler/           # lex, parse, type/capacity check, bytecode and manifest emission
+interpreter/        # bytecode execution, safe points, builtin dispatch
 core/               # native primitives (Rust): console, streams, time, text
 stdlib/             # standard library written in the application language
 syslib/             # privileged hardware primitives (ports, MMIO, DMA)
@@ -127,6 +128,7 @@ commands here (`cargo xtask build`, `cargo xtask run`, `cargo xtask test`).
 | Boot: INIT-SIPI-SIPI through a sub-1 MiB trampoline, `MAX_CORES` static state; framebuffer tag mandatory; one IPI vector | specs 0002, 0007 |
 | ext2 subset: 1/4 KiB blocks, double indirect, regular root files, metadata validated; unsupported images refuse the mount | specs 0002, 0007 |
 | `ExitReason.Killed`; dispatcher before every claim; admission counts cores online at call time; relative paths without `..` | specs 0003, 0005, 0007 |
+| Bytecode: one package per application, 4-byte-word stack VM, split `compiler`/`interpreter` crates over `abi`, structural verification | spec 0008 (Draft) |
 
 ## Open questions
 
@@ -159,3 +161,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-13 | Streams settled: unique application-wide names, one sender and one receiver, `stdlib` framing helpers; explicit close deferred to v2; Q11–Q13 closed (spec 0006). |
 | 2026-11-13 | Floating point added to the first milestone: `f64` with a per-task FXSAVE region (ADR 0018). Language settled: no visibility modifiers, `T(x)` casts, FNV-1a maps, `core.bit_*`, `Diagnostic` only; Q15–Q23 closed (specs 0002–0004, 0006, 0007). |
 | 2026-11-13 | Boot, loader and REPL settled: sub-1 MiB trampoline, mandatory framebuffer tag, one IPI vector, ext2 subset, dispatcher timing, `ExitReason.Killed`, path validation; Q24–Q38 closed (specs 0002, 0003, 0005, 0007). |
+| 2026-11-13 | Spec 0008 drafted: one bytecode package per application, fixed 4-byte-word stack VM, `compiler`/`interpreter` split over `abi`, structural verification at load. |
