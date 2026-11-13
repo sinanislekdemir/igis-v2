@@ -43,3 +43,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0016 | [Realtime tasks run without quantum preemption under a heartbeat contract](0016-realtime-heartbeat.md) | Accepted | 2026-11-12 |
 | 0017 | [The REPL is a kernel service; applications request runs through a spawn queue](0017-repl-spawn-service.md) | Accepted | 2026-11-12 |
 | 0018 | [Floating point is in the first milestone: one `f64` type and a per-task FPU region](0018-floating-point.md) | Accepted | 2026-11-13 |
+| 0019 | [Applications are always compiled from source at load; no precompiled packages, ever](0019-source-only-delivery.md) | Accepted | 2026-11-13 |

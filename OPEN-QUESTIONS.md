@@ -5,7 +5,7 @@ Parked decisions for igis-v2. This is the working register; each spec's own
 resolved, record the answer in the relevant spec or in a new ADR, then remove it here.
 
 **Status:** specification phase, no code. Last updated: 2026-11-13.
-**Snapshot:** specs 0001–0008, ADRs 0001–0018.
+**Snapshot:** specs 0001–0008, ADRs 0001–0019.
 
 ## How to use
 
@@ -86,6 +86,9 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
   `0..63` faults `IllegalOperation` (Q20).
 - **Bytecode format moved to its own spec.** `0008-bytecode.md` covers encoding, constant
   pool, frames, semantic splits, verification and ABI versioning (Q21).
+- **Delivery is source-only, permanently.** The image never carries bytecode and a package
+  exists only in memory for one instance; compile latency is not a design constraint
+  (ADR 0019).
 - **Request limits.** A `run`/`spawn` path is at most 256 bytes and relative to the image
   root (Q22); a stream name is `string[32]` matching `[a-z][a-z0-9_]*`, and a stream
   capacity is `1..=65536` bytes (Q23, spec 0006 S12).

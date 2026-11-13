@@ -246,8 +246,10 @@ There are no zombies. A terminated task leaves nothing behind.
 
 - Before claiming a task — and whenever the runnable set is empty — the loop calls the
   kernel service dispatcher. It processes at most one pending compile-and-run request per
-  opportunity (`0002-architecture.md`, ADR 0017). This bounds the time a core spends
-  compiling. The dispatcher runs before every claim rather than only when the set is
+  opportunity (`0002-architecture.md`, ADR 0017). A compile is not interrupted: it takes as
+  long as it takes, and the core is unavailable meanwhile — accepted in ADR 0019. The rule
+  exists so requests are serviced in order and a core returns to the scheduler between
+  compiles. The dispatcher runs before every claim rather than only when the set is
   empty: if it ran only on idle, a machine with a permanently runnable task would never
   service a queued request. Only one core compiles at a time — a core claims a request by
   taking the service lock, and other cores skip the opportunity.
@@ -395,4 +397,4 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 2026-11-12 | Task creation carries the fixed `string[1024]` argument, delivered as `main(args)`; queue capacity 1024; orphan children continue (ADR 0017 addendum). |
 | 2026-11-13 | Time fixed as one global nanosecond counter advanced by the boot core's 1 kHz APIC timer tick; no TSC, because per-vCPU TSC drift would corrupt budget and heartbeat accounting; 1 ms resolution is accepted. |
 | 2026-11-13 | Claim and release save and restore SSE state with `FXSAVE`/`FXRSTOR` into a per-task `fpu` region; Sch5 now names the FPU context explicitly (ADR 0018). |
-| 2026-11-13 | Boot and service details fixed: INIT-SIPI-SIPI through a sub-1 MiB trampoline with `MAX_CORES` static per-core state; one IPI vector (0x40); the dispatcher runs before every claim; realtime admission counts the cores online at call time; `kill` cancels a queued request and records `Killed`; request paths are validated (relative, no `..`, regular files only). |
+| 2026-11-13 | Boot and service details fixed: INIT-SIPI-SIPI through a sub-1 MiB trampoline with `MAX_CORES` static per-core state; one IPI vector (0x40); the dispatcher runs before every claim and a compile is not interrupted (ADR 0019); realtime admission counts the cores online at call time; `kill` cancels a queued request and records `Killed`; request paths are validated (relative, no `..`, regular files only). |

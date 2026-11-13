@@ -5,6 +5,10 @@
 - **Deciders:** project owner
 - **Related specs:** 0001 (vision), 0002 (architecture), 0003 (language)
 
+> **Note (2026-11-13).** The follow-up listed under "Neutral" — disk bytecode caching —
+> is now closed: never. Applications are always compiled from source at load, and no
+> compiled artifact is ever shipped or cached (ADR 0019).
+
 ## Context
 
 ADR 0002 established that applications are delivered as source text and evaluated by a

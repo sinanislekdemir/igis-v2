@@ -6,7 +6,8 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0002 (interpreted applications), 0005 (internal bytecode, no JIT), 0007 (fully
-  static placement), 0011 (work stealing), 0018 (floating point)
+  static placement), 0011 (work stealing), 0018 (floating point), 0019 (source-only
+  delivery)
 - **Updated:** 2026-11-13
 
 ## Context
@@ -29,9 +30,14 @@ This spec fixes the artifact the compiler produces and the interpreter consumes.
 not specify the source language (spec 0003) or the loader's filesystem (spec 0002); it
 specifies the boundary between them.
 
+Delivery is source-only and permanent (ADR 0019): the image never carries bytecode, and a
+package exists only in memory for the lifetime of one instance. Compile latency is
+explicitly not a design constraint; the compiler may be as slow as correctness requires.
+
 Non-goals: source compatibility guarantees, an assembler, a linker between separately
-compiled units, debugger integration, and optimising compilation. The first milestone
-compiles whole applications, once, into one artifact.
+compiled units, debugger integration, optimising compilation, and any form of precompiled
+or cached delivery. The first milestone compiles whole applications, once per instance,
+into one package.
 
 ## Requirements
 
@@ -59,6 +65,9 @@ compiles whole applications, once, into one artifact.
   scratch limit is a `Status` error, not an allocation.
 - **B12 (MUST):** The compiler and the interpreter are separate crates over a shared `abi`
   crate; neither depends on the other's internals.
+- **B13 (MUST):** Compilation always happens at load, in the kernel, from source. A package
+  is an in-memory value with the lifetime of one instance; it is never persisted, cached
+  across boots, or delivered through the image (ADR 0019).
 
 ## Design
 
@@ -78,9 +87,10 @@ package
     └── line table  (code offset → unit, line, column)
 ```
 
-In the first milestone the package is produced in memory from source read out of ext2. The
-format is the same if a future image builder stores precompiled packages; the interpreter
-cannot tell the difference. A package is never modified after load (B2).
+In the first milestone the package is produced in memory from source read out of ext2, and
+that is the only way a package ever comes into existence. It has the lifetime of one task:
+no part of it is written back, cached for a later start, or stored in the image (ADR 0019).
+A second start of the same application compiles its source again.
 
 ### Target profile
 
@@ -174,7 +184,8 @@ Compile memory is caller-provided: source buffer, token/parse arenas, code buffe
 constant buffer, each with a compile-time cap. One package is compiled at a time because
 the service holds the compiler lock (spec 0007), so one set of buffers is enough. The
 first-milestone caps (provisional, tuning): 64 KiB of source per unit, 256 KiB per
-application, 1 MiB of scratch.
+application, 1 MiB of scratch. They bound memory because memory is statically placed; they
+are not a time budget, and compile time is not a design constraint (ADR 0019).
 
 ### Verification and diagnostics
 
@@ -191,8 +202,9 @@ application, 1 MiB of scratch.
 
 Opcode numbering, constant layout, hashing and float rounding are fixed by the ABI version.
 No address, timestamp or random seed enters the artifact, so two builds of the same source
-with the same parameters are byte-identical (B9). This is what makes the package
-reproducible and the language track testable on the host.
+with the same parameters are byte-identical (B9). Nothing is shipped, so this is not a
+distribution guarantee; it is what makes the language track testable on the host and a
+compiler change reviewable.
 
 ## Interfaces
 
@@ -268,7 +280,7 @@ pub fn run(task: &mut Task);
 | 3 | Verifier depth: structural only, or limited control-flow and stack-depth checks | First malformed-package test; structural is the floor. |
 | 4 | Line-table encoding and compaction | When packages grow past the first few units. |
 | 5 | Compile caps (source, scratch) and whether they are per-build parameters | First real applications and the host toolchain. |
-| 6 | Whether precompiled packages may ship in the ext2 image | Tooling, after the in-kernel compiler works. |
+| 6 | ~~Whether precompiled packages may ship in the ext2 image~~ | **Resolved** — never. The image carries source only; packages exist in memory for one instance (ADR 0019). |
 | 7 | Constant-pool sharing between functions and units | Optimisation, not correctness. |
 
 ## Changelog
@@ -276,3 +288,4 @@ pub fn run(task: &mut Task);
 | Date | Change |
 |------|--------|
 | 2026-11-13 | Initial draft: one package per application, fixed 4-byte-word encoding, stack frames with inline locals, bounds-checked instructions, structural verification, compiler/interpreter crates over `abi`, line-table diagnostics, deterministic artifacts. |
+| 2026-11-13 | Delivery fixed as source-only, permanently: the image never carries bytecode and a package lives only as long as its instance (ADR 0019). |

@@ -18,7 +18,8 @@ constraints learned there.
   architectures can be added without touching the kernel core (ADR 0013).
 - **Central thesis:** the kernel is a programmable system — a language runtime plus
   standard library owning the machine. Applications are source code, not native
-  binaries. Everything runs at ring 0 in one address space.
+  binaries, compiled in the kernel at load and never precompiled (ADR 0019). Everything
+  runs at ring 0 in one address space.
 - **Execution model:** one interpreter loop per core; tasks are claimed from a global
   runnable set and are never pinned to a core (ADR 0011).
 - **Long-term goal:** a general personal system. The first milestone proves the thesis
@@ -129,6 +130,7 @@ commands here (`cargo xtask build`, `cargo xtask run`, `cargo xtask test`).
 | ext2 subset: 1/4 KiB blocks, double indirect, regular root files, metadata validated; unsupported images refuse the mount | specs 0002, 0007 |
 | `ExitReason.Killed`; dispatcher before every claim; admission counts cores online at call time; relative paths without `..` | specs 0003, 0005, 0007 |
 | Bytecode: one package per application, 4-byte-word stack VM, split `compiler`/`interpreter` crates over `abi`, structural verification | spec 0008 (Draft) |
+| Delivery is source-only, permanently: the image never carries bytecode and packages live only in memory | ADR 0019 (Accepted) |
 
 ## Open questions
 
@@ -162,3 +164,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-13 | Floating point added to the first milestone: `f64` with a per-task FXSAVE region (ADR 0018). Language settled: no visibility modifiers, `T(x)` casts, FNV-1a maps, `core.bit_*`, `Diagnostic` only; Q15–Q23 closed (specs 0002–0004, 0006, 0007). |
 | 2026-11-13 | Boot, loader and REPL settled: sub-1 MiB trampoline, mandatory framebuffer tag, one IPI vector, ext2 subset, dispatcher timing, `ExitReason.Killed`, path validation; Q24–Q38 closed (specs 0002, 0003, 0005, 0007). |
 | 2026-11-13 | Spec 0008 drafted: one bytecode package per application, fixed 4-byte-word stack VM, `compiler`/`interpreter` split over `abi`, structural verification at load. |
+| 2026-11-13 | Source-only delivery made permanent: no precompiled packages ever, compile latency is not a constraint (ADR 0019; specs 0002, 0008). |

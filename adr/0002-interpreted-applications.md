@@ -9,6 +9,10 @@
 > collector — predates ADR 0004 and ADR 0007. The application memory model is static and
 > has no collector. The decision in this ADR is unaffected; only that estimate was wrong.
 
+> **Note (2026-11-13).** The evaluation strategy left open below is now settled: internal
+> bytecode (ADR 0005), and source-only delivery with no precompiled packages ever
+> (ADR 0019).
+
 ## Context
 
 If applications were native binaries, the system would need a loader, an executable
