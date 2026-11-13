@@ -3,14 +3,41 @@
 version = 4
 
 [[package]]
+name = "abi"
+version = "0.0.0"
+
+[[package]]
 name = "arch_x86_64"
 version = "0.0.0"
+
+[[package]]
+name = "compiler"
+version = "0.0.0"
+dependencies = [
+ "abi",
+]
+
+[[package]]
+name = "interpreter"
+version = "0.0.0"
+dependencies = [
+ "abi",
+]
 
 [[package]]
 name = "kernel"
 version = "0.0.0"
 dependencies = [
  "arch_x86_64",
+]
+
+[[package]]
+name = "langhost"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "compiler",
+ "interpreter",
 ]
 
 [[package]]

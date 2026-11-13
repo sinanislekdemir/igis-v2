@@ -28,8 +28,9 @@ constraints learned there.
 - **Status:** implementation. Specs 0001–0008 are accepted. The kernel boots under
   GRUB/multiboot2 into long mode, prints through a framebuffer console mirrored to serial,
   has a GDT/TSS and an exception path with a double-fault IST, runs a 1 kHz APIC timer
-  driving a global nanosecond clock, and owns a bitmap frame allocator. The language
-  runtime is next.
+  driving a global nanosecond clock, and owns a bitmap frame allocator. A host-side
+  vertical slice of the language (`abi`, `compiler`, `interpreter`, `langhost`) compiles
+  and runs source end-to-end; wiring it into the kernel REPL is next.
 
 ## Ground rules
 
@@ -52,8 +53,13 @@ constraints learned there.
 ├── OPEN-QUESTIONS.md  # parked decisions and unresolved questions
 ├── adr/               # decision log (immutable once accepted)
 ├── specs/             # normative specifications (living)
-├── arch/x86_64/       # boot stub, page tables, long-mode transition, serial
-├── kernel/            # entry, multiboot2 walking, framebuffer, panic
+├── arch/x86_64/       # boot stub, page tables, long-mode transition, serial, APIC
+├── abi/               # opcodes, headers, Status/FaultCode, reference encoding
+├── compiler/          # lexer, parser, type check, codegen, manifest
+├── interpreter/       # package verifier, machine, Host trait
+├── langhost/          # host runner: compile, verify, run
+├── kernel/            # entry, multiboot2 walking, console, frame allocator, clock
+├── samples/lang/      # example programs
 ├── xtask/             # build, image and QEMU orchestration
 ├── Cargo.toml         # workspace
 ├── rust-toolchain.toml
@@ -61,7 +67,8 @@ constraints learned there.
 ```
 
 Planned top-level shape as code grows — architecture-specific code must not leak into
-the core. Only `arch/x86_64/`, `kernel/` and `xtask/` exist so far:
+the core. `arch/x86_64/`, `abi/`, `compiler/`, `interpreter/`, `kernel/`, `langhost/` and
+`xtask/` exist so far:
 
 ```
 arch/<isa>/         # ISA-specific: boot, long mode, paging, stack switch, IDT, APIC, ...
@@ -103,6 +110,8 @@ The kernel is cross-built for `x86_64-unknown-none`; `xtask` itself builds for t
 | `cargo xtask run` | image + QEMU with a display, serial on stdio |
 | `cargo xtask run --headless` | image + QEMU with no display (serial only) |
 | `cargo xtask clean` | remove build artifacts |
+| `cargo test -p abi -p compiler -p interpreter -p langhost` | host language tests (the kernel crates have no test harness) |
+| `cargo run -p langhost -- samples/lang/hello.ig` | compile and run one unit on the host |
 
 `.cargo/config.toml` pins the linker script, `code-model=kernel`, and the static
 relocation model for the bare-metal target. The workspace has no default target, so
@@ -192,3 +201,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-13 | Kernel diagnostics: 8x8 bitmap-font console on the framebuffer (mirrored to serial), IDT with 32 exception gates and a register dump (verified with a deliberate `int3`), multiboot2 memory-map parsing. |
 | 2026-11-13 | Frame allocator: 4 KiB bitmap over the first 4 GiB, initialised from the multiboot2 map and reserving low memory, the kernel image, the multiboot2 structure and the framebuffer; verified by allocating, writing, reading back and freeing two frames (254 MiB usable under `-m 256M`). |
 | 2026-11-13 | GDT/TSS with a double-fault IST (verified with a real non-canonical-stack fault), local APIC enabled with the legacy PIC masked, timer calibrated against the PIT (~62.5k ticks/ms in QEMU), and a 1 kHz tick advancing the global nanosecond clock (Q6, spec 0007). |
+| 2026-11-13 | Host language slice: `abi` (ABI v1 opcodes/headers), `compiler` (lexer → parser → type/capacity check → deterministic package), `interpreter` (structural verifier, allocation-free machine, `Host` trait), `langhost` runner; 50 tests, kernel untouched. Spec 0008 open questions 1 and 3 resolved. |

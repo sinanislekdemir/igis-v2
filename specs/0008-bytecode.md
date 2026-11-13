@@ -124,8 +124,15 @@ the offset against the region size.
 Each call pushes one frame on the task's stack region:
 
 ```
-frame = [ prev_fp: u64 ][ return_pc: u32 ][ function: u32 ][ locals... ][ operands... ]
+frame = [ prev_fp: u64 ][ return_pc: u32 ][ function: u32 ][ return_sp: u64 ]
+        [ dest_ref: u64 ][ locals... ][ operands... ]
 ```
+
+The header is 32 bytes, so locals start at offset 32. `return_sp` restores the
+caller's operand-stack top and `dest_ref` names the destination that receives a
+function result. Every scalar, including `bool` and `byte`, occupies one 8-byte
+local slot in the first implementation; the packed layouts of records and
+arrays are not part of this slice.
 
 - Locals are addressed by slot index, 8-byte aligned; buffers are inline in the locals
   area, so a large local is a large frame (spec 0004).
@@ -275,9 +282,9 @@ pub fn run(task: &mut Task);
 
 | # | Question | Trigger / owner |
 |---|----------|-----------------|
-| 1 | Exact opcode table and operand encodings | `abi` crate; fixed at ABI version 1 when the interpreter is implemented. |
+| 1 | ~~Exact opcode table and operand encodings~~ | **Resolved** — ABI v1 is `abi::opcodes`: 53 opcodes, one 4-byte opcode word plus up to two immediate words, `i32` jump offsets in instruction words, 8-byte operand slots. The interpreter implements it. |
 | 2 | Stack machine vs a small register machine | Performance measurement after the first loops run. |
-| 3 | Verifier depth: structural only, or limited control-flow and stack-depth checks | First malformed-package test; structural is the floor. |
+| 3 | ~~Verifier depth: structural only, or limited control-flow and stack-depth checks~~ | **Resolved for v1** — structural checks plus one instruction-boundary bit per word for jump targets; operand-stack depth is enforced at run time against the frame's operand area, not by dataflow analysis. |
 | 4 | Line-table encoding and compaction | When packages grow past the first few units. |
 | 5 | Compile caps (source, scratch) and whether they are per-build parameters | First real applications and the host toolchain. |
 | 6 | ~~Whether precompiled packages may ship in the ext2 image~~ | **Resolved** — never. The image carries source only; packages exist in memory for one instance (ADR 0019). |
@@ -289,3 +296,4 @@ pub fn run(task: &mut Task);
 |------|--------|
 | 2026-11-13 | Initial draft: one package per application, fixed 4-byte-word encoding, stack frames with inline locals, bounds-checked instructions, structural verification, compiler/interpreter crates over `abi`, line-table diagnostics, deterministic artifacts. |
 | 2026-11-13 | Delivery fixed as source-only, permanently: the image never carries bytecode and a package lives only as long as its instance (ADR 0019). |
+| 2026-11-13 | ABI v1 fixed and implemented on the host: opcode table in `abi::opcodes`, 32-byte frame header with `return_sp`/`dest_ref`, structural verifier with jump-boundary bits, `compiler`/`interpreter`/`langhost` crates. Open questions 1 and 3 resolved. |

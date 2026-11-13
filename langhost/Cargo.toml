@@ -1,0 +1,13 @@
+[package]
+name = "langhost"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+abi = { path = "../abi" }
+compiler = { path = "../compiler" }
+interpreter = { path = "../interpreter" }
+
+[[bin]]
+name = "langhost"
+path = "src/main.rs"

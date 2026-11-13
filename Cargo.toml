@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["arch/x86_64", "kernel", "xtask"]
+members = ["abi", "arch/x86_64", "compiler", "kernel", "langhost", "xtask"]
 
 [workspace.package]
 version = "0.0.0"
