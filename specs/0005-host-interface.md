@@ -1,6 +1,6 @@
 # 0005: Host interface
 
-- **Status:** Draft
+- **Status:** Accepted
 - **Scope:** `core`, `syslib`, interpreter, runtime, host-side language tooling
 - **Supersedes:** none
 - **Superseded by:** none

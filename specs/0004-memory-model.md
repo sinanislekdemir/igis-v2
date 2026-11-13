@@ -1,6 +1,6 @@
 # 0004: Application memory model
 
-- **Status:** Draft
+- **Status:** Accepted
 - **Scope:** `mm`, loader, interpreter, language memory semantics
 - **Supersedes:** none
 - **Superseded by:** none

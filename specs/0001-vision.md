@@ -1,6 +1,6 @@
 # 0001: Vision and guiding principles
 
-- **Status:** Draft
+- **Status:** Accepted
 - **Scope:** whole system (kernel, runtime, language, tooling)
 - **Supersedes:** none
 - **Superseded by:** none

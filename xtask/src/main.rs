@@ -1,0 +1,167 @@
+//! Build, image and QEMU orchestration.
+//!
+//! `cargo xtask <command>`; the workspace `.cargo/config.toml` does not set a
+//! default target, so this host tool builds with the host toolchain while the
+//! kernel is cross-built for `x86_64-unknown-none`.
+
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode};
+
+const TARGET: &str = "x86_64-unknown-none";
+const KERNEL_ELF: &str = "kernel";
+
+fn root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask lives in the workspace")
+        .to_path_buf()
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let command = args.first().map(String::as_str).unwrap_or("build");
+
+    match command {
+        "build" => build(),
+        "image" => image(),
+        "run" => run(args.iter().any(|arg| arg == "--headless")),
+        "clean" => clean(),
+        other => {
+            eprintln!("unknown command: {other}");
+            eprintln!("usage: cargo xtask <build|image|run [--headless]|clean>");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn build() -> ExitCode {
+    let status = Command::new(cargo())
+        .current_dir(root())
+        .args([
+            "build",
+            "-p",
+            "kernel",
+            "--release",
+            "--target",
+            TARGET,
+        ])
+        .status()
+        .expect("failed to run cargo");
+
+    if status.success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn kernel_elf() -> PathBuf {
+    root()
+        .join("target")
+        .join(TARGET)
+        .join("release")
+        .join(KERNEL_ELF)
+}
+
+fn image() -> ExitCode {
+    if build() == ExitCode::FAILURE {
+        return ExitCode::FAILURE;
+    }
+
+    let elf = kernel_elf();
+    if !elf.exists() {
+        eprintln!("kernel ELF not found at {}", elf.display());
+        return ExitCode::FAILURE;
+    }
+
+    let iso_root = root().join("build").join("iso");
+    let boot = iso_root.join("boot");
+    let grub = boot.join("grub");
+
+    fs::create_dir_all(&grub).expect("create ISO tree");
+    fs::copy(&elf, boot.join("kernel.elf")).expect("copy kernel ELF");
+
+    let cmdline = "multiboot2 /boot/kernel.elf";
+    let config = format!(
+        "serial --unit=0 --speed=115200\n\
+         terminal_input serial\n\
+         terminal_output serial\n\
+         set timeout=0\n\
+         set default=0\n\n\
+         menuentry \"igis-v2\" {{\n    {cmdline}\n    boot\n}}\n"
+    );
+    fs::write(grub.join("grub.cfg"), config).expect("write grub.cfg");
+
+    let iso = root().join("build").join("igis.iso");
+    let status = Command::new("grub2-mkrescue")
+        .arg("-o")
+        .arg(&iso)
+        .arg(&iso_root)
+        .status()
+        .expect("failed to run grub2-mkrescue");
+
+    if !status.success() {
+        return ExitCode::FAILURE;
+    }
+
+    println!("image: {}", iso.display());
+    ExitCode::SUCCESS
+}
+
+fn run(headless: bool) -> ExitCode {
+    if image() == ExitCode::FAILURE {
+        return ExitCode::FAILURE;
+    }
+
+    let iso = root().join("build").join("igis.iso");
+    let mut qemu = Command::new("qemu-system-x86_64");
+
+    qemu.current_dir(root())
+        .arg("-cdrom")
+        .arg(&iso)
+        .arg("-m")
+        .arg("256M")
+        .arg("-serial")
+        .arg("stdio")
+        .arg("-monitor")
+        .arg("none")
+        .arg("-no-reboot")
+        .arg("-no-shutdown")
+        .arg("-accel")
+        .arg("tcg")
+        .arg("-vga")
+        .arg("std");
+
+    if headless {
+        qemu.arg("-display").arg("none");
+    }
+
+    let status = qemu.status().expect("failed to run qemu-system-x86_64");
+    ExitCode::from(status.code().unwrap_or(1) as u8)
+}
+
+fn clean() -> ExitCode {
+    let _ = fs::remove_dir_all(root().join("build"));
+    let status = Command::new(cargo())
+        .current_dir(root())
+        .args(["clean"])
+        .status()
+        .expect("failed to run cargo clean");
+
+    if status.success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn cargo() -> String {
+    env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
+}
+
+#[allow(dead_code)]
+fn is_file(path: &Path) -> bool {
+    path.is_file()
+}

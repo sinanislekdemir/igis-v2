@@ -1,6 +1,6 @@
 # 0006: Streams and inter-application IPC
 
-- **Status:** Draft
+- **Status:** Accepted
 - **Scope:** `mm` (buffers), `sched` (blocking), `core`/`stdlib` (endpoints), loader
 - **Supersedes:** none
 - **Superseded by:** none

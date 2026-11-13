@@ -1,0 +1,11 @@
+[package]
+name = "kernel"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+arch_x86_64 = { path = "../arch/x86_64" }
+
+[[bin]]
+name = "kernel"
+path = "src/main.rs"

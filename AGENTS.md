@@ -25,8 +25,9 @@ constraints learned there.
 - **Long-term goal:** a general personal system. The first milestone proves the thesis
   with a booting kernel, source applications, read-only ext2 delivery, and a REPL that
   can drive a device.
-- **Status:** specification. No code yet, and none is written until the governing spec is
-  accepted.
+- **Status:** implementation. Specs 0001–0008 are accepted. The kernel boots under
+  GRUB/multiboot2 into long mode and drives serial plus the framebuffer; the language
+  runtime is next.
 
 ## Ground rules
 
@@ -49,11 +50,16 @@ constraints learned there.
 ├── OPEN-QUESTIONS.md  # parked decisions and unresolved questions
 ├── adr/               # decision log (immutable once accepted)
 ├── specs/             # normative specifications (living)
-└── src/ ...           # (to be created once the architecture spec is accepted)
+├── arch/x86_64/       # boot stub, page tables, long-mode transition, serial
+├── kernel/            # entry, multiboot2 walking, framebuffer, panic
+├── xtask/             # build, image and QEMU orchestration
+├── Cargo.toml         # workspace
+├── rust-toolchain.toml
+└── .cargo/config.toml
 ```
 
-Planned top-level shape once code starts — architecture-specific code must not leak
-into the core:
+Planned top-level shape as code grows — architecture-specific code must not leak into
+the core. Only `arch/x86_64/`, `kernel/` and `xtask/` exist so far:
 
 ```
 arch/<isa>/         # ISA-specific: boot, long mode, paging, stack switch, IDT, APIC, ...
@@ -81,9 +87,24 @@ xtask/              # build, image, and QEMU orchestration
 | nightly | rustc 1.101.0-nightly (2026-11-02) |
 | targets installed | `x86_64-unknown-linux-gnu`, `x86_64-unknown-none` |
 | extra components | `rust-src` (nightly), required for `-Z build-std` |
+| QEMU | qemu-system-x86_64 10.2.2 |
+| boot tooling | GRUB 2.12 (`grub2-mkrescue`), xorriso |
 
-No build commands exist yet. Once a workspace is created, document the canonical
-commands here (`cargo xtask build`, `cargo xtask run`, `cargo xtask test`).
+## Build commands
+
+The kernel is cross-built for `x86_64-unknown-none`; `xtask` itself builds for the host.
+
+| Command | Purpose |
+|---------|---------|
+| `cargo xtask build` | build the kernel ELF (release) |
+| `cargo xtask image` | build and assemble `build/igis.iso` with GRUB |
+| `cargo xtask run` | image + QEMU with a display, serial on stdio |
+| `cargo xtask run --headless` | image + QEMU with no display (serial only) |
+| `cargo xtask clean` | remove build artifacts |
+
+`.cargo/config.toml` pins the linker script, `code-model=kernel`, and the static
+relocation model for the bare-metal target. The workspace has no default target, so
+host tools are unaffected.
 
 ## Document conventions
 
@@ -165,3 +186,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-13 | Boot, loader and REPL settled: sub-1 MiB trampoline, mandatory framebuffer tag, one IPI vector, ext2 subset, dispatcher timing, `ExitReason.Killed`, path validation; Q24–Q38 closed (specs 0002, 0003, 0005, 0007). |
 | 2026-11-13 | Spec 0008 drafted: one bytecode package per application, fixed 4-byte-word stack VM, `compiler`/`interpreter` split over `abi`, structural verification at load. |
 | 2026-11-13 | Source-only delivery made permanent: no precompiled packages ever, compile latency is not a constraint (ADR 0019; specs 0002, 0008). |
+| 2026-11-13 | Specs 0001–0008 accepted. Workspace created (`arch/x86_64`, `kernel`, `xtask`): GRUB/multiboot2 boots into long mode, serial works, the framebuffer tag is parsed and the screen cleared. |

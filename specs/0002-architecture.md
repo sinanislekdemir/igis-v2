@@ -1,6 +1,6 @@
 # 0002: System architecture
 
-- **Status:** Draft
+- **Status:** Accepted
 - **Scope:** kernel internals, runtime hosting, execution and memory model
 - **Supersedes:** none
 - **Superseded by:** none

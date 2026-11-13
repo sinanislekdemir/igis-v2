@@ -1,6 +1,6 @@
 # 0003: Language and standard library
 
-- **Status:** Draft (design — syntax and semantics are now specified, not yet implemented)
+- **Status:** Accepted (design specified; implementation pending)
 - **Scope:** application language, type system, memory model, standard library
 - **Supersedes:** none
 - **Superseded by:** none

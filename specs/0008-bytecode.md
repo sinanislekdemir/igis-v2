@@ -1,6 +1,6 @@
 # 0008: Bytecode format and the compiler/runtime split
 
-- **Status:** Draft
+- **Status:** Accepted
 - **Scope:** `abi`, `compiler`, `interpreter`, `repl` (in-kernel compile), host language
   tooling
 - **Supersedes:** none

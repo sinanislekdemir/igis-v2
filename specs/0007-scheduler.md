@@ -1,6 +1,6 @@
 # 0007: Scheduler
 
-- **Status:** Draft
+- **Status:** Accepted
 - **Scope:** `sched`, `arch/<isa>` timer and IPI, interpreter safe points
 - **Supersedes:** none
 - **Superseded by:** none

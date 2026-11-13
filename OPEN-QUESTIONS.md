@@ -4,7 +4,7 @@ Parked decisions for igis-v2. This is the working register; each spec's own
 "Open questions" section remains authoritative for that document. When an item is
 resolved, record the answer in the relevant spec or in a new ADR, then remove it here.
 
-**Status:** specification phase, no code. Last updated: 2026-11-13.
+**Status:** implementation phase. Last updated: 2026-11-13.
 **Snapshot:** specs 0001–0008, ADRs 0001–0019.
 
 ## How to use
@@ -133,9 +133,8 @@ These are no longer open; they were recorded in specs and ADRs:
 
 ## Suggested next step
 
-1. Review and mark specs 0001 and 0002 **Accepted** (they are the governing documents).
-2. Review `specs/0008-bytecode.md` (drafted): instruction encoding, constant pool, frame
-   layout, calling convention, compiler/runtime split and ABI versioning (Q21).
-3. Create the workspace and the first bootable skeleton: linker script, multiboot2
-   header, 32-bit stub, long-mode transition, 64-bit entry, serial + framebuffer console.
-4. Pick the tuning constants (Q1–Q4) when the scheduler first runs.
+Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Next:
+
+1. Bitmap-font framebuffer console, so the kernel can print without serial.
+2. GDT/IDT with a fault path, then the frame allocator over the multiboot2 memory map.
+3. Pick the tuning constants (Q1–Q4) when the scheduler first runs.

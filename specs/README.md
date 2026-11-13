@@ -7,14 +7,14 @@ revised as understanding improves, and their history lives in git.
 
 | ID   | Title | Status | Scope | Updated |
 |------|-------|--------|-------|---------|
-| 0001 | [Vision and guiding principles](0001-vision.md) | Draft | whole system | 2026-11-12 |
-| 0002 | [System architecture](0002-architecture.md) | Draft | kernel, runtime, execution/memory model | 2026-11-13 |
-| 0003 | [Language and standard library](0003-language.md) | Draft | application language | 2026-11-13 |
-| 0004 | [Application memory model](0004-memory-model.md) | Draft | mm, loader, interpreter, language | 2026-11-13 |
-| 0005 | [Host interface](0005-host-interface.md) | Draft | core, syslib, interpreter, runtime | 2026-11-13 |
-| 0006 | [Streams and inter-application IPC](0006-streams.md) | Draft | mm, sched, core/stdlib, loader | 2026-11-13 |
-| 0007 | [Scheduler](0007-scheduler.md) | Draft | sched, arch timer/IPI, interpreter | 2026-11-13 |
-| 0008 | [Bytecode format and the compiler/runtime split](0008-bytecode.md) | Draft | abi, compiler, interpreter, repl | 2026-11-13 |
+| 0001 | [Vision and guiding principles](0001-vision.md) | Accepted | whole system | 2026-11-12 |
+| 0002 | [System architecture](0002-architecture.md) | Accepted | kernel, runtime, execution/memory model | 2026-11-13 |
+| 0003 | [Language and standard library](0003-language.md) | Accepted | application language | 2026-11-13 |
+| 0004 | [Application memory model](0004-memory-model.md) | Accepted | mm, loader, interpreter, language | 2026-11-13 |
+| 0005 | [Host interface](0005-host-interface.md) | Accepted | core, syslib, interpreter, runtime | 2026-11-13 |
+| 0006 | [Streams and inter-application IPC](0006-streams.md) | Accepted | mm, sched, core/stdlib, loader | 2026-11-13 |
+| 0007 | [Scheduler](0007-scheduler.md) | Accepted | sched, arch timer/IPI, interpreter | 2026-11-13 |
+| 0008 | [Bytecode format and the compiler/runtime split](0008-bytecode.md) | Accepted | abi, compiler, interpreter, repl | 2026-11-13 |
 
 ## Lifecycle
 
