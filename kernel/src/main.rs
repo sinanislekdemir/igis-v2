@@ -4,6 +4,7 @@
 mod console;
 mod fb;
 mod font8x8;
+mod frame;
 mod mb2;
 mod sync;
 
@@ -63,6 +64,33 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
         "available: {} MiB",
         available_bytes / (1024 * 1024)
     );
+
+    frame::init(mb2_info as usize, fb);
+    println!(
+        "frames: {} free of {} ({} MiB usable)",
+        frame::free_frames(),
+        frame::total_frames(),
+        frame::free_frames() * frame::FRAME_SIZE / (1024 * 1024)
+    );
+
+    // Self-test: two frames, write and read one, release both.
+    match (frame::alloc_frame(), frame::alloc_frame()) {
+        (Some(first), Some(second)) => {
+            // SAFETY: both frames are outside the kernel image and were just
+            // reserved by the allocator; the identity map covers them.
+            unsafe { core::ptr::write_volatile(first as *mut u64, 0x1234_5678_9abc_def0) };
+            // SAFETY: reading back the same reserved frame.
+            let read = unsafe { core::ptr::read_volatile(first as *const u64) };
+            println!(
+                "frame test: {:#x} reads back {:#018x}, next {:#x}",
+                first, read, second
+            );
+            frame::free_frame(first);
+            frame::free_frame(second);
+            println!("frames after test: {} free", frame::free_frames());
+        }
+        _ => println!("frame test: allocation failed"),
+    }
 
     println!("boot stub complete; halting");
     arch_x86_64::halt();

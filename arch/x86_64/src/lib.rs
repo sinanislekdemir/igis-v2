@@ -11,6 +11,9 @@ core::arch::global_asm!(include_str!("interrupts.s"));
 pub mod idt;
 pub mod serial;
 
+/// Virtual base of the kernel image; physical addresses map through this offset.
+pub const KERNEL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
+
 /// Stop this core forever. Interrupts are disabled.
 pub fn halt() -> ! {
     loop {

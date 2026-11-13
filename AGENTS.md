@@ -27,8 +27,8 @@ constraints learned there.
   can drive a device.
 - **Status:** implementation. Specs 0001–0008 are accepted. The kernel boots under
   GRUB/multiboot2 into long mode, prints through a framebuffer console mirrored to serial,
-  has an exception path with a register dump, and reads the multiboot2 memory map. The
-  language runtime is next.
+  has an exception path with a register dump, reads the multiboot2 memory map, and owns a
+  bitmap frame allocator. The language runtime is next.
 
 ## Ground rules
 
@@ -189,3 +189,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-13 | Source-only delivery made permanent: no precompiled packages ever, compile latency is not a constraint (ADR 0019; specs 0002, 0008). |
 | 2026-11-13 | Specs 0001–0008 accepted. Workspace created (`arch/x86_64`, `kernel`, `xtask`): GRUB/multiboot2 boots into long mode, serial works, the framebuffer tag is parsed and the screen cleared. |
 | 2026-11-13 | Kernel diagnostics: 8x8 bitmap-font console on the framebuffer (mirrored to serial), IDT with 32 exception gates and a register dump (verified with a deliberate `int3`), multiboot2 memory-map parsing. |
+| 2026-11-13 | Frame allocator: 4 KiB bitmap over the first 4 GiB, initialised from the multiboot2 map and reserving low memory, the kernel image, the multiboot2 structure and the framebuffer; verified by allocating, writing, reading back and freeing two frames (254 MiB usable under `-m 256M`). |

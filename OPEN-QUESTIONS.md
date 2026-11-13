@@ -137,5 +137,7 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
 
 1. ~~Bitmap-font framebuffer console~~ — done, mirrored to serial.
 2. ~~IDT with an exception dump~~ — done; GDT is still the boot stub's.
-3. Frame allocator over the multiboot2 memory map, then kernel pools for regions.
-4. Pick the tuning constants (Q1–Q4) when the scheduler first runs.
+3. ~~Frame allocator over the multiboot2 memory map~~ — done, 4 KiB bitmap.
+4. Next: GDT/TSS with a double-fault IST, APIC timer and clock (Q6), then the `abi` and
+   compiler/interpreter skeleton.
+5. Pick the tuning constants (Q1–Q4) when the scheduler first runs.
