@@ -29,7 +29,7 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | Q9 | DMA and block primitives | handle model fixed; no primitive in M1 | first real block device |
 | Q39 | Console/stream multiplexing (`poll`/`select`) | none in M1; a task blocks on one source at a time | when an application must serve two input sources |
 | Q43 | Staged scalar `spawn`/`wait`/`kill` ABI | `int` task ids, negated `Status`, `0`/`1`/`2 + fault_code` wait results; replace with `Status`/`Diagnostic`/`ExitReason` records when the language has enums/records (spec 0005, "Staged ABI") | before `stdlib` exposes `run`, and before console input builds a shell on top of it |
-| Q44 | Staged kernel line discipline (`core.read_line`) | the kernel polls COM1/PS-2, echoes, assembles and stores lines in a 4-line ring; `core.read_line(var buf)` blocks until a line exists and truncates to the buffer. Replace with application-side editing when indexing and string operations land (spec 0005, "Staged line discipline") | when buffer indexing and string operations exist |
+| Q44 | Staged kernel line discipline (`core.read_line`) | the kernel polls COM1/PS-2, echoes, assembles and stores lines in a 4-line ring; `core.read_line(var buf)` blocks until a line exists and truncates to the buffer. Replace with application-side editing when string length/truncate/insert operations exist: indexing alone reads and writes single bytes but cannot delete one (spec 0005, "Staged line discipline") | when `stdlib` string editing exists |
 
 ## C. Streams
 
@@ -163,6 +163,14 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
     path. The ABI is staged as scalars (Q43).
 11. ~~Console input~~ — done: COM1 and the PS/2 keyboard are polled in the service
     opportunity, a kernel-staged line ring echoes/edits, and `core.read_line` blocks the
-    shell until a line exists (Q44; spec 0005). Next: buffer indexing and string
-    operations so the shell can parse commands, then the record-based spawn ABI; then APs,
-    the realtime class and streams (Q3/Q4 when their features land).
+    shell until a line exists (Q44; spec 0005).
+12. ~~Buffer indexing, comparison and length~~ — done: `buf[i]` reads a raw `byte` checked
+    against the runtime length, `bytes[i] := b` writes one byte checked against the capacity
+    (extending the length and zero-filling the gap), `string` is read-only by index, `=`/`<>`
+    compare buffers of the same kind across capacities, and `core.len` returns `uint`
+    (`load_u8`, `store_u8`, `cmp_buffers`; spec 0003, spec 0008). The shell parses `help`,
+    `hello` and `exit` and the host `read_line` stub scripts them. Next: string slicing and
+    `stdlib` text helpers so the kernel can keep its own line editor instead of the staged
+    ring (Q44 still stands until length/truncate/insert operations exist), command
+    arguments, then the record-based spawn ABI; then APs, the realtime class and streams
+    (Q3/Q4 when their features land).

@@ -4,14 +4,16 @@
 //! # Staged input line discipline (spec 0005, Q44)
 //!
 //! The target design keeps the kernel out of line editing: input is a byte
-//! stream, and `stdlib`/the shell echo and assemble lines. The language cannot
-//! index a buffer yet, so this milestone stages that work here, exactly like
-//! the scalar `spawn`/`wait` ABI. The service opportunity polls COM1 and the
+//! stream, and `stdlib`/the shell echo and assemble lines. A shell can now
+//! index and compare buffers, but the language still has no way to delete or
+//! insert a byte inside one, so this milestone stages that work here, exactly
+//! like the scalar `spawn`/`wait` ABI. The service opportunity polls COM1 and the
 //! PS/2 keyboard into one static FIFO; printable bytes are appended to a
 //! pending line and echoed, Backspace erases, Enter completes the line into a
 //! small ring, and Ctrl+C clears it. `core.read_line` pops a finished line and
 //! otherwise blocks the caller. Replacing this with application-side editing
-//! is required when indexing lands (Q44).
+//! is required when `stdlib` string editing (length, truncate, insert) lands; byte
+//! indexing alone cannot delete a character (Q44).
 
 use core::fmt::{self, Write};
 

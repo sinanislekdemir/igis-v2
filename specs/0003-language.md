@@ -178,6 +178,32 @@ Rules:
 - **T5 (MUST):** Capacity is measured in bytes, never characters. `string[128]` holds at
   most 128 bytes of UTF-8.
 
+### Indexing, comparison and length
+
+- **Indexing.** `buf[index]` yields one `byte`. The index is `int`, `uint` or `byte`; a
+  negative or out-of-range index is a fault, never a clamp. For `string` the result is the
+  raw byte at that offset, not a code point (T4), so indexing implies no UTF-8 boundary and
+  is not a text operation.
+- **Writes are `bytes`-only.** `bytes[i] := expr` stores one byte and `expr` must be `byte`
+  (`byte(x)` narrows explicitly). `string[i] := expr` is a compile error: a single-byte
+  write could split a multi-byte sequence and break the invariant. Text changes by
+  construction (`dst := ...`) or, later, by `stdlib` helpers that preserve UTF-8.
+- **Bounds.** A read is checked against the runtime length and faults `OutOfBounds` at or
+  past it. A write is checked against the declared capacity and faults `CapacityExceeded`
+  at or past it.
+- **Writing extends the length.** An index at or past the current length is allowed: the gap
+  between the old length and the index is filled with zero bytes and the length becomes
+  `index + 1`. The buffer never grows past its capacity. Writing inside the length replaces
+  the byte and leaves the length alone. (This is a checked append without a second
+  primitive; it is the one semantic worth remembering about buffer writes.)
+- **Comparison.** `=` and `<>` accept two buffers of the same kind (`string` with `string`,
+  `bytes` with `bytes`) and any capacities: they compare the runtime lengths, then the
+  bytes. A literal takes its kind from the other operand, so `line = "help"` works. Mixed
+  `string`/`bytes` comparison is a compile error, and ordering (`<`, `<=`, `>`, `>=`) is not
+  defined for buffers.
+- **Length.** `core.len(buf) -> uint` returns the runtime length for either kind. One
+  builtin serves both because the length word is part of the shared representation.
+
 ### Compound and parametric types
 
 - **Records:** `type Point = record x, y: int; end;`
@@ -270,6 +296,7 @@ point where the value is created, instead of at every call site.
 - Shared byte operations (`len`, compare, find) are defined on both.
 - UTF-8-specific operations (`codepoints`, `chars`, `substr_into`) exist only on `string`.
 - Comparison is byte-wise (`bytes`) or code-point-wise (`string`), both lexicographic.
+  In this slice equality compares bytes, which is the same relation for valid UTF-8.
 
 ## Collections
 
@@ -507,6 +534,11 @@ is the signal.
 | Situation | Behaviour |
 |-----------|-----------|
 | Index outside `array`/`ring` | `fault(OutOfBounds)`; recover once or terminate |
+| Buffer read at or past the runtime length | `fault(OutOfBounds)` |
+| Buffer write at or past the declared capacity | `fault(CapacityExceeded)`; never a partial write |
+| Buffer index expression that is not `int`/`uint`/`byte` | Compile error |
+| `string[i] := expr` | Compile error (`string` is read-only by index) |
+| Buffers of different kinds compared (`string` = `bytes`) | Compile error |
 | `string`/`bytes` write past capacity | `fault(CapacityExceeded)`; no truncation, no growth |
 | `ring` push on full, `map` put on full | `Status.Full` (non-fatal) or explicit failure, never growth |
 | Invalid UTF-8 conversion | `Status.Invalid`; no invalid `string` can be constructed |
@@ -561,3 +593,4 @@ is the signal.
 | 2026-11-13 | Stream endpoint names are application-wide unique (spec 0006, S11); `stdlib` framing defaults to a length prefix with newline-delimited helpers for text. |
 | 2026-11-13 | Floating point added to the first milestone: `f64` only, IEEE-754, per-task 512-byte FXSAVE region (ADR 0018); explicit `T(x)` casts, IEEE float semantics; every top-level declaration is public with no visibility modifiers; FNV-1a maps with linear probing; comparisons bind tighter than `and`/`or` and bitwise operations are `core` functions; `Diagnostic` only, no stack trace; stream names are `string[32]` and capacities are `1..=65536`; `run`/`spawn` paths are limited to 256 bytes. |
 | 2026-11-13 | `ExitReason` gained `Killed`; `kill` cancels a queued request and runs `exit(Killed)` on a live task; request paths are validated as relative with no `..` and must name regular files. |
+| 2026-11-13 | Buffer indexing, comparison and length: `buf[i]` yields a `byte` (raw for `string`, T4); writes are `bytes`-only and extend the length to `index + 1`, zero-filling the gap; reads check the runtime length and writes the declared capacity; `=`/`<>` compare buffers of the same kind across capacities; `core.len(buf) -> uint`. |

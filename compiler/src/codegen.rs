@@ -955,7 +955,12 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 column,
             } => {
                 self.mark(line, column)?;
-                self.assign(target, value, line, column)
+                match target {
+                    AssignTarget::Name(name) => self.assign(name, value, line, column),
+                    AssignTarget::Index(name, index) => {
+                        self.assign_index(name, index, value, line, column)
+                    }
+                }
             }
             Stmt::Call(call) => {
                 self.mark(call.line, call.column)?;
@@ -1071,6 +1076,72 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             Target::LocalBuffer { .. } | Target::StateBuffer { .. } => {
                 self.buffer_assign(name, &target, value)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Assigns one byte of a buffer: `name[index] := value`.
+    ///
+    /// Only `bytes` is writable by index. Writing into a `string` would break
+    /// the UTF-8 invariant one byte at a time, so it is a compile error
+    /// (spec 0003). The declared capacity is carried in the instruction; the
+    /// interpreter extends the runtime length to `index + 1` when the index is
+    /// at or past the current length.
+    fn assign_index(
+        &mut self,
+        name: &'a str,
+        index: &'a Expr<'a>,
+        value: &'a Expr<'a>,
+        line: u32,
+        column: u32,
+    ) -> Result<(), Diagnostic> {
+        let target = self.resolve_target(name, line, column)?;
+        let ty = match target {
+            Target::LocalBuffer { .. } | Target::StateBuffer { .. } => target.ty(),
+            _ => {
+                return Err(self.err(
+                    line,
+                    column,
+                    format_args!("cannot index `{name}`; it is not a buffer"),
+                ))
+            }
+        };
+        if ty.kind != Kind::Bytes {
+            return Err(self.err(
+                line,
+                column,
+                format_args!(
+                    "cannot assign into `{ty}` by index; `string` is read-only by index (UTF-8)"
+                ),
+            ));
+        }
+        self.push_target_ref(&target)?;
+        self.check_index_type(index)?;
+        let value_ty = self.expr_scalar(value)?;
+        if value_ty.kind != Kind::Byte {
+            return Err(self.err_at(
+                value,
+                format_args!(
+                    "`{name}[...] := ...` needs a `byte`, found `{value_ty}`; convert the value with `byte(x)`"
+                ),
+            ));
+        }
+        self.one(opcodes::STORE_U8, ty.cap)?;
+        self.pop(3)?;
+        Ok(())
+    }
+
+    /// Checks that an index expression is an integer type and emits it.
+    ///
+    /// Negative and out-of-range values are not compile errors: the interpreter
+    /// bounds-checks every index at run time (spec 0008, B4).
+    fn check_index_type(&mut self, index: &'a Expr<'a>) -> Result<(), Diagnostic> {
+        let ty = self.expr_scalar(index)?;
+        if !matches!(ty.kind, Kind::Int | Kind::Uint | Kind::Byte) {
+            return Err(self.err_at(
+                index,
+                format_args!("a buffer index must be `int`, `uint` or `byte`, found `{ty}`"),
+            ));
         }
         Ok(())
     }
@@ -1311,6 +1382,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 ),
             )),
             ExprKind::Ident(name) => self.load_scalar(name, expr),
+            ExprKind::Index(name, index) => self.load_index(name, index, expr),
             ExprKind::Call(call) => match self.call(&call)? {
                 Some(ty) => Ok(ty),
                 None => Err(self.err_at(
@@ -1322,6 +1394,109 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             ExprKind::Unary(op, inner) => self.unary(op, inner, expr),
             ExprKind::Binary(op, left, right) => self.binary(op, left, right, expr),
         }
+    }
+
+    /// Loads one byte of a buffer: `name[index]`.
+    ///
+    /// The result is `byte` for both `string` and `bytes`; a `string` index
+    /// yields the raw byte at that offset, not a code point (spec 0003, T4).
+    /// The interpreter checks the index against the runtime length and faults
+    /// `OutOfBounds` past it. A literal index is not folded; it is checked at
+    /// run time like any other.
+    fn load_index(
+        &mut self,
+        name: &'a str,
+        index: &'a Expr<'a>,
+        expr: &'a Expr<'a>,
+    ) -> Result<Type, Diagnostic> {
+        self.buffer_type(name, expr)?;
+        self.push_named_ref(name, expr)?;
+        self.check_index_type(index)?;
+        self.simple(opcodes::LOAD_U8)?;
+        self.pop(1)?;
+        Ok(Type::scalar(Kind::Byte))
+    }
+
+    /// Returns the buffer type of a buffer expression without emitting code.
+    ///
+    /// A string literal reports `string[len]`; that kind is only a default,
+    /// because a literal is typed by its destination (spec 0003, T1).
+    fn probe_buffer(&self, expr: &Expr<'a>) -> Option<Type> {
+        match expr.kind {
+            ExprKind::Str(bytes) => Some(Type::buffer(Kind::String, bytes.len() as u32)),
+            ExprKind::Ident(name) => {
+                if let Some(slot) = self.slot(name) {
+                    if slot.ty.is_buffer() {
+                        return Some(slot.ty);
+                    }
+                }
+                find_state(self.state_vars, name)
+                    .filter(|var| var.ty.is_buffer())
+                    .map(|var| var.ty)
+            }
+            _ => None,
+        }
+    }
+
+    /// Emits `left = right` (or `<>`) when both operands are buffers, and
+    /// returns `None` when neither is.
+    ///
+    /// Capacities may differ: the comparison reads both runtime lengths and
+    /// then the bytes. A literal takes its kind from the other operand, so
+    /// `line = "help"` compares `string` with `string` and `frame = "\x00"`
+    /// compares `bytes` with `bytes`.
+    fn compare_buffers(
+        &mut self,
+        op: BinOp,
+        left: &'a Expr<'a>,
+        right: &'a Expr<'a>,
+        expr: &'a Expr<'a>,
+    ) -> Result<Option<Type>, Diagnostic> {
+        let (left_ty, right_ty) = match (self.probe_buffer(left), self.probe_buffer(right)) {
+            (None, None) => return Ok(None),
+            (Some(left_ty), Some(right_ty)) => (left_ty, right_ty),
+            (Some(left_ty), None) => {
+                return Err(self.err_at(
+                    right,
+                    format_args!(
+                        "cannot compare `{left_ty}` with a scalar; both operands must be buffers of the same kind"
+                    ),
+                ))
+            }
+            (None, Some(right_ty)) => {
+                return Err(self.err_at(
+                    left,
+                    format_args!(
+                        "cannot compare a scalar with `{right_ty}`; both operands must be buffers of the same kind"
+                    ),
+                ))
+            }
+        };
+        let left_literal = matches!(left.kind, ExprKind::Str(_));
+        let right_literal = matches!(right.kind, ExprKind::Str(_));
+        let kind = if left_ty.kind == right_ty.kind {
+            left_ty.kind
+        } else if left_literal {
+            right_ty.kind
+        } else if right_literal {
+            left_ty.kind
+        } else {
+            return Err(self.err_at(
+                expr,
+                format_args!(
+                    "cannot compare `{left_ty}` with `{right_ty}`; `string` and `bytes` are distinct types"
+                ),
+            ));
+        };
+
+        self.emit_ref(left, Some(kind))?;
+        self.emit_ref(right, Some(kind))?;
+        self.simple(opcodes::CMP_BUFFERS)?;
+        self.pop(1)?;
+        if op == BinOp::Ne {
+            self.simple(opcodes::NOT)?;
+        }
+        Ok(Some(Type::scalar(Kind::Bool)))
     }
 
     fn load_scalar(&mut self, name: &'a str, expr: &'a Expr<'a>) -> Result<Type, Diagnostic> {
@@ -1494,6 +1669,25 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             return Ok(Type::scalar(Kind::Bool));
         }
 
+        // Equality between two buffers is a byte comparison over the runtime
+        // lengths, not a value copy: `line = "help"` must compile. `<>` is the
+        // same comparison negated. Ordering stays scalar-only.
+        if matches!(op, BinOp::Eq | BinOp::Ne) {
+            if let Some(result) = self.compare_buffers(op, left, right, expr)? {
+                return Ok(result);
+            }
+        }
+        if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+            && (self.probe_buffer(left).is_some() || self.probe_buffer(right).is_some())
+        {
+            return Err(self.err_at(
+                expr,
+                format_args!(
+                    "buffer ordering is not implemented; buffers compare with `=` and `<>` only"
+                ),
+            ));
+        }
+
         let left_ty = self.expr_scalar(left)?;
         let right_ty = self.expr_scalar(right)?;
         if left_ty != right_ty {
@@ -1502,12 +1696,6 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 format_args!(
                     "type mismatch: `{left_ty}` and `{right_ty}`; there are no implicit conversions"
                 ),
-            ));
-        }
-        if left_ty.is_buffer() {
-            return Err(self.err_at(
-                expr,
-                format_args!("buffer comparison is not implemented in this slice"),
             ));
         }
 
@@ -1664,6 +1852,22 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.pop(1)?;
                 self.push();
                 Ok(Some(Type::scalar(Kind::Int)))
+            }
+            // `core.len` accepts both buffer kinds; one builtin serves both
+            // because the length lives in the same header (spec 0003).
+            "core.len" => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.len` expects 1 argument, got {}", args.len()),
+                    ));
+                }
+                self.emit_ref(args[0], None)?;
+                self.one(opcodes::BUILTIN, builtin::LEN)?;
+                self.pop(1)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Uint)))
             }
             "core.clock" => {
                 if !args.is_empty() {

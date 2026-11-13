@@ -111,8 +111,8 @@ pub struct ProcDecl<'a> {
 pub enum Stmt<'a> {
     /// `target := value;`
     Assign {
-        /// Destination name.
-        target: &'a str,
+        /// Destination: a name, or one byte of a `bytes` buffer.
+        target: AssignTarget<'a>,
         /// Right-hand side.
         value: &'a Expr<'a>,
         /// 1-based source line.
@@ -140,6 +140,18 @@ pub enum Stmt<'a> {
     },
     /// `begin ... end`
     Block(&'a [Stmt<'a>]),
+}
+
+/// An assignment destination.
+///
+/// `name[index]` is only assignable for `bytes`; `string` is read-only by index
+/// so the UTF-8 invariant cannot be broken one byte at a time (spec 0003).
+#[derive(Debug, Clone, Copy)]
+pub enum AssignTarget<'a> {
+    /// `name := value`
+    Name(&'a str),
+    /// `name[index] := value`
+    Index(&'a str, &'a Expr<'a>),
 }
 
 /// A call expression or call statement.
@@ -179,6 +191,9 @@ pub enum ExprKind<'a> {
     Bool(bool),
     /// A name.
     Ident(&'a str),
+    /// One byte of a buffer: `name[index]`. The result is a `byte`; for a
+    /// `string` it is the raw byte at that offset (spec 0003, T4).
+    Index(&'a str, &'a Expr<'a>),
     /// A call.
     Call(Call<'a>),
     /// A binary operation.

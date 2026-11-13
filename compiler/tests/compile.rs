@@ -360,3 +360,333 @@ end;
     let error = compile(wrong_type, "t.ig").expect_err("must not compile");
     assert!(error.message.contains("task id"), "{}", error.message);
 }
+
+/// Walks the instruction section and returns every opcode in order.
+fn opcodes_of(package: &Owned) -> Vec<u8> {
+    use abi::opcodes;
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+    let mut seen = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        seen.push(op);
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        pc += words * 4;
+    }
+    seen
+}
+
+#[test]
+fn indexing_emits_byte_load_and_store() {
+    let source = br#"
+unit t;
+
+var
+  raw: bytes[8];
+  b: byte;
+  i: int;
+
+procedure main(args: const string[1024]);
+begin
+  raw := "ab";
+  i := 1;
+  b := raw[i];
+  raw[i + 1] := b;
+end;
+"#;
+    let package = compile(source, "t.ig").expect("compiles");
+    let ops = opcodes_of(&package);
+    assert!(
+        ops.contains(&abi::opcodes::LOAD_U8),
+        "no load_u8 in {ops:?}"
+    );
+    assert!(
+        ops.contains(&abi::opcodes::STORE_U8),
+        "no store_u8 in {ops:?}"
+    );
+}
+
+#[test]
+fn reading_a_byte_from_a_string_is_allowed() {
+    let source = br#"
+unit t;
+
+var
+  text: string[8];
+  b: byte;
+
+procedure main(args: const string[1024]);
+begin
+  text := "abc";
+  b := text[1];
+end;
+"#;
+    compile(source, "t.ig").expect("a string is readable by index");
+}
+
+#[test]
+fn writing_into_a_string_by_index_is_rejected() {
+    let source = br#"
+unit t;
+
+var
+  text: string[8];
+
+procedure main(args: const string[1024]);
+begin
+  text := "abc";
+  text[1] := byte(66);
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("must not compile");
+    assert_eq!(error.line, 10);
+    assert_eq!(error.column, 3);
+    assert!(
+        error.message.contains("read-only by index"),
+        "{}",
+        error.message
+    );
+    assert!(error.message.contains("UTF-8"), "{}", error.message);
+}
+
+#[test]
+fn an_index_must_be_an_integer() {
+    let source = br#"
+unit t;
+
+var
+  raw: bytes[8];
+  b: byte;
+  f: f64;
+
+procedure main(args: const string[1024]);
+begin
+  raw := "ab";
+  f := 1.0;
+  b := raw[f];
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("must not compile");
+    assert!(
+        error
+            .message
+            .contains("buffer index must be `int`, `uint` or `byte`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn an_indexed_write_needs_a_byte_value() {
+    let source = br#"
+unit t;
+
+var
+  raw: bytes[8];
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  raw := "ab";
+  n := 1;
+  raw[0] := n;
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("must not compile");
+    assert!(
+        error.message.contains("needs a `byte`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn indexed_assignment_to_a_const_parameter_is_rejected() {
+    let source = br#"
+unit t;
+
+procedure poke(raw: const bytes[8]);
+begin
+  raw[0] := byte(1);
+end;
+
+procedure main(args: const string[1024]);
+var
+  buf: bytes[8];
+begin
+  poke(buf);
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("must not compile");
+    assert!(error.message.contains("const"), "{}", error.message);
+}
+
+#[test]
+fn buffers_compare_with_equality_across_capacities() {
+    let source = br#"
+unit t;
+
+var
+  line: string[64];
+  other: string[8];
+  raw: bytes[4];
+  done: bool;
+
+procedure main(args: const string[1024]);
+begin
+  line := "help";
+  other := "help";
+  raw := "he";
+  done := line = "help";
+  done := line = other;
+  done := line <> "bye";
+  done := raw = "he";
+  done := raw <> "help";
+end;
+"#;
+    let package = compile(source, "t.ig").expect("compiles");
+    let ops = opcodes_of(&package);
+    assert!(
+        ops.contains(&abi::opcodes::CMP_BUFFERS),
+        "no cmp_buffers in {ops:?}"
+    );
+    assert!(ops.contains(&abi::opcodes::NOT), "`<>` negates the compare");
+}
+
+#[test]
+fn comparing_a_string_with_bytes_is_rejected() {
+    let source = br#"
+unit t;
+
+var
+  text: string[8];
+  raw: bytes[8];
+  done: bool;
+
+procedure main(args: const string[1024]);
+begin
+  text := "ab";
+  raw := "ab";
+  done := text = raw;
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("must not compile");
+    assert!(
+        error.message.contains("distinct types"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn comparing_a_buffer_with_a_scalar_is_rejected() {
+    let source = br#"
+unit t;
+
+var
+  text: string[8];
+  done: bool;
+
+procedure main(args: const string[1024]);
+begin
+  text := "ab";
+  done := text = 1;
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("must not compile");
+    assert!(
+        error.message.contains("both operands must be buffers"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn buffer_ordering_is_rejected() {
+    let source = br#"
+unit t;
+
+var
+  text: string[8];
+  done: bool;
+
+procedure main(args: const string[1024]);
+begin
+  text := "ab";
+  done := text < "b";
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("must not compile");
+    assert!(
+        error.message.contains("buffer ordering"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn core_len_returns_uint_for_both_buffer_kinds() {
+    let good = br#"
+unit t;
+
+uses core;
+
+var
+  text: string[8];
+  raw: bytes[4];
+  n: uint;
+
+procedure main(args: const string[1024]);
+begin
+  text := "ab";
+  raw := "abc";
+  n := core.len(text);
+  n := core.len(raw);
+  n := core.len("abcd");
+end;
+"#;
+    let package = compile(good, "t.ig").expect("compiles");
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+    let mut seen = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = abi::opcodes::instruction_words(op).expect("known opcode") as usize;
+        if op == abi::opcodes::BUILTIN {
+            seen.push(u32::from_le_bytes(
+                instructions[pc + 4..pc + 8].try_into().unwrap(),
+            ));
+        }
+        pc += words * 4;
+    }
+    assert_eq!(
+        seen,
+        vec![
+            abi::opcodes::builtin::LEN,
+            abi::opcodes::builtin::LEN,
+            abi::opcodes::builtin::LEN
+        ]
+    );
+
+    let bad = br#"
+unit t;
+
+uses core;
+
+var
+  text: string[8];
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  text := "ab";
+  n := core.len(text);
+end;
+"#;
+    let error = compile(bad, "t.ig").expect_err("uint is not int");
+    assert!(error.message.contains("type mismatch"), "{}", error.message);
+}

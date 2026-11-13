@@ -7,7 +7,7 @@ var
   line: string[256];
   id: int;
   code: int;
-  count: int;
+  done: bool;
 
 procedure say(text: const string[0]);
 begin
@@ -42,19 +42,25 @@ begin
     say("shell: spawn failed\n");
   end;
 
-  // Staged line discipline (spec 0005, Q44): the kernel echoes the typed
-  // bytes and completes one line; core.read_line blocks until it is ready.
-  // The language cannot index a buffer yet, so the shell counts three lines
-  // and echoes each one whole.
-  count := 0;
-  while count < 3 do
+  // Command loop. Staged line discipline (spec 0005, Q44): the kernel echoes
+  // the typed bytes and completes one line; `core.read_line` blocks until it
+  // is ready. Buffer equality compares the runtime length and then the bytes,
+  // so `line = "help"` works even though the capacities differ.
+  //
+  // There is no `return` yet, so `main` ends by leaving the loop with `done`.
+  done := false;
+  while not done do
   begin
     say("shell> ");
     code := core.read_line(line);
-    say("you said: ");
-    say(line);
-    say("\n");
-    count := count + 1;
+    if line = "help" then
+      say("shell: help, hello, exit\n")
+    else if line = "hello" then
+      say("hello from igis-v2\n")
+    else if line = "exit" then
+      done := true
+    else
+      say("unknown\n");
   end;
 
   say("bye\n");

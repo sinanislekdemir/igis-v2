@@ -611,3 +611,166 @@ fn kill_forwards_the_id_and_pushes_zero() {
     assert_eq!(host.killed, vec![4]);
     assert_eq!(u64::from_le_bytes(state[..8].try_into().unwrap()), 0);
 }
+
+// ---- buffer indexing, comparison and length -----------------------------
+//
+// The byte-oriented packages below lay `state` out by hand:
+//
+//   state[0..8]    a scalar result slot
+//   state[8..16]   the buffer's runtime length
+//   state[16..24]  eight bytes of data
+//
+// so a test can preload a length and bytes and read them back afterwards.
+
+const BYTE_FRAME: FnSpec = FnSpec {
+    code_off: 0,
+    frame_size: 64,
+    operand_off: 40,
+    param_count: 1,
+    has_destination: false,
+};
+
+#[test]
+fn store_u8_extends_the_length_and_zero_fills_the_gap() {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 16);
+    op_const(&mut instructions, 4);
+    op_const(&mut instructions, 0xAB);
+    op_imm(&mut instructions, opcodes::STORE_U8, 8);
+    op(&mut instructions, opcodes::RET);
+    let code = build(&[BYTE_FRAME], &instructions, &[], 24, 64, 0);
+
+    let mut host = MockHost::default();
+    let mut state = vec![0u8; 24];
+    state[8..16].copy_from_slice(&2u64.to_le_bytes());
+    state[16..18].copy_from_slice(b"hi");
+    let mut stack = vec![0u8; 64];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(u64::from_le_bytes(state[8..16].try_into().unwrap()), 5);
+    assert_eq!(&state[16..21], b"hi\0\0\xab");
+}
+
+#[test]
+fn store_u8_inside_the_length_keeps_it() {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 16);
+    op_const(&mut instructions, 1);
+    op_const(&mut instructions, b'X' as i64);
+    op_imm(&mut instructions, opcodes::STORE_U8, 8);
+    op(&mut instructions, opcodes::RET);
+    let code = build(&[BYTE_FRAME], &instructions, &[], 24, 64, 0);
+
+    let mut host = MockHost::default();
+    let mut state = vec![0u8; 24];
+    state[8..16].copy_from_slice(&3u64.to_le_bytes());
+    state[16..19].copy_from_slice(b"abc");
+    let mut stack = vec![0u8; 64];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(u64::from_le_bytes(state[8..16].try_into().unwrap()), 3);
+    assert_eq!(&state[16..19], b"aXc");
+}
+
+#[test]
+fn load_u8_reads_inside_the_length_and_faults_past_it() {
+    let mut inside = Vec::new();
+    op_imm(&mut inside, opcodes::REF_STATE, 16);
+    op_const(&mut inside, 2);
+    op(&mut inside, opcodes::LOAD_U8);
+    op_imm(&mut inside, opcodes::STORE_STATE, 0);
+    op(&mut inside, opcodes::RET);
+    let code = build(&[BYTE_FRAME], &inside, &[], 24, 64, 0);
+    let mut host = MockHost::default();
+    let mut state = vec![0u8; 24];
+    state[8..16].copy_from_slice(&3u64.to_le_bytes());
+    state[16..19].copy_from_slice(b"abc");
+    let mut stack = vec![0u8; 64];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(u64::from_le_bytes(state[0..8].try_into().unwrap()), 99);
+
+    let mut past = Vec::new();
+    op_imm(&mut past, opcodes::REF_STATE, 16);
+    op_const(&mut past, 3);
+    op(&mut past, opcodes::LOAD_U8);
+    op(&mut past, opcodes::DROP);
+    op(&mut past, opcodes::RET);
+    let code = build(&[BYTE_FRAME], &past, &[], 24, 64, 0);
+    let mut state = vec![0u8; 24];
+    state[8..16].copy_from_slice(&3u64.to_le_bytes());
+    let mut stack = vec![0u8; 64];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(
+        outcome,
+        Outcome::Exited(ExitReason::Faulted(FaultCode::OutOfBounds))
+    );
+}
+
+#[test]
+fn store_u8_past_the_capacity_faults_capacity_exceeded() {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 16);
+    op_const(&mut instructions, 8);
+    op_const(&mut instructions, 1);
+    op_imm(&mut instructions, opcodes::STORE_U8, 8);
+    op(&mut instructions, opcodes::RET);
+    let code = build(&[BYTE_FRAME], &instructions, &[], 24, 64, 0);
+    let mut host = MockHost::default();
+    let mut state = vec![0u8; 24];
+    let mut stack = vec![0u8; 64];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(
+        outcome,
+        Outcome::Exited(ExitReason::Faulted(FaultCode::CapacityExceeded))
+    );
+    assert_eq!(state, vec![0u8; 24], "nothing is written on a failed store");
+}
+
+#[test]
+fn cmp_buffers_compares_length_then_bytes() {
+    for (length, data, expected) in [
+        (3u64, &b"abc"[..], 1u64),
+        (3, &b"abd"[..], 0),
+        (2, &b"ab"[..], 0),
+    ] {
+        let mut instructions = Vec::new();
+        op_imm(&mut instructions, opcodes::REF_STATE, 16);
+        op_imm(&mut instructions, opcodes::REF_CONST, 8);
+        op(&mut instructions, opcodes::CMP_BUFFERS);
+        op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+        op(&mut instructions, opcodes::RET);
+        let constants = constant(b"abc");
+        let code = build(&[BYTE_FRAME], &instructions, &constants, 24, 64, 0);
+
+        let mut host = MockHost::default();
+        let mut state = vec![0u8; 24];
+        state[8..16].copy_from_slice(&length.to_le_bytes());
+        state[16..16 + data.len()].copy_from_slice(data);
+        let mut stack = vec![0u8; 64];
+        let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+        assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+        assert_eq!(
+            u64::from_le_bytes(state[0..8].try_into().unwrap()),
+            expected,
+            "{length} bytes of {data:?}"
+        );
+    }
+}
+
+#[test]
+fn len_builtin_pushes_the_runtime_length() {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 16);
+    op_imm(&mut instructions, opcodes::BUILTIN, opcodes::builtin::LEN);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op(&mut instructions, opcodes::RET);
+    let code = build(&[BYTE_FRAME], &instructions, &[], 24, 64, 0);
+    let mut host = MockHost::default();
+    let mut state = vec![0u8; 24];
+    state[8..16].copy_from_slice(&5u64.to_le_bytes());
+    let mut stack = vec![0u8; 64];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(u64::from_le_bytes(state[0..8].try_into().unwrap()), 5);
+}

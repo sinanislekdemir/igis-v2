@@ -78,12 +78,14 @@ pub struct RunResult {
 /// parent's, and stores the exit reason under a fresh id. `core.wait` then
 /// returns that record immediately and never blocks; the scheduling difference
 /// from the kernel is invisible to a program that spawns and waits.
-/// Fixed line returned by the host `core.read_line` stub.
 ///
-/// The host toolchain has no kernel line ring, so the stub always reports one
-/// complete line. A host-side shell therefore runs the same code path and
-/// prints `you said: host` for each read, without ever blocking.
-const HOST_LINE: &[u8] = b"host";
+/// The host has no kernel line ring, so `core.read_line` is a scripted stub:
+/// it hands out one complete line per call from [`HOST_LINES`], then an empty
+/// line forever. A host-side shell therefore runs the same code path as the
+/// kernel's, deterministically, without ever blocking. A program that keeps
+/// reading after the script is exhausted sees empty lines and either exits or
+/// is stopped by the budget watchdog.
+const HOST_LINES: [&[u8]; 3] = [b"help", b"hello", b"exit"];
 
 struct ConsoleHost {
     output: Vec<u8>,
@@ -91,6 +93,7 @@ struct ConsoleHost {
     source_dir: PathBuf,
     children: HashMap<u64, ExitReason>,
     next_id: u64,
+    next_line: usize,
 }
 
 impl ConsoleHost {
@@ -101,6 +104,7 @@ impl ConsoleHost {
             source_dir: app_dir(),
             children: HashMap::new(),
             next_id: 1,
+            next_line: 0,
         }
     }
 }
@@ -129,8 +133,10 @@ impl Host for ConsoleHost {
     }
 
     fn read_line(&mut self, buf: &mut [u8]) -> Option<usize> {
-        let copied = HOST_LINE.len().min(buf.len());
-        buf[..copied].copy_from_slice(&HOST_LINE[..copied]);
+        let line = HOST_LINES.get(self.next_line).copied().unwrap_or(b"");
+        self.next_line += 1;
+        let copied = line.len().min(buf.len());
+        buf[..copied].copy_from_slice(&line[..copied]);
         Some(copied)
     }
 

@@ -215,14 +215,36 @@ fn shell_spawns_and_waits_for_the_child_on_the_host() {
         "child: hello\n",
         "child: bye\n",
         "child: ok\n",
-        "shell> you said: host\n",
-        "bye\n",
     ] {
         assert!(text.contains(line), "missing {line:?} in {text:?}");
     }
+    // The host `read_line` stub scripts `help`, `hello`, `exit`, so the same
+    // command loop the kernel runs prints these three responses in order.
     assert_eq!(
-        text.matches("you said: host\n").count(),
+        text.matches("shell> ").count(),
         3,
-        "the shell reads three lines: {text:?}"
+        "the shell prompts once per scripted line: {text:?}"
     );
+    let help = text.find("shell> shell: help, hello, exit\n");
+    let hello = text.find("shell> hello from igis-v2\n");
+    let bye = text.find("shell> bye\n");
+    assert!(
+        help.is_some() && hello.is_some() && bye.is_some(),
+        "{text:?}"
+    );
+    assert!(
+        help < hello && hello < bye,
+        "responses are out of order: {text:?}"
+    );
+    assert!(!text.contains("unknown"), "{text:?}");
+}
+
+#[test]
+fn indexing_length_and_buffer_equality_work_end_to_end() {
+    let result = run_sample("index.ig", b"");
+    assert_eq!(
+        result.output,
+        b"extend ok\nlen ok\nzero ok\nwrite ok\nneq ok\neq ok\nbyte ok\n".to_vec()
+    );
+    assert_eq!(result.reason, ExitReason::Ok);
 }

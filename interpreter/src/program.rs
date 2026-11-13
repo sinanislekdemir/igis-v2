@@ -433,6 +433,13 @@ fn verify_instructions(
                         return Err(invalid(base + pc + 4, "buffer capacity is out of range"));
                     }
                 }
+                opcodes::STORE_U8 => {
+                    let capacity = read_u32(instructions, pc + 4)
+                        .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;
+                    if capacity > MAX_SECTION {
+                        return Err(invalid(base + pc + 4, "buffer capacity is out of range"));
+                    }
+                }
                 opcodes::BUILTIN => {
                     let id = read_u32(instructions, pc + 4)
                         .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;

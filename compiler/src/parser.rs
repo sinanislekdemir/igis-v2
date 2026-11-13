@@ -426,6 +426,32 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             TokenKind::Ident(_) => {
                 let (target, line, column) = self.name_path()?;
+                if self.check(&TokenKind::LBracket) {
+                    if target.contains('.') {
+                        return Err(self.error(
+                            line,
+                            column,
+                            format_args!(
+                                "cannot index `{target}`; only variables and parameters can be indexed"
+                            ),
+                        ));
+                    }
+                    self.advance();
+                    let index = self.expression()?;
+                    self.expect(&TokenKind::RBracket, "`]`")?;
+                    self.expect(&TokenKind::Assign, "`:=` after an indexed target")?;
+                    let value = self.expression()?;
+                    return self.alloc_stmt(
+                        Stmt::Assign {
+                            target: AssignTarget::Index(target, index),
+                            value,
+                            line,
+                            column,
+                        },
+                        line,
+                        column,
+                    );
+                }
                 if self.eat(&TokenKind::Assign) {
                     if target.contains('.') {
                         return Err(self.error(
@@ -437,7 +463,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                     let value = self.expression()?;
                     self.alloc_stmt(
                         Stmt::Assign {
-                            target,
+                            target: AssignTarget::Name(target),
                             value,
                             line,
                             column,
@@ -683,6 +709,10 @@ impl<'a, 'b> Parser<'a, 'b> {
                     self.alloc_expr(ExprKind::Call(call), line, column)
                 } else if name.contains('.') {
                     Err(self.here(format_args!("expected `(` after `{name}`")))
+                } else if self.eat(&TokenKind::LBracket) {
+                    let index = self.expression()?;
+                    self.expect(&TokenKind::RBracket, "`]`")?;
+                    self.alloc_expr(ExprKind::Index(name, index), line, column)
                 } else {
                     self.alloc_expr(ExprKind::Ident(name), line, column)
                 }

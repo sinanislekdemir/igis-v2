@@ -409,6 +409,115 @@ impl Machine {
                 let offset = read_u32(code, pc + 4)? as usize;
                 self.push(stack, refs::encode(refs::REGION_CODE, offset as u64))?;
             }
+            opcodes::LOAD_U8 => {
+                let index = self.pop(stack)?;
+                let bits = self.pop(stack)?;
+                let (region, offset) = self.resolve(bits, state, stack, constants, args)?;
+                // A read is checked against the runtime length, so the byte is
+                // always one the buffer actually holds (spec 0008, B4).
+                let length = self.buffer_len(region, offset, state, stack, constants, args)?;
+                let index = usize::try_from(index).map_err(|_| FaultCode::OutOfBounds)?;
+                if index >= length {
+                    return Err(FaultCode::OutOfBounds);
+                }
+                let address = offset.checked_add(index).ok_or(FaultCode::OutOfBounds)?;
+                let value = byte_at(region, address, state, stack, constants, args)?;
+                self.push(stack, u64::from(value))?;
+            }
+            opcodes::STORE_U8 => {
+                let capacity = read_u32(code, pc + 4)? as usize;
+                let value = self.pop(stack)?;
+                let index = self.pop(stack)?;
+                let bits = self.pop(stack)?;
+                if value > u8::MAX as u64 {
+                    return Err(FaultCode::Overflow);
+                }
+                let (region, offset) = self.resolve(bits, state, stack, constants, args)?;
+                if region != refs::REGION_STATE && region != refs::REGION_STACK {
+                    return Err(FaultCode::IllegalOperation);
+                }
+                if offset < 8 {
+                    return Err(FaultCode::OutOfBounds);
+                }
+                let end = region_len(region, state, stack, constants, args)
+                    .ok_or(FaultCode::OutOfBounds)?;
+                let limit = offset.checked_add(capacity).ok_or(FaultCode::OutOfBounds)?;
+                if limit > end {
+                    return Err(FaultCode::OutOfBounds);
+                }
+                // A write is checked against the declared capacity, which is
+                // the region the compiler proved available.
+                let index = usize::try_from(index).map_err(|_| FaultCode::CapacityExceeded)?;
+                if index >= capacity {
+                    return Err(FaultCode::CapacityExceeded);
+                }
+                let length = self.buffer_len(region, offset, state, stack, constants, args)?;
+                if length > capacity {
+                    return Err(FaultCode::CapacityExceeded);
+                }
+                let address = offset + index;
+                // Writing at or past the length extends it; the gap keeps no
+                // stale bytes, so it is zero-filled before the length moves.
+                let extended = index >= length;
+                if extended && index > length {
+                    match region {
+                        refs::REGION_STATE => state[offset + length..address].fill(0),
+                        refs::REGION_STACK => stack[offset + length..address].fill(0),
+                        _ => return Err(FaultCode::IllegalOperation),
+                    }
+                }
+                match region {
+                    refs::REGION_STATE => state[address] = value as u8,
+                    refs::REGION_STACK => stack[address] = value as u8,
+                    _ => return Err(FaultCode::IllegalOperation),
+                }
+                if extended {
+                    let new_len = (index + 1) as u64;
+                    match region {
+                        refs::REGION_STATE => write_u64(state, offset - 8, new_len)?,
+                        refs::REGION_STACK => write_u64(stack, offset - 8, new_len)?,
+                        _ => return Err(FaultCode::IllegalOperation),
+                    }
+                }
+            }
+            opcodes::CMP_BUFFERS => {
+                let right_bits = self.pop(stack)?;
+                let left_bits = self.pop(stack)?;
+                let equal = {
+                    let (left_region, left) =
+                        self.resolve(left_bits, state, stack, constants, args)?;
+                    let (right_region, right) =
+                        self.resolve(right_bits, state, stack, constants, args)?;
+                    let left_len =
+                        self.buffer_len(left_region, left, state, stack, constants, args)?;
+                    let right_len =
+                        self.buffer_len(right_region, right, state, stack, constants, args)?;
+                    if left_len != right_len {
+                        false
+                    } else {
+                        let a = buffer_slice(
+                            left_region,
+                            left,
+                            left_len,
+                            state,
+                            stack,
+                            constants,
+                            args,
+                        )?;
+                        let b = buffer_slice(
+                            right_region,
+                            right,
+                            right_len,
+                            state,
+                            stack,
+                            constants,
+                            args,
+                        )?;
+                        a == b
+                    }
+                };
+                self.push_bool(stack, equal)?;
+            }
 
             opcodes::ADD => self.signed(stack, |a, b| a.checked_add(b))?,
             opcodes::SUB => self.signed(stack, |a, b| a.checked_sub(b))?,
@@ -596,6 +705,20 @@ impl Machine {
                         let id = self.pop(stack)?;
                         let status = host.kill(id);
                         self.push(stack, status_code(status))?;
+                    }
+                    builtin::LEN => {
+                        let bits = self.pop(stack)?;
+                        let (region, offset) = self.resolve(bits, state, stack, constants, args)?;
+                        let length =
+                            self.buffer_len(region, offset, state, stack, constants, args)?;
+                        let end = offset.checked_add(length).ok_or(FaultCode::OutOfBounds)?;
+                        if end
+                            > region_len(region, state, stack, constants, args)
+                                .ok_or(FaultCode::OutOfBounds)?
+                        {
+                            return Err(FaultCode::OutOfBounds);
+                        }
+                        self.push(stack, length as u64)?;
                     }
                     _ => return Err(FaultCode::IllegalOperation),
                 }
@@ -1043,6 +1166,25 @@ impl Machine {
         }
         Ok(())
     }
+}
+
+/// Reads one byte from a region, bounds-checked like [`buffer_slice`].
+fn byte_at(
+    region: u8,
+    offset: usize,
+    state: &[u8],
+    stack: &[u8],
+    code: &[u8],
+    args: &[u8],
+) -> Result<u8, FaultCode> {
+    let bytes = match region {
+        refs::REGION_STATE => state,
+        refs::REGION_STACK => stack,
+        refs::REGION_CODE => code,
+        refs::REGION_ARGS => args,
+        _ => return Err(FaultCode::OutOfBounds),
+    };
+    bytes.get(offset).copied().ok_or(FaultCode::OutOfBounds)
 }
 
 /// Maps an [`abi::Status`] to the language's `int` result: the negated

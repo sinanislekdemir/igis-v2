@@ -46,7 +46,13 @@ constraints learned there.
   are not language values yet; spec 0005, "Staged ABI"). Console input now runs too: COM1
   and the PS/2 keyboard are polled in the service opportunity, the kernel stages
   echo/line assembly, and `core.read_line` blocks the shell until a line is ready (Q44;
-  spec 0005). The next pieces are buffer indexing and string operations, the record-based
+  spec 0005). Buffers can be indexed and compared: `buf[i]` reads a raw `byte` (checked
+  against the runtime length), `bytes[i] := b` writes one byte (checked against the
+  capacity, extending the length and zero-filling the gap), `=`/`<>` compare two buffers
+  of the same kind across capacities, and `core.len` returns the runtime length. The shell
+  is now a real command loop (`help`, `hello`, `exit`), and the host `core.read_line` stub
+  scripts those three lines so `langhost` runs the same shell deterministically. The next
+  pieces are string slicing/`stdlib` text helpers and command arguments, the record-based
   spawn ABI, then APs, the realtime class and streams.
 
 ## Ground rules
@@ -227,3 +233,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-13 | Scheduler loop: `task.rs` owns the record and a 64-slot runnable table (claim/release by value move), `sched.rs` runs claim → quantum → release/terminate on the boot core. The REPL only compiles and enqueues; the boot application crosses 181 claims over a 10 000-step quantum, then `exit Ok` and an idle summary. Budgets are provisional: 10 s of CPU time plus a 200M-step cap because the 1 ms clock cannot resolve a quantum. |
 | 2026-11-13 | REPL request service: `core.spawn`/`wait`/`kill` with a staged scalar `int` ABI, a 1024-slot static request queue serviced before every claim, a 64-entry exit ring, `Blocked(task exit)` with wake-on-termination, and a `shell` → `child` sample that blocks, wakes and reports `child: ok`. A load failure prints the diagnostic and records `Faulted(IoError)` under the reserved id. |
 | 2026-11-13 | Console input: COM1 and the PS/2 keyboard are polled in the service opportunity into one static FIFO, a staged line ring echoes/edits/completes lines, and `core.read_line` blocks the shell (`Blocked(Console)`) until a line exists; `shell` reads three lines and exits. Temporary until indexing lands (Q44). |
+| 2026-11-13 | Buffer indexing, comparison and length: `buf[i]` is a raw `byte` checked against the runtime length; `bytes[i] := b` is checked against the capacity and extends the length (zero-filling the gap), `string` stays read-only by index; `=`/`<>` compare buffers of the same kind across capacities; `core.len` returns `uint`. New ABI v1 opcodes `load_u8`, `store_u8`, `cmp_buffers` (54 → 57) and builtin id 6. The shell is a real `help`/`hello`/`exit` loop; the host `read_line` stub scripts those lines. |

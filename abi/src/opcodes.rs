@@ -50,6 +50,21 @@ pub const LOAD_REF: u8 = 0x16;
 pub const STORE_REF: u8 = 0x17;
 /// Push a read-only reference into the constant blob. Immediate: `off: u32`.
 pub const REF_CONST: u8 = 0x18;
+/// Pop an index, pop a buffer reference, push one raw `byte` from the buffer.
+///
+/// The index is a byte offset into the buffer's data. A read is checked
+/// against the buffer's runtime length, so an index at or past the length
+/// faults `OutOfBounds`. The result is the raw byte at that offset, zero
+/// extended to 64 bits; for `string` it is the byte, not a code point
+/// (spec 0003, T4).
+pub const LOAD_U8: u8 = 0x19;
+/// Pop a value, pop an index, pop a buffer reference, store one raw `byte`.
+///
+/// Immediate: `capacity: u32`, the destination's declared capacity. An index
+/// at or past the capacity faults `CapacityExceeded`. An index at or past the
+/// runtime length is allowed: the gap between the old length and the index is
+/// filled with zero bytes and the length becomes `index + 1` (write extends).
+pub const STORE_U8: u8 = 0x1A;
 
 /// Checked signed integer addition.
 pub const ADD: u8 = 0x20;
@@ -96,6 +111,10 @@ pub const GT_U: u8 = 0x33;
 pub const GE_U: u8 = 0x34;
 /// Boolean negation; pushes `bool`.
 pub const NOT: u8 = 0x35;
+/// Pop two buffer references, push `bool`: true when their runtime lengths and
+/// their bytes are equal. Works across capacities and regions; `string` and
+/// `bytes` are distinct types, so the compiler only pairs like with like.
+pub const CMP_BUFFERS: u8 = 0x36;
 
 /// Pop a destination reference and set its buffer length to zero.
 pub const CLEAR: u8 = 0x40;
@@ -170,6 +189,10 @@ pub mod builtin {
     /// `core.kill(id)`: pop a task id, push `0` on success or the negated
     /// `Status` discriminant.
     pub const KILL: u32 = 5;
+    /// `core.len(buffer)`: pop a `string` or `bytes` reference, push its
+    /// runtime length as a `uint`. One builtin serves both kinds; the length is
+    /// read from the buffer header, so nothing is allocated or copied.
+    pub const LEN: u32 = 6;
 
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
@@ -178,6 +201,7 @@ pub mod builtin {
             CLOCK => Some((0, 1)),
             SPAWN => Some((2, 1)),
             WAIT | KILL => Some((1, 1)),
+            LEN => Some((1, 1)),
             _ => None,
         }
     }
@@ -190,10 +214,10 @@ pub const fn instruction_words(op: u8) -> Option<u32> {
         DROP | RET | LOAD_REF | STORE_REF | NOT | CLEAR | CONVERT | FADD | FSUB | FMUL | FDIV
         | FNEG | FEQ | FNE | FLT | FLE | FGT | FGE => Some(1),
         ADD | SUB | MUL | DIV | MOD | NEG | ADD_U | SUB_U | MUL_U | DIV_U | MOD_U | EQ | NE
-        | LT | LE | GT | GE | LT_U | LE_U | GT_U | GE_U => Some(1),
+        | LT | LE | GT | GE | LT_U | LE_U | GT_U | GE_U | LOAD_U8 | CMP_BUFFERS => Some(1),
         CONST => Some(3),
         JMP | JZ | JNZ | CALL | LOAD_LOCAL | STORE_LOCAL | REF_LOCAL | LOAD_STATE | STORE_STATE
-        | REF_STATE | REF_CONST | APPEND | READ_LINE | BUILTIN => Some(2),
+        | REF_STATE | REF_CONST | APPEND | READ_LINE | STORE_U8 | BUILTIN => Some(2),
         _ => None,
     }
 }
@@ -217,6 +241,8 @@ pub const fn mnemonic(op: u8) -> Option<&'static str> {
         LOAD_REF => Some("load_ref"),
         STORE_REF => Some("store_ref"),
         REF_CONST => Some("ref_const"),
+        LOAD_U8 => Some("load_u8"),
+        STORE_U8 => Some("store_u8"),
         ADD => Some("add"),
         SUB => Some("sub"),
         MUL => Some("mul"),
@@ -239,6 +265,7 @@ pub const fn mnemonic(op: u8) -> Option<&'static str> {
         GT_U => Some("gt_u"),
         GE_U => Some("ge_u"),
         NOT => Some("not"),
+        CMP_BUFFERS => Some("cmp_buffers"),
         CLEAR => Some("clear"),
         APPEND => Some("append"),
         READ_LINE => Some("read_line"),
