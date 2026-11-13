@@ -5,7 +5,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0002, 0004, 0005, 0007, 0010, 0011, 0016
-- **Updated:** 2026-11-12
+- **Updated:** 2026-11-13
 
 ## Context
 
@@ -300,11 +300,12 @@ if st <> Ok then
 - **C6 (MUST):** A task may call `core.realtime_on()` once to enter the realtime class and
   must then call `core.heartbeat()` at least once per second of non-blocked time. There is
   no way back to the normal class. The model is soft realtime (ADR 0016).
-- **C7 (MUST):** `core.run(path, args, var reason)` blocks until the child terminates.
-  `core.spawn(path, args, var id)` reserves a global `TaskId` and returns immediately;
-  `core.wait(id, var reason)` blocks if the task is live and returns its exit reason;
-  `core.kill(id)` requests termination and does not wait. The request is handled by the
-  kernel REPL service (ADR 0017).
+- **C7 (MUST):** `core.run(path, args, var diag, var reason)` blocks until the child
+  terminates. `core.spawn(path, args, var diag, var id)` reserves a global `TaskId` and
+  returns immediately; `core.wait(id, var reason)` blocks if the task is live and returns
+  its exit reason; `core.kill(id)` requests termination and does not wait. The request is
+  handled by the kernel REPL service (ADR 0017). `diag` is filled on a compile error and
+  cleared otherwise.
 - **C8 (MUST):** A spawned child is a separate application instance with its own regions.
   It shares no memory with the parent; communication is through streams.
 - **C9 (MUST):** The argument passed to `run`/`spawn` is a fixed `string[1024]`, delivered
@@ -383,11 +384,13 @@ Labels and loops inside the handlers are allowed. A recovery label is declared a
 level and is validated by the compiler and the interpreter: no nested function interiors,
 no return to the faulting instruction, no other application.
 
-**Diagnostics.** `Diagnostic` is a kernel-filled, read-only record:
+**Diagnostics.** `Diagnostic` is a caller-owned record filled by the kernel or the
+compiler; the application only reads it:
 
 ```text
 type Diagnostic = record
   unit_name: string[32];
+  message: string[96];   // short text, truncated if it does not fit
   line: int;
   column: int;
   handle: int;      // region handle involved, or -1
@@ -396,6 +399,11 @@ type Diagnostic = record
   task_id: int;
 end;
 ```
+
+The same record carries compile diagnostics. `core.run` and `core.spawn` take a
+`var diag: Diagnostic` out-parameter: on `Status.Invalid` it holds the failing unit, line,
+column and message; on any other status it is cleared. The compiler writes into the
+caller's buffer, so there is no global error slot and no diagnostic stream.
 
 **Fault codes.** `fault` receives one of:
 
@@ -443,9 +451,9 @@ is the signal.
 | Send on a receive endpoint | Compile error (distinct types) |
 | Send on a closed endpoint | `Status.Closed` |
 | Realtime heartbeat missed | `fault(WatchdogTimeout)`; recovery rejected |
-| `run`/`spawn` path not found | `Status.NotFound` |
+| `run`/`spawn` path not found | `Status.NotFound`; `diag` cleared |
 | Argument longer than 1024 bytes | `Status.CapacityExceeded` |
-| `run`/`spawn` compile error | `Status.Invalid`; no child |
+| `run`/`spawn` compile error | `Status.Invalid`; `diag` filled; no child |
 | `wait` on an unknown or evicted id | `Status.NotFound` |
 | `kill` on an unknown or terminated id | `Status.NotFound` |
 | Discarded `Status` | Compile warning |
@@ -475,3 +483,4 @@ is the signal.
 | 2026-11-12 | Added task spawning and `run`/`spawn`/`wait`/`kill`; `spawn` starts a separate application instance, not a thread (ADR 0017). |
 | 2026-11-12 | Added the fixed `string[1024]` argument, delivered as `main(args)` (ADR 0017 addendum). |
 | 2026-11-12 | Replaced task handles with global `TaskId`s; `spawn` returns an id, `wait`/`kill` take one; no per-task handle table (ADR 0017 addendum 2). |
+| 2026-11-13 | `Diagnostic` gained a `message: string[96]` field and is caller-owned; `core.run`/`core.spawn` take a `var diag` out-parameter filled on compile errors (spec 0005, whose OQ 7 is now closed). |

@@ -4,7 +4,7 @@ Parked decisions for igis-v2. This is the working register; each spec's own
 "Open questions" section remains authoritative for that document. When an item is
 resolved, record the answer in the relevant spec or in a new ADR, then remove it here.
 
-**Status:** specification phase, no code. Last updated: 2026-11-12.
+**Status:** specification phase, no code. Last updated: 2026-11-13.
 **Snapshot:** specs 0001–0007, ADRs 0001–0017.
 
 ## How to use
@@ -26,11 +26,9 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 
 | # | Question | Options / recommendation | Trigger |
 |---|----------|--------------------------|---------|
-| Q5 | Console read granularity | bytes vs lines vs key events; byte stream is the working assumption | console driver |
-| Q6 | Clock source and unit | TSC / PIT / APIC timer; nanoseconds since boot | `arch/x86_64` timer |
-| Q7 | Compile-error diagnostics | fixed buffer vs stream vs `Status` only | REPL/shell integration |
-| Q8 | Debug/introspection primitive | none in M1; task listing/counters later | after the shell exists |
-| Q9 | DMA and block primitives | when the first real device is added | `syslib` |
+| Q8 | Debug/introspection primitive | shape open (task listing, counters, trace); none in M1 | after the shell exists |
+| Q9 | DMA and block primitives | handle model fixed; no primitive in M1 | first real block device |
+| Q39 | Console/stream multiplexing (`poll`/`select`) | none in M1; a task blocks on one source at a time | when an application must serve two input sources |
 
 ## C. Streams
 
@@ -80,6 +78,25 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | Q36 | Path validation | relative to the image root; directories allowed? `..` rejected? | REPL |
 | Q37 | Shell/entrypoint recursion | is starting `shell` from `shell` allowed? | REPL |
 | Q38 | Spawn queue full retry policy | `Status.Full` (decided); does the shell retry or report? | shell |
+
+## Decided in the 2026-11-13 session
+
+- **Console input is a byte stream.** `console_read` blocks until at least one byte,
+  returns what is available, and never waits for a line. No echo, no line assembly, no key
+  events in the kernel; `Enter`/`Backspace`/`Tab`/`Ctrl+C` map to `\n`/`0x7F`/`\t`/`0x03`
+  and other non-text keys are discarded. The console is unowned (spec 0005).
+- **One clock: nanoseconds since boot.** A global 64-bit counter is advanced by the boot
+  core's 1 kHz APIC timer tick and read by every core; the timer is calibrated against the
+  PIT/HPET. The TSC is not used, because in QEMU TCG it is per-vCPU and can drift, which
+  would corrupt budget and heartbeat accounting under work stealing. Resolution is 1 ms
+  (specs 0005, 0007).
+- **Compile diagnostics are a caller-owned out-parameter.** `run`/`spawn` take
+  `var diag: Diagnostic`, filled on `Status.Invalid` and cleared otherwise; `Diagnostic`
+  gained `message: string[96]`. No global error slot, no diagnostic stream
+  (specs 0003, 0005).
+- **No debug/introspection primitive and no DMA/block primitive in M1** (Q8, Q9 stay open
+  with later triggers).
+- Q5, Q6 and Q7 are resolved and removed from the table.
 
 ## Decided in the 2026-11-12 session
 

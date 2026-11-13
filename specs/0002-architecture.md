@@ -406,7 +406,7 @@ task; after that, shutdown.
 | ext2 image missing or corrupt | Mount refused; no applications load; kernel still boots to a diagnostic |
 | `shell` missing or fails to compile | Try `entrypoint`; if that also fails, write `no entry` and halt |
 | Spawn path not found | `Status.NotFound`; no task created |
-| Spawn compile error | `Status.Invalid`; no task created |
+| Spawn compile error | `Status.Invalid`; `diag` filled; no task created |
 | Request queue full | `Status.Full`; `run` blocks only on the child, never on the queue |
 | `wait` on an unknown or evicted id | `Status.NotFound` |
 | `kill` on a terminated or unknown id | `Status.NotFound` |

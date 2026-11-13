@@ -6,7 +6,7 @@
 - **Superseded by:** none
 - **ADRs:** 0003 (cooperative model, budget intent), 0006 (guard pages), 0011 (work
   stealing), 0016 (realtime class)
-- **Updated:** 2026-11-12
+- **Updated:** 2026-11-13
 
 ## Context
 
@@ -123,6 +123,22 @@ loop {
   release path.
 - A task that terminates inside `run_quantum` is reclaimed by the termination path and is
   never re-enqueued.
+
+### Time
+
+- The runtime sees one clock: a global 64-bit nanosecond counter since boot.
+- The boot core's periodic APIC timer tick (1 kHz by default) advances it. Every core
+  reads the same value, so a task that migrates between quanta never observes time moving
+  backwards and its budget cannot lose or gain time in the move.
+- Resolution is the tick period, one millisecond by default. `sleep_until`, budget
+  accounting and the heartbeat deadline inherit that granularity; all three are measured
+  in seconds, so the coarse tick is not a limitation.
+- The TSC is not used. In QEMU TCG it is per-vCPU and can drift, so two cores could
+  disagree about a task's accumulated budget or heartbeat deadline under work stealing.
+  The APIC timer frequency is calibrated against the PIT or HPET at boot; the calibrated
+  value is a boot-time constant.
+- A core with nothing to run halts until the next timer interrupt or IPI; time therefore
+  advances on an otherwise idle machine and blocked deadlines still fire.
 
 ### Safe points
 
@@ -264,8 +280,8 @@ There is no per-core ownership of any application region.
 
 ### Interrupts
 
-- The timer interrupt updates time and sets budget/quantum flags. It does not switch
-  tasks.
+- The timer interrupt advances the global clock on the boot core and sets budget/quantum
+  flags on every core. It does not switch tasks.
 - Handlers are short; deferred work runs in a bottom half drained by the interpreter loop
   before the next quantum.
 - An interrupt that arrives while a core is between tasks (no current task) must not
@@ -325,7 +341,7 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 2 | Global queue vs per-core deques with stealing | Performance; claim semantics do not change. |
 | 3 | Priority or deadline scheduling | Not planned; budgets are the only policy. |
 | 4 | IPC mechanism: fixed-vector IPI vs APIC shorthand | `arch/x86_64` implementation detail. |
-| 5 | Timer source: PIT, HPET or APIC timer | `arch/x86_64`; the APIC timer is the likely choice. |
+| 5 | ~~Timer source: PIT, HPET or APIC timer~~ | **Resolved** — APIC timer for ticks, calibrated against the PIT/HPET at boot; one global nanosecond counter advanced by the boot core (see Time). |
 | 6 | Whether a task can be pinned for debugging | A debug feature, not a scheduling model. |
 | 7 | ~~Whether to reserve one core for the REPL/system~~ | **Resolved** — no reservation; realtime may occupy every core (ADR 0016 addendum). |
 | 8 | Heartbeat interval (one second) and whether it is configurable per task | Detection latency versus overhead. |
@@ -341,3 +357,4 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 2026-11-12 | Added the realtime class: one-way promotion, priority, no quantum preemption, admission by core count, heartbeat with `WatchdogTimeout` (ADR 0016). |
 | 2026-11-12 | Added the service opportunity and REPL task creation: `run`/`spawn`/`wait`/`kill`, task ids and the exit-reason ring (ADR 0017). |
 | 2026-11-12 | Task creation carries the fixed `string[1024]` argument, delivered as `main(args)`; queue capacity 1024; orphan children continue (ADR 0017 addendum). |
+| 2026-11-13 | Time fixed as one global nanosecond counter advanced by the boot core's 1 kHz APIC timer tick; no TSC, because per-vCPU TSC drift would corrupt budget and heartbeat accounting; 1 ms resolution is accepted. |

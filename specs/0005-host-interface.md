@@ -5,7 +5,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0001, 0011, 0014, 0015
-- **Updated:** 2026-11-12
+- **Updated:** 2026-11-13
 
 ## Context
 
@@ -65,8 +65,8 @@ The interface is split into two namespaces:
 | `sleep_until` | `fn sleep_until(deadline_ns: u64)` | yes, until deadline |
 | `realtime_on` | `fn realtime_on() -> Status` | no; `Full` if no core is available |
 | `heartbeat` | `fn heartbeat()` | no; resets the realtime deadline |
-| `run` | `fn run(path: &str, args: &str, reason: &mut ExitReason) -> Status` | yes, until the child terminates |
-| `spawn` | `fn spawn(path: &str, args: &str, id: &mut TaskId) -> Status` | no; reserves an id and returns |
+| `run` | `fn run(path: &str, args: &str, diag: &mut Diagnostic, reason: &mut ExitReason) -> Status` | yes, until the child terminates |
+| `spawn` | `fn spawn(path: &str, args: &str, diag: &mut Diagnostic, id: &mut TaskId) -> Status` | no; reserves an id and returns |
 | `wait` | `fn wait(id: TaskId, reason: &mut ExitReason) -> Status` | yes if the task is live |
 | `kill` | `fn kill(id: TaskId) -> Status` | no; requests termination |
 
@@ -87,14 +87,38 @@ The interface is split into two namespaces:
 - The argument is a fixed `string[1024]`. The kernel copies it into the request and
   passes it to the child's `main(args: const string[1024])`; it never parses it. A longer
   argument is `Status.CapacityExceeded`.
+- The caller supplies the diagnostic buffer. `run` and `spawn` fill `diag` on
+  `Status.Invalid` with the failing unit, line, column and a truncated message, and clear
+  it on every other status. There is no global "last error" slot — it would race between
+  concurrent compiles — and no diagnostic stream.
 - `wait` is `wait(id)`. If the task is live it blocks; if it has terminated, the exit
   reason is served from a small global ring (64 entries by default); if the record has
   been evicted or the id is unknown, it returns `Status.NotFound`.
 - Any application may wait on or kill any id; there is no capability check (vision R14).
-- Time is monotonic nanoseconds since boot. It does not wrap in any realistic uptime;
-  the comparison is unsigned and the deadline is absolute.
-- `console_read` returns a byte count and never blocks past the next input event; line
-  editing and echo belong to `stdlib`.
+- Time is monotonic nanoseconds since boot, read from one global 64-bit counter. The boot
+  core's periodic timer tick (1 kHz by default) advances it; every core reads the same
+  value, so a task observes the clock consistently across migration. It does not wrap in
+  any realistic uptime; the comparison is unsigned and the deadline is absolute.
+- Resolution is the tick period, one millisecond by default. That bounds `sleep_until`
+  precision and budget accounting error, and is well below the 10 s budget and 1 s
+  heartbeat. The TSC is deliberately not used: in QEMU TCG it is per-vCPU and can drift,
+  which would make two cores disagree about a task's budget or heartbeat. The APIC timer
+  frequency is calibrated against the PIT or HPET at boot (`0007-scheduler.md`).
+- `console_read` is a byte stream. It blocks until at least one byte is available,
+  returns as many bytes as are available up to the destination length, and never waits for
+  a line or a full key sequence.
+- The kernel does not echo, does not assemble lines, does no editing and exposes no key
+  events; prompt, echo, history and line editing are `stdlib`/shell code.
+- Console bytes pass through unvalidated: the kernel never checks UTF-8 and never
+  interprets escape sequences. In the first milestone the keyboard driver emits US ASCII,
+  with `Enter` as `\n` (LF only), `Backspace` as `0x7F`, `Tab` as `\t` and `Ctrl+C` as
+  `0x03`. Every other non-text key is discarded.
+- `Ctrl+C` is not interpreted by the kernel. It is a byte an application may read, for
+  example to kill or interrupt the child it is waiting on.
+- The console has no owner. Any task may read, and a byte is consumed by the first task
+  that reads it. The first milestone assumes one interactive application.
+- There is no `poll` or `select`: a task cannot wait on the console and a stream at the
+  same time. It blocks on one source at a time (open question 12).
 - `send` is atomic (`0006-streams.md`): it either enqueues the whole slice or returns an
   error. A slice larger than the endpoint capacity can never succeed and is a
   `CapacityExceeded` status.
@@ -150,8 +174,8 @@ trait Host {
     fn sleep_until(&mut self, deadline_ns: u64);
     fn realtime_on(&mut self) -> Status;
     fn heartbeat(&mut self);
-    fn run(&mut self, path: &str, args: &str, reason: &mut ExitReason) -> Status;
-    fn spawn(&mut self, path: &str, args: &str, id: &mut TaskId) -> Status;
+    fn run(&mut self, path: &str, args: &str, diag: &mut Diagnostic, reason: &mut ExitReason) -> Status;
+    fn spawn(&mut self, path: &str, args: &str, diag: &mut Diagnostic, id: &mut TaskId) -> Status;
     fn wait(&mut self, id: TaskId, reason: &mut ExitReason) -> Status;
     fn kill(&mut self, id: TaskId) -> Status;
 }
@@ -174,6 +198,9 @@ signal for origin and cost (`0003-language.md`).
 | Situation | Behaviour |
 |-----------|-----------|
 | `console_read` with no input | Task blocks; no CPU consumed |
+| `console_read` sees a non-text key | Key is discarded; no byte is produced |
+| Two tasks read the console | Bytes are split between them; no ownership, no arbitration |
+| Task needs the console and a stream at once | Not expressible; one blocking wait at a time (open question 12) |
 | `send` with a full queue | Blocks by default; `try_send` returns `WouldBlock` |
 | `send` larger than capacity | `CapacityExceeded`; cannot ever succeed |
 | `receive` from an empty queue | Blocks; `try_receive` returns `WouldBlock` |
@@ -181,10 +208,10 @@ signal for origin and cost (`0003-language.md`).
 | `sleep_until` in the past | Returns immediately |
 | Realtime requested with no free core | `Status.Full`; the task stays normal |
 | Realtime task misses its heartbeat | Terminate at the next safe point; `fault(WatchdogTimeout)`; recovery rejected; `exit`; reclaim |
-| `run`/`spawn` path not found | `Status.NotFound`; no task created |
+| `run`/`spawn` path not found | `Status.NotFound`; `diag` cleared; no task created |
 | Argument longer than 1024 bytes | `Status.CapacityExceeded`; no request enqueued |
-| `run`/`spawn` compile error | `Status.Invalid`; the diagnostic is written where the caller can read it (open question 7) |
-| Request queue full | `Status.Full`; `run` blocks only on the child |
+| `run`/`spawn` compile error | `Status.Invalid`; `diag` filled; no task created |
+| Request queue full | `Status.Full`; `diag` cleared; `run` blocks only on the child |
 | `wait` on an unknown or evicted id | `Status.NotFound` |
 | `kill` on a terminated or unknown id | `Status.NotFound` |
 | Child terminates while the parent is blocked in `wait` | Parent wakes with the child's `ExitReason` |
@@ -198,17 +225,18 @@ signal for origin and cost (`0003-language.md`).
 
 | # | Question | Trigger / owner |
 |---|----------|-----------------|
-| 1 | `console_read` granularity: bytes, lines, or key events | Console driver and REPL; a byte stream is the current assumption. |
-| 2 | Clock source and unit (TSC, PIT, APIC timer) and the `sleep_until` granularity | `arch/x86_64` timer work. |
-| 3 | Whether a minimal debug/introspection primitive is worth adding to the first milestone | After the REPL exists; not assumed. |
+| 1 | ~~`console_read` granularity: bytes, lines, or key events~~ | **Resolved** — byte stream; no echo, no line assembly, no key events; US ASCII with `\n`, `0x7F`, `\t`, `0x03`. |
+| 2 | ~~Clock source and unit (TSC, PIT, APIC timer) and the `sleep_until` granularity~~ | **Resolved** — one global nanosecond counter advanced by the boot core's 1 kHz timer tick; no TSC; 1 ms resolution. |
+| 3 | ~~Whether a minimal debug/introspection primitive is worth adding to the first milestone~~ | **Resolved** — none in M1; task listing and counters are designed after the shell exists. |
 | 4 | Whether `syslib` needs its own trait or shares the host trait | Implementation layout; no semantic impact. |
-| 5 | DMA and block primitives | When the first real device is added. |
+| 5 | DMA and block primitives | When the first real device is added; M1 reads ext2 through the in-memory module. |
 | 6 | ~~Whether one core is reserved for the REPL/system so realtime tasks cannot starve it~~ | **Resolved** — no reservation; realtime may occupy every core (ADR 0016 addendum). |
-| 7 | Compile-error diagnostics: a fixed buffer, a stream, or a status only | The shell must display errors; the ABI shape is open. |
+| 7 | ~~Compile-error diagnostics: a fixed buffer, a stream, or a status only~~ | **Resolved** — caller-owned `var diag: Diagnostic` out-parameter on `run`/`spawn`; no global slot. |
 | 8 | ~~`run`/`spawn` arguments, working directory and environment~~ | **Resolved** — fixed `string[1024]`; the child parses it (ADR 0017 addendum). |
 | 9 | ~~Parent death with live children~~ | **Resolved** — children continue (ADR 0017 addendum). |
 | 10 | ~~Exit-reason ring size (64?) and whether `run` blocks on a full queue~~ | **Resolved** — ring default 64; a full request queue returns `Status.Full`. |
 | 11 | ~~Whether the argument string is `core.arguments` or a `main` parameter~~ | **Resolved** — `main(args: const string[1024])`. |
+| 12 | Multiplexing: a task cannot wait on the console and a stream at the same time | When an application must serve input from more than one source; a `poll`-style primitive would widen the ABI. |
 
 ## Changelog
 
@@ -217,3 +245,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-12 | Initial draft: core and syslib namespaces, blocking semantics, mockability, absence of allocation and spawn. |
 | 2026-11-12 | Added realtime promotion and heartbeat. |
 | 2026-11-12 | Added `run`/`spawn`/`wait`/`kill`, fixed `string[1024]` arguments delivered as `main(args)`, global task ids and the exit-reason ring; removed per-task handles (ADR 0017 and addenda 1–2). |
+| 2026-11-13 | Console input fixed as a byte stream (no echo, no line assembly, no key events, `\n`/`0x7F`/`\t`/`0x03`); clock fixed as one global nanosecond counter at 1 ms resolution (no TSC); `run`/`spawn` take a caller-owned `Diagnostic` out-parameter; no debug or DMA primitive in M1; consoles are unowned and there is no multiplexing (open question 12). |
