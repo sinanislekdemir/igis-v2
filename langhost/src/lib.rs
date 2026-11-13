@@ -7,16 +7,27 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::HashMap;
 use std::io::Write;
+use std::path::PathBuf;
 use std::time::Instant;
 
-use abi::{ExitReason, FaultCode};
-use interpreter::{Host, Machine, Outcome, Program};
+use abi::{ExitReason, FaultCode, Status};
+use interpreter::{Host, Machine, Outcome, Program, WaitOutcome};
 
 /// Default instruction budget for one `langhost` run. This is a host-side
 /// watchdog, not a scheduler quantum: the machine is resumed between slices
 /// until the budget is exhausted.
 pub const DEFAULT_BUDGET: u64 = 100_000_000;
+
+/// Maximum nesting of `core.spawn` on the host. The real kernel places tasks
+/// statically and has no depth limit beyond the 64-slot task table; the host
+/// runs a child synchronously inside its parent, so it needs one.
+pub const MAX_SPAWN_DEPTH: u32 = 8;
+
+/// Directory `core.spawn` resolves paths against, unless `IGIS_APP_DIR` is
+/// set. It matches the source directory `xtask image` stages (ADR 0019).
+const DEFAULT_APP_DIR: &str = "samples/apps";
 
 /// A package with owned buffers, produced by [`compile`].
 ///
@@ -61,18 +72,48 @@ pub struct RunResult {
 }
 
 /// The host implementation behind the trait.
+///
+/// `core.spawn` is implemented the only way a single-threaded host can: it
+/// compiles and runs the child **synchronously**, appends its output to the
+/// parent's, and stores the exit reason under a fresh id. `core.wait` then
+/// returns that record immediately and never blocks; the scheduling difference
+/// from the kernel is invisible to a program that spawns and waits.
 struct ConsoleHost {
-    started: Instant,
     output: Vec<u8>,
+    depth: u32,
+    source_dir: PathBuf,
+    children: HashMap<u64, ExitReason>,
+    next_id: u64,
 }
 
 impl ConsoleHost {
-    fn new() -> Self {
+    fn new(depth: u32) -> Self {
         ConsoleHost {
-            started: Instant::now(),
             output: Vec::new(),
+            depth,
+            source_dir: app_dir(),
+            children: HashMap::new(),
+            next_id: 1,
         }
     }
+}
+
+/// Resolves the directory `core.spawn` reads sources from.
+///
+/// `IGIS_APP_DIR` wins. Otherwise the repository layout is tried relative to
+/// the working directory (`samples/apps` from the root, `../samples/apps` from
+/// the `langhost` crate root under `cargo test`).
+fn app_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("IGIS_APP_DIR") {
+        return PathBuf::from(dir);
+    }
+    for candidate in [DEFAULT_APP_DIR, "../samples/apps"] {
+        let path = PathBuf::from(candidate);
+        if path.is_dir() {
+            return path;
+        }
+    }
+    PathBuf::from(DEFAULT_APP_DIR)
 }
 
 impl Host for ConsoleHost {
@@ -81,8 +122,83 @@ impl Host for ConsoleHost {
     }
 
     fn clock(&mut self) -> u64 {
-        self.started.elapsed().as_nanos() as u64
+        // One process-wide baseline, so nested runs observe the same clock.
+        static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        START.get_or_init(Instant::now).elapsed().as_nanos() as u64
     }
+
+    fn spawn(&mut self, path: &[u8], args: &[u8]) -> Result<u64, Status> {
+        if self.depth >= MAX_SPAWN_DEPTH {
+            eprintln!("langhost: spawn refused: nesting deeper than {MAX_SPAWN_DEPTH}");
+            return Err(Status::Full);
+        }
+        let path = std::str::from_utf8(path).map_err(|_| Status::Invalid)?;
+        if !valid_path(path) {
+            eprintln!("langhost: spawn refused: malformed path `{path}`");
+            return Err(Status::Invalid);
+        }
+        if args.len() > 1024 {
+            return Err(Status::CapacityExceeded);
+        }
+        if std::str::from_utf8(args).is_err() {
+            return Err(Status::Invalid);
+        }
+
+        let source = match std::fs::read(self.source_dir.join(path)) {
+            Ok(source) => source,
+            Err(error) => {
+                let status = if error.kind() == std::io::ErrorKind::NotFound {
+                    Status::NotFound
+                } else {
+                    Status::IoError
+                };
+                eprintln!("langhost: spawn `{path}`: {error}");
+                return Err(status);
+            }
+        };
+        let package = match compile(&source, path) {
+            Ok(package) => package,
+            Err(diagnostic) => {
+                eprintln!("langhost: spawn `{path}`: {diagnostic}");
+                return Err(Status::Invalid);
+            }
+        };
+
+        let mut child = ConsoleHost::new(self.depth + 1);
+        match run_with_host(&package.code, args, DEFAULT_BUDGET, &mut child) {
+            Ok(result) => {
+                self.output.extend_from_slice(&result.output);
+                let id = self.next_id;
+                self.next_id += 1;
+                self.children.insert(id, result.reason);
+                Ok(id)
+            }
+            Err(diagnostic) => {
+                eprintln!("langhost: spawn `{path}`: verifier rejected it: {diagnostic}");
+                Err(Status::Invalid)
+            }
+        }
+    }
+
+    fn wait(&mut self, id: u64) -> WaitOutcome {
+        match self.children.remove(&id) {
+            Some(reason) => WaitOutcome::Exited(reason),
+            None => WaitOutcome::Status(Status::NotFound),
+        }
+    }
+
+    fn kill(&mut self, _id: u64) -> Status {
+        // Children run to completion inside `spawn`, so nothing is ever live.
+        Status::NotFound
+    }
+}
+
+/// Host-side path validation, matching the kernel's relative-path rule.
+fn valid_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.ends_with('/')
+        && !path.split('/').any(|part| part.is_empty() || part == "..")
 }
 
 /// Verifies and runs a compiled package.
@@ -90,6 +206,16 @@ impl Host for ConsoleHost {
 /// `args` is the text delivered to `main(args)`; it may be at most 1024 bytes.
 /// `budget` bounds the total number of instructions executed.
 pub fn run(code: &[u8], args: &[u8], budget: u64) -> Result<RunResult, interpreter::Diagnostic> {
+    let mut host = ConsoleHost::new(0);
+    run_with_host(code, args, budget, &mut host)
+}
+
+fn run_with_host(
+    code: &[u8],
+    args: &[u8],
+    budget: u64,
+    host: &mut ConsoleHost,
+) -> Result<RunResult, interpreter::Diagnostic> {
     if args.len() > 1024 {
         // The language's `string[1024]` argument is a compile/loader contract;
         // report it as a capacity failure rather than truncating.
@@ -110,19 +236,23 @@ pub fn run(code: &[u8], args: &[u8], budget: u64) -> Result<RunResult, interpret
     argument_buffer[8..8 + args.len()].copy_from_slice(args);
 
     let mut machine = Machine::new();
-    let mut host = ConsoleHost::new();
     let mut remaining = budget;
     let reason = loop {
         let slice = remaining.min(1_000_000);
         match machine.run(
             &program,
-            &mut host,
+            host,
             &mut state,
             &mut stack,
             &argument_buffer,
             slice,
         ) {
             Outcome::Exited(reason) => break reason,
+            Outcome::Blocked(_) => {
+                // `ConsoleHost::wait` never returns `Blocked`; a package that
+                // reaches here is broken rather than merely slow.
+                break ExitReason::Faulted(FaultCode::IllegalOperation);
+            }
             Outcome::Yielded => {
                 remaining = remaining.saturating_sub(slice);
                 if remaining == 0 {
@@ -141,7 +271,7 @@ pub fn run(code: &[u8], args: &[u8], budget: u64) -> Result<RunResult, interpret
     };
 
     Ok(RunResult {
-        output: host.output,
+        output: std::mem::take(&mut host.output),
         reason,
         fault_at,
     })

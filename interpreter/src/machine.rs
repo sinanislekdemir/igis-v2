@@ -29,15 +29,20 @@
 //! yield flag and waiting for the next `Yielded`.
 
 use abi::opcodes::{self, builtin, value_kind};
-use abi::{refs, ExitReason, FaultCode};
+use abi::{refs, ExitReason, FaultCode, Status};
 
 use crate::program::Program;
 
 /// The host interface as far as this slice needs it (spec 0005).
 ///
-/// The kernel will implement this over its own console and clock; the host
-/// toolchain implements it over stdout and `Instant`. Neither the interpreter
-/// nor the compiler knows which one is behind the trait.
+/// The kernel implements this over its own console, clock and REPL service;
+/// the host toolchain implements it over stdout, `Instant` and a synchronous
+/// child runner. Neither the interpreter nor the compiler knows which one is
+/// behind the trait.
+///
+/// `spawn`, `wait` and `kill` have default implementations that refuse with
+/// [`Status::Invalid`], so a test host that only needs the console and the
+/// clock stays small (spec 0005, H4).
 pub trait Host {
     /// Writes application bytes to the console. The bytes are unvalidated:
     /// they may be arbitrary binary data.
@@ -45,6 +50,47 @@ pub trait Host {
 
     /// Monotonic nanoseconds since boot (or since the host process started).
     fn clock(&mut self) -> u64;
+
+    /// Requests a new application instance (`core.spawn`).
+    ///
+    /// `path` and `args` are the bytes of the two `string` buffers. A
+    /// successful call returns the reserved global task id; an error is a
+    /// `Status` with no task created.
+    fn spawn(&mut self, _path: &[u8], _args: &[u8]) -> Result<u64, Status> {
+        Err(Status::Invalid)
+    }
+
+    /// Consumes the exit record for `id`, or reports that the child is live
+    /// (`core.wait`). A live child makes the machine return
+    /// [`Outcome::Blocked`] and retry the same instruction when the scheduler
+    /// wakes the task.
+    fn wait(&mut self, _id: u64) -> WaitOutcome {
+        WaitOutcome::Status(Status::Invalid)
+    }
+
+    /// Requests termination of `id` (`core.kill`). It never waits.
+    fn kill(&mut self, _id: u64) -> Status {
+        Status::Invalid
+    }
+}
+
+/// What a blocked builtin is waiting for. The scheduler records the condition
+/// on the task and retries the instruction after the wake-up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitKind {
+    /// Wait for the task with this global id to terminate.
+    ChildExit(u64),
+}
+
+/// Result of [`Host::wait`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitOutcome {
+    /// The child has terminated; the record was consumed.
+    Exited(ExitReason),
+    /// The child is live. The machine blocks without advancing.
+    Blocked,
+    /// The id is unknown or its record was evicted.
+    Status(Status),
 }
 
 /// Result of one [`Machine::run`] slice.
@@ -53,8 +99,21 @@ pub enum Outcome {
     /// The step budget ran out (or a yield was requested); call `run` again to
     /// resume at the same instruction boundary.
     Yielded,
+    /// A blocking builtin cannot complete. The machine has not advanced `pc`
+    /// or the operand stack, so the same instruction is retried on wake.
+    Blocked(WaitKind),
     /// The task stopped. No further execution is possible.
     Exited(ExitReason),
+}
+
+/// What one instruction did.
+enum Step {
+    /// Continue with the next instruction.
+    Continue,
+    /// The entry function returned; the task is done.
+    Exited(ExitReason),
+    /// A builtin blocked; the caller restores the instruction boundary.
+    Blocked(WaitKind),
 }
 
 const FRAME_HEADER: usize = 32;
@@ -200,11 +259,12 @@ impl Machine {
             steps -= 1;
             self.executed = self.executed.wrapping_add(1);
             match self.step(program, host, state, stack, args) {
-                Ok(Some(reason)) => {
+                Ok(Step::Exited(reason)) => {
                     self.halted = Some(reason);
                     return Outcome::Exited(reason);
                 }
-                Ok(None) => {}
+                Ok(Step::Blocked(kind)) => return Outcome::Blocked(kind),
+                Ok(Step::Continue) => {}
                 Err(code) => {
                     let reason = ExitReason::Faulted(code);
                     self.halted = Some(reason);
@@ -221,10 +281,11 @@ impl Machine {
         state: &mut [u8],
         stack: &mut [u8],
         args: &[u8],
-    ) -> Result<Option<ExitReason>, FaultCode> {
+    ) -> Result<Step, FaultCode> {
         let code = program.instructions();
         let constants = program.constants();
         let pc = self.pc;
+        let saved_sp = self.sp;
         if pc.checked_add(4).is_none_or(|end| end > code.len()) {
             return Err(FaultCode::IllegalOperation);
         }
@@ -271,7 +332,7 @@ impl Machine {
             }
             opcodes::RET => {
                 if let Some(reason) = self.ret(program, state, stack, args)? {
-                    return Ok(Some(reason));
+                    return Ok(Step::Exited(reason));
                 }
             }
 
@@ -412,6 +473,79 @@ impl Machine {
                         let now = host.clock();
                         self.push(stack, now)?;
                     }
+                    builtin::SPAWN => {
+                        let args_bits = self.pop(stack)?;
+                        let path_bits = self.pop(stack)?;
+                        let value = {
+                            let (path_region, path_offset) =
+                                self.resolve(path_bits, state, stack, constants, args)?;
+                            let (args_region, args_offset) =
+                                self.resolve(args_bits, state, stack, constants, args)?;
+                            let path_len = self.buffer_len(
+                                path_region,
+                                path_offset,
+                                state,
+                                stack,
+                                constants,
+                                args,
+                            )?;
+                            let args_len = self.buffer_len(
+                                args_region,
+                                args_offset,
+                                state,
+                                stack,
+                                constants,
+                                args,
+                            )?;
+                            let path = buffer_slice(
+                                path_region,
+                                path_offset,
+                                path_len,
+                                state,
+                                stack,
+                                constants,
+                                args,
+                            )?;
+                            let argument = buffer_slice(
+                                args_region,
+                                args_offset,
+                                args_len,
+                                state,
+                                stack,
+                                constants,
+                                args,
+                            )?;
+                            match host.spawn(path, argument) {
+                                Ok(id) => id,
+                                Err(status) => status_code(status),
+                            }
+                        };
+                        self.push(stack, value)?;
+                    }
+                    builtin::WAIT => {
+                        let id = self.pop(stack)?;
+                        match host.wait(id) {
+                            WaitOutcome::Exited(reason) => {
+                                self.push(stack, exit_code(reason))?;
+                            }
+                            WaitOutcome::Status(status) => {
+                                self.push(stack, status_code(status))?;
+                            }
+                            WaitOutcome::Blocked => {
+                                // Put the id back on the operand stack and point
+                                // `pc` at the same instruction: the retry after
+                                // the wake-up must see an unchanged boundary.
+                                self.pc = pc;
+                                self.sp = saved_sp;
+                                return Ok(Step::Blocked(WaitKind::ChildExit(id)));
+                            }
+                        }
+                    }
+                    builtin::KILL => {
+                        let id = self.pop(stack)?;
+                        let status = host.kill(id);
+                        self.push(stack, status_code(status))?;
+                    }
                     _ => return Err(FaultCode::IllegalOperation),
                 }
             }
@@ -443,7 +577,7 @@ impl Machine {
         // `c` is read for the poll hint only; the first-milestone interpreter
         // checks the budget at every boundary, so no extra work is needed.
         let _ = c;
-        Ok(None)
+        Ok(Step::Continue)
     }
 
     // ---- operand stack ------------------------------------------------
@@ -858,6 +992,43 @@ impl Machine {
         }
         Ok(())
     }
+}
+
+/// Maps an [`abi::Status`] to the language's `int` result: the negated
+/// discriminant (`Invalid` is `-4`, `NotFound` is `-3`, ...).
+fn status_code(status: Status) -> u64 {
+    (-(status as i64)) as u64
+}
+
+/// Maps a finished child to the staged `core.wait` result: `0` for `Ok`, `1`
+/// for `Killed`, `2 + code` for `Faulted(code)`.
+fn exit_code(reason: ExitReason) -> u64 {
+    match reason {
+        ExitReason::Ok => 0,
+        ExitReason::Killed => 1,
+        ExitReason::Faulted(code) => 2 + code as u64,
+    }
+}
+
+/// The bytes a buffer reference names, bounds-checked like `WRITE` does.
+fn buffer_slice<'a>(
+    region: u8,
+    offset: usize,
+    length: usize,
+    state: &'a [u8],
+    stack: &'a [u8],
+    code: &'a [u8],
+    args: &'a [u8],
+) -> Result<&'a [u8], FaultCode> {
+    let end = offset.checked_add(length).ok_or(FaultCode::OutOfBounds)?;
+    let bytes = match region {
+        refs::REGION_STATE => state,
+        refs::REGION_STACK => stack,
+        refs::REGION_CODE => code,
+        refs::REGION_ARGS => args,
+        _ => return Err(FaultCode::OutOfBounds),
+    };
+    bytes.get(offset..end).ok_or(FaultCode::OutOfBounds)
 }
 
 fn region_len(region: u8, state: &[u8], stack: &[u8], code: &[u8], args: &[u8]) -> Option<usize> {

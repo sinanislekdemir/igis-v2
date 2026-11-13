@@ -254,3 +254,79 @@ fn compile_into_reports_its_caps() {
     assert_eq!(compiler::MAX_CODE_BYTES, 256 * 1024);
     assert_eq!(compiler::MAX_MANIFEST_BYTES, 4 * 1024);
 }
+
+#[test]
+fn spawn_wait_and_kill_emit_their_builtin_ids() {
+    use abi::opcodes::{self, builtin};
+
+    let source = br#"
+unit t;
+
+uses core;
+
+var
+  id: int;
+  code: int;
+
+procedure main(args: const string[1024]);
+begin
+  id := core.spawn("child", "hello");
+  code := core.wait(id);
+  code := core.kill(id);
+end;
+"#;
+    let package = compile(source, "t.ig").expect("compiles");
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+
+    let mut seen = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        if op == opcodes::BUILTIN {
+            let id = u32::from_le_bytes(instructions[pc + 4..pc + 8].try_into().unwrap());
+            seen.push(id);
+        }
+        pc += words * 4;
+    }
+    assert_eq!(seen, vec![builtin::SPAWN, builtin::WAIT, builtin::KILL]);
+}
+
+#[test]
+fn spawn_argument_count_and_task_id_type_are_checked() {
+    let wrong_count = br#"
+unit t;
+
+uses core;
+
+procedure main(args: const string[1024]);
+begin
+  core.spawn("child");
+end;
+"#;
+    let error = compile(wrong_count, "t.ig").expect_err("must not compile");
+    assert!(
+        error.message.contains("`core.spawn` expects 2 arguments"),
+        "{}",
+        error.message
+    );
+
+    let wrong_type = br#"
+unit t;
+
+uses core;
+
+var
+  u: uint;
+
+procedure main(args: const string[1024]);
+begin
+  u := uint(1);
+  core.wait(u);
+end;
+"#;
+    let error = compile(wrong_type, "t.ig").expect_err("must not compile");
+    assert!(error.message.contains("task id"), "{}", error.message);
+}

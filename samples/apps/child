@@ -1,0 +1,23 @@
+unit child;
+
+uses core;
+
+var
+  line: string[32];
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  line := "child: hello\n";
+  core.write(line);
+
+  // Enough work to cross more than one scheduler quantum, so the child is
+  // claimed and released rather than finishing inside its first slice.
+  n := 0;
+  while n < 20000 do
+  begin
+    n := n + 1;
+  end;
+
+  core.write("child: bye\n");
+end;

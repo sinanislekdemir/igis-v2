@@ -188,3 +188,35 @@ fn host_trait_implementation_sees_application_bytes() {
     assert_eq!(host.output, b"hello, igis\n");
     assert_eq!(args[..8], 0u64.to_le_bytes());
 }
+
+#[test]
+fn stage_app_samples_compile_with_the_spawn_builtins() {
+    for name in ["shell", "child"] {
+        let path = format!("{}/../samples/apps/{name}", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
+        let package = langhost::compile(&source, name).unwrap_or_else(|error| {
+            panic!("{name} fails to compile: {error}");
+        });
+        assert!(!package.code.is_empty(), "{name} produced no code");
+    }
+}
+
+#[test]
+fn shell_spawns_and_waits_for_the_child_on_the_host() {
+    let path = format!("{}/../samples/apps/shell", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
+    let package = langhost::compile(&source, "shell").expect("shell compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    let text = String::from_utf8(result.output).expect("UTF-8 output");
+    for line in [
+        "shell: spawning child\n",
+        "shell: child task id assigned\n",
+        "child: hello\n",
+        "child: bye\n",
+        "child: ok\n",
+        "shell: done\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in {text:?}");
+    }
+}

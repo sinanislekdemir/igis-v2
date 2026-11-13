@@ -33,12 +33,14 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use abi::{ExitReason, FaultCode};
-use interpreter::{Diagnostic, Host, Outcome, Program};
+use abi::{ExitReason, FaultCode, Status};
+use interpreter::{Diagnostic, Host, Outcome, Program, WaitKind, WaitOutcome};
 
 use crate::clock;
+use crate::ext2::Ext2;
 use crate::frame;
 use crate::println;
+use crate::repl;
 use crate::sync::SpinLock;
 use crate::task::{self, Task};
 
@@ -73,15 +75,61 @@ static YIELDS: AtomicU64 = AtomicU64::new(0);
 static EXITS: AtomicU64 = AtomicU64::new(0);
 
 /// The kernel's implementation of the interpreter host interface (spec 0005).
-struct KernelHost;
+///
+/// `current` is the id of the task being advanced, so `core.wait` on oneself is
+/// `Invalid` rather than a permanent block. `image` is the read-only ext2
+/// mount the REPL service compiles from.
+struct KernelHost<'a> {
+    image: &'a Ext2<'a>,
+    current: u64,
+}
 
-impl Host for KernelHost {
+impl Host for KernelHost<'_> {
     fn console_write(&mut self, bytes: &[u8]) {
         crate::console::write_bytes(bytes);
     }
 
     fn clock(&mut self) -> u64 {
         clock::now_ns()
+    }
+
+    fn spawn(&mut self, path: &[u8], args: &[u8]) -> Result<u64, Status> {
+        repl::request_spawn(self.image, self.current, path, args)
+    }
+
+    fn wait(&mut self, id: u64) -> WaitOutcome {
+        if id == 0 || id == self.current {
+            return WaitOutcome::Status(Status::Invalid);
+        }
+        // A record written by `terminate` is consumed first: the child may
+        // have finished before the parent reached `wait`.
+        if let Some(reason) = repl::take_exit(id) {
+            return WaitOutcome::Exited(reason);
+        }
+        if task::is_live(id) || repl::is_pending(id) {
+            return WaitOutcome::Blocked;
+        }
+        WaitOutcome::Status(Status::NotFound)
+    }
+
+    fn kill(&mut self, id: u64) -> Status {
+        if id == 0 || id == self.current {
+            return Status::Invalid;
+        }
+        match task::request_kill(id) {
+            Status::NotFound => {
+                // The request may still be in the queue: cancel it and record
+                // `Killed` under the reserved id (spec 0007).
+                if repl::cancel_request(id) {
+                    repl::record_exit(id, ExitReason::Killed);
+                    task::wake(id);
+                    Status::Ok
+                } else {
+                    Status::NotFound
+                }
+            }
+            status => status,
+        }
     }
 }
 
@@ -97,19 +145,19 @@ pub fn parse_program(code: &[u8]) -> Result<Program<'_>, Diagnostic> {
 
 /// The scheduler loop. Never returns.
 ///
-/// `boot_task` is the id of the application the REPL enqueued at boot; once it
-/// has terminated there is no other source of work, so the loop prints the
-/// summary and halts.
-pub fn run_forever(boot_task: u64) -> ! {
-    let mut boot_done = false;
-
+/// `image` is the read-only ext2 mount the service compiles requests from.
+/// The loop ends when no task is live and no request is pending: with no
+/// console input there is no other source of work, so it prints the summary and
+/// halts. A blocked task keeps the system alive (it will be woken by a child
+/// termination), so the check is "no live task", not "boot task finished".
+pub fn run_forever(image: &Ext2<'_>) -> ! {
     loop {
-        service();
+        service(image);
 
         match task::claim() {
             Some(mut task) => {
                 let started = clock::now_ns();
-                let outcome = run_quantum(&mut task);
+                let outcome = run_quantum(&mut task, image);
                 let elapsed = clock::now_ns().saturating_sub(started);
 
                 task.budget_ns = task.budget_ns.saturating_add(elapsed);
@@ -117,16 +165,31 @@ pub fn run_forever(boot_task: u64) -> ! {
                 CLAIMS.fetch_add(1, Ordering::Relaxed);
 
                 match outcome {
-                    Outcome::Exited(reason) => {
-                        boot_done |= task.id == boot_task;
-                        terminate(task, reason);
+                    Outcome::Exited(reason) => terminate(task, reason),
+                    Outcome::Blocked(kind) => {
+                        let WaitKind::ChildExit(child) = kind;
+                        if task.kill_requested {
+                            // A kill that arrived while the task was blocked
+                            // must not be lost by blocking it again.
+                            terminate(task, ExitReason::Killed);
+                            continue;
+                        }
+                        // The blocked task keeps its slot but stops being
+                        // claimable; `terminate` of the child wakes it (Sch9).
+                        println!("sched: task {} blocked on task {}", task.id, child);
+                        task::block(task, child);
                     }
                     Outcome::Yielded => {
+                        if task.kill_requested {
+                            // `core.kill` marks the task and requests a yield;
+                            // the next boundary is where it dies (spec 0007).
+                            terminate(task, ExitReason::Killed);
+                            continue;
+                        }
                         let expired = task.budget_ns >= TOTAL_BUDGET_NS
                             || task.machine.steps() >= TOTAL_BUDGET_STEPS;
                         if expired {
                             // Sch8: unconditional, no `fault` handler in ABI v1.
-                            boot_done |= task.id == boot_task;
                             terminate(task, ExitReason::Faulted(FaultCode::BudgetExceeded));
                         } else {
                             task.yields += 1;
@@ -136,7 +199,7 @@ pub fn run_forever(boot_task: u64) -> ! {
                     }
                 }
             }
-            None => idle(boot_done),
+            None => idle(),
         }
     }
 }
@@ -147,8 +210,9 @@ pub fn run_forever(boot_task: u64) -> ! {
 /// bytes the task executes are the bytes the verifier checked, and nothing
 /// self-referential has to live inside the [`Task`]. Parsing is host-side work
 /// and is not charged to the quantum.
-fn run_quantum(task: &mut Task) -> Outcome {
+fn run_quantum(task: &mut Task, image: &Ext2<'_>) -> Outcome {
     let Task {
+        id,
         regions,
         machine,
         args,
@@ -164,7 +228,10 @@ fn run_quantum(task: &mut Task) -> Outcome {
         }
     };
 
-    let mut host = KernelHost;
+    let mut host = KernelHost {
+        image,
+        current: *id,
+    };
     machine.run(
         &program,
         &mut host,
@@ -175,8 +242,12 @@ fn run_quantum(task: &mut Task) -> Outcome {
     )
 }
 
-/// Reports and reclaims a terminated task. It is not in the runnable set: this
-/// core owns it (Sch10).
+/// Reports, records and reclaims a terminated task.
+///
+/// The exit record goes into the global ring and every task blocked on this id
+/// is woken, in that order: the woken parent's retried `core.wait` must find
+/// the record. The regions are reclaimed here (Sch10); the id and reason
+/// survive in the ring until consumed or evicted.
 fn terminate(task: Task, reason: ExitReason) {
     let id = task.id;
     let claims = task.claims;
@@ -196,18 +267,26 @@ fn terminate(task: Task, reason: ExitReason) {
         ),
     }
 
+    repl::record_exit(id, reason);
+    task::wake(id);
     task.reclaim();
 }
 
-/// A stub for the REPL service dispatcher (spec 0007, "Services and task
-/// creation"). There is no request queue yet: `repl::boot` enqueues the boot
-/// task before the loop starts, and the dispatcher runs before every claim.
-fn service() {}
+/// The REPL service opportunity: at most one pending request per call (spec
+/// 0007, "Services and task creation"). It runs before every claim so a
+/// permanently runnable machine still services its queue.
+fn service(image: &Ext2<'_>) {
+    repl::service(image);
+}
 
-/// Nothing is runnable. Wait for the next interrupt and re-check, unless the
-/// boot work is finished, in which case print the summary and halt.
-fn idle(boot_done: bool) {
-    if boot_done {
+/// Nothing is runnable. Wait for the next interrupt and re-check, unless there
+/// is no live task and no pending request, in which case print the summary and
+/// halt.
+///
+/// A blocked task is live, so the system halts only after the last child and
+/// parent are gone — never while a wake-up is still possible.
+fn idle() {
+    if task::live_count() == 0 && !repl::has_pending() {
         println!(
             "scheduler: idle: {} claims, {} yields, {} exits, {} free frames",
             CLAIMS.load(Ordering::Relaxed),
@@ -219,7 +298,7 @@ fn idle(boot_done: bool) {
         arch_x86_64::halt();
     }
 
-    // `sti; hlt`: the timer keeps the clock running, and any wake-up (a future
-    // service request or stream event) re-checks the set after this returns.
+    // `sti; hlt`: the timer keeps the clock running, and a wake-up (a service
+    // request or a child termination) re-checks the set after this returns.
     arch_x86_64::wait_for_interrupt();
 }

@@ -4,8 +4,8 @@ uses core;
 
 var
   banner: string[32];
-  n: int;
-  round: int;
+  id: int;
+  code: int;
 
 procedure say(text: const string[0]);
 begin
@@ -16,30 +16,29 @@ procedure main(args: const string[1024]);
 begin
   banner := "igis-v2 shell\n";
   say(banner);
-  say("argv: ");
-  say(args);
-  say("\n");
+  say("shell: spawning child\n");
 
-  // Four rounds of 50 000 iterations. This is enough work to cross many
-  // 10 000-step quanta, so the scheduler claims, releases and re-claims the
-  // boot task instead of running it from one call.
-  round := 0;
-  while round < 4 do
+  // Staged ABI: a positive result is a task id, a negative one is -Status.
+  id := core.spawn("child", "hello");
+  if id > 0 then
   begin
-    n := 0;
-    while n < 50000 do
-    begin
-      n := n + 1;
-    end;
-    round := round + 1;
-    if round = 1 then
-      say("shell: round 1 of 4\n")
-    else if round = 2 then
-      say("shell: round 2 of 4\n")
-    else if round = 3 then
-      say("shell: round 3 of 4\n")
+    say("shell: child task id assigned\n");
+
+    // Blocks on the child; the scheduler runs it and wakes us on exit.
+    code := core.wait(id);
+    if code = 0 then
+      say("child: ok\n")
+    else if code = 1 then
+      say("child: killed\n")
+    else if code >= 2 then
+      say("child: faulted\n")
     else
-      say("shell: round 4 of 4\n");
+      say("child: wait failed\n");
+  end
+  else
+  begin
+    say("shell: spawn failed\n");
   end;
+
   say("shell: done\n");
 end;

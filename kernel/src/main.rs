@@ -173,9 +173,9 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
                     }
 
                     // The REPL leaves the boot task in the runnable set; the
-                    // scheduler loop owns it from here.
-                    let boot_task = repl::boot(&fs);
-                    sched::run_forever(boot_task);
+                    // scheduler loop owns it and the service queue from here.
+                    let _boot_task = repl::boot(&fs);
+                    sched::run_forever(&fs);
                 }
                 Err(status) => {
                     println!("ext2: mount refused ({})", status.name());

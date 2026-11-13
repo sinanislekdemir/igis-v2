@@ -130,6 +130,24 @@ The interface is split into two namespaces:
 - `receive` copies what is available, up to the destination length; a byte stream has no
   message boundaries. Framing is a `stdlib` concern.
 
+#### Staged ABI: `spawn`/`wait`/`kill` as scalars
+
+The first milestone has no language values for `Status`, `ExitReason` or `Diagnostic`
+(no enums or records, spec 0003), so the implemented primitives take and return `int`:
+
+| Primitive | Staged signature | Result |
+|-----------|------------------|--------|
+| `core.spawn` | `(path: const string[0], args: const string[0]) -> int` | positive `TaskId`, or `-Status` (`-3` NotFound, `-4` Invalid, `-5` Full, `-6` CapacityExceeded) |
+| `core.wait` | `(id: int) -> int` | `0` `Ok`, `1` `Killed`, `2 + fault_code` `Faulted(code)`, or `-Status` (`-3` NotFound, `-4` Invalid) |
+| `core.kill` | `(id: int) -> int` | `0` on success, or `-Status` |
+
+This is a staging shape, not the ABI. The target API keeps the signatures in the
+`core` table above: a caller-owned `var diag: Diagnostic`, `var reason: ExitReason` and
+`Status` as a return value. A failure the service discovers after `spawn` returned (a
+compile error, a read failure) is recorded as `Faulted(IoError)` and the kernel prints the
+compiler diagnostic; the final API reports `Status.Invalid` with `diag` filled instead.
+Replacing the scalar form is required before `stdlib` exposes `run`.
+
 ### `syslib` primitives
 
 | Primitive | Signature (illustrative) | Notes |
@@ -160,7 +178,8 @@ aspirational.
 - No `exit`/`fault` primitive: those are interpreter control flow, not host calls.
 - No allocation primitive: the loader allocates before the task starts; the interface has
   nothing to give at runtime.
-- No process, thread or spawn primitive: an application is one task.
+- No process or thread primitive: an application is one task. `spawn` starts another
+  application instance, not a thread in the caller's task.
 - No debug or introspection primitive in the first milestone; counters and task listing are
   designed after the shell exists.
 
@@ -259,3 +278,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-13 | Console input fixed as a byte stream (no echo, no line assembly, no key events, `\n`/`0x7F`/`\t`/`0x03`); clock fixed as one global nanosecond counter at 1 ms resolution (no TSC); `run`/`spawn` take a caller-owned `Diagnostic` out-parameter; no debug or DMA primitive in M1; consoles are unowned and there is no multiplexing (open question 12). |
 | 2026-11-13 | `run`/`spawn` paths are limited to 256 bytes and are relative to the image root; path validation stays open (question 13). |
 | 2026-11-13 | Path validation settled (question 13): relative, no leading/trailing `/`, no empty or `..` component, regular files only; malformed is `Invalid`, absent is `NotFound`. `kill` semantics: queued requests are cancelled with `Killed`, live tasks terminate at the next safe point. |
+| 2026-11-13 | Staged scalar `spawn`/`wait`/`kill` ABI added for the first milestone (`int` task id, negated `Status`, `0`/`1`/`2 + fault_code` wait results); the record-based `Diagnostic`/`Status`/`ExitReason` form remains the target API (see "Staged ABI"). |

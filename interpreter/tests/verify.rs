@@ -9,7 +9,7 @@ use abi::{
     CodeHeader, Function, Status, ABI_VERSION, CODE_MAGIC, NO_DIAGNOSTIC, NO_NAME,
     PROFILE_X86_64_LE,
 };
-use interpreter::{ExitReason, FaultCode, Host, Machine, Outcome, Program};
+use interpreter::{ExitReason, FaultCode, Host, Machine, Outcome, Program, WaitKind, WaitOutcome};
 
 #[derive(Clone, Copy)]
 struct FnSpec {
@@ -133,6 +133,7 @@ fn execute(code: &[u8], state_size: usize, stack_size: usize) -> (ExitReason, Ve
     let outcome = machine.run(&program, &mut host, &mut state, &mut stack, &args, 10_000);
     match outcome {
         Outcome::Exited(reason) => (reason, host.output),
+        Outcome::Blocked(kind) => panic!("machine blocked on {kind:?}"),
         Outcome::Yielded => panic!("machine yielded without a budget limit"),
     }
 }
@@ -340,4 +341,195 @@ fn a_frame_that_does_not_fit_faults_stack_overflow() {
     let code = build(&[MAIN], &instructions, &[], 0, 16, 0);
     let (reason, _) = execute(&code, 0, 16);
     assert_eq!(reason, ExitReason::Faulted(FaultCode::StackOverflow));
+}
+
+/// A host that scripts the spawn/wait/kill primitives. `wait` returns its
+/// scripted outcomes in order, so a blocking path can be exercised without a
+/// scheduler.
+#[derive(Default)]
+struct MockHost {
+    output: Vec<u8>,
+    spawn_result: Option<Result<u64, Status>>,
+    spawn_args: Option<(Vec<u8>, Vec<u8>)>,
+    wait_results: Vec<WaitOutcome>,
+    wait_calls: usize,
+    killed: Vec<u64>,
+}
+
+impl Host for MockHost {
+    fn console_write(&mut self, bytes: &[u8]) {
+        self.output.extend_from_slice(bytes);
+    }
+
+    fn clock(&mut self) -> u64 {
+        42
+    }
+
+    fn spawn(&mut self, path: &[u8], args: &[u8]) -> Result<u64, Status> {
+        self.spawn_args = Some((path.to_vec(), args.to_vec()));
+        self.spawn_result.unwrap_or(Err(Status::Invalid))
+    }
+
+    fn wait(&mut self, _id: u64) -> WaitOutcome {
+        let index = self.wait_calls;
+        self.wait_calls += 1;
+        self.wait_results
+            .get(index)
+            .copied()
+            .unwrap_or(WaitOutcome::Status(Status::NotFound))
+    }
+
+    fn kill(&mut self, id: u64) -> Status {
+        self.killed.push(id);
+        Status::Ok
+    }
+}
+
+fn run_with_host(
+    code: &[u8],
+    state: &mut [u8],
+    stack: &mut [u8],
+    host: &mut MockHost,
+    budget: u64,
+) -> (Outcome, Machine) {
+    let mut scratch = scratch_for(code);
+    let program = Program::parse(code, &mut scratch).expect("verifies");
+    let args = vec![0u8; 8 + 1024];
+    let mut machine = Machine::new();
+    let outcome = machine.run(&program, host, state, stack, &args, budget);
+    (outcome, machine)
+}
+
+fn spawn_package(spawn_result: Result<u64, Status>) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_CONST, 8);
+    op_imm(&mut instructions, opcodes::REF_CONST, 24);
+    op_imm(&mut instructions, opcodes::BUILTIN, opcodes::builtin::SPAWN);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op(&mut instructions, opcodes::RET);
+    let mut constants = constant(b"child");
+    constants.extend_from_slice(&constant(b"hello"));
+    let spec = FnSpec {
+        frame_size: 64,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &constants, 8, 64, 0);
+    let mut host = MockHost {
+        spawn_result: Some(spawn_result),
+        ..Default::default()
+    };
+    let mut state = vec![0u8; 8];
+    let mut stack = vec![0u8; 64];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    let (path, args) = host.spawn_args.unwrap_or_default();
+    (state, path, args)
+}
+
+#[test]
+fn spawn_pushes_the_reserved_id_and_forwards_both_buffers() {
+    let (state, path, args) = spawn_package(Ok(7));
+    assert_eq!(u64::from_le_bytes(state[..8].try_into().unwrap()), 7);
+    assert_eq!(path, b"child");
+    assert_eq!(args, b"hello");
+}
+
+#[test]
+fn spawn_failure_pushes_the_negated_status() {
+    let (state, _, _) = spawn_package(Err(Status::Full));
+    assert_eq!(
+        u64::from_le_bytes(state[..8].try_into().unwrap()),
+        (-5i64) as u64
+    );
+}
+
+#[test]
+fn wait_blocks_without_advancing_and_retries_the_same_instruction() {
+    let mut instructions = Vec::new();
+    op_const(&mut instructions, 3);
+    op_imm(&mut instructions, opcodes::BUILTIN, opcodes::builtin::WAIT);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op(&mut instructions, opcodes::RET);
+    let spec = FnSpec {
+        frame_size: 48,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &[], 8, 64, 0);
+
+    let mut host = MockHost {
+        wait_results: vec![
+            WaitOutcome::Blocked,
+            WaitOutcome::Exited(ExitReason::Faulted(FaultCode::Overflow)),
+        ],
+        ..Default::default()
+    };
+    let mut state = vec![0u8; 8];
+    let mut stack = vec![0u8; 64];
+
+    let (outcome, machine) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Blocked(WaitKind::ChildExit(3)));
+    assert_eq!(machine.pc(), 12, "pc stays on the wait instruction");
+    assert_eq!(state, vec![0u8; 8], "the id is not consumed or stored");
+
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(host.wait_calls, 2);
+    assert_eq!(
+        u64::from_le_bytes(state[..8].try_into().unwrap()),
+        2 + FaultCode::Overflow as u64
+    );
+}
+
+#[test]
+fn wait_maps_exit_reasons_and_status_errors() {
+    for (outcome, expected) in [
+        (WaitOutcome::Exited(ExitReason::Ok), 0i64),
+        (WaitOutcome::Exited(ExitReason::Killed), 1),
+        (WaitOutcome::Status(Status::NotFound), -3),
+    ] {
+        let mut instructions = Vec::new();
+        op_const(&mut instructions, 9);
+        op_imm(&mut instructions, opcodes::BUILTIN, opcodes::builtin::WAIT);
+        op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+        op(&mut instructions, opcodes::RET);
+        let spec = FnSpec {
+            frame_size: 48,
+            ..MAIN
+        };
+        let code = build(&[spec], &instructions, &[], 8, 64, 0);
+        let mut host = MockHost {
+            wait_results: vec![outcome],
+            ..Default::default()
+        };
+        let mut state = vec![0u8; 8];
+        let mut stack = vec![0u8; 64];
+        let (result, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+        assert_eq!(result, Outcome::Exited(ExitReason::Ok));
+        assert_eq!(
+            i64::from_le_bytes(state[..8].try_into().unwrap()),
+            expected,
+            "{outcome:?}"
+        );
+    }
+}
+
+#[test]
+fn kill_forwards_the_id_and_pushes_zero() {
+    let mut instructions = Vec::new();
+    op_const(&mut instructions, 4);
+    op_imm(&mut instructions, opcodes::BUILTIN, opcodes::builtin::KILL);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op(&mut instructions, opcodes::RET);
+    let spec = FnSpec {
+        frame_size: 48,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &[], 8, 64, 0);
+    let mut host = MockHost::default();
+    let mut state = vec![0u8; 8];
+    let mut stack = vec![0u8; 64];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(host.killed, vec![4]);
+    assert_eq!(u64::from_le_bytes(state[..8].try_into().unwrap()), 0);
 }

@@ -38,8 +38,13 @@ constraints learned there.
   with a 10 s / 200 000 000-step watchdog, and release or deterministic termination. The
   boot application crosses many quanta, prints its output, exits `Ok`, and the system
   prints the claim/yield/exit summary and halts. The compiler is `no_std` and
-  allocation-free; the scheduler path adds no heap. The next pieces are console input and
-  the REPL request service, then APs and blocking/wake-up.
+  allocation-free; the scheduler path adds no heap. The REPL request service now runs: a
+  1024-slot static queue is serviced before every claim, `core.spawn` returns a reserved
+  `TaskId` immediately, `core.wait` blocks the parent (a `Blocked` slot skipped by
+  `claim`) until the child's exit record wakes it, and a 64-entry exit ring serves `wait`.
+  These three primitives use a staged scalar `int` ABI (`Status`/`ExitReason`/`Diagnostic`
+  are not language values yet; spec 0005, "Staged ABI"). The next pieces are console input,
+  the record-based spawn ABI, then APs, the realtime class and streams.
 
 ## Ground rules
 
@@ -216,3 +221,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-13 | Compiler made `no_std` and allocation-free (B11): a bump arena over the caller's `&mut [u8]`, source-borrowing tokens and AST, arena-backed lists instead of `Vec`/`HashMap`, fixed-buffer diagnostics, and `compile_into(source, path, arena, code, manifest) -> Package<'a>` writing into caller buffers. Packages are byte-identical to the previous build; 54 tests; `langhost` keeps a std helper that allocates the caps. |
 | 2026-11-13 | First in-kernel vertical slice: `xtask image` stages `samples/apps/` into a 4 MiB ext2 image attached as the `apps` GRUB module; the kernel finds the module tag, mounts the image read-only (validated superblock, group descriptors, inodes, directories, direct/single/double indirect), reads `shell`, compiles it with `compile_into`, places `code`/`state`/`stack` in contiguous frames, verifies and runs it (`exit: Ok`), reclaims the frames and halts. Boot stack raised 16 KiB → 64 KiB after the in-kernel compiler overflowed into the boot page tables. |
 | 2026-11-13 | Scheduler loop: `task.rs` owns the record and a 64-slot runnable table (claim/release by value move), `sched.rs` runs claim → quantum → release/terminate on the boot core. The REPL only compiles and enqueues; the boot application crosses 181 claims over a 10 000-step quantum, then `exit Ok` and an idle summary. Budgets are provisional: 10 s of CPU time plus a 200M-step cap because the 1 ms clock cannot resolve a quantum. |
+| 2026-11-13 | REPL request service: `core.spawn`/`wait`/`kill` with a staged scalar `int` ABI, a 1024-slot static request queue serviced before every claim, a 64-entry exit ring, `Blocked(task exit)` with wake-on-termination, and a `shell` → `child` sample that blocks, wakes and reports `child: ok`. A load failure prints the diagnostic and records `Faulted(IoError)` under the reserved id. |

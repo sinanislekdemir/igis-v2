@@ -36,6 +36,24 @@ pub const ARGS_BYTES: usize = 1024;
 /// Task ids are global, monotonic and never reused, starting at 1 (ADR 0017).
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Reserves a fresh global task id. `spawn` reserves one before the request is
+/// queued, so the caller can be handed the id immediately (spec 0007).
+pub fn reserve_id() -> u64 {
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Whether a task may be claimed.
+///
+/// A `Blocked` task stays in its slot (so its regions and machine are never
+/// lost) but [`claim`] skips it; the wake-up path flips it back to `Runnable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskState {
+    /// In the runnable set; any core may claim it.
+    Runnable,
+    /// Waiting for a condition; not claimable.
+    Blocked,
+}
+
 /// One physically contiguous task region.
 #[derive(Clone, Copy)]
 pub struct Region {
@@ -85,10 +103,16 @@ pub struct Regions {
 /// application state ever stays in a core's registers across a release
 /// (Sch5), because the state lives in `regions` and the `Machine`.
 pub struct Task {
-    /// Global, monotonic, never reused; assigned when the record is created.
+    /// Global, monotonic, never reused; reserved before the task is placed.
     pub id: u64,
     /// Slot the task is (or will be) enqueued in; set by [`spawn`].
     pub slot: usize,
+    /// Runnable or blocked; a blocked task stays in its slot but is not claimed.
+    pub state: TaskState,
+    /// The child id this task is blocked on (`core.wait`), if any.
+    pub waiting: Option<u64>,
+    /// `core.kill` arrived; terminate at the next quantum boundary.
+    pub kill_requested: bool,
     /// Claims so far, printed at termination.
     pub claims: u64,
     /// Releases so far (quantum expiry), printed at termination.
@@ -102,11 +126,17 @@ pub struct Task {
 }
 
 impl Task {
-    /// Reserves and zeroes the task's regions and assigns a fresh id.
+    /// Reserves and zeroes the task's regions under a caller-reserved id.
     ///
     /// Nothing is enqueued here: the caller fills `code` and then calls
-    /// [`spawn`].
-    pub fn place(code_len: usize, state_len: usize, stack_len: usize) -> Result<Self, Status> {
+    /// [`spawn`]. The id is reserved before a `spawn` request is queued, so it
+    /// is passed in rather than assigned here.
+    pub fn place(
+        code_len: usize,
+        state_len: usize,
+        stack_len: usize,
+        id: u64,
+    ) -> Result<Self, Status> {
         let code = Region::allocate(code_len)?;
         let state = match Region::allocate(state_len) {
             Ok(state) => state,
@@ -125,8 +155,11 @@ impl Task {
         };
 
         let mut task = Task {
-            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            id,
             slot: usize::MAX,
+            state: TaskState::Runnable,
+            waiting: None,
+            kill_requested: false,
             claims: 0,
             yields: 0,
             budget_ns: 0,
@@ -159,6 +192,8 @@ static SLOTS: [SpinLock<Option<Task>>; MAX_TASKS] = [const { SpinLock::new(None)
 /// more, and leaking its frames would break the deterministic-reclaim rule.
 pub fn spawn(task: Task) -> Result<(), Status> {
     let mut task = task;
+    task.state = TaskState::Runnable;
+    task.waiting = None;
     for (index, slot) in SLOTS.iter().enumerate() {
         let mut guard = slot.lock();
         if guard.is_none() {
@@ -171,28 +206,100 @@ pub fn spawn(task: Task) -> Result<(), Status> {
     Err(Status::Full)
 }
 
-/// Claims one runnable task, or `None` when the set is empty.
+/// Claims one runnable task, or `None` when no slot is runnable.
 ///
 /// The `take` under the slot lock is the exclusive ownership transfer: the
 /// task is removed from the set before the value is returned. No lock is held
-/// after this returns.
+/// after this returns. A `Blocked` task stays in its slot and is skipped
+/// (Sch9); the wake-up path marks it `Runnable` again.
 pub fn claim() -> Option<Task> {
     for slot in SLOTS.iter() {
         let mut guard = slot.lock();
-        if guard.is_some() {
+        let runnable = guard
+            .as_ref()
+            .is_some_and(|task| task.state == TaskState::Runnable);
+        if runnable {
             return guard.take();
         }
     }
     None
 }
 
-/// Releases a claimed task back into its recorded slot.
+/// Puts a claimed task back into its slot after a blocking builtin.
 ///
-/// A task is placed in exactly one slot at a time, so the target is free; an
-/// occupied slot means the claim protocol was violated, which is a TCB defect
-/// (spec 0007, failure modes). It is reported and halts rather than corrupting
-/// memory silently.
+/// The record stays where it is (regions and machine included) but is no
+/// longer claimable until [`wake`] clears the condition.
+pub fn block(task: Task, child: u64) {
+    let mut task = task;
+    task.state = TaskState::Blocked;
+    task.waiting = Some(child);
+    put(task);
+}
+
+/// Makes every task blocked on `child` runnable again.
+///
+/// The task is mutated in place under its slot lock: it never left the slot,
+/// so no value move or fresh claim is needed.
+pub fn wake(child: u64) {
+    for slot in SLOTS.iter() {
+        let mut guard = slot.lock();
+        if let Some(task) = guard.as_mut() {
+            if task.state == TaskState::Blocked && task.waiting == Some(child) {
+                task.waiting = None;
+                task.state = TaskState::Runnable;
+            }
+        }
+    }
+}
+
+/// Requests termination of `id` at its next safe point (`core.kill`).
+///
+/// A blocked task is made runnable as well, so the request cannot sit behind a
+/// wait that will never complete. The task is not reclaimed here; the
+/// scheduler sees the flag at the next quantum boundary.
+pub fn request_kill(id: u64) -> Status {
+    for slot in SLOTS.iter() {
+        let mut guard = slot.lock();
+        if let Some(task) = guard.as_mut() {
+            if task.id == id {
+                task.kill_requested = true;
+                task.machine.request_yield();
+                if task.state == TaskState::Blocked {
+                    task.waiting = None;
+                    task.state = TaskState::Runnable;
+                }
+                return Status::Ok;
+            }
+        }
+    }
+    Status::NotFound
+}
+
+/// True when `id` names a live task (runnable or blocked) in a slot.
+///
+/// A `spawn` request reserves its id before the task exists; the request
+/// queue is the other half of "live" and is checked by the REPL service.
+pub fn is_live(id: u64) -> bool {
+    SLOTS
+        .iter()
+        .any(|slot| slot.lock().as_ref().is_some_and(|task| task.id == id))
+}
+
+/// Number of live tasks (runnable or blocked).
+pub fn live_count() -> usize {
+    SLOTS.iter().filter(|slot| slot.lock().is_some()).count()
+}
+
+/// Releases a claimed task back into its recorded slot (Sch7).
 pub fn release(task: Task) {
+    let mut task = task;
+    task.state = TaskState::Runnable;
+    task.waiting = None;
+    put(task);
+}
+
+/// Places a claimed task value into its recorded slot.
+fn put(task: Task) {
     let index = task.slot;
     let Some(slot) = SLOTS.get(index) else {
         println!("sched: task {} released before it was enqueued", task.id);

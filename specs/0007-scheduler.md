@@ -82,7 +82,7 @@ liveness/progress contract that replaces the total budget for realtime tasks.
             claim                release (quantum/yield)
 Runnable ──────────▶ Running ───────────────────────────▶ Runnable
    ▲                    │
-   │                    ├── block ──▶ Blocked(stream|timer) ── wake ──▶ Runnable
+   │                    ├── block ──▶ Blocked(stream|timer|task exit) ── wake ──▶ Runnable
    │                    │
    │                    └── budget/fault ──▶ Terminated
    └────────────────────── wake ─────────────┘
@@ -90,7 +90,7 @@ Runnable ──────────▶ Running ─────────�
 
 - `Runnable` — in the global set, owned by nobody.
 - `Running` — owned by exactly one core.
-- `Blocked(stream | timer)` — not in the set; a condition will re-enqueue it.
+- `Blocked(stream | timer | task exit)` — not in the set; a condition will re-enqueue it.
 - `Terminated` — removed from everything; regions reclaimed after `exit`.
 
 ### The loop
@@ -231,6 +231,14 @@ overhead and interrupt handling still add jitter.
 
 - A blocking primitive sets `Blocked(reason)`, records the wait condition, and returns to
   the loop without re-enqueueing.
+- The first milestone has one blocking condition: `core.wait(child)`. The blocked task
+  stays in its slot with `state = Blocked` and `waiting = Some(child)`; `claim` skips
+  blocked slots and the wake-up path clears the condition in place, so the task's regions
+  and machine never move. A `Blocked` task counts as live, so the system does not halt.
+- A blocking builtin that cannot complete returns `Blocked` from the interpreter without
+  advancing `pc` or the operand stack; the instruction is retried after the wake-up, so a
+  retry sees the same frame. The service dispatcher still runs before every claim, so a
+  queued child is compiled even while its parent is blocked.
 - The condition (stream data, stream space, timer deadline, peer close) enqueues the task
   and marks it `Runnable`.
 - If every core is halted, the enqueuing core sends an IPI to one of them. A per-core
@@ -280,6 +288,11 @@ There are no zombies. A terminated task leaves nothing behind.
   request: no task is created, and `Killed` is recorded in the exit ring under the
   reserved id. `kill` on an unknown or already terminated id returns `Status.NotFound`.
   It never waits.
+- A request that fails to load (missing file, compile error, placement failure) creates no
+  task: the diagnostic is printed, `Faulted(IoError)` is recorded under the reserved id and
+  a parent blocked in `wait` is woken. The staged scalar ABI reports it through `wait` as
+  `2 + IoError` (spec 0005, "Staged ABI"); the final API reports `Status.Invalid` with the
+  caller-owned `Diagnostic`.
 - A spawned child is independent: if the parent terminates, the child continues. The
   parent's memory is reclaimed; the child keeps running.
 - If every core is held by a realtime task, the service gets no opportunity and no
@@ -368,7 +381,7 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | `wait` on a killed id | `ExitReason.Killed` |
 | Request path malformed or not a regular file | `Status.Invalid`; no request enqueued |
 | Parent terminates with live children | Children continue (ADR 0017 addendum 2) |
-| Compile fails in the REPL service | Request completes with `Status.Invalid`; no task created |
+| Compile fails in the REPL service | Request fails; `Faulted(IoError)` recorded under the reserved id; a waiting parent wakes; no task created |
 | Task blocks | Leaves the runnable set; no CPU consumed |
 | Wake with all cores halted | IPI to one core; `need_resched` set before the IPI |
 | Task terminates while owning a stream endpoint | Endpoint closes; queued data discarded; peer sees `Closed` |
@@ -406,3 +419,4 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 2026-11-13 | Claim and release save and restore SSE state with `FXSAVE`/`FXRSTOR` into a per-task `fpu` region; Sch5 now names the FPU context explicitly (ADR 0018). |
 | 2026-11-13 | Boot and service details fixed: INIT-SIPI-SIPI through a sub-1 MiB trampoline with `MAX_CORES` static per-core state; one IPI vector (0x40); the dispatcher runs before every claim and a compile is not interrupted (ADR 0019); realtime admission counts the cores online at call time; `kill` cancels a queued request and records `Killed`; request paths are validated (relative, no `..`, regular files only). |
 | 2026-11-13 | First scheduler implementation: 10 000-bytecode quantum and a 10 s / 200 000 000-step total budget, both provisional (Q1); the step cap is the effective watchdog while the clock ticks at 1 ms. |
+| 2026-11-13 | Spawn/wait implemented: a 1024-slot request queue serviced before every claim, a 64-entry exit ring, `Blocked(task exit)` with wake-on-termination, and `kill` for live tasks and queued requests. A blocked builtin returns without advancing `pc` or the operand stack, so the instruction is retried unchanged. |

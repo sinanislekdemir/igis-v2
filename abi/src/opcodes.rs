@@ -154,12 +154,24 @@ pub mod builtin {
     pub const WRITE: u32 = 1;
     /// `core.clock()`: push the host's monotonic nanosecond counter.
     pub const CLOCK: u32 = 2;
+    /// `core.spawn(path, args)`: pop two buffer references, push the new task
+    /// id (positive) or the negated `Status` discriminant.
+    pub const SPAWN: u32 = 3;
+    /// `core.wait(id)`: pop a task id, push `0` (Ok), `1` (Killed) or
+    /// `2 + fault_code` (Faulted), or the negated `Status` discriminant. May
+    /// block; the instruction is retried on wake without consuming operands.
+    pub const WAIT: u32 = 4;
+    /// `core.kill(id)`: pop a task id, push `0` on success or the negated
+    /// `Status` discriminant.
+    pub const KILL: u32 = 5;
 
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
         match id {
             WRITE => Some((1, 0)),
             CLOCK => Some((0, 1)),
+            SPAWN => Some((2, 1)),
+            WAIT | KILL => Some((1, 1)),
             _ => None,
         }
     }

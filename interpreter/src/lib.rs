@@ -18,6 +18,7 @@
 //! let mut host = Host;
 //! match machine.run(&program, &mut host, state, stack, &[], 100_000) {
 //!     Outcome::Exited(reason) => { /* task finished */ }
+//!     Outcome::Blocked(_) => { /* block, retry the same instruction later */ }
 //!     Outcome::Yielded => { /* resume later */ }
 //! }
 //! # }
@@ -34,5 +35,5 @@ mod machine;
 mod program;
 
 pub use abi::{ExitReason, FaultCode, Status};
-pub use machine::{Host, Machine, Outcome};
+pub use machine::{Host, Machine, Outcome, WaitKind, WaitOutcome};
 pub use program::{verify, Diagnostic, Program};

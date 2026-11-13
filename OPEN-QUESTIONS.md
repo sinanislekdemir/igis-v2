@@ -28,6 +28,7 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | Q8 | Debug/introspection primitive | shape open (task listing, counters, trace); none in M1 | after the shell exists |
 | Q9 | DMA and block primitives | handle model fixed; no primitive in M1 | first real block device |
 | Q39 | Console/stream multiplexing (`poll`/`select`) | none in M1; a task blocks on one source at a time | when an application must serve two input sources |
+| Q43 | Staged scalar `spawn`/`wait`/`kill` ABI | `int` task ids, negated `Status`, `0`/`1`/`2 + fault_code` wait results; replace with `Status`/`Diagnostic`/`ExitReason` records when the language has enums/records (spec 0005, "Staged ABI") | before `stdlib` exposes `run`, and before console input builds a shell on top of it |
 
 ## C. Streams
 
@@ -154,5 +155,10 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
    value move, a 10 000-step quantum, per-task budget accounting and a step-cap watchdog;
    the boot application crosses ~180 claims before `exit Ok`.
 9. ~~Pick the tuning constants~~ — Q1/Q2 chosen provisionally: 10 000 steps, 10 s / 200M
-   steps. Next: console input; then streams and the `run`/`spawn` request queue; then APs,
-   blocking/wake-up and the realtime class (Q3/Q4 when their features land).
+   steps.
+10. ~~REPL request service and blocking~~ — done: `core.spawn`/`wait`/`kill`, a 1024-slot
+    request queue serviced before every claim, a 64-entry exit ring, blocked tasks skipped
+    by `claim` and woken on child termination; the `shell` → `child` sample proves the
+    path. The ABI is staged as scalars (Q43). Next: console input (`core.console_read`),
+    then the record-based spawn ABI; then APs, the realtime class and streams (Q3/Q4 when
+    their features land).

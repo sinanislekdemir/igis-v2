@@ -1651,6 +1651,54 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::scalar(Kind::Uint)))
             }
+            // Staged scalar ABI (spec 0005, "Staged ABI"): `Status`,
+            // `ExitReason` and `Diagnostic` are not language types yet, so the
+            // spawn/wait/kill slice speaks in `int`. A positive spawn result is
+            // a task id; a negative one is `-Status`; wait is `0` for Ok, `1`
+            // for Killed, `2 + fault_code` for Faulted.
+            "core.spawn" => {
+                if args.len() != 2 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.spawn` expects 2 arguments, got {}", args.len()),
+                    ));
+                }
+                self.emit_ref(args[0], Some(Kind::String))?;
+                self.emit_ref(args[1], Some(Kind::String))?;
+                self.one(opcodes::BUILTIN, builtin::SPAWN)?;
+                self.pop(2)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Int)))
+            }
+            "core.wait" => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.wait` expects 1 argument, got {}", args.len()),
+                    ));
+                }
+                self.builtin_id(args[0])?;
+                self.one(opcodes::BUILTIN, builtin::WAIT)?;
+                self.pop(1)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Int)))
+            }
+            "core.kill" => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.kill` expects 1 argument, got {}", args.len()),
+                    ));
+                }
+                self.builtin_id(args[0])?;
+                self.one(opcodes::BUILTIN, builtin::KILL)?;
+                self.pop(1)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Int)))
+            }
             target => {
                 if target.contains('.') {
                     return Err(self.err(
@@ -1746,6 +1794,19 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 }
             }
         }
+    }
+
+    /// Emits a scalar expression and requires it to be an `int` task id, the
+    /// staged type of `core.wait`/`core.kill`.
+    fn builtin_id(&mut self, expr: &'a Expr<'a>) -> Result<(), Diagnostic> {
+        let found = self.expr_scalar(expr)?;
+        if found.kind != Kind::Int {
+            return Err(self.err_at(
+                expr,
+                format_args!("expected an `int` task id, found `{found}`"),
+            ));
+        }
+        Ok(())
     }
 
     /// Pushes a reference to a buffer expression. `want` selects the nominal
