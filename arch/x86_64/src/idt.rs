@@ -29,11 +29,11 @@ impl Entry {
         }
     }
 
-    fn handler(address: u64, selector: u16) -> Self {
+    fn handler(address: u64, selector: u16, ist: u8) -> Self {
         Self {
             offset_low: address as u16,
             selector,
-            ist: 0,
+            ist,
             kind: 0x8E, // present, ring 0, 64-bit interrupt gate
             offset_mid: (address >> 16) as u16,
             offset_high: (address >> 32) as u32,
@@ -108,6 +108,9 @@ extern "C" {
     fn isr_29();
     fn isr_30();
     fn isr_31();
+
+    fn irq_timer();
+    fn irq_spurious();
 }
 
 static STUBS: [unsafe extern "C" fn(); 32] = [
@@ -118,15 +121,26 @@ static STUBS: [unsafe extern "C" fn(); 32] = [
 
 static mut IDT: [Entry; 256] = [Entry::missing(); 256];
 
-/// Install the 32 architectural exception gates on the kernel code segment.
+/// Install the exception gates, the double-fault IST gate and the timer gates.
 pub fn init(code_selector: u16) {
     // SAFETY: called once during boot with interrupts disabled; the only
     // outstanding writes are to IDT, which nothing else reads yet.
     unsafe {
         let idt = addr_of_mut!(IDT);
         for (vector, stub) in STUBS.iter().enumerate() {
-            (*idt)[vector] = Entry::handler(*stub as u64, code_selector);
+            (*idt)[vector] = Entry::handler(*stub as u64, code_selector, 0);
         }
+
+        // #DF runs on its own stack so a bad kernel stack cannot prevent the dump.
+        let double_fault: unsafe extern "C" fn() = isr_8;
+        (*idt)[8] = Entry::handler(double_fault as u64, code_selector, 1);
+
+        let timer_isr: unsafe extern "C" fn() = irq_timer;
+        let spurious_isr: unsafe extern "C" fn() = irq_spurious;
+        (*idt)[crate::apic::TIMER_VECTOR as usize] =
+            Entry::handler(timer_isr as u64, code_selector, 0);
+        (*idt)[crate::apic::SPURIOUS_VECTOR as usize] =
+            Entry::handler(spurious_isr as u64, code_selector, 0);
 
         let pointer = DescriptorPointer {
             limit: (core::mem::size_of::<[Entry; 256]>() - 1) as u16,

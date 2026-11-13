@@ -136,8 +136,9 @@ These are no longer open; they were recorded in specs and ADRs:
 Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Next:
 
 1. ~~Bitmap-font framebuffer console~~ — done, mirrored to serial.
-2. ~~IDT with an exception dump~~ — done; GDT is still the boot stub's.
+2. ~~IDT with an exception dump~~ — done; GDT/TSS and double-fault IST done.
 3. ~~Frame allocator over the multiboot2 memory map~~ — done, 4 KiB bitmap.
-4. Next: GDT/TSS with a double-fault IST, APIC timer and clock (Q6), then the `abi` and
-   compiler/interpreter skeleton.
-5. Pick the tuning constants (Q1–Q4) when the scheduler first runs.
+4. ~~APIC timer and the global nanosecond clock~~ — done, 1 kHz tick calibrated
+   against the PIT (Q6).
+5. Next: the `abi` crate and the compiler/interpreter skeleton on the host.
+6. Pick the tuning constants (Q1–Q4) when the scheduler first runs.

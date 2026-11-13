@@ -8,7 +8,10 @@
 core::arch::global_asm!(include_str!("boot.s"));
 core::arch::global_asm!(include_str!("interrupts.s"));
 
+pub mod apic;
+pub mod gdt;
 pub mod idt;
+pub mod port;
 pub mod serial;
 
 /// Virtual base of the kernel image; physical addresses map through this offset.

@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+mod clock;
 mod console;
 mod fb;
 mod font8x8;
@@ -8,7 +9,7 @@ mod frame;
 mod mb2;
 mod sync;
 
-use arch_x86_64::{idt, serial};
+use arch_x86_64::{apic, gdt, idt, serial};
 
 /// Entry point called from the 64-bit trampoline in `arch_x86_64`.
 ///
@@ -36,8 +37,40 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
         }
     }
 
-    idt::init(0x08);
-    println!("idt: 32 exception gates installed");
+    // SAFETY: boot runs on one core with interrupts disabled; the GDT and TSS
+    // are installed exactly once, before anything can fault.
+    unsafe { gdt::init() };
+    println!("gdt: loaded, task register {:#x}", gdt::task_register());
+
+    idt::init(gdt::KERNEL_CODE);
+    println!("idt: exception gates, double-fault IST and timer gates installed");
+
+    match apic::init() {
+        Some(apic) => {
+            let ticks_per_ms = apic.calibrate();
+            println!(
+                "apic: id {}, {} ticks/ms",
+                apic.id(),
+                ticks_per_ms
+            );
+            apic.start_periodic(ticks_per_ms.max(1));
+
+            // SAFETY: the IDT and the timer are installed; interrupts may run.
+            unsafe { core::arch::asm!("sti", options(nostack)) };
+
+            let start = clock::now_ns();
+            let mut guard = 0u64;
+            while clock::now_ns() < start + 20_000_000 {
+                core::hint::spin_loop();
+                guard += 1;
+                if guard > 5_000_000_000 {
+                    break;
+                }
+            }
+            println!("clock: {} ms since boot", clock::now_ns() / 1_000_000);
+        }
+        None => println!("apic: not present; no timer"),
+    }
 
     println!("memory map:");
     let mut available_bytes = 0u64;
@@ -94,6 +127,13 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
 
     println!("boot stub complete; halting");
     arch_x86_64::halt();
+}
+
+/// Called by the timer stub in `arch_x86_64` on every tick.
+#[no_mangle]
+pub extern "C" fn timer_tick() {
+    apic::eoi();
+    clock::advance_tick();
 }
 
 /// Called by `arch_x86_64` for any architectural exception.

@@ -210,3 +210,33 @@ isr_common:
 1:  cli
     hlt
     jmp 1b
+
+.global irq_timer
+irq_timer:
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    mov r11, rsp
+    and rsp, -16
+    call timer_tick
+    mov rsp, r11
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
+
+.global irq_spurious
+irq_spurious:
+    iretq
