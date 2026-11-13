@@ -6,7 +6,9 @@
 //! `boot.s`. Everything above the transition is ordinary Rust.
 
 core::arch::global_asm!(include_str!("boot.s"));
+core::arch::global_asm!(include_str!("interrupts.s"));
 
+pub mod idt;
 pub mod serial;
 
 /// Stop this core forever. Interrupts are disabled.

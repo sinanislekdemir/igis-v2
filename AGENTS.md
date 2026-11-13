@@ -26,8 +26,9 @@ constraints learned there.
   with a booting kernel, source applications, read-only ext2 delivery, and a REPL that
   can drive a device.
 - **Status:** implementation. Specs 0001–0008 are accepted. The kernel boots under
-  GRUB/multiboot2 into long mode and drives serial plus the framebuffer; the language
-  runtime is next.
+  GRUB/multiboot2 into long mode, prints through a framebuffer console mirrored to serial,
+  has an exception path with a register dump, and reads the multiboot2 memory map. The
+  language runtime is next.
 
 ## Ground rules
 
@@ -187,3 +188,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-13 | Spec 0008 drafted: one bytecode package per application, fixed 4-byte-word stack VM, `compiler`/`interpreter` split over `abi`, structural verification at load. |
 | 2026-11-13 | Source-only delivery made permanent: no precompiled packages ever, compile latency is not a constraint (ADR 0019; specs 0002, 0008). |
 | 2026-11-13 | Specs 0001–0008 accepted. Workspace created (`arch/x86_64`, `kernel`, `xtask`): GRUB/multiboot2 boots into long mode, serial works, the framebuffer tag is parsed and the screen cleared. |
+| 2026-11-13 | Kernel diagnostics: 8x8 bitmap-font console on the framebuffer (mirrored to serial), IDT with 32 exception gates and a register dump (verified with a deliberate `int3`), multiboot2 memory-map parsing. |

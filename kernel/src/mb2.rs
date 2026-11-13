@@ -14,6 +14,13 @@ pub struct Framebuffer {
     pub kind: u8,
 }
 
+#[derive(Clone, Copy)]
+pub struct MemoryRegion {
+    pub base: u64,
+    pub len: u64,
+    pub kind: u32,
+}
+
 unsafe fn read_u8(addr: usize) -> u8 {
     core::ptr::read_unaligned(addr as *const u8)
 }
@@ -26,7 +33,7 @@ unsafe fn read_u64(addr: usize) -> u64 {
     core::ptr::read_unaligned(addr as *const u64)
 }
 
-pub fn framebuffer(info: usize) -> Option<Framebuffer> {
+fn each_tag(info: usize, mut visit: impl FnMut(u32, usize, usize)) {
     // SAFETY: `info` is the pointer GRUB placed in ebx and verified by the stub.
     let total_size = unsafe { read_u32(info) } as usize;
     let mut offset = 8usize;
@@ -38,29 +45,61 @@ pub fn framebuffer(info: usize) -> Option<Framebuffer> {
         // SAFETY: the size field is part of every tag header.
         let size = unsafe { read_u32(tag + 4) } as usize;
 
-        if kind == 0 {
-            break;
-        }
-        if size < 8 || offset + size > total_size {
+        if kind == 0 || size < 8 || offset + size > total_size {
             break;
         }
 
-        if kind == 8 && size >= 32 {
+        visit(kind, tag, size);
+        offset += (size + 7) & !7;
+    }
+}
+
+pub fn framebuffer(info: usize) -> Option<Framebuffer> {
+    let mut found = None;
+
+    each_tag(info, |kind, tag, size| {
+        if kind == 8 && size >= 32 && found.is_none() {
             // SAFETY: the framebuffer tag is at least 32 bytes when present.
-            unsafe {
-                return Some(Framebuffer {
+            found = Some(unsafe {
+                Framebuffer {
                     addr: read_u64(tag + 8),
                     pitch: read_u32(tag + 16),
                     width: read_u32(tag + 20),
                     height: read_u32(tag + 24),
                     bpp: read_u8(tag + 28),
                     kind: read_u8(tag + 29),
-                });
-            }
+                }
+            });
+        }
+    });
+
+    found
+}
+
+pub fn memory_regions(info: usize, mut visit: impl FnMut(MemoryRegion)) {
+    each_tag(info, |kind, tag, size| {
+        if kind != 6 || size < 16 {
+            return;
         }
 
-        offset += (size + 7) & !7;
-    }
+        // SAFETY: the memory-map tag is at least 16 bytes when present.
+        let entry_size = unsafe { read_u32(tag + 8) } as usize;
+        if entry_size < 24 {
+            return;
+        }
 
-    None
+        let mut offset = 16usize;
+        while offset + entry_size <= size {
+            let entry = tag + offset;
+            // SAFETY: the entry lies inside the tag.
+            visit(unsafe {
+                MemoryRegion {
+                    base: read_u64(entry),
+                    len: read_u64(entry + 8),
+                    kind: read_u32(entry + 16),
+                }
+            });
+            offset += entry_size;
+        }
+    });
 }

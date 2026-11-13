@@ -135,6 +135,7 @@ These are no longer open; they were recorded in specs and ADRs:
 
 Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Next:
 
-1. Bitmap-font framebuffer console, so the kernel can print without serial.
-2. GDT/IDT with a fault path, then the frame allocator over the multiboot2 memory map.
-3. Pick the tuning constants (Q1–Q4) when the scheduler first runs.
+1. ~~Bitmap-font framebuffer console~~ — done, mirrored to serial.
+2. ~~IDT with an exception dump~~ — done; GDT is still the boot stub's.
+3. Frame allocator over the multiboot2 memory map, then kernel pools for regions.
+4. Pick the tuning constants (Q1–Q4) when the scheduler first runs.
