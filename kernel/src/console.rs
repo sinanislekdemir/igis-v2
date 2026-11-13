@@ -1,9 +1,21 @@
 //! Framebuffer text console. Every character is also mirrored to COM1, so a
 //! headless run still shows the same output.
+//!
+//! # Staged input line discipline (spec 0005, Q44)
+//!
+//! The target design keeps the kernel out of line editing: input is a byte
+//! stream, and `stdlib`/the shell echo and assemble lines. The language cannot
+//! index a buffer yet, so this milestone stages that work here, exactly like
+//! the scalar `spawn`/`wait` ABI. The service opportunity polls COM1 and the
+//! PS/2 keyboard into one static FIFO; printable bytes are appended to a
+//! pending line and echoed, Backspace erases, Enter completes the line into a
+//! small ring, and Ctrl+C clears it. `core.read_line` pops a finished line and
+//! otherwise blocks the caller. Replacing this with application-side editing
+//! is required when indexing lands (Q44).
 
 use core::fmt::{self, Write};
 
-use arch_x86_64::serial;
+use arch_x86_64::{keyboard, serial};
 
 use crate::font8x8::FONT8X8_BASIC;
 use crate::mb2::Framebuffer;
@@ -13,6 +25,12 @@ const SCALE: usize = 2;
 const GLYPH: usize = 8 * SCALE;
 const FG: u32 = 0x00D8_E0E0;
 const BG: u32 = 0x0010_1818;
+
+/// Longest pending line. A byte that would exceed it is dropped.
+pub const LINE_BYTES: usize = 256;
+/// Finished lines held for `core.read_line`; the oldest is overwritten when
+/// the ring is full.
+pub const LINE_RING: usize = 4;
 
 pub struct Console {
     fb: Option<Framebuffer>,
@@ -146,6 +164,139 @@ pub fn write_bytes(bytes: &[u8]) {
             console.put_byte(*byte);
         }
     }
+}
+
+// ---- staged input -------------------------------------------------------
+
+/// One completed line.
+#[derive(Clone, Copy)]
+struct Line {
+    len: u16,
+    data: [u8; LINE_BYTES],
+}
+
+const EMPTY_LINE: Line = Line {
+    len: 0,
+    data: [0; LINE_BYTES],
+};
+
+/// Pending line, finished-line ring and the indices that make it a queue.
+struct Input {
+    pending_len: usize,
+    pending: [u8; LINE_BYTES],
+    lines: [Line; LINE_RING],
+    next: usize,
+    len: usize,
+}
+
+impl Input {
+    const fn new() -> Self {
+        Input {
+            pending_len: 0,
+            pending: [0; LINE_BYTES],
+            lines: [EMPTY_LINE; LINE_RING],
+            next: 0,
+            len: 0,
+        }
+    }
+
+    fn feed(&mut self, byte: u8) {
+        match byte {
+            b'\r' | b'\n' => {
+                self.complete();
+                echo(b"\n");
+            }
+            0x7F | 0x08 => {
+                if self.pending_len > 0 {
+                    self.pending_len -= 1;
+                    // Move back, overwrite the glyph with a space, move back.
+                    echo(b"\x08 \x08");
+                }
+            }
+            0x03 => {
+                self.pending_len = 0;
+                echo(b"^C\n");
+            }
+            b'\t' | 0x20..=0x7E => self.append(byte),
+            _ => {}
+        }
+    }
+
+    fn append(&mut self, byte: u8) {
+        if self.pending_len < LINE_BYTES {
+            self.pending[self.pending_len] = byte;
+            self.pending_len += 1;
+            echo(&[byte]);
+        }
+        // At capacity the byte is refused: it is neither stored nor echoed,
+        // so the visible line always matches the stored one.
+    }
+
+    fn complete(&mut self) {
+        let slot = if self.len == LINE_RING {
+            // Full: overwrite the oldest finished line.
+            let slot = self.next;
+            self.next = (self.next + 1) % LINE_RING;
+            slot
+        } else {
+            let slot = (self.next + self.len) % LINE_RING;
+            self.len += 1;
+            slot
+        };
+        let line = &mut self.lines[slot];
+        line.len = self.pending_len as u16;
+        line.data[..self.pending_len].copy_from_slice(&self.pending[..self.pending_len]);
+        self.pending_len = 0;
+    }
+
+    fn pop(&mut self, out: &mut [u8]) -> Option<usize> {
+        if self.len == 0 {
+            return None;
+        }
+        let slot = self.next;
+        self.next = (self.next + 1) % LINE_RING;
+        self.len -= 1;
+        let line = &self.lines[slot];
+        let copied = (line.len as usize).min(out.len());
+        out[..copied].copy_from_slice(&line.data[..copied]);
+        Some(copied)
+    }
+}
+
+static INPUT: SpinLock<Input> = SpinLock::new(Input::new());
+
+fn echo(bytes: &[u8]) {
+    write_bytes(bytes);
+}
+
+/// Polls both byte sources into the line discipline. Called once per service
+/// opportunity, before the scheduler claims a task.
+pub fn poll_input() {
+    let mut input = INPUT.lock();
+    for _ in 0..64 {
+        match serial::try_read_byte() {
+            Some(byte) => input.feed(byte),
+            None => break,
+        }
+    }
+    for _ in 0..32 {
+        match keyboard::try_read_byte() {
+            Some(byte) => input.feed(byte),
+            None => break,
+        }
+    }
+}
+
+/// Pops one finished line into `out`, truncating to its length. Returns the
+/// copied length, or `None` when no line is complete. The rest of an
+/// over-long line is discarded (staged behaviour, spec 0005 Q44).
+pub fn read_line(out: &mut [u8]) -> Option<usize> {
+    INPUT.lock().pop(out)
+}
+
+/// True when at least one finished line is waiting.
+pub fn has_line() -> bool {
+    INPUT.lock().len != 0
 }
 
 #[macro_export]

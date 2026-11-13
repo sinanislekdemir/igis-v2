@@ -10,13 +10,28 @@ pub fn init() {
     // SAFETY: COM1 is the conventional 16550 UART port; writing its registers is
     // legal at ring 0 and there is no other owner.
     unsafe {
-        outb(COM1 + 1, 0x00); // no interrupts
+        outb(COM1 + 1, 0x00); // no interrupts: input is polled in the service opportunity
         outb(COM1 + 3, 0x80); // DLAB
         outb(COM1 + 0, 0x01); // divisor: 115200 baud
         outb(COM1 + 1, 0x00);
         outb(COM1 + 3, 0x03); // 8N1
         outb(COM1 + 2, 0xC7); // FIFO on, clear, 14-byte threshold
         outb(COM1 + 4, 0x03); // DTR + RTS
+    }
+}
+
+/// Reads one byte if the receive FIFO has data, without blocking.
+///
+/// The line-status register bit 0 is "data ready". Serial interrupts stay off,
+/// so the caller polls this from the service opportunity (spec 0005).
+pub fn try_read_byte() -> Option<u8> {
+    // SAFETY: reading the line status and data registers of COM1.
+    unsafe {
+        if inb(COM1 + 5) & 0x01 != 0 {
+            Some(inb(COM1))
+        } else {
+            None
+        }
     }
 }
 

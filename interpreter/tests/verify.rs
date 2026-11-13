@@ -353,12 +353,27 @@ struct MockHost {
     spawn_args: Option<(Vec<u8>, Vec<u8>)>,
     wait_results: Vec<WaitOutcome>,
     wait_calls: usize,
+    read_lines: Vec<Option<Vec<u8>>>,
+    read_calls: usize,
     killed: Vec<u64>,
 }
 
 impl Host for MockHost {
     fn console_write(&mut self, bytes: &[u8]) {
         self.output.extend_from_slice(bytes);
+    }
+
+    fn read_line(&mut self, buf: &mut [u8]) -> Option<usize> {
+        let index = self.read_calls;
+        self.read_calls += 1;
+        match self.read_lines.get(index) {
+            Some(Some(line)) => {
+                let copied = line.len().min(buf.len());
+                buf[..copied].copy_from_slice(&line[..copied]);
+                Some(copied)
+            }
+            _ => None,
+        }
     }
 
     fn clock(&mut self) -> u64 {
@@ -511,6 +526,69 @@ fn wait_maps_exit_reasons_and_status_errors() {
             "{outcome:?}"
         );
     }
+}
+
+#[test]
+fn read_line_blocks_then_copies_the_line_into_the_buffer() {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 8);
+    op_imm(&mut instructions, opcodes::READ_LINE, 8);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 16);
+    op(&mut instructions, opcodes::RET);
+    let spec = FnSpec {
+        frame_size: 64,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &[], 24, 64, 0);
+
+    let mut host = MockHost {
+        read_lines: vec![None, Some(b"alpha".to_vec())],
+        ..Default::default()
+    };
+    let mut state = vec![0u8; 24];
+    let mut stack = vec![0u8; 64];
+
+    let (outcome, machine) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Blocked(WaitKind::Console));
+    assert_eq!(machine.pc(), 8, "pc stays on the read_line instruction");
+    assert_eq!(
+        state,
+        vec![0u8; 24],
+        "nothing is written before a line exists"
+    );
+
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(host.read_calls, 2);
+    assert_eq!(u64::from_le_bytes(state[0..8].try_into().unwrap()), 5);
+    assert_eq!(&state[8..13], b"alpha");
+    assert_eq!(u64::from_le_bytes(state[16..24].try_into().unwrap()), 5);
+}
+
+#[test]
+fn read_line_truncates_to_the_buffer_capacity() {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 8);
+    op_imm(&mut instructions, opcodes::READ_LINE, 4);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 16);
+    op(&mut instructions, opcodes::RET);
+    let spec = FnSpec {
+        frame_size: 64,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &[], 24, 64, 0);
+
+    let mut host = MockHost {
+        read_lines: vec![Some(b"alphabet".to_vec())],
+        ..Default::default()
+    };
+    let mut state = vec![0u8; 24];
+    let mut stack = vec![0u8; 64];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(u64::from_le_bytes(state[0..8].try_into().unwrap()), 4);
+    assert_eq!(&state[8..12], b"alph");
+    assert_eq!(u64::from_le_bytes(state[16..24].try_into().unwrap()), 4);
 }
 
 #[test]

@@ -11,6 +11,7 @@ core::arch::global_asm!(include_str!("interrupts.s"));
 pub mod apic;
 pub mod gdt;
 pub mod idt;
+pub mod keyboard;
 pub mod port;
 pub mod serial;
 

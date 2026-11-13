@@ -29,6 +29,7 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | Q9 | DMA and block primitives | handle model fixed; no primitive in M1 | first real block device |
 | Q39 | Console/stream multiplexing (`poll`/`select`) | none in M1; a task blocks on one source at a time | when an application must serve two input sources |
 | Q43 | Staged scalar `spawn`/`wait`/`kill` ABI | `int` task ids, negated `Status`, `0`/`1`/`2 + fault_code` wait results; replace with `Status`/`Diagnostic`/`ExitReason` records when the language has enums/records (spec 0005, "Staged ABI") | before `stdlib` exposes `run`, and before console input builds a shell on top of it |
+| Q44 | Staged kernel line discipline (`core.read_line`) | the kernel polls COM1/PS-2, echoes, assembles and stores lines in a 4-line ring; `core.read_line(var buf)` blocks until a line exists and truncates to the buffer. Replace with application-side editing when indexing and string operations land (spec 0005, "Staged line discipline") | when buffer indexing and string operations exist |
 
 ## C. Streams
 
@@ -159,6 +160,9 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
 10. ~~REPL request service and blocking~~ — done: `core.spawn`/`wait`/`kill`, a 1024-slot
     request queue serviced before every claim, a 64-entry exit ring, blocked tasks skipped
     by `claim` and woken on child termination; the `shell` → `child` sample proves the
-    path. The ABI is staged as scalars (Q43). Next: console input (`core.console_read`),
-    then the record-based spawn ABI; then APs, the realtime class and streams (Q3/Q4 when
-    their features land).
+    path. The ABI is staged as scalars (Q43).
+11. ~~Console input~~ — done: COM1 and the PS/2 keyboard are polled in the service
+    opportunity, a kernel-staged line ring echoes/edits, and `core.read_line` blocks the
+    shell until a line exists (Q44; spec 0005). Next: buffer indexing and string
+    operations so the shell can parse commands, then the record-based spawn ABI; then APs,
+    the realtime class and streams (Q3/Q4 when their features land).

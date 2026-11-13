@@ -215,8 +215,14 @@ fn shell_spawns_and_waits_for_the_child_on_the_host() {
         "child: hello\n",
         "child: bye\n",
         "child: ok\n",
-        "shell: done\n",
+        "shell> you said: host\n",
+        "bye\n",
     ] {
         assert!(text.contains(line), "missing {line:?} in {text:?}");
     }
+    assert_eq!(
+        text.matches("you said: host\n").count(),
+        3,
+        "the shell reads three lines: {text:?}"
+    );
 }

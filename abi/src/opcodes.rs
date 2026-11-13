@@ -103,6 +103,12 @@ pub const CLEAR: u8 = 0x40;
 /// bytes to the destination. Immediate: `capacity: u32`, the destination's
 /// declared capacity. Overflow faults `CapacityExceeded`.
 pub const APPEND: u8 = 0x41;
+/// Pop a `string` buffer reference and ask the host for one finished console
+/// line (`core.read_line`). Immediate: `capacity: u32`, the destination's
+/// declared capacity. Pushes the copied length, or blocks the task with
+/// `WaitKind::Console` when no line is complete. The copied length is at most
+/// the capacity; a longer line is truncated and the rest discarded.
+pub const READ_LINE: u8 = 0x42;
 
 /// Invoke a host builtin. Immediate: `builtin: u32` (see [`builtin`]).
 pub const BUILTIN: u8 = 0x50;
@@ -187,7 +193,7 @@ pub const fn instruction_words(op: u8) -> Option<u32> {
         | LT | LE | GT | GE | LT_U | LE_U | GT_U | GE_U => Some(1),
         CONST => Some(3),
         JMP | JZ | JNZ | CALL | LOAD_LOCAL | STORE_LOCAL | REF_LOCAL | LOAD_STATE | STORE_STATE
-        | REF_STATE | REF_CONST | APPEND | BUILTIN => Some(2),
+        | REF_STATE | REF_CONST | APPEND | READ_LINE | BUILTIN => Some(2),
         _ => None,
     }
 }
@@ -235,6 +241,7 @@ pub const fn mnemonic(op: u8) -> Option<&'static str> {
         NOT => Some("not"),
         CLEAR => Some("clear"),
         APPEND => Some("append"),
+        READ_LINE => Some("read_line"),
         BUILTIN => Some("builtin"),
         FADD => Some("fadd"),
         FSUB => Some("fsub"),

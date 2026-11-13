@@ -290,7 +290,7 @@ pub fn run(task: &mut Task);
 
 | # | Question | Trigger / owner |
 |---|----------|-----------------|
-| 1 | ~~Exact opcode table and operand encodings~~ | **Resolved** — ABI v1 is `abi::opcodes`: 53 opcodes, one 4-byte opcode word plus up to two immediate words, `i32` jump offsets in instruction words, 8-byte operand slots. The interpreter implements it. |
+| 1 | ~~Exact opcode table and operand encodings~~ | **Resolved** — ABI v1 is `abi::opcodes`: 54 opcodes, one 4-byte opcode word plus up to two immediate words, `i32` jump offsets in instruction words, 8-byte operand slots. The interpreter implements it. |
 | 2 | Stack machine vs a small register machine | Performance measurement after the first loops run. |
 | 3 | ~~Verifier depth: structural only, or limited control-flow and stack-depth checks~~ | **Resolved for v1** — structural checks plus one instruction-boundary bit per word for jump targets; operand-stack depth is enforced at run time against the frame's operand area, not by dataflow analysis. |
 | 4 | Line-table encoding and compaction | When packages grow past the first few units. |
@@ -305,3 +305,4 @@ pub fn run(task: &mut Task);
 | 2026-11-13 | Initial draft: one package per application, fixed 4-byte-word encoding, stack frames with inline locals, bounds-checked instructions, structural verification, compiler/interpreter crates over `abi`, line-table diagnostics, deterministic artifacts. |
 | 2026-11-13 | Delivery fixed as source-only, permanently: the image never carries bytecode and a package lives only as long as its instance (ADR 0019). |
 | 2026-11-13 | ABI v1 fixed and implemented on the host: opcode table in `abi::opcodes`, 32-byte frame header with `return_sp`/`dest_ref`, structural verifier with jump-boundary bits, `compiler`/`interpreter`/`langhost` crates. Open questions 1 and 3 resolved. |
+| 2026-11-13 | Added the `read_line` buffer opcode (capacity immediate, copied length pushed) for the staged `core.read_line` line discipline (spec 0005, Q44). |

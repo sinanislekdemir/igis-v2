@@ -231,16 +231,17 @@ overhead and interrupt handling still add jitter.
 
 - A blocking primitive sets `Blocked(reason)`, records the wait condition, and returns to
   the loop without re-enqueueing.
-- The first milestone has one blocking condition: `core.wait(child)`. The blocked task
-  stays in its slot with `state = Blocked` and `waiting = Some(child)`; `claim` skips
-  blocked slots and the wake-up path clears the condition in place, so the task's regions
-  and machine never move. A `Blocked` task counts as live, so the system does not halt.
+- The first milestone has two blocking conditions: `core.wait(child)` and the staged
+  `core.read_line` (`Console`). A blocked task stays in its slot with `state = Blocked`
+  and a `WaitFor` condition (`Child(id)` or `Console`); `claim` skips blocked slots and
+  the wake-up path clears the condition in place, so the task's regions and machine never
+  move. A `Blocked` task counts as live, so the system does not halt.
 - A blocking builtin that cannot complete returns `Blocked` from the interpreter without
   advancing `pc` or the operand stack; the instruction is retried after the wake-up, so a
-  retry sees the same frame. The service dispatcher still runs before every claim, so a
-  queued child is compiled even while its parent is blocked.
-- The condition (stream data, stream space, timer deadline, peer close) enqueues the task
-  and marks it `Runnable`.
+  retry sees the same frame. The service dispatcher still runs before every claim (and
+  polls console input), so a queued child is compiled even while its parent is blocked.
+- A child termination wakes `Child(id)`; a finished console line wakes `Console`. The
+  condition enqueues the task and marks it `Runnable`.
 - If every core is halted, the enqueuing core sends an IPI to one of them. A per-core
   `need_resched` flag is set before the IPI; the woken core checks it after `hlt`.
 
@@ -420,3 +421,4 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 2026-11-13 | Boot and service details fixed: INIT-SIPI-SIPI through a sub-1 MiB trampoline with `MAX_CORES` static per-core state; one IPI vector (0x40); the dispatcher runs before every claim and a compile is not interrupted (ADR 0019); realtime admission counts the cores online at call time; `kill` cancels a queued request and records `Killed`; request paths are validated (relative, no `..`, regular files only). |
 | 2026-11-13 | First scheduler implementation: 10 000-bytecode quantum and a 10 s / 200 000 000-step total budget, both provisional (Q1); the step cap is the effective watchdog while the clock ticks at 1 ms. |
 | 2026-11-13 | Spawn/wait implemented: a 1024-slot request queue serviced before every claim, a 64-entry exit ring, `Blocked(task exit)` with wake-on-termination, and `kill` for live tasks and queued requests. A blocked builtin returns without advancing `pc` or the operand stack, so the instruction is retried unchanged. |
+| 2026-11-13 | Console input implemented with a second blocking condition: the service opportunity polls COM1 and the PS/2 keyboard and wakes `Console` waiters when a finished line exists; staged line discipline in the kernel (spec 0005, Q44). |

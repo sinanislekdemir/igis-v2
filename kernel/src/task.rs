@@ -54,6 +54,15 @@ pub enum TaskState {
     Blocked,
 }
 
+/// What a blocked task is waiting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitFor {
+    /// The child task with this global id has terminated (`core.wait`).
+    Child(u64),
+    /// One finished console line (`core.read_line`).
+    Console,
+}
+
 /// One physically contiguous task region.
 #[derive(Clone, Copy)]
 pub struct Region {
@@ -109,8 +118,8 @@ pub struct Task {
     pub slot: usize,
     /// Runnable or blocked; a blocked task stays in its slot but is not claimed.
     pub state: TaskState,
-    /// The child id this task is blocked on (`core.wait`), if any.
-    pub waiting: Option<u64>,
+    /// The condition this task is blocked on, if any.
+    pub waiting: Option<WaitFor>,
     /// `core.kill` arrived; terminate at the next quantum boundary.
     pub kill_requested: bool,
     /// Claims so far, printed at termination.
@@ -228,11 +237,11 @@ pub fn claim() -> Option<Task> {
 /// Puts a claimed task back into its slot after a blocking builtin.
 ///
 /// The record stays where it is (regions and machine included) but is no
-/// longer claimable until [`wake`] clears the condition.
-pub fn block(task: Task, child: u64) {
+/// longer claimable until the matching wake-up clears the condition.
+pub fn block(task: Task, wait: WaitFor) {
     let mut task = task;
     task.state = TaskState::Blocked;
-    task.waiting = Some(child);
+    task.waiting = Some(wait);
     put(task);
 }
 
@@ -241,10 +250,19 @@ pub fn block(task: Task, child: u64) {
 /// The task is mutated in place under its slot lock: it never left the slot,
 /// so no value move or fresh claim is needed.
 pub fn wake(child: u64) {
+    wake_matching(|wait| wait == WaitFor::Child(child));
+}
+
+/// Makes every task blocked on the console runnable again.
+pub fn wake_console() {
+    wake_matching(|wait| wait == WaitFor::Console);
+}
+
+fn wake_matching(matches: impl Fn(WaitFor) -> bool) {
     for slot in SLOTS.iter() {
         let mut guard = slot.lock();
         if let Some(task) = guard.as_mut() {
-            if task.state == TaskState::Blocked && task.waiting == Some(child) {
+            if task.state == TaskState::Blocked && task.waiting.is_some_and(|wait| matches(wait)) {
                 task.waiting = None;
                 task.state = TaskState::Runnable;
             }

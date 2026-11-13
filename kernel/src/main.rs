@@ -14,7 +14,7 @@ mod sched;
 mod sync;
 mod task;
 
-use arch_x86_64::{apic, gdt, idt, serial};
+use arch_x86_64::{apic, gdt, idt, keyboard, serial};
 
 /// Entry point called from the 64-bit trampoline in `arch_x86_64`.
 ///
@@ -23,6 +23,7 @@ use arch_x86_64::{apic, gdt, idt, serial};
 #[no_mangle]
 pub extern "C" fn kmain(mb2_info: u64) -> ! {
     serial::init();
+    keyboard::init();
 
     let fb = mb2::framebuffer(mb2_info as usize);
     console::init(fb);

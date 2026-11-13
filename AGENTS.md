@@ -43,8 +43,11 @@ constraints learned there.
   `TaskId` immediately, `core.wait` blocks the parent (a `Blocked` slot skipped by
   `claim`) until the child's exit record wakes it, and a 64-entry exit ring serves `wait`.
   These three primitives use a staged scalar `int` ABI (`Status`/`ExitReason`/`Diagnostic`
-  are not language values yet; spec 0005, "Staged ABI"). The next pieces are console input,
-  the record-based spawn ABI, then APs, the realtime class and streams.
+  are not language values yet; spec 0005, "Staged ABI"). Console input now runs too: COM1
+  and the PS/2 keyboard are polled in the service opportunity, the kernel stages
+  echo/line assembly, and `core.read_line` blocks the shell until a line is ready (Q44;
+  spec 0005). The next pieces are buffer indexing and string operations, the record-based
+  spawn ABI, then APs, the realtime class and streams.
 
 ## Ground rules
 
@@ -170,6 +173,7 @@ host tools are unaffected.
 | Realtime class: no quantum preemption, one-second heartbeat, admission by core count, no reserved core | ADR 0016 (Accepted) |
 | REPL is a kernel service; boot tries `shell` then `entrypoint`; `run`/`spawn` carry `string[1024]` args through a 1024-slot queue and return global task ids | ADR 0017 (Accepted + addenda) |
 | Console is a byte stream (no echo, no key events); one global nanosecond clock at 1 ms resolution, no TSC; compile diagnostics via a caller-owned `Diagnostic` out-parameter | specs 0003, 0005, 0007 |
+| Console input: polled COM1 + PS/2, kernel-staged line discipline, blocking `core.read_line` | spec 0005, Q44 |
 | Streams are single-producer/single-consumer; names are unique per application; framing helpers live in `stdlib` | spec 0006 (Draft) |
 | Floating point in the first milestone: one `f64` type, IEEE-754, with a kernel-owned per-task `fpu` region | ADR 0018 (Accepted) |
 | No visibility modifiers: every top-level declaration is public; conversions are `T(x)` casts; maps use FNV-1a with linear probing | specs 0003, 0004 |
@@ -222,3 +226,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-13 | First in-kernel vertical slice: `xtask image` stages `samples/apps/` into a 4 MiB ext2 image attached as the `apps` GRUB module; the kernel finds the module tag, mounts the image read-only (validated superblock, group descriptors, inodes, directories, direct/single/double indirect), reads `shell`, compiles it with `compile_into`, places `code`/`state`/`stack` in contiguous frames, verifies and runs it (`exit: Ok`), reclaims the frames and halts. Boot stack raised 16 KiB → 64 KiB after the in-kernel compiler overflowed into the boot page tables. |
 | 2026-11-13 | Scheduler loop: `task.rs` owns the record and a 64-slot runnable table (claim/release by value move), `sched.rs` runs claim → quantum → release/terminate on the boot core. The REPL only compiles and enqueues; the boot application crosses 181 claims over a 10 000-step quantum, then `exit Ok` and an idle summary. Budgets are provisional: 10 s of CPU time plus a 200M-step cap because the 1 ms clock cannot resolve a quantum. |
 | 2026-11-13 | REPL request service: `core.spawn`/`wait`/`kill` with a staged scalar `int` ABI, a 1024-slot static request queue serviced before every claim, a 64-entry exit ring, `Blocked(task exit)` with wake-on-termination, and a `shell` → `child` sample that blocks, wakes and reports `child: ok`. A load failure prints the diagnostic and records `Faulted(IoError)` under the reserved id. |
+| 2026-11-13 | Console input: COM1 and the PS/2 keyboard are polled in the service opportunity into one static FIFO, a staged line ring echoes/edits/completes lines, and `core.read_line` blocks the shell (`Blocked(Console)`) until a line exists; `shell` reads three lines and exits. Temporary until indexing lands (Q44). |

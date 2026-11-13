@@ -78,6 +78,13 @@ pub struct RunResult {
 /// parent's, and stores the exit reason under a fresh id. `core.wait` then
 /// returns that record immediately and never blocks; the scheduling difference
 /// from the kernel is invisible to a program that spawns and waits.
+/// Fixed line returned by the host `core.read_line` stub.
+///
+/// The host toolchain has no kernel line ring, so the stub always reports one
+/// complete line. A host-side shell therefore runs the same code path and
+/// prints `you said: host` for each read, without ever blocking.
+const HOST_LINE: &[u8] = b"host";
+
 struct ConsoleHost {
     output: Vec<u8>,
     depth: u32,
@@ -119,6 +126,12 @@ fn app_dir() -> PathBuf {
 impl Host for ConsoleHost {
     fn console_write(&mut self, bytes: &[u8]) {
         self.output.extend_from_slice(bytes);
+    }
+
+    fn read_line(&mut self, buf: &mut [u8]) -> Option<usize> {
+        let copied = HOST_LINE.len().min(buf.len());
+        buf[..copied].copy_from_slice(&HOST_LINE[..copied]);
+        Some(copied)
     }
 
     fn clock(&mut self) -> u64 {

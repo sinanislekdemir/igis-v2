@@ -113,7 +113,8 @@ The interface is split into two namespaces:
   returns as many bytes as are available up to the destination length, and never waits for
   a line or a full key sequence.
 - The kernel does not echo, does not assemble lines, does no editing and exposes no key
-  events; prompt, echo, history and line editing are `stdlib`/shell code.
+  events; prompt, echo, history and line editing are `stdlib`/shell code. The staged
+  `core.read_line` below is a deliberate first-milestone exception until indexing exists.
 - Console bytes pass through unvalidated: the kernel never checks UTF-8 and never
   interprets escape sequences. In the first milestone the keyboard driver emits US ASCII,
   with `Enter` as `\n` (LF only), `Backspace` as `0x7F`, `Tab` as `\t` and `Ctrl+C` as
@@ -147,6 +148,33 @@ This is a staging shape, not the ABI. The target API keeps the signatures in the
 compile error, a read failure) is recorded as `Faulted(IoError)` and the kernel prints the
 compiler diagnostic; the final API reports `Status.Invalid` with `diag` filled instead.
 Replacing the scalar form is required before `stdlib` exposes `run`.
+
+#### Staged line discipline: `core.read_line`
+
+The target rule above stands: `console_read` is a byte stream, the kernel does not echo
+or assemble lines, and prompt/history/editing are application code. The first milestone
+cannot follow it yet because the language has no buffer indexing or string slicing, so
+this slice stages a line reader in the kernel console layer, the same staging shape as
+the scalar `spawn` ABI:
+
+| Primitive | Staged signature | Result |
+|-----------|------------------|--------|
+| `core.read_line` | `(var buf: string[N]) -> int` | copied length (`0..=N`), or blocks until a line is complete |
+
+- The service opportunity polls COM1 and the PS/2 keyboard into one static FIFO.
+  Printable bytes append to a 256-byte pending line and are echoed; Backspace erases
+  (`\b \b`); Enter completes the line into a four-line ring and echoes `\n`; Ctrl+C
+  clears the pending line and echoes `^C\n`. Other keys are dropped.
+- A byte past the pending capacity is refused: it is neither stored nor echoed. A
+  finished line longer than `N` is truncated to `N`; the rest is discarded and the
+  copied length is returned. There is no `CapacityExceeded` result in this staged form.
+- `read_line` returns `None` when no line is complete; the interpreter then returns
+  `Blocked(Console)` without advancing and retries the instruction after the scheduler
+  wakes the task.
+- The host mock has no line ring: `langhost` returns one fixed line (`host`) per call so
+  host-side programs exercise the same code path without blocking.
+- This is temporary. Replace it with application-side editing as soon as indexing and
+  string operations exist (Q44).
 
 ### `syslib` primitives
 
@@ -190,6 +218,7 @@ aspirational.
 trait Host {
     fn console_write(&self, bytes: &[u8]);
     fn console_read(&mut self, buf: &mut [u8]) -> usize;
+    fn read_line(&mut self, buf: &mut [u8]) -> Option<usize>;
     fn yield_now(&mut self);
     fn send(&mut self, ep: Endpoint, bytes: &[u8]) -> Status;
     fn try_send(&mut self, ep: Endpoint, bytes: &[u8]) -> Status;
@@ -223,6 +252,7 @@ signal for origin and cost (`0003-language.md`).
 | Situation | Behaviour |
 |-----------|-----------|
 | `console_read` with no input | Task blocks; no CPU consumed |
+| `core.read_line` with no finished line | Task blocks; no CPU consumed (staged line discipline, above) |
 | `console_read` sees a non-text key | Key is discarded; no byte is produced |
 | Two tasks read the console | Bytes are split between them; no ownership, no arbitration |
 | Task needs the console and a stream at once | Not expressible; one blocking wait at a time (open question 12) |
@@ -279,3 +309,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-13 | `run`/`spawn` paths are limited to 256 bytes and are relative to the image root; path validation stays open (question 13). |
 | 2026-11-13 | Path validation settled (question 13): relative, no leading/trailing `/`, no empty or `..` component, regular files only; malformed is `Invalid`, absent is `NotFound`. `kill` semantics: queued requests are cancelled with `Killed`, live tasks terminate at the next safe point. |
 | 2026-11-13 | Staged scalar `spawn`/`wait`/`kill` ABI added for the first milestone (`int` task id, negated `Status`, `0`/`1`/`2 + fault_code` wait results); the record-based `Diagnostic`/`Status`/`ExitReason` form remains the target API (see "Staged ABI"). |
+| 2026-11-13 | Staged `core.read_line` line discipline added: polled COM1/PS-2 bytes, kernel echo and a four-line ring, blocking on an unfinished line. Temporary until indexing exists (Q44). |

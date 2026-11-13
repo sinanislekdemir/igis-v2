@@ -1639,6 +1639,32 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.pop(1)?;
                 Ok(None)
             }
+            // Staged line discipline (spec 0005, Q44): the kernel assembles
+            // one line and hands it to the caller. `var` gives the callee the
+            // caller's buffer; the declared capacity is carried in the
+            // instruction so the interpreter can bound the copy.
+            "core.read_line" => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.read_line` expects 1 argument, got {}", args.len()),
+                    ));
+                }
+                let found = self.emit_var_buffer_ref(args[0])?;
+                if found.kind != Kind::String {
+                    return Err(self.err_at(
+                        args[0],
+                        format_args!(
+                            "`core.read_line` expects a `var string` buffer, found `{found}`"
+                        ),
+                    ));
+                }
+                self.one(opcodes::READ_LINE, found.cap)?;
+                self.pop(1)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Int)))
+            }
             "core.clock" => {
                 if !args.is_empty() {
                     return Err(self.err(

@@ -48,6 +48,17 @@ pub trait Host {
     /// they may be arbitrary binary data.
     fn console_write(&mut self, bytes: &[u8]);
 
+    /// Pops one completed console line into `buf` (`core.read_line`).
+    ///
+    /// Returns the number of bytes copied, at most `buf.len()`, or `None` when
+    /// no line is complete. The machine then returns [`Outcome::Blocked`] with
+    /// [`WaitKind::Console`] without advancing and retries the same instruction
+    /// when the scheduler wakes the task. The default is a host with no input,
+    /// so tests that only need the console and the clock stay small.
+    fn read_line(&mut self, _buf: &mut [u8]) -> Option<usize> {
+        None
+    }
+
     /// Monotonic nanoseconds since boot (or since the host process started).
     fn clock(&mut self) -> u64;
 
@@ -80,6 +91,8 @@ pub trait Host {
 pub enum WaitKind {
     /// Wait for the task with this global id to terminate.
     ChildExit(u64),
+    /// Wait for one finished console line (`core.read_line`).
+    Console,
 }
 
 /// Result of [`Host::wait`].
@@ -446,6 +459,44 @@ impl Machine {
             opcodes::APPEND => {
                 let capacity = read_u32(code, pc + 4)? as usize;
                 self.append(capacity, state, stack, constants, args)?;
+            }
+            opcodes::READ_LINE => {
+                let capacity = read_u32(code, pc + 4)? as usize;
+                let bits = self.pop(stack)?;
+                let (region, offset) = self.resolve(bits, state, stack, constants, args)?;
+                if region != refs::REGION_STATE && region != refs::REGION_STACK {
+                    return Err(FaultCode::IllegalOperation);
+                }
+                if offset < 8 {
+                    return Err(FaultCode::OutOfBounds);
+                }
+                let end = offset.checked_add(capacity).ok_or(FaultCode::OutOfBounds)?;
+                if end
+                    > region_len(region, state, stack, constants, args)
+                        .ok_or(FaultCode::OutOfBounds)?
+                {
+                    return Err(FaultCode::OutOfBounds);
+                }
+                let copied = match region {
+                    refs::REGION_STATE => host.read_line(&mut state[offset..end]),
+                    refs::REGION_STACK => host.read_line(&mut stack[offset..end]),
+                    _ => return Err(FaultCode::IllegalOperation),
+                };
+                let Some(copied) = copied else {
+                    // As with `wait`: restore the operand stack and point at
+                    // the same instruction so the retry sees an unchanged
+                    // boundary. Nothing was written to the destination.
+                    self.pc = pc;
+                    self.sp = saved_sp;
+                    return Ok(Step::Blocked(WaitKind::Console));
+                };
+                let copied = copied.min(capacity);
+                match region {
+                    refs::REGION_STATE => write_u64(state, offset - 8, copied as u64)?,
+                    refs::REGION_STACK => write_u64(stack, offset - 8, copied as u64)?,
+                    _ => return Err(FaultCode::IllegalOperation),
+                }
+                self.push(stack, copied as u64)?;
             }
             opcodes::BUILTIN => {
                 let id = read_u32(code, pc + 4)?;

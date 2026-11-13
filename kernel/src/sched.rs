@@ -37,12 +37,13 @@ use abi::{ExitReason, FaultCode, Status};
 use interpreter::{Diagnostic, Host, Outcome, Program, WaitKind, WaitOutcome};
 
 use crate::clock;
+use crate::console;
 use crate::ext2::Ext2;
 use crate::frame;
 use crate::println;
 use crate::repl;
 use crate::sync::SpinLock;
-use crate::task::{self, Task};
+use crate::task::{self, Task, WaitFor};
 
 /// Bytecodes executed per claim (spec 0007 Q1, provisional).
 ///
@@ -87,6 +88,10 @@ struct KernelHost<'a> {
 impl Host for KernelHost<'_> {
     fn console_write(&mut self, bytes: &[u8]) {
         crate::console::write_bytes(bytes);
+    }
+
+    fn read_line(&mut self, buf: &mut [u8]) -> Option<usize> {
+        console::read_line(buf)
     }
 
     fn clock(&mut self) -> u64 {
@@ -149,7 +154,8 @@ pub fn parse_program(code: &[u8]) -> Result<Program<'_>, Diagnostic> {
 /// The loop ends when no task is live and no request is pending: with no
 /// console input there is no other source of work, so it prints the summary and
 /// halts. A blocked task keeps the system alive (it will be woken by a child
-/// termination), so the check is "no live task", not "boot task finished".
+/// termination or a finished console line), so the check is "no live task", not
+/// "boot task finished".
 pub fn run_forever(image: &Ext2<'_>) -> ! {
     loop {
         service(image);
@@ -167,7 +173,6 @@ pub fn run_forever(image: &Ext2<'_>) -> ! {
                 match outcome {
                     Outcome::Exited(reason) => terminate(task, reason),
                     Outcome::Blocked(kind) => {
-                        let WaitKind::ChildExit(child) = kind;
                         if task.kill_requested {
                             // A kill that arrived while the task was blocked
                             // must not be lost by blocking it again.
@@ -175,9 +180,18 @@ pub fn run_forever(image: &Ext2<'_>) -> ! {
                             continue;
                         }
                         // The blocked task keeps its slot but stops being
-                        // claimable; `terminate` of the child wakes it (Sch9).
-                        println!("sched: task {} blocked on task {}", task.id, child);
-                        task::block(task, child);
+                        // claimable. A child termination wakes `ChildExit`; a
+                        // finished console line wakes `Console` (Sch9).
+                        match kind {
+                            WaitKind::ChildExit(child) => {
+                                println!("sched: task {} blocked on task {}", task.id, child);
+                                task::block(task, WaitFor::Child(child));
+                            }
+                            WaitKind::Console => {
+                                println!("sched: task {} blocked on console", task.id);
+                                task::block(task, WaitFor::Console);
+                            }
+                        }
                     }
                     Outcome::Yielded => {
                         if task.kill_requested {
@@ -275,7 +289,15 @@ fn terminate(task: Task, reason: ExitReason) {
 /// The REPL service opportunity: at most one pending request per call (spec
 /// 0007, "Services and task creation"). It runs before every claim so a
 /// permanently runnable machine still services its queue.
+///
+/// Input is polled here too: with no input the loop `hlt`s, the timer wakes it
+/// every millisecond, and this is where a typed line reaches the line ring and
+/// wakes a task blocked in `core.read_line`.
 fn service(image: &Ext2<'_>) {
+    console::poll_input();
+    if console::has_line() {
+        task::wake_console();
+    }
     repl::service(image);
 }
 
