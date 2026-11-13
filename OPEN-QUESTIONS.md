@@ -44,31 +44,6 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | Q40 | `f32` support | not in M1; additive later, but it needs its own opcode and conversion rules | when single precision is needed |
 | Q41 | Float text beyond fixed decimal | shortest round-trip formatting and full decimal parsing are deferred | when float output must round-trip losslessly |
 
-## E. Boot and platform
-
-| # | Question | Options / recommendation | Trigger |
-|---|----------|--------------------------|---------|
-| Q24 | AP bring-up details | trampoline vs INIT-SIPI-SIPI; per-core stacks | second half of M1 |
-| Q25 | Timer source | PIT / HPET / APIC timer | `arch/x86_64` |
-| Q26 | IPI mechanism | fixed vector vs APIC shorthand | `arch/x86_64` |
-| Q27 | ext2 subset edge cases | 1 KiB/4 KiB blocks, indirect depth, corrupt images | loader |
-| Q28 | `shell` exists but fails to compile | fall back to `entrypoint`, or halt? Current: halt | REPL boot |
-| Q29 | `no entry` behaviour | halt vs reboot vs built-in prompt | boot |
-| Q30 | Framebuffer fallback | no VGA fallback; is the multiboot2 tag mandatory? | boot |
-
-## F. Scheduler and REPL
-
-| # | Question | Options / recommendation | Trigger |
-|---|----------|--------------------------|---------|
-| Q31 | Service dispatcher timing | before every claim, or only when the runnable set is empty | scheduler |
-| Q32 | Realtime admission when APs come online late | count online cores? re-check blocked admissions? | AP bring-up |
-| Q33 | `kill(id)` before the task is created | cancel the queued request, or mark it killed on creation | REPL |
-| Q34 | Parent death with live children | continue (decided); no reparent and no kill-tree | future supervisor |
-| Q35 | Exit-reason ring size and eviction | 64 default; oldest evicted | REPL |
-| Q36 | Path validation | relative to the image root; directories allowed? `..` rejected? | REPL |
-| Q37 | Shell/entrypoint recursion | is starting `shell` from `shell` allowed? | REPL |
-| Q38 | Spawn queue full retry policy | `Status.Full` (decided); does the shell retry or report? | shell |
-
 ## Decided in the 2026-11-13 session
 
 - **Console input is a byte stream.** `console_read` blocks until at least one byte,
@@ -114,7 +89,26 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 - **Request limits.** A `run`/`spawn` path is at most 256 bytes and relative to the image
   root (Q22); a stream name is `string[32]` matching `[a-z][a-z0-9_]*`, and a stream
   capacity is `1..=65536` bytes (Q23, spec 0006 S12).
-- Q5, Q6, Q7, Q11–Q13 and Q15–Q23 are resolved and removed from the table.
+- **Boot and platform.** APs are started with INIT-SIPI-SIPI through a real-mode trampoline
+  below 1 MiB, with `MAX_CORES` static per-core state and a bounded wait that logs
+  `IoError` and continues. Wake-up uses one fixed IPI vector (0x40) with fixed delivery and
+  the all-excluding-self shorthand. The multiboot2 framebuffer tag is mandatory: without
+  it the kernel writes `no framebuffer` to serial and halts (Q24, Q26, Q30).
+- **ext2 subset.** 1 KiB and 4 KiB blocks, revision 1, direct/single/double indirect,
+  regular files in the image root, exact case-sensitive matching, and full metadata
+  validation before use. Unsupported features and triple indirect refuse the mount; there
+  is no partial mount (Q27, spec 0002).
+- **Scheduler and REPL.** The dispatcher runs before every claim with at most one request
+  per opportunity; realtime admission counts the cores online at call time and does not
+  revisit a refusal; `ExitReason` gained `Killed`, and `kill` cancels a queued request or
+  terminates a live task at its next safe point; request paths are relative with no `..` and
+  must name regular files; a shell may start another shell; a full queue is reported, not
+  retried (Q31–Q33, Q36–Q38).
+- **Already decided, removed from the table:** Q25 (timer source, closed by Q6), Q28 and
+  Q29 (ADR 0017 addendum), Q34 (children continue), Q35 (64-entry exit ring).
+- Q5, Q6, Q7, Q11–Q13 and Q15–Q38 are resolved and removed from the table; only the
+  tuning constants, the deferred debug/DMA/streams items and the two float follow-ups
+  remain.
 
 ## Decided in the 2026-11-12 session
 
@@ -137,6 +131,8 @@ These are no longer open; they were recorded in specs and ADRs:
 ## Suggested next step
 
 1. Review and mark specs 0001 and 0002 **Accepted** (they are the governing documents).
-2. Create the workspace and the first bootable skeleton: linker script, multiboot2
+2. Write `specs/0008-bytecode.md`: instruction encoding, constant pool, frame layout,
+   calling convention, compiler/runtime split and ABI versioning (Q21).
+3. Create the workspace and the first bootable skeleton: linker script, multiboot2
    header, 32-bit stub, long-mode transition, 64-bit entry, serial + framebuffer console.
-3. Pick the tuning constants (Q1–Q4) when the scheduler first runs.
+4. Pick the tuning constants (Q1–Q4) when the scheduler first runs.

@@ -360,7 +360,9 @@ if st <> Ok then
   its exit reason; `core.kill(id)` requests termination and does not wait. The request is
   handled by the kernel REPL service (ADR 0017). `diag` is filled on a compile error and
   cleared otherwise. `path` is at most 256 bytes and is interpreted relative to the image
-  root (`0005-host-interface.md`).
+  root (`0005-host-interface.md`). `kill(id)` on a queued request cancels it and records
+  `Killed`; on a live task it requests termination at the next safe point; on an unknown or
+  finished id it returns `Status.NotFound`.
 - **C8 (MUST):** A spawned child is a separate application instance with its own regions.
   It shares no memory with the parent; communication is through streams.
 - **C9 (MUST):** The argument passed to `run`/`spawn` is a fixed `string[1024]`, delivered
@@ -482,7 +484,9 @@ observability budget.
 | `IoError` | Loader or device failure |
 | `ExitFault` | Terminal reason recorded when `exit` itself failed; never delivered to `fault` |
 
-`exit` receives `ExitReason`, which is `Ok` or `Faulted(code: FaultCode)`.
+`exit` receives `ExitReason`, which is `Ok`, `Killed`, or `Faulted(code: FaultCode)`.
+`Killed` is recorded when `core.kill(id)` ends a task, including a request cancelled before
+its task was created.
 
 ## Standard library
 
@@ -524,6 +528,8 @@ is the signal.
 | `run`/`spawn` compile error | `Status.Invalid`; `diag` filled; no child |
 | `wait` on an unknown or evicted id | `Status.NotFound` |
 | `kill` on an unknown or terminated id | `Status.NotFound` |
+| `kill` on a live child | Terminates at the next safe point; `exit(Killed)` runs |
+| `kill` on a queued request | Cancelled; `ExitReason.Killed` recorded; no child created |
 | Discarded `Status` | Compile warning |
 | Import cycle | Compile error |
 | Capacity mismatch in assignment | Compile error |
@@ -554,3 +560,4 @@ is the signal.
 | 2026-11-13 | `Diagnostic` gained a `message: string[96]` field and is caller-owned; `core.run`/`core.spawn` take a `var diag` out-parameter filled on compile errors (spec 0005, whose OQ 7 is now closed). |
 | 2026-11-13 | Stream endpoint names are application-wide unique (spec 0006, S11); `stdlib` framing defaults to a length prefix with newline-delimited helpers for text. |
 | 2026-11-13 | Floating point added to the first milestone: `f64` only, IEEE-754, per-task 512-byte FXSAVE region (ADR 0018); explicit `T(x)` casts, IEEE float semantics; every top-level declaration is public with no visibility modifiers; FNV-1a maps with linear probing; comparisons bind tighter than `and`/`or` and bitwise operations are `core` functions; `Diagnostic` only, no stack trace; stream names are `string[32]` and capacities are `1..=65536`; `run`/`spawn` paths are limited to 256 bytes. |
+| 2026-11-13 | `ExitReason` gained `Killed`; `kill` cancels a queued request and runs `exit(Killed)` on a live task; request paths are validated as relative with no `..` and must name regular files. |

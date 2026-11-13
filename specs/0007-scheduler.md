@@ -195,7 +195,9 @@ core.heartbeat()     // at least once per second of non-blocked time
   `realtime_on()` again is a no-op that returns `Ok`.
 - **Admission is by core count.** The number of realtime tasks may not exceed the number
   of online cores. A blocked realtime task still occupies its slot, so an oversubscribed
-  set cannot appear when it wakes.
+  set cannot appear when it wakes. "Online" means online at admission time: an earlier
+  `Status.Full` is not re-evaluated when an AP arrives later, and the caller retries. The
+  online count never decreases in the first milestone.
 - **Priority.** The runnable set has a realtime queue and a normal queue; a core claims
   from the realtime queue first.
 - **No quantum preemption.** A claimed realtime task is not released at quantum expiry.
@@ -243,12 +245,20 @@ There are no zombies. A terminated task leaves nothing behind.
 ### Services and task creation
 
 - Before claiming a task — and whenever the runnable set is empty — the loop calls the
-  kernel service dispatcher. The REPL service processes at most one pending
-  compile-and-run request per opportunity (`0002-architecture.md`, ADR 0017). This bounds
-  the time a core spends compiling.
+  kernel service dispatcher. It processes at most one pending compile-and-run request per
+  opportunity (`0002-architecture.md`, ADR 0017). This bounds the time a core spends
+  compiling. The dispatcher runs before every claim rather than only when the set is
+  empty: if it ran only on idle, a machine with a permanently runnable task would never
+  service a queued request. Only one core compiles at a time — a core claims a request by
+  taking the service lock, and other cores skip the opportunity.
 - A request creates a task: the service resolves the path in ext2, reads the source,
-  compiles it, allocates `code`/`state`/`stack`, builds the task record, and enqueues it
-  as `Runnable`.
+  compiles it, allocates `code`/`state`/`stack`/`fpu`, builds the task record, and enqueues
+  it as `Runnable`.
+- A request path is validated before the image is searched. It must be relative to the
+  image root, at most 256 bytes, with no leading `/`, no empty component, no trailing `/`
+  and no `..` component. A malformed path returns `Status.Invalid`; a well-formed path that
+  names no regular file returns `Status.NotFound`; a directory or other non-regular entry
+  returns `Status.Invalid`. Matching is exact and case-sensitive.
 - The task record stores the fixed `string[1024]` argument; the loader passes it to the
   child's `main(args: const string[1024])`. The queue holds 1024 pending requests by
   default, a compile-time constant.
@@ -256,7 +266,11 @@ There are no zombies. A terminated task leaves nothing behind.
   go to the global ring, and the parent is woken if it is blocked in `wait`/`run`.
 - Child regions are reclaimed at termination; the exit reason survives in the global ring
   until `wait` consumes it or it is evicted.
-- `kill` marks the child for termination at its next safe point; it does not wait.
+- `kill` on a live task marks it for termination at its next safe point; `exit(Killed)`
+  runs and the task is reclaimed. `kill` on a request that is still queued cancels the
+  request: no task is created, and `Killed` is recorded in the exit ring under the
+  reserved id. `kill` on an unknown or already terminated id returns `Status.NotFound`.
+  It never waits.
 - A spawned child is independent: if the parent terminates, the child continues. The
   parent's memory is reclaimed; the child keeps running.
 - If every core is held by a realtime task, the service gets no opportunity and no
@@ -281,8 +295,14 @@ There is no per-core ownership of any application region.
 
 - The boot core initializes the GDT/IDT, paging, APIC and the scheduler, then enters the
   loop.
-- APs are started with the standard INIT-SIPI-SIPI sequence, given their own stacks and
-  per-core state, and enter the same loop.
+- APs are started with the standard INIT-SIPI-SIPI sequence through a real-mode trampoline
+  page placed in reserved memory below 1 MiB. The trampoline switches the AP to protected
+  mode, then to long mode with the shared page tables, and jumps into the kernel entry.
+- Per-core stacks and per-core state come from a fixed array sized by `MAX_CORES`, a
+  compile-time constant (16 in the first build). Nothing is allocated during bring-up.
+- The boot core waits for each AP with a bounded spin and a timeout. An AP that does not
+  arrive is logged as `IoError`; the boot core continues with fewer cores. The milestone is
+  not complete until bring-up works on the target.
 - All cores share the global runnable set and the same claim protocol.
 - AP bring-up is the second half of the first milestone; the single-core run is the same
   code with one loop.
@@ -291,6 +311,10 @@ There is no per-core ownership of any application region.
 
 - The timer interrupt advances the global clock on the boot core and sets budget/quantum
   flags on every core. It does not switch tasks.
+- Wake-up uses one fixed IPI vector (0x40), delivered in fixed mode to a physical
+  destination; a wake that any core may serve uses the all-excluding-self shorthand. The
+  sender sets the target's `need_resched` flag before the IPI. The handler only
+  acknowledges with an EOI; the core re-checks the runnable set after `hlt` returns.
 - Handlers are short; deferred work runs in a bottom half drained by the interpreter loop
   before the next quantum.
 - An interrupt that arrives while a core is between tasks (no current task) must not
@@ -331,7 +355,10 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | Child terminates while parent is in `wait` | Parent wakes with the child's `ExitReason` |
 | `wait` on an unknown or evicted id | `Status.NotFound` |
 | `kill` on an unknown or terminated id | `Status.NotFound` |
-| Parent terminates with live children | Children continue (open question) |
+| `kill` on a queued request | Request cancelled; `Killed` recorded under the reserved id; no task created |
+| `wait` on a killed id | `ExitReason.Killed` |
+| Request path malformed or not a regular file | `Status.Invalid`; no request enqueued |
+| Parent terminates with live children | Children continue (ADR 0017 addendum 2) |
 | Compile fails in the REPL service | Request completes with `Status.Invalid`; no task created |
 | Task blocks | Leaves the runnable set; no CPU consumed |
 | Wake with all cores halted | IPI to one core; `need_resched` set before the IPI |
@@ -349,12 +376,12 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 1 | Quantum size (steps and time) and the total budget value | Tuning after the first measurable workloads. |
 | 2 | Global queue vs per-core deques with stealing | Performance; claim semantics do not change. |
 | 3 | Priority or deadline scheduling | Not planned; budgets are the only policy. |
-| 4 | IPC mechanism: fixed-vector IPI vs APIC shorthand | `arch/x86_64` implementation detail. |
+| 4 | ~~IPC mechanism: fixed-vector IPI vs APIC shorthand~~ | **Resolved** — one fixed vector (0x40), fixed delivery to a physical destination, all-excluding-self shorthand for any-core wakes. |
 | 5 | ~~Timer source: PIT, HPET or APIC timer~~ | **Resolved** — APIC timer for ticks, calibrated against the PIT/HPET at boot; one global nanosecond counter advanced by the boot core (see Time). |
 | 6 | Whether a task can be pinned for debugging | A debug feature, not a scheduling model. |
 | 7 | ~~Whether to reserve one core for the REPL/system~~ | **Resolved** — no reservation; realtime may occupy every core (ADR 0016 addendum). |
 | 8 | Heartbeat interval (one second) and whether it is configurable per task | Detection latency versus overhead. |
-| 9 | Whether the service dispatcher runs before every claim or only when the runnable set is empty | Compile latency versus scheduling overhead. |
+| 9 | ~~Whether the service dispatcher runs before every claim or only when the runnable set is empty~~ | **Resolved** — before every claim, at most one request per opportunity. |
 | 10 | ~~Exit-reason ring size (64?) and whether `run` may block on a full queue~~ | **Resolved** — ring default 64; a full request queue returns `Status.Full`. |
 | 11 | ~~Whether the argument string is `core.arguments` or a `main` parameter~~ | **Resolved** — `main(args: const string[1024])`. |
 
@@ -368,3 +395,4 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 2026-11-12 | Task creation carries the fixed `string[1024]` argument, delivered as `main(args)`; queue capacity 1024; orphan children continue (ADR 0017 addendum). |
 | 2026-11-13 | Time fixed as one global nanosecond counter advanced by the boot core's 1 kHz APIC timer tick; no TSC, because per-vCPU TSC drift would corrupt budget and heartbeat accounting; 1 ms resolution is accepted. |
 | 2026-11-13 | Claim and release save and restore SSE state with `FXSAVE`/`FXRSTOR` into a per-task `fpu` region; Sch5 now names the FPU context explicitly (ADR 0018). |
+| 2026-11-13 | Boot and service details fixed: INIT-SIPI-SIPI through a sub-1 MiB trampoline with `MAX_CORES` static per-core state; one IPI vector (0x40); the dispatcher runs before every claim; realtime admission counts the cores online at call time; `kill` cancels a queued request and records `Killed`; request paths are validated (relative, no `..`, regular files only). |

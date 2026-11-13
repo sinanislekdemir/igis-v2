@@ -88,8 +88,10 @@ The interface is split into two namespaces:
   passes it to the child's `main(args: const string[1024])`; it never parses it. A longer
   argument is `Status.CapacityExceeded`.
 - `path` is relative to the image root and limited to 256 bytes; a longer value returns
-  `Status.CapacityExceeded`. Whether `..`, a leading `/` or a directory is rejected is
-  open question 13.
+  `Status.CapacityExceeded`. A path with a leading `/`, an empty component, a trailing `/`
+  or a `..` component is `Status.Invalid`, as is a directory or other non-regular entry;
+  a well-formed path that names nothing is `Status.NotFound`. Matching is exact and
+  case-sensitive.
 - The caller supplies the diagnostic buffer. `run` and `spawn` fill `diag` on
   `Status.Invalid` with the failing unit, line, column and a truncated message, and clear
   it on every other status. There is no global "last error" slot — it would race between
@@ -159,7 +161,8 @@ aspirational.
 - No allocation primitive: the loader allocates before the task starts; the interface has
   nothing to give at runtime.
 - No process, thread or spawn primitive: an application is one task.
-- No debug or introspection primitive in the first milestone (open question 3).
+- No debug or introspection primitive in the first milestone; counters and task listing are
+  designed after the shell exists.
 
 ## Interfaces
 
@@ -214,10 +217,13 @@ signal for origin and cost (`0003-language.md`).
 | `run`/`spawn` path not found | `Status.NotFound`; `diag` cleared; no task created |
 | Argument longer than 1024 bytes | `Status.CapacityExceeded`; no request enqueued |
 | Path longer than 256 bytes | `Status.CapacityExceeded`; no request enqueued |
+| Request path malformed or not a regular file | `Status.Invalid`; `diag` cleared; no task created |
 | `run`/`spawn` compile error | `Status.Invalid`; `diag` filled; no task created |
 | Request queue full | `Status.Full`; `diag` cleared; `run` blocks only on the child |
 | `wait` on an unknown or evicted id | `Status.NotFound` |
 | `kill` on a terminated or unknown id | `Status.NotFound` |
+| `kill` on a queued request | Cancelled; `ExitReason.Killed` recorded; no task created |
+| `kill` on a live task | Requests termination at the next safe point; `exit(Killed)` runs |
 | Child terminates while the parent is blocked in `wait` | Parent wakes with the child's `ExitReason` |
 | Parent terminates with live children | Children continue (ADR 0017 addendum 2) |
 | `mmio_map` of an invalid or conflicting range | `Status` error; no partial mapping |
@@ -241,7 +247,7 @@ signal for origin and cost (`0003-language.md`).
 | 10 | ~~Exit-reason ring size (64?) and whether `run` blocks on a full queue~~ | **Resolved** — ring default 64; a full request queue returns `Status.Full`. |
 | 11 | ~~Whether the argument string is `core.arguments` or a `main` parameter~~ | **Resolved** — `main(args: const string[1024])`. |
 | 12 | Multiplexing: a task cannot wait on the console and a stream at the same time | When an application must serve input from more than one source; a `poll`-style primitive would widen the ABI. |
-| 13 | Path validation: may a request name a directory, start with `/`, or contain `..`? | Probably rejected, but the exact rule and the resulting `Status` are unresolved (register Q36). |
+| 13 | ~~Path validation: may a request name a directory, start with `/`, or contain `..`?~~ | **Resolved** — relative to the image root, no leading/trailing `/`, no empty or `..` component, regular files only; malformed is `Invalid`, absent is `NotFound`. |
 
 ## Changelog
 
@@ -252,3 +258,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-12 | Added `run`/`spawn`/`wait`/`kill`, fixed `string[1024]` arguments delivered as `main(args)`, global task ids and the exit-reason ring; removed per-task handles (ADR 0017 and addenda 1–2). |
 | 2026-11-13 | Console input fixed as a byte stream (no echo, no line assembly, no key events, `\n`/`0x7F`/`\t`/`0x03`); clock fixed as one global nanosecond counter at 1 ms resolution (no TSC); `run`/`spawn` take a caller-owned `Diagnostic` out-parameter; no debug or DMA primitive in M1; consoles are unowned and there is no multiplexing (open question 12). |
 | 2026-11-13 | `run`/`spawn` paths are limited to 256 bytes and are relative to the image root; path validation stays open (question 13). |
+| 2026-11-13 | Path validation settled (question 13): relative, no leading/trailing `/`, no empty or `..` component, regular files only; malformed is `Invalid`, absent is `NotFound`. `kill` semantics: queued requests are cancelled with `Killed`, live tasks terminate at the next safe point. |

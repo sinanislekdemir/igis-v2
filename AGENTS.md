@@ -124,11 +124,15 @@ commands here (`cargo xtask build`, `cargo xtask run`, `cargo xtask test`).
 | Streams are single-producer/single-consumer; names are unique per application; framing helpers live in `stdlib` | spec 0006 (Draft) |
 | Floating point in the first milestone: one `f64` type, IEEE-754, with a kernel-owned per-task `fpu` region | ADR 0018 (Accepted) |
 | No visibility modifiers: every top-level declaration is public; conversions are `T(x)` casts; maps use FNV-1a with linear probing | specs 0003, 0004 |
+| Boot: INIT-SIPI-SIPI through a sub-1 MiB trampoline, `MAX_CORES` static state; framebuffer tag mandatory; one IPI vector | specs 0002, 0007 |
+| ext2 subset: 1/4 KiB blocks, double indirect, regular root files, metadata validated; unsupported images refuse the mount | specs 0002, 0007 |
+| `ExitReason.Killed`; dispatcher before every claim; admission counts cores online at call time; relative paths without `..` | specs 0003, 0005, 0007 |
 
 ## Open questions
 
-See [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) for the full parked register. It groups
-tuning constants, host interface, streams, language, boot and REPL items by trigger.
+See [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) for the remaining parked items: tuning
+constants, the deferred debug/DMA/streams work, and the float follow-ups. Boot, platform,
+scheduler, REPL and language decisions are settled.
 When an item is resolved, record the answer in its spec or a new ADR and remove it there.
 
 ## Status log
@@ -154,3 +158,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-13 | Host interface settled: console is a byte stream, one global nanosecond clock (no TSC), caller-owned compile diagnostics; Q5–Q7 closed (specs 0003, 0005, 0007). |
 | 2026-11-13 | Streams settled: unique application-wide names, one sender and one receiver, `stdlib` framing helpers; explicit close deferred to v2; Q11–Q13 closed (spec 0006). |
 | 2026-11-13 | Floating point added to the first milestone: `f64` with a per-task FXSAVE region (ADR 0018). Language settled: no visibility modifiers, `T(x)` casts, FNV-1a maps, `core.bit_*`, `Diagnostic` only; Q15–Q23 closed (specs 0002–0004, 0006, 0007). |
+| 2026-11-13 | Boot, loader and REPL settled: sub-1 MiB trampoline, mandatory framebuffer tag, one IPI vector, ext2 subset, dispatcher timing, `ExitReason.Killed`, path validation; Q24–Q38 closed (specs 0002, 0003, 0005, 0007). |
