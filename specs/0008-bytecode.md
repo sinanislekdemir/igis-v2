@@ -194,6 +194,14 @@ first-milestone caps (provisional, tuning): 64 KiB of source per unit, 256 KiB p
 application, 1 MiB of scratch. They bound memory because memory is statically placed; they
 are not a time budget, and compile time is not a design constraint (ADR 0019).
 
+The `compiler` crate is `no_std` and allocation-free: it borrows the source, stores tokens,
+AST nodes and name tables in the caller's scratch arena, and writes the package into the
+caller's code and manifest buffers. It exports the caps as `MAX_SOURCE_BYTES` (64 KiB),
+`MAX_ARENA_BYTES` (1 MiB), `MAX_CODE_BYTES` (256 KiB) and `MAX_MANIFEST_BYTES` (4 KiB), and
+`compile_into` reports exhaustion of any of them as `Status.CapacityExceeded` with a
+`Diagnostic`. The only `unsafe` in the crate is the alignment/initialisation arithmetic of
+the bump arena, isolated in `compiler/src/arena.rs`.
+
 ### Verification and diagnostics
 
 - The loader runs a bounded linear verifier (B7). It does not re-typecheck the program; the

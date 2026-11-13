@@ -74,7 +74,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let package = match compiler::compile(&source, &display) {
+    let package = match langhost::compile(&source, &display) {
         Ok(package) => package,
         Err(diagnostic) => {
             eprintln!("{diagnostic}");

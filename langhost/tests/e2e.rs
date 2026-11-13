@@ -10,7 +10,7 @@ fn sample(name: &str) -> Vec<u8> {
 
 fn run_sample(name: &str, args: &[u8]) -> langhost::RunResult {
     let source = sample(name);
-    let package = compiler::compile(&source, name).expect("compiles");
+    let package = langhost::compile(&source, name).expect("compiles");
     langhost::run(&package.code, args, langhost::DEFAULT_BUDGET).expect("verifies")
 }
 
@@ -104,15 +104,15 @@ fn a_runtime_capacity_overflow_faults() {
 #[test]
 fn compiling_twice_is_byte_identical() {
     let source = sample("loop.ig");
-    let first = compiler::compile(&source, "loop.ig").expect("compiles");
-    let second = compiler::compile(&source, "loop.ig").expect("compiles");
+    let first = langhost::compile(&source, "loop.ig").expect("compiles");
+    let second = langhost::compile(&source, "loop.ig").expect("compiles");
     assert_eq!(first.code, second.code);
     assert_eq!(first.manifest, second.manifest);
 }
 
 #[test]
 fn oversized_literal_is_a_compile_error_with_a_position() {
-    let error = compiler::compile(&sample("bad_capacity.ig"), "bad_capacity.ig")
+    let error = langhost::compile(&sample("bad_capacity.ig"), "bad_capacity.ig")
         .expect_err("must not compile");
     assert_eq!(error.line, 8);
     assert_eq!(error.column, 11);
@@ -122,7 +122,7 @@ fn oversized_literal_is_a_compile_error_with_a_position() {
 
 #[test]
 fn unknown_identifier_is_a_compile_error_with_a_position() {
-    let error = compiler::compile(&sample("bad_unknown.ig"), "bad_unknown.ig")
+    let error = langhost::compile(&sample("bad_unknown.ig"), "bad_unknown.ig")
         .expect_err("must not compile");
     assert_eq!(error.line, 5);
     assert_eq!(error.column, 3);
@@ -135,7 +135,7 @@ fn unknown_identifier_is_a_compile_error_with_a_position() {
 
 #[test]
 fn missing_main_is_a_diagnostic() {
-    let error = compiler::compile(&sample("bad_no_main.ig"), "bad_no_main.ig")
+    let error = langhost::compile(&sample("bad_no_main.ig"), "bad_no_main.ig")
         .expect_err("must not compile");
     assert_eq!(error.line, 1);
     assert!(
@@ -148,7 +148,7 @@ fn missing_main_is_a_diagnostic() {
 #[test]
 fn a_malformed_package_is_refused_by_the_verifier() {
     let source = sample("hello.ig");
-    let package = compiler::compile(&source, "hello.ig").expect("compiles");
+    let package = langhost::compile(&source, "hello.ig").expect("compiles");
 
     let mut scratch = vec![0u8; package.code.len().div_ceil(32)];
     interpreter::verify(&package.code, &mut scratch).expect("the compiler output verifies");
@@ -167,7 +167,7 @@ fn host_trait_implementation_sees_application_bytes() {
     // `run` already uses its own host; this checks the trait is usable the way
     // the kernel will use it: a caller-supplied Host over the same machine.
     let source = sample("hello.ig");
-    let package = compiler::compile(&source, "hello.ig").expect("compiles");
+    let package = langhost::compile(&source, "hello.ig").expect("compiles");
     let mut scratch = vec![0u8; package.code.len().div_ceil(32)];
     let program = interpreter::Program::parse(&package.code, &mut scratch).expect("verifies");
     let header = *program.header();

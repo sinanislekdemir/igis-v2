@@ -18,6 +18,36 @@ use interpreter::{Host, Machine, Outcome, Program};
 /// until the budget is exhausted.
 pub const DEFAULT_BUDGET: u64 = 100_000_000;
 
+/// A package with owned buffers, produced by [`compile`].
+///
+/// The compiler writes into caller-provided buffers, so the host allocates the
+/// arena, code and manifest once per compile (the sizes are the caps exported
+/// by `compiler`) and copies the result out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedPackage {
+    /// Encoded manifest.
+    pub manifest: Vec<u8>,
+    /// Encoded code blob.
+    pub code: Vec<u8>,
+}
+
+/// Compiles one unit into an owned package.
+///
+/// This is the host wrapper around [`compiler::compile_into`]: it allocates the
+/// boundeds buffers the kernel will later place statically, compiles, and copies
+/// the artifact out so the diagnostic can outlive the scratch.
+#[allow(clippy::result_large_err)]
+pub fn compile(source: &[u8], path: &str) -> Result<OwnedPackage, compiler::Diagnostic> {
+    let mut arena = vec![0u8; compiler::MAX_ARENA_BYTES];
+    let mut code = vec![0u8; compiler::MAX_CODE_BYTES];
+    let mut manifest = vec![0u8; compiler::MAX_MANIFEST_BYTES];
+    let package = compiler::compile_into(source, path, &mut arena, &mut code, &mut manifest)?;
+    Ok(OwnedPackage {
+        manifest: package.manifest.to_vec(),
+        code: package.code.to_vec(),
+    })
+}
+
 /// A finished, or budget-terminated, run.
 #[derive(Debug)]
 pub struct RunResult {
@@ -125,7 +155,7 @@ pub fn run(code: &[u8], args: &[u8], budget: u64) -> Result<RunResult, interpret
 ///
 /// The container is a host convenience for inspecting or archiving a package;
 /// the image itself never carries bytecode (ADR 0019).
-pub fn write_package(path: &std::path::Path, package: &compiler::Package) -> std::io::Result<()> {
+pub fn write_package(path: &std::path::Path, package: &OwnedPackage) -> std::io::Result<()> {
     let mut file = std::fs::File::create(path)?;
     file.write_all(b"IGPK")?;
     file.write_all(&(package.manifest.len() as u32).to_le_bytes())?;
@@ -146,7 +176,7 @@ mod tests {
             "/../samples/lang/hello.ig"
         ))
         .expect("sample");
-        let package = compiler::compile(&source, "hello.ig").expect("compiles");
+        let package = compile(&source, "hello.ig").expect("compiles");
         let path =
             std::env::temp_dir().join(format!("igis-package-test-{}.bin", std::process::id()));
         write_package(&path, &package).expect("write");

@@ -5,9 +5,29 @@ use abi::{CodeHeader, ABI_VERSION, CODE_MAGIC, PROFILE_X86_64_LE};
 const HELLO: &[u8] = include_bytes!("../../samples/lang/hello.ig");
 const LOOP: &[u8] = include_bytes!("../../samples/lang/loop.ig");
 
+/// The compiler is allocation-free, so this integration test plays the kernel's
+/// role: allocate the bounded buffers, call `compile_into`, copy the result.
+#[derive(Debug, PartialEq, Eq)]
+struct Owned {
+    manifest: Vec<u8>,
+    code: Vec<u8>,
+}
+
+#[allow(clippy::result_large_err)]
+fn compile(source: &[u8], path: &str) -> Result<Owned, compiler::Diagnostic> {
+    let mut arena = vec![0u8; compiler::MAX_ARENA_BYTES];
+    let mut code = vec![0u8; compiler::MAX_CODE_BYTES];
+    let mut manifest = vec![0u8; compiler::MAX_MANIFEST_BYTES];
+    let package = compiler::compile_into(source, path, &mut arena, &mut code, &mut manifest)?;
+    Ok(Owned {
+        manifest: package.manifest.to_vec(),
+        code: package.code.to_vec(),
+    })
+}
+
 #[test]
 fn hello_emits_a_well_formed_header() {
-    let package = compiler::compile(HELLO, "hello.ig").expect("compiles");
+    let package = compile(HELLO, "hello.ig").expect("compiles");
     let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
     assert_eq!(header.magic, CODE_MAGIC);
     assert_eq!(header.abi_version, ABI_VERSION);
@@ -23,8 +43,8 @@ fn hello_emits_a_well_formed_header() {
 
 #[test]
 fn compiling_twice_is_byte_identical() {
-    let first = compiler::compile(LOOP, "loop.ig").expect("compiles");
-    let second = compiler::compile(LOOP, "loop.ig").expect("compiles");
+    let first = compile(LOOP, "loop.ig").expect("compiles");
+    let second = compile(LOOP, "loop.ig").expect("compiles");
     assert_eq!(first, second);
 }
 
@@ -38,7 +58,7 @@ begin
   missing();
 end;
 "#;
-    let error = compiler::compile(source, "t.ig").expect_err("must not compile");
+    let error = compile(source, "t.ig").expect_err("must not compile");
     assert_eq!(error.line, 6);
     assert_eq!(error.column, 3);
     assert!(
@@ -62,7 +82,7 @@ begin
   greet();
 end;
 "#;
-    let error = compiler::compile(source, "t.ig").expect_err("must not compile");
+    let error = compile(source, "t.ig").expect_err("must not compile");
     assert_eq!(error.line, 10);
     assert_eq!(error.column, 3);
     assert!(
@@ -87,7 +107,7 @@ begin
   narrow := wide;
 end;
 "#;
-    let error = compiler::compile(source, "t.ig").expect_err("must not compile");
+    let error = compile(source, "t.ig").expect_err("must not compile");
     assert_eq!(error.line, 11);
     assert!(
         error.message.contains("capacity mismatch"),
@@ -109,7 +129,7 @@ begin
   text := text + "x";
 end;
 "#;
-    let error = compiler::compile(source, "t.ig").expect_err("must not compile");
+    let error = compile(source, "t.ig").expect_err("must not compile");
     assert!(
         error.message.contains("aliases an operand"),
         "{}",
@@ -128,7 +148,7 @@ procedure main(args: const string[1024]);
 begin
 end;
 "#;
-    let error = compiler::compile(source, "t.ig").expect_err("must not compile");
+    let error = compile(source, "t.ig").expect_err("must not compile");
     assert!(error.message.contains("unknown unit `stdlib`"));
 }
 
@@ -144,7 +164,7 @@ begin
   n := 1 and 2;
 end;
 "#;
-    let error = compiler::compile(source, "t.ig").expect_err("must not compile");
+    let error = compile(source, "t.ig").expect_err("must not compile");
     assert!(
         error.message.contains("needs `bool` operands"),
         "{}",
@@ -161,7 +181,7 @@ procedure main();
 begin
 end;
 "#;
-    let error = compiler::compile(source, "t.ig").expect_err("must not compile");
+    let error = compile(source, "t.ig").expect_err("must not compile");
     assert!(
         error.message.contains("main must be declared"),
         "{}",
@@ -182,10 +202,55 @@ begin
   text := "\xFF";
 end;
 "#;
-    let error = compiler::compile(source, "t.ig").expect_err("must not compile");
+    let error = compile(source, "t.ig").expect_err("must not compile");
     assert!(
         error.message.contains("not valid UTF-8"),
         "{}",
         error.message
     );
+}
+
+#[test]
+fn a_tiny_arena_is_a_capacity_error() {
+    let mut arena = [0u8; 64];
+    let mut code = vec![0u8; compiler::MAX_CODE_BYTES];
+    let mut manifest = vec![0u8; compiler::MAX_MANIFEST_BYTES];
+    let error = compiler::compile_into(HELLO, "hello.ig", &mut arena, &mut code, &mut manifest)
+        .expect_err("must be refused");
+    assert_eq!(error.status, abi::Status::CapacityExceeded);
+    assert!(error.message.contains("scratch arena"), "{}", error.message);
+}
+
+#[test]
+fn a_tiny_code_buffer_is_a_capacity_error() {
+    let mut arena = vec![0u8; compiler::MAX_ARENA_BYTES];
+    let mut code = [0u8; 8];
+    let mut manifest = vec![0u8; compiler::MAX_MANIFEST_BYTES];
+    let error = compiler::compile_into(HELLO, "hello.ig", &mut arena, &mut code, &mut manifest)
+        .expect_err("must be refused");
+    assert_eq!(error.status, abi::Status::CapacityExceeded);
+    assert!(error.message.contains("code buffer"), "{}", error.message);
+}
+
+#[test]
+fn a_tiny_manifest_buffer_is_a_capacity_error() {
+    let mut arena = vec![0u8; compiler::MAX_ARENA_BYTES];
+    let mut code = vec![0u8; compiler::MAX_CODE_BYTES];
+    let mut manifest = [0u8; 8];
+    let error = compiler::compile_into(HELLO, "hello.ig", &mut arena, &mut code, &mut manifest)
+        .expect_err("must be refused");
+    assert_eq!(error.status, abi::Status::CapacityExceeded);
+    assert!(
+        error.message.contains("manifest buffer"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn compile_into_reports_its_caps() {
+    assert_eq!(compiler::MAX_SOURCE_BYTES, 64 * 1024);
+    assert_eq!(compiler::MAX_ARENA_BYTES, 1024 * 1024);
+    assert_eq!(compiler::MAX_CODE_BYTES, 256 * 1024);
+    assert_eq!(compiler::MAX_MANIFEST_BYTES, 4 * 1024);
 }

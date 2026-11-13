@@ -142,6 +142,8 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
    against the PIT (Q6).
 5. ~~Host-side language vertical slice~~ — done: `abi`, `compiler`, `interpreter`,
    `langhost`, 50 tests; ABI v1 opcode table fixed (spec 0008 OQ 1 and 3).
-6. Next: a bounded-memory compiler mode (arenas instead of `Vec`/`HashMap`), then link
-   `compiler` + `interpreter` into the kernel REPL service.
-7. Pick the tuning constants (Q1–Q4) when the scheduler first runs.
+6. ~~Bounded-memory compiler~~ — done: `no_std`, allocation-free, `compile_into` writes into
+   caller-provided arena/code/manifest buffers; exhaustion is `CapacityExceeded`.
+7. Next: link `compiler` + `interpreter` into the kernel REPL service (ext2 source → code →
+   `state`/`stack` from the frame allocator → run), then the scheduler loop.
+8. Pick the tuning constants (Q1–Q4) when the scheduler first runs.

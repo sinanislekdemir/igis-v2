@@ -30,7 +30,10 @@ constraints learned there.
   has a GDT/TSS and an exception path with a double-fault IST, runs a 1 kHz APIC timer
   driving a global nanosecond clock, and owns a bitmap frame allocator. A host-side
   vertical slice of the language (`abi`, `compiler`, `interpreter`, `langhost`) compiles
-  and runs source end-to-end; wiring it into the kernel REPL is next.
+  and runs source end-to-end. The compiler is `no_std` and allocation-free: it borrows the
+  source, compiles into caller-provided arena/code/manifest buffers
+  (`compiler::compile_into`) and exports the caps the kernel must place. Wiring it into the
+  kernel REPL is next.
 
 ## Ground rules
 
@@ -202,3 +205,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-13 | Frame allocator: 4 KiB bitmap over the first 4 GiB, initialised from the multiboot2 map and reserving low memory, the kernel image, the multiboot2 structure and the framebuffer; verified by allocating, writing, reading back and freeing two frames (254 MiB usable under `-m 256M`). |
 | 2026-11-13 | GDT/TSS with a double-fault IST (verified with a real non-canonical-stack fault), local APIC enabled with the legacy PIC masked, timer calibrated against the PIT (~62.5k ticks/ms in QEMU), and a 1 kHz tick advancing the global nanosecond clock (Q6, spec 0007). |
 | 2026-11-13 | Host language slice: `abi` (ABI v1 opcodes/headers), `compiler` (lexer → parser → type/capacity check → deterministic package), `interpreter` (structural verifier, allocation-free machine, `Host` trait), `langhost` runner; 50 tests, kernel untouched. Spec 0008 open questions 1 and 3 resolved. |
+| 2026-11-13 | Compiler made `no_std` and allocation-free (B11): a bump arena over the caller's `&mut [u8]`, source-borrowing tokens and AST, arena-backed lists instead of `Vec`/`HashMap`, fixed-buffer diagnostics, and `compile_into(source, path, arena, code, manifest) -> Package<'a>` writing into caller buffers. Packages are byte-identical to the previous build; 54 tests; `langhost` keeps a std helper that allocates the caps. |

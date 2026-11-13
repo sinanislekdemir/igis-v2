@@ -4,58 +4,110 @@
 //! the only absolute sizes here are the section lengths. Every section starts
 //! on an 8-byte boundary and the padding is zero, which keeps the artifact
 //! byte-identical between builds (spec 0008, B9).
+//!
+//! Both artifacts are written straight into the caller's output buffers; a
+//! buffer that is too small is a `CapacityExceeded` diagnostic, and no partial
+//! package is returned.
 
 use abi::{
     CodeHeader, Function, ManifestHeader, ABI_VERSION, CODE_MAGIC, LINE_ENTRY_SIZE, MANIFEST_MAGIC,
     NO_DIAGNOSTIC, PROFILE_X86_64_LE,
 };
 
-use crate::{diag, Diagnostic, Package};
+use crate::arena::OutOfSpace;
+use crate::{diag, out_of_space, Diagnostic, Package, Resource};
 
 /// Sections must stay under the verifier's per-section cap, so the compiler
 /// never produces a package the interpreter would refuse.
 const MAX_SECTION: usize = 1 << 20;
 
 /// One line-table entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LineEntry {
     pub off: u32,
     pub line: u32,
     pub column: u32,
 }
 
-fn pad_to_8(buffer: &mut Vec<u8>) {
-    while !buffer.len().is_multiple_of(8) {
-        buffer.push(0);
+/// A front-to-back writer over a caller-provided buffer.
+struct Out<'a> {
+    buf: &'a mut [u8],
+    len: usize,
+}
+
+impl<'a> Out<'a> {
+    fn new(buf: &'a mut [u8]) -> Self {
+        Out { buf, len: 0 }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn put(&mut self, bytes: &[u8]) -> Result<(), OutOfSpace> {
+        let end = self.len.checked_add(bytes.len()).ok_or(OutOfSpace)?;
+        if end > self.buf.len() {
+            return Err(OutOfSpace);
+        }
+        self.buf[self.len..end].copy_from_slice(bytes);
+        self.len = end;
+        Ok(())
+    }
+
+    fn pad_to_8(&mut self) -> Result<(), OutOfSpace> {
+        while !self.len.is_multiple_of(8) {
+            self.put(&[0])?;
+        }
+        Ok(())
+    }
+
+    fn into_written(self) -> &'a [u8] {
+        let Out { buf, len } = self;
+        let buf: &'a [u8] = buf;
+        &buf[..len]
     }
 }
 
-fn to_u32(value: usize, path: &str, unit: &str, what: &str) -> Result<u32, Diagnostic> {
+fn to_u32<'a>(
+    value: usize,
+    path: &'a str,
+    unit_name: &'a str,
+    what: &str,
+) -> Result<u32, Diagnostic> {
     u32::try_from(value).map_err(|_| {
         diag(
             path,
-            unit,
+            unit_name,
             1,
             1,
-            format!("{what} is larger than the ABI's 4 GiB section limit"),
+            format_args!("{what} is larger than the ABI's 4 GiB section limit"),
         )
     })
 }
 
-/// Assembles the code blob and manifest.
+/// Assembles the code blob and manifest into the caller's buffers.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn assemble(
-    path: &str,
-    unit_name: &str,
-    functions: Vec<Function>,
-    instructions: Vec<u8>,
-    constants: Vec<u8>,
-    lines: Vec<LineEntry>,
+pub(crate) fn assemble<'a>(
+    path: &'a str,
+    unit_name: &'a str,
+    functions: &[Function],
+    instructions: &[u8],
+    constants: &[u8],
+    lines: &[LineEntry],
     state_size: u32,
     stack_size: u32,
     entry: u32,
-) -> Result<Package, Diagnostic> {
+    code_buffer: &'a mut [u8],
+    manifest_buffer: &'a mut [u8],
+) -> Result<Package<'a>, Diagnostic> {
     if unit_name.len() > u16::MAX as usize {
-        return Err(diag(path, unit_name, 1, 1, "unit name is too long"));
+        return Err(diag(
+            path,
+            unit_name,
+            1,
+            1,
+            format_args!("unit name is too long"),
+        ));
     }
     for (length, what) in [
         (instructions.len(), "instruction section"),
@@ -68,10 +120,13 @@ pub(crate) fn assemble(
                 unit_name,
                 1,
                 1,
-                format!("{what} is {length} bytes, over the {MAX_SECTION}-byte cap"),
+                format_args!("{what} is {length} bytes, over the {MAX_SECTION}-byte cap"),
             ));
         }
     }
+
+    let full_code = || out_of_space(path, unit_name, 1, 1, Resource::Code);
+    let full_manifest = || out_of_space(path, unit_name, 1, 1, Resource::Manifest);
 
     let header = CodeHeader {
         magic: CODE_MAGIC,
@@ -87,24 +142,27 @@ pub(crate) fn assemble(
         diag_offset: NO_DIAGNOSTIC,
     };
 
-    let mut code = Vec::new();
-    code.extend_from_slice(&header.to_bytes());
-    for function in &functions {
-        code.extend_from_slice(&function.to_bytes());
+    let mut code = Out::new(code_buffer);
+    code.put(&header.to_bytes()).map_err(|_| full_code())?;
+    for function in functions {
+        code.put(&function.to_bytes()).map_err(|_| full_code())?;
     }
-    pad_to_8(&mut code);
-    code.extend_from_slice(&instructions);
-    pad_to_8(&mut code);
-    code.extend_from_slice(&constants);
-    pad_to_8(&mut code);
-    for line in &lines {
-        code.extend_from_slice(&line.off.to_le_bytes());
-        code.extend_from_slice(&0u32.to_le_bytes()); // unit index; ABI v1 has one unit
-        code.extend_from_slice(&line.line.to_le_bytes());
-        code.extend_from_slice(&line.column.to_le_bytes());
+    code.pad_to_8().map_err(|_| full_code())?;
+    code.put(instructions).map_err(|_| full_code())?;
+    code.pad_to_8().map_err(|_| full_code())?;
+    code.put(constants).map_err(|_| full_code())?;
+    code.pad_to_8().map_err(|_| full_code())?;
+    for line in lines {
+        code.put(&line.off.to_le_bytes()).map_err(|_| full_code())?;
+        code.put(&0u32.to_le_bytes()).map_err(|_| full_code())?; // unit index; ABI v1 has one unit
+        code.put(&line.line.to_le_bytes())
+            .map_err(|_| full_code())?;
+        code.put(&line.column.to_le_bytes())
+            .map_err(|_| full_code())?;
     }
-
     let code_len = to_u32(code.len(), path, unit_name, "code blob")?;
+    let code: &'a [u8] = code.into_written();
+
     let manifest_header = ManifestHeader {
         magic: MANIFEST_MAGIC,
         abi_version: ABI_VERSION,
@@ -117,9 +175,14 @@ pub(crate) fn assemble(
         entry,
         capacity_profile: 0,
     };
-    let mut manifest = Vec::new();
-    manifest.extend_from_slice(&manifest_header.to_bytes());
-    manifest.extend_from_slice(unit_name.as_bytes());
+    let mut manifest = Out::new(manifest_buffer);
+    manifest
+        .put(&manifest_header.to_bytes())
+        .map_err(|_| full_manifest())?;
+    manifest
+        .put(unit_name.as_bytes())
+        .map_err(|_| full_manifest())?;
+    let manifest: &'a [u8] = manifest.into_written();
 
     Ok(Package { manifest, code })
 }

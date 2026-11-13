@@ -4,29 +4,33 @@
 //! capacities are expressions. `codegen` resolves names, evaluates capacities
 //! and emits bytecode. Keeping the two phases apart is what makes the
 //! diagnostics point at the right token.
+//!
+//! Every node is `Copy` and lives in the caller's arena: names and literals
+//! borrow the source (or decoded literal bytes) and children are references to
+//! arena slots, so the tree has no ownership and nothing to free.
 
 /// One source file.
-#[derive(Debug, Clone)]
-pub struct Unit {
+#[derive(Debug, Clone, Copy)]
+pub struct Unit<'a> {
     /// Name from the `unit <name>;` declaration.
-    pub name: String,
+    pub name: &'a str,
     /// Names in the optional `uses ...;` clause.
-    pub uses: Vec<String>,
+    pub uses: &'a [&'a str],
     /// Top-level constants, in declaration order.
-    pub consts: Vec<ConstDecl>,
+    pub consts: &'a [ConstDecl<'a>],
     /// Top-level variables, in declaration order.
-    pub vars: Vec<VarDecl>,
+    pub vars: &'a [VarDecl<'a>],
     /// Procedures, in declaration order. The order fixes the function indices.
-    pub procs: Vec<ProcDecl>,
+    pub procs: &'a [ProcDecl<'a>],
 }
 
 /// `const Name = <expression>;`
-#[derive(Debug, Clone)]
-pub struct ConstDecl {
+#[derive(Debug, Clone, Copy)]
+pub struct ConstDecl<'a> {
     /// Constant name.
-    pub name: String,
+    pub name: &'a str,
     /// Value expression; evaluated at compile time.
-    pub value: Expr,
+    pub value: &'a Expr<'a>,
     /// 1-based source line.
     pub line: u32,
     /// 1-based source column.
@@ -34,12 +38,12 @@ pub struct ConstDecl {
 }
 
 /// `name: type;`
-#[derive(Debug, Clone)]
-pub struct VarDecl {
+#[derive(Debug, Clone, Copy)]
+pub struct VarDecl<'a> {
     /// Variable name.
-    pub name: String,
+    pub name: &'a str,
     /// Declared type.
-    pub ty: TypeRef,
+    pub ty: TypeRef<'a>,
     /// 1-based source line.
     pub line: u32,
     /// 1-based source column.
@@ -47,12 +51,12 @@ pub struct VarDecl {
 }
 
 /// A written type such as `int` or `string[64]`.
-#[derive(Debug, Clone)]
-pub struct TypeRef {
+#[derive(Debug, Clone, Copy)]
+pub struct TypeRef<'a> {
     /// Type name, before resolution.
-    pub name: String,
+    pub name: &'a str,
     /// Capacity expression for `string`/`bytes`.
-    pub cap: Option<Expr>,
+    pub cap: Option<&'a Expr<'a>>,
     /// 1-based source line.
     pub line: u32,
     /// 1-based source column.
@@ -71,14 +75,14 @@ pub enum ParamMode {
 }
 
 /// One parameter declaration.
-#[derive(Debug, Clone)]
-pub struct ParamDecl {
+#[derive(Debug, Clone, Copy)]
+pub struct ParamDecl<'a> {
     /// Parameter name.
-    pub name: String,
+    pub name: &'a str,
     /// Passing mode.
     pub mode: ParamMode,
     /// Declared type.
-    pub ty: TypeRef,
+    pub ty: TypeRef<'a>,
     /// 1-based source line.
     pub line: u32,
     /// 1-based source column.
@@ -86,16 +90,16 @@ pub struct ParamDecl {
 }
 
 /// `procedure Name(...); <declarations> begin ... end;`
-#[derive(Debug, Clone)]
-pub struct ProcDecl {
+#[derive(Debug, Clone, Copy)]
+pub struct ProcDecl<'a> {
     /// Procedure name.
-    pub name: String,
+    pub name: &'a str,
     /// Parameters, in order.
-    pub params: Vec<ParamDecl>,
+    pub params: &'a [ParamDecl<'a>],
     /// Procedure-local variables.
-    pub locals: Vec<VarDecl>,
+    pub locals: &'a [VarDecl<'a>],
     /// Body statements.
-    pub body: Vec<Stmt>,
+    pub body: &'a [Stmt<'a>],
     /// 1-based source line.
     pub line: u32,
     /// 1-based source column.
@@ -103,48 +107,48 @@ pub struct ProcDecl {
 }
 
 /// A statement.
-#[derive(Debug, Clone)]
-pub enum Stmt {
+#[derive(Debug, Clone, Copy)]
+pub enum Stmt<'a> {
     /// `target := value;`
     Assign {
         /// Destination name.
-        target: String,
+        target: &'a str,
         /// Right-hand side.
-        value: Expr,
+        value: &'a Expr<'a>,
         /// 1-based source line.
         line: u32,
         /// 1-based source column.
         column: u32,
     },
     /// A call used as a statement.
-    Call(Call),
+    Call(Call<'a>),
     /// `if condition then then_branch [else else_branch]`
     If {
         /// Boolean condition.
-        cond: Expr,
+        cond: &'a Expr<'a>,
         /// Branch taken when the condition is true.
-        then_branch: Box<Stmt>,
+        then_branch: &'a Stmt<'a>,
         /// Branch taken otherwise, if any.
-        else_branch: Option<Box<Stmt>>,
+        else_branch: Option<&'a Stmt<'a>>,
     },
     /// `while condition do body`
     While {
         /// Boolean condition.
-        cond: Expr,
+        cond: &'a Expr<'a>,
         /// Loop body.
-        body: Box<Stmt>,
+        body: &'a Stmt<'a>,
     },
     /// `begin ... end`
-    Block(Vec<Stmt>),
+    Block(&'a [Stmt<'a>]),
 }
 
 /// A call expression or call statement.
-#[derive(Debug, Clone)]
-pub struct Call {
+#[derive(Debug, Clone, Copy)]
+pub struct Call<'a> {
     /// Callee name, possibly qualified (`core.write`).
-    pub target: String,
+    pub target: &'a str,
     /// Arguments, in order.
-    pub args: Vec<Expr>,
+    pub args: &'a [&'a Expr<'a>],
     /// 1-based source line.
     pub line: u32,
     /// 1-based source column.
@@ -152,10 +156,10 @@ pub struct Call {
 }
 
 /// An expression.
-#[derive(Debug, Clone)]
-pub struct Expr {
+#[derive(Debug, Clone, Copy)]
+pub struct Expr<'a> {
     /// Expression form.
-    pub kind: ExprKind,
+    pub kind: ExprKind<'a>,
     /// 1-based source line.
     pub line: u32,
     /// 1-based source column.
@@ -163,26 +167,26 @@ pub struct Expr {
 }
 
 /// Expression forms.
-#[derive(Debug, Clone)]
-pub enum ExprKind {
+#[derive(Debug, Clone, Copy)]
+pub enum ExprKind<'a> {
     /// Integer literal.
     Int(i64),
     /// Floating-point literal.
     Float(f64),
-    /// String literal, as raw bytes.
-    Str(Vec<u8>),
+    /// String literal, as raw bytes decoded into the arena.
+    Str(&'a [u8]),
     /// `true` or `false`.
     Bool(bool),
     /// A name.
-    Ident(String),
+    Ident(&'a str),
     /// A call.
-    Call(Call),
+    Call(Call<'a>),
     /// A binary operation.
-    Binary(BinOp, Box<Expr>, Box<Expr>),
+    Binary(BinOp, &'a Expr<'a>, &'a Expr<'a>),
     /// A unary operation.
-    Unary(UnOp, Box<Expr>),
+    Unary(UnOp, &'a Expr<'a>),
     /// An explicit scalar conversion such as `int(x)`.
-    Cast(String, Box<Expr>),
+    Cast(&'a str, &'a Expr<'a>),
 }
 
 /// Binary operators.

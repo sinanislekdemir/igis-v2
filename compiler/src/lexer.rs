@@ -3,14 +3,21 @@
 //! Source is UTF-8 text, but the language's identifiers and keywords are ASCII.
 //! Columns count bytes and start at 1; a tab advances the column by one. The
 //! block-comment form is `{ ... }`; the line form is `// ...`.
+//!
+//! Tokens borrow the source: identifiers and keywords are `&str` slices of it,
+//! and decoded string literals are copied into the caller's arena. The token
+//! vector itself is arena-backed, so lexing allocates nothing.
 
-use crate::{diag, Diagnostic};
+use core::fmt;
+
+use crate::arena::{Bump, SliceVec};
+use crate::{diag, out_of_space, Diagnostic, Resource};
 
 /// One lexical token.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Token {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Token<'a> {
     /// Token class and payload.
-    pub kind: TokenKind,
+    pub kind: TokenKind<'a>,
     /// 1-based source line.
     pub line: u32,
     /// 1-based source column.
@@ -18,16 +25,16 @@ pub struct Token {
 }
 
 /// Token classes.
-#[derive(Debug, Clone, PartialEq)]
-pub enum TokenKind {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TokenKind<'a> {
     /// Identifier.
-    Ident(String),
+    Ident(&'a str),
     /// Signed integer literal.
     Int(i64),
     /// Floating-point literal.
     Float(f64),
     /// String literal as raw bytes (escapes already decoded).
-    Str(Vec<u8>),
+    Str(&'a [u8]),
     /// `unit`
     Unit,
     /// `uses`
@@ -108,19 +115,7 @@ pub enum TokenKind {
     Eof,
 }
 
-impl TokenKind {
-    /// Human-readable description used in syntax errors.
-    pub fn describe(&self) -> String {
-        match self {
-            TokenKind::Ident(name) => format!("identifier `{name}`"),
-            TokenKind::Int(value) => format!("integer `{value}`"),
-            TokenKind::Float(value) => format!("float `{value}`"),
-            TokenKind::Str(_) => "string literal".to_string(),
-            TokenKind::Eof => "end of file".to_string(),
-            other => format!("`{}`", other.text()),
-        }
-    }
-
+impl TokenKind<'_> {
     fn text(&self) -> &'static str {
         match self {
             TokenKind::Unit => "unit",
@@ -170,26 +165,42 @@ impl TokenKind {
     }
 }
 
-struct Lexer<'a> {
+impl fmt::Display for TokenKind<'_> {
+    /// Human-readable description used in syntax errors.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TokenKind::Ident(name) => write!(f, "identifier `{name}`"),
+            TokenKind::Int(value) => write!(f, "integer `{value}`"),
+            TokenKind::Float(value) => write!(f, "float `{value}`"),
+            TokenKind::Str(_) => f.write_str("string literal"),
+            TokenKind::Eof => f.write_str("end of file"),
+            other => write!(f, "`{}`", other.text()),
+        }
+    }
+}
+
+struct Lexer<'a, 'b> {
     src: &'a [u8],
     pos: usize,
     line: u32,
     column: u32,
     path: &'a str,
+    bump: &'b Bump<'a>,
 }
 
-impl<'a> Lexer<'a> {
-    fn new(src: &'a [u8], path: &'a str) -> Self {
+impl<'a, 'b> Lexer<'a, 'b> {
+    fn new(src: &'a [u8], path: &'a str, bump: &'b Bump<'a>) -> Self {
         Lexer {
             src,
             pos: 0,
             line: 1,
             column: 1,
             path,
+            bump,
         }
     }
 
-    fn error(&self, line: u32, column: u32, message: impl Into<String>) -> Diagnostic {
+    fn error(&self, line: u32, column: u32, message: fmt::Arguments<'_>) -> Diagnostic {
         diag(self.path, "", line, column, message)
     }
 
@@ -227,7 +238,11 @@ impl<'a> Lexer<'a> {
                             Some(b'}') => break,
                             Some(_) => {}
                             None => {
-                                return Err(self.error(line, column, "unterminated block comment"));
+                                return Err(self.error(
+                                    line,
+                                    column,
+                                    format_args!("unterminated block comment"),
+                                ));
                             }
                         }
                     }
@@ -244,7 +259,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn next(&mut self) -> Result<Token, Diagnostic> {
+    fn next(&mut self) -> Result<Token<'a>, Diagnostic> {
         self.skip_trivia()?;
         let (line, column) = (self.line, self.column);
         let byte = match self.bump() {
@@ -259,7 +274,7 @@ impl<'a> Lexer<'a> {
         };
 
         let kind = match byte {
-            b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.ident(byte),
+            b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.ident(line, column)?,
             b'0'..=b'9' => self.number(byte, line, column)?,
             b'"' => TokenKind::Str(self.string(line, column)?),
             b':' => {
@@ -305,7 +320,7 @@ impl<'a> Lexer<'a> {
                 return Err(self.error(
                     line,
                     column,
-                    format!("unexpected character `{}`", other as char),
+                    format_args!("unexpected character `{}`", other as char),
                 ))
             }
         };
@@ -313,19 +328,20 @@ impl<'a> Lexer<'a> {
         Ok(Token { kind, line, column })
     }
 
-    fn ident(&mut self, first: u8) -> TokenKind {
-        let mut text = vec![first];
+    fn ident(&mut self, line: u32, column: u32) -> Result<TokenKind<'a>, Diagnostic> {
+        let src = self.src;
+        let start = self.pos - 1;
         while let Some(byte) = self.peek() {
             if byte.is_ascii_alphanumeric() || byte == b'_' {
-                text.push(byte);
                 self.bump();
             } else {
                 break;
             }
         }
-        // The byte vector is ASCII by construction.
-        let text = String::from_utf8(text).expect("identifier is ASCII");
-        match text.as_str() {
+        // The span is ASCII by construction, so it is valid UTF-8.
+        let text = core::str::from_utf8(&src[start..self.pos])
+            .map_err(|_| self.error(line, column, format_args!("identifier is not ASCII")))?;
+        Ok(match text {
             "unit" => TokenKind::Unit,
             "uses" => TokenKind::Uses,
             "const" => TokenKind::Const,
@@ -346,10 +362,11 @@ impl<'a> Lexer<'a> {
             "true" => TokenKind::True,
             "false" => TokenKind::False,
             _ => TokenKind::Ident(text),
-        }
+        })
     }
 
-    fn number(&mut self, first: u8, line: u32, column: u32) -> Result<TokenKind, Diagnostic> {
+    fn number(&mut self, first: u8, line: u32, column: u32) -> Result<TokenKind<'a>, Diagnostic> {
+        let src = self.src;
         let start = self.pos - 1;
 
         if first == b'0' && matches!(self.peek(), Some(b'x') | Some(b'X')) {
@@ -363,16 +380,26 @@ impl<'a> Lexer<'a> {
                 }
             }
             if self.pos == digits_start {
-                return Err(self.error(line, column, "hexadecimal literal has no digits"));
+                return Err(self.error(
+                    line,
+                    column,
+                    format_args!("hexadecimal literal has no digits"),
+                ));
             }
-            let text = std::str::from_utf8(&self.src[digits_start..self.pos])
-                .map_err(|_| self.error(line, column, "invalid hexadecimal literal"))?;
+            let text = core::str::from_utf8(&src[digits_start..self.pos]).map_err(|_| {
+                self.error(line, column, format_args!("invalid hexadecimal literal"))
+            })?;
             return i64::from_str_radix(text, 16)
                 .map(TokenKind::Int)
-                .map_err(|_| self.error(line, column, "integer literal does not fit in 64 bits"));
+                .map_err(|_| {
+                    self.error(
+                        line,
+                        column,
+                        format_args!("integer literal does not fit in 64 bits"),
+                    )
+                });
         }
 
-        let _ = first;
         let mut is_float = false;
         while matches!(self.peek(), Some(b'0'..=b'9')) {
             self.bump();
@@ -395,64 +422,90 @@ impl<'a> Lexer<'a> {
                 self.bump();
             }
             if self.pos == digits_start {
-                return Err(self.error(line, column, "float exponent has no digits"));
+                return Err(self.error(line, column, format_args!("float exponent has no digits")));
             }
         }
 
-        let text = std::str::from_utf8(&self.src[start..self.pos])
-            .map_err(|_| self.error(line, column, "invalid number literal"))?;
+        let text = core::str::from_utf8(&src[start..self.pos])
+            .map_err(|_| self.error(line, column, format_args!("invalid number literal")))?;
         if is_float {
             text.parse::<f64>()
                 .map(TokenKind::Float)
-                .map_err(|_| self.error(line, column, "invalid float literal"))
+                .map_err(|_| self.error(line, column, format_args!("invalid float literal")))
         } else {
-            text.parse::<i64>()
-                .map(TokenKind::Int)
-                .map_err(|_| self.error(line, column, "integer literal does not fit in 64 bits"))
+            text.parse::<i64>().map(TokenKind::Int).map_err(|_| {
+                self.error(
+                    line,
+                    column,
+                    format_args!("integer literal does not fit in 64 bits"),
+                )
+            })
         }
     }
 
-    fn string(&mut self, line: u32, column: u32) -> Result<Vec<u8>, Diagnostic> {
-        let mut out = Vec::new();
+    fn string(&mut self, line: u32, column: u32) -> Result<&'a [u8], Diagnostic> {
+        let arena_full = |lexer: &Self| out_of_space(lexer.path, "", line, column, Resource::Arena);
+        let mut out = SliceVec::<u8>::new(self.bump).map_err(|_| arena_full(self))?;
         loop {
             let byte = match self.bump() {
                 Some(byte) => byte,
-                None => return Err(self.error(line, column, "unterminated string literal")),
+                None => {
+                    return Err(self.error(
+                        line,
+                        column,
+                        format_args!("unterminated string literal"),
+                    ))
+                }
             };
-            match byte {
-                b'"' => return Ok(out),
+            let decoded = match byte {
+                b'"' => return Ok(out.into_slice()),
                 b'\\' => {
                     let escape = match self.bump() {
                         Some(escape) => escape,
                         None => {
-                            return Err(self.error(line, column, "unterminated string literal"))
+                            return Err(self.error(
+                                line,
+                                column,
+                                format_args!("unterminated string literal"),
+                            ))
                         }
                     };
                     match escape {
-                        b'n' => out.push(b'\n'),
-                        b'r' => out.push(b'\r'),
-                        b't' => out.push(b'\t'),
-                        b'\\' => out.push(b'\\'),
-                        b'"' => out.push(b'"'),
+                        b'n' => b'\n',
+                        b'r' => b'\r',
+                        b't' => b'\t',
+                        b'\\' => b'\\',
+                        b'"' => b'"',
                         b'x' => {
                             let hi = self.hex_digit().ok_or_else(|| {
-                                self.error(line, column, "`\\x` needs two hexadecimal digits")
+                                self.error(
+                                    line,
+                                    column,
+                                    format_args!("`\\x` needs two hexadecimal digits"),
+                                )
                             })?;
                             let lo = self.hex_digit().ok_or_else(|| {
-                                self.error(line, column, "`\\x` needs two hexadecimal digits")
+                                self.error(
+                                    line,
+                                    column,
+                                    format_args!("`\\x` needs two hexadecimal digits"),
+                                )
                             })?;
-                            out.push(hi * 16 + lo);
+                            hi * 16 + lo
                         }
                         other => {
                             return Err(self.error(
                                 line,
                                 column,
-                                format!("unknown string escape `\\{}`", other as char),
+                                format_args!("unknown string escape `\\{}`", other as char),
                             ))
                         }
                     }
                 }
-                other => out.push(other),
+                other => other,
+            };
+            if out.push(decoded).is_err() {
+                return Err(arena_full(self));
             }
         }
     }
@@ -471,15 +524,22 @@ impl<'a> Lexer<'a> {
 }
 
 /// Tokenises one unit.
-pub fn lex(src: &[u8], path: &str) -> Result<Vec<Token>, Diagnostic> {
-    let mut lexer = Lexer::new(src, path);
-    let mut tokens = Vec::new();
+pub fn lex<'a>(
+    src: &'a [u8],
+    path: &'a str,
+    bump: &Bump<'a>,
+) -> Result<&'a [Token<'a>], Diagnostic> {
+    let mut lexer = Lexer::new(src, path, bump);
+    let mut tokens =
+        SliceVec::new(bump).map_err(|_| out_of_space(path, "", 1, 1, Resource::Arena))?;
     loop {
         let token = lexer.next()?;
-        let eof = token.kind == TokenKind::Eof;
-        tokens.push(token);
+        let eof = matches!(token.kind, TokenKind::Eof);
+        tokens
+            .push(token)
+            .map_err(|_| out_of_space(path, "", token.line, token.column, Resource::Arena))?;
         if eof {
-            return Ok(tokens);
+            return Ok(tokens.into_slice());
         }
     }
 }

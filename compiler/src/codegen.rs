@@ -20,15 +20,21 @@
 //!
 //! A buffer local occupies `[len: u64][data: cap]`; `ref_local`/`ref_state`
 //! point at `data`, and every buffer instruction reads `len` at `data - 8`.
+//!
+//! Name resolution is table-driven, not hash-driven: a unit is small, so
+//! constants, state variables, procedures and locals are looked up by a linear
+//! scan of an arena-backed slice. That keeps declaration order observable and
+//! removes every hash map from the pipeline (spec 0008, B9).
 
-use std::collections::{HashMap, HashSet};
+use core::fmt;
 
 use abi::opcodes::{self, builtin};
 
+use crate::arena::{Bump, OutOfSpace, SliceVec};
 use crate::ast::*;
 use crate::package::LineEntry;
 use crate::types::{align8, Kind, Type, MAX_CAPACITY};
-use crate::{diag, package, Diagnostic};
+use crate::{diag, out_of_space, package, Diagnostic, Package, Resource};
 
 /// Bytes reserved at the bottom of every frame (spec 0008, "Frames" plus the
 /// saved `return_sp` and the destination reference this ABI version adds).
@@ -38,111 +44,171 @@ pub const FRAME_HEADER: u32 = 32;
 /// has room even when a caller's operand stack is not the deepest one.
 const STACK_MARGIN: u32 = 128;
 
-struct StateVar {
+fn arena_full(path: &str, unit: &str, line: u32, column: u32) -> Diagnostic {
+    out_of_space(path, unit, line, column, Resource::Arena)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Const<'a> {
+    name: &'a str,
+    value: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StateVar<'a> {
+    name: &'a str,
     ty: Type,
     off: u32,
 }
 
-#[derive(Clone)]
-struct Param {
-    name: String,
+#[derive(Debug, Clone, Copy)]
+struct Param<'a> {
+    name: &'a str,
     mode: ParamMode,
     ty: Type,
 }
 
-struct Sig {
-    name: String,
-    params: Vec<Param>,
+#[derive(Debug, Clone, Copy)]
+struct Sig<'a> {
+    name: &'a str,
+    params: &'a [Param<'a>],
     line: u32,
     column: u32,
 }
 
-struct CompiledFn {
-    code: Vec<u8>,
+#[derive(Clone, Copy)]
+struct CompiledFn<'a> {
+    code: &'a [u8],
     frame_size: u32,
     operand_off: u32,
     param_count: u8,
-    lines: Vec<LineEntry>,
+    lines: &'a [LineEntry],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ConstRef {
+    offset: u32,
+    len: u32,
 }
 
 /// Interns buffer literals into the constant blob, one entry per distinct byte
-/// string, in first-use order.
-#[derive(Default)]
-struct ConstantPool {
-    bytes: Vec<u8>,
-    index: HashMap<Vec<u8>, u32>,
+/// string, in first-use order. Interning scans the entries already emitted, so
+/// constant order is first-use order and nothing depends on a hash seed.
+struct ConstantPool<'a, 'b> {
+    data: SliceVec<'a, 'b, u8>,
+    index: SliceVec<'a, 'b, ConstRef>,
 }
 
-impl ConstantPool {
-    fn intern(&mut self, data: &[u8]) -> u32 {
-        if let Some(offset) = self.index.get(data) {
-            return *offset;
-        }
-        let base = self.bytes.len() as u32;
-        self.bytes
-            .extend_from_slice(&(data.len() as u64).to_le_bytes());
-        self.bytes.extend_from_slice(data);
-        while !self.bytes.len().is_multiple_of(8) {
-            self.bytes.push(0);
-        }
-        let offset = base + 8;
-        self.index.insert(data.to_vec(), offset);
-        offset
+impl<'a, 'b> ConstantPool<'a, 'b> {
+    fn new(path: &str, unit: &str, bump: &'b Bump<'a>) -> Result<Self, Diagnostic> {
+        let data = SliceVec::new(bump).map_err(|_| arena_full(path, unit, 1, 1))?;
+        let index = SliceVec::new(bump).map_err(|_| arena_full(path, unit, 1, 1))?;
+        Ok(ConstantPool { data, index })
     }
+
+    fn intern(&mut self, bytes: &[u8]) -> Result<u32, OutOfSpace> {
+        for entry in self.index.as_slice() {
+            let start = entry.offset as usize;
+            let end = start + entry.len as usize;
+            if entry.len as usize == bytes.len() && self.data.as_slice()[start..end] == *bytes {
+                return Ok(entry.offset);
+            }
+        }
+        let offset = u32::try_from(self.data.len() + 8).map_err(|_| OutOfSpace)?;
+        for byte in (bytes.len() as u64).to_le_bytes() {
+            self.data.push(byte)?;
+        }
+        self.data.extend_from_slice(bytes)?;
+        while !self.data.len().is_multiple_of(8) {
+            self.data.push(0)?;
+        }
+        self.index.push(ConstRef {
+            offset,
+            len: bytes.len() as u32,
+        })?;
+        Ok(offset)
+    }
+}
+
+fn find_const<'a>(consts: &[Const<'a>], name: &str) -> Option<i64> {
+    consts.iter().find(|c| c.name == name).map(|c| c.value)
+}
+
+fn find_state<'a>(vars: &[StateVar<'a>], name: &str) -> Option<StateVar<'a>> {
+    vars.iter().find(|v| v.name == name).copied()
+}
+
+fn find_sig<'a>(sigs: &[Sig<'a>], name: &str) -> Option<usize> {
+    sigs.iter().position(|s| s.name == name)
 }
 
 /// Compiles one parsed unit into a package.
-pub(crate) fn compile_unit(unit: &Unit, path: &str) -> Result<crate::Package, Diagnostic> {
-    if unit.name.is_empty() {
-        return Err(diag(path, "", 1, 1, "unit has no name"));
+pub(crate) fn compile_unit<'a>(
+    unit: &Unit<'a>,
+    path: &'a str,
+    bump: &Bump<'a>,
+    code: &'a mut [u8],
+    manifest: &'a mut [u8],
+) -> Result<Package<'a>, Diagnostic> {
+    let name = unit.name;
+    if name.is_empty() {
+        return Err(diag(path, "", 1, 1, format_args!("unit has no name")));
     }
-    for used in &unit.uses {
-        if used != "core" {
+    for used in unit.uses {
+        if *used != "core" {
             return Err(diag(
                 path,
-                &unit.name,
+                name,
                 1,
                 1,
-                format!("unknown unit `{used}`; this slice provides only `core`"),
+                format_args!("unknown unit `{used}`; this slice provides only `core`"),
             ));
         }
     }
 
-    let mut consts: HashMap<String, i64> = HashMap::new();
-    for decl in &unit.consts {
-        if consts.contains_key(&decl.name) {
+    let mut consts = SliceVec::<Const<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
+    for decl in unit.consts {
+        if find_const(consts.as_slice(), decl.name).is_some() {
             return Err(diag(
                 path,
-                &unit.name,
+                name,
                 decl.line,
                 decl.column,
-                format!("duplicate declaration of `{}`", decl.name),
+                format_args!("duplicate declaration of `{}`", decl.name),
             ));
         }
-        let value = eval_const(&decl.value, &consts, path, &unit.name)?;
-        consts.insert(decl.name.clone(), value);
+        let value = eval_const(decl.value, consts.as_slice(), path, name)?;
+        consts
+            .push(Const {
+                name: decl.name,
+                value,
+            })
+            .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
     }
 
-    let mut state_vars: HashMap<String, StateVar> = HashMap::new();
+    let mut state_vars =
+        SliceVec::<StateVar<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
     let mut state_size = 0u32;
-    for decl in &unit.vars {
-        if consts.contains_key(&decl.name) || state_vars.contains_key(&decl.name) {
+    for decl in unit.vars {
+        if find_const(consts.as_slice(), decl.name).is_some()
+            || find_state(state_vars.as_slice(), decl.name).is_some()
+        {
             return Err(diag(
                 path,
-                &unit.name,
+                name,
                 decl.line,
                 decl.column,
-                format!("duplicate declaration of `{}`", decl.name),
+                format_args!("duplicate declaration of `{}`", decl.name),
             ));
         }
-        let ty = resolve_type(&decl.ty, &consts, path, &unit.name)?;
+        let ty = resolve_type(&decl.ty, consts.as_slice(), path, name)?;
         if ty.is_buffer() && ty.cap == 0 {
             return Err(diag(
                 path,
-                &unit.name,
+                name,
                 decl.line,
                 decl.column,
-                format!(
+                format_args!(
                     "buffer variable `{}` needs a capacity of at least 1",
                     decl.name
                 ),
@@ -152,69 +218,74 @@ pub(crate) fn compile_unit(unit: &Unit, path: &str) -> Result<crate::Package, Di
         state_size = off.checked_add(ty.size()).ok_or_else(|| {
             diag(
                 path,
-                &unit.name,
+                name,
                 decl.line,
                 decl.column,
-                "state region is too large",
+                format_args!("state region is too large"),
             )
         })?;
         if state_size > MAX_CAPACITY {
             return Err(diag(
                 path,
-                &unit.name,
+                name,
                 decl.line,
                 decl.column,
-                format!("state region exceeds the {MAX_CAPACITY}-byte cap"),
+                format_args!("state region exceeds the {MAX_CAPACITY}-byte cap"),
             ));
         }
-        state_vars.insert(decl.name.clone(), StateVar { ty, off });
+        state_vars
+            .push(StateVar {
+                name: decl.name,
+                ty,
+                off,
+            })
+            .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
     }
 
-    let mut sigs: Vec<Sig> = Vec::new();
-    let mut sig_index: HashMap<String, usize> = HashMap::new();
-    for proc in &unit.procs {
-        if consts.contains_key(&proc.name)
-            || state_vars.contains_key(&proc.name)
-            || sig_index.contains_key(&proc.name)
+    let mut sigs = SliceVec::<Sig<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
+    for proc in unit.procs {
+        if find_const(consts.as_slice(), proc.name).is_some()
+            || find_state(state_vars.as_slice(), proc.name).is_some()
+            || find_sig(sigs.as_slice(), proc.name).is_some()
         {
             return Err(diag(
                 path,
-                &unit.name,
+                name,
                 proc.line,
                 proc.column,
-                format!("duplicate declaration of `{}`", proc.name),
+                format_args!("duplicate declaration of `{}`", proc.name),
             ));
         }
         if proc.params.len() > u8::MAX as usize {
             return Err(diag(
                 path,
-                &unit.name,
+                name,
                 proc.line,
                 proc.column,
-                "too many parameters (limit is 255)",
+                format_args!("too many parameters (limit is 255)"),
             ));
         }
-        let mut params = Vec::new();
-        let mut seen = HashSet::new();
-        for param in &proc.params {
-            if !seen.insert(param.name.clone()) {
+        let mut params = SliceVec::<Param<'a>>::new(bump)
+            .map_err(|_| arena_full(path, name, proc.line, proc.column))?;
+        for param in proc.params {
+            if params.as_slice().iter().any(|p| p.name == param.name) {
                 return Err(diag(
                     path,
-                    &unit.name,
+                    name,
                     param.line,
                     param.column,
-                    format!("duplicate parameter `{}`", param.name),
+                    format_args!("duplicate parameter `{}`", param.name),
                 ));
             }
-            let ty = resolve_type(&param.ty, &consts, path, &unit.name)?;
+            let ty = resolve_type(&param.ty, consts.as_slice(), path, name)?;
             if ty.is_buffer() {
                 if param.mode == ParamMode::Value {
                     return Err(diag(
                         path,
-                        &unit.name,
+                        name,
                         param.line,
                         param.column,
-                        format!(
+                        format_args!(
                             "buffer parameter `{}` must be declared `const` or `var`",
                             param.name
                         ),
@@ -223,131 +294,141 @@ pub(crate) fn compile_unit(unit: &Unit, path: &str) -> Result<crate::Package, Di
                 if param.mode == ParamMode::Var && ty.cap == 0 {
                     return Err(diag(
                         path,
-                        &unit.name,
+                        name,
                         param.line,
                         param.column,
-                        format!(
+                        format_args!(
                             "`var` buffer parameter `{}` needs a capacity of at least 1",
                             param.name
                         ),
                     ));
                 }
             }
-            params.push(Param {
-                name: param.name.clone(),
-                mode: param.mode,
-                ty,
-            });
+            params
+                .push(Param {
+                    name: param.name,
+                    mode: param.mode,
+                    ty,
+                })
+                .map_err(|_| arena_full(path, name, param.line, param.column))?;
         }
-        sig_index.insert(proc.name.clone(), sigs.len());
+        let params = params.into_slice();
         sigs.push(Sig {
-            name: proc.name.clone(),
+            name: proc.name,
             params,
             line: proc.line,
             column: proc.column,
-        });
+        })
+        .map_err(|_| arena_full(path, name, proc.line, proc.column))?;
     }
 
-    let main_index = match sig_index.get("main") {
-        Some(index) => *index,
+    let main_index = match find_sig(sigs.as_slice(), "main") {
+        Some(index) => index,
         None => {
             return Err(diag(
                 path,
-                &unit.name,
+                name,
                 1,
                 1,
-                "missing `main` procedure; an application needs `procedure main(args: const string[1024]);`",
+                format_args!(
+                    "missing `main` procedure; an application needs `procedure main(args: const string[1024]);`"
+                ),
             ))
         }
     };
-    let main_sig = &sigs[main_index];
+    let main_sig = sigs.as_slice()[main_index];
     let main_ok = main_sig.params.len() == 1
         && main_sig.params[0].mode == ParamMode::Const
         && main_sig.params[0].ty == Type::buffer(Kind::String, 1024);
     if !main_ok {
         return Err(diag(
             path,
-            &unit.name,
+            name,
             main_sig.line,
             main_sig.column,
-            "main must be declared as `procedure main(args: const string[1024]);`",
+            format_args!("main must be declared as `procedure main(args: const string[1024]);`"),
         ));
     }
 
-    let mut pool = ConstantPool::default();
-    let mut compiled: Vec<CompiledFn> = Vec::with_capacity(unit.procs.len());
+    let mut pool = ConstantPool::new(path, name, bump)?;
+    let mut compiled =
+        SliceVec::<CompiledFn<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
     for (index, proc) in unit.procs.iter().enumerate() {
-        let mut compiler = FnCompiler {
+        let current = sigs.as_slice()[index];
+        let mut compiler = FnCompiler::new(
             path,
-            unit: &unit.name,
-            sigs: &sigs,
-            sig_index: &sig_index,
-            consts: &consts,
-            state_vars: &state_vars,
-            pool: &mut pool,
-            current: &sigs[index],
-            code: Vec::new(),
-            slots: HashMap::new(),
-            next_local: 0,
-            depth: 0,
-            max_depth: 0,
-            labels: Vec::new(),
-            pending: Vec::new(),
-            lines: Vec::new(),
-        };
+            name,
+            sigs.as_slice(),
+            consts.as_slice(),
+            state_vars.as_slice(),
+            &mut pool,
+            current,
+            bump,
+        )?;
         compiler.compile_procedure(proc)?;
-        compiled.push(compiler.finish()?);
+        let function = compiler.finish()?;
+        compiled
+            .push(function)
+            .map_err(|_| arena_full(path, name, proc.line, proc.column))?;
     }
 
     // Lay the functions out in declaration order and rebase their line tables.
-    let mut instructions = Vec::new();
-    let mut functions = Vec::new();
-    let mut lines = Vec::new();
+    let mut instructions = SliceVec::<u8>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
+    let mut functions =
+        SliceVec::<abi::Function>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
+    let mut lines = SliceVec::<LineEntry>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
     let mut stack_size = STACK_MARGIN;
-    for (index, function) in compiled.iter().enumerate() {
+    for (index, function) in compiled.as_slice().iter().enumerate() {
+        let proc = unit.procs[index];
         let code_off = u32::try_from(instructions.len()).map_err(|_| {
             diag(
                 path,
-                &unit.name,
-                unit.procs[index].line,
-                unit.procs[index].column,
-                "instruction section exceeds 4 GiB",
+                name,
+                proc.line,
+                proc.column,
+                format_args!("instruction section exceeds 4 GiB"),
             )
         })?;
         let line_base = u32::try_from(lines.len()).map_err(|_| {
             diag(
                 path,
-                &unit.name,
-                unit.procs[index].line,
-                unit.procs[index].column,
-                "line table is too large",
+                name,
+                proc.line,
+                proc.column,
+                format_args!("line table is too large"),
             )
         })?;
-        for entry in &function.lines {
-            lines.push(LineEntry {
-                off: entry.off + code_off,
-                line: entry.line,
-                column: entry.column,
-            });
+        for entry in function.lines {
+            lines
+                .push(LineEntry {
+                    off: entry.off + code_off,
+                    line: entry.line,
+                    column: entry.column,
+                })
+                .map_err(|_| arena_full(path, name, proc.line, proc.column))?;
         }
-        functions.push(abi::Function {
-            code_off,
-            frame_size: function.frame_size,
-            operand_off: function.operand_off,
-            line_base,
-            name_off: abi::NO_NAME,
-            param_count: function.param_count,
-            has_destination: false,
-            _reserved: [0, 0],
-        });
-        instructions.extend_from_slice(&function.code);
+        functions
+            .push(abi::Function {
+                code_off,
+                frame_size: function.frame_size,
+                operand_off: function.operand_off,
+                line_base,
+                name_off: abi::NO_NAME,
+                param_count: function.param_count,
+                has_destination: false,
+                _reserved: [0, 0],
+            })
+            .map_err(|_| arena_full(path, name, proc.line, proc.column))?;
+        instructions
+            .extend_from_slice(function.code)
+            .map_err(|_| arena_full(path, name, proc.line, proc.column))?;
         stack_size = stack_size.checked_add(function.frame_size).ok_or_else(|| {
             diag(
                 path,
-                &unit.name,
-                unit.procs[index].line,
-                unit.procs[index].column,
-                "stack size overflows",
+                name,
+                proc.line,
+                proc.column,
+                format_args!("stack size overflows"),
             )
         })?;
     }
@@ -355,33 +436,35 @@ pub(crate) fn compile_unit(unit: &Unit, path: &str) -> Result<crate::Package, Di
     if stack_size > MAX_CAPACITY {
         return Err(diag(
             path,
-            &unit.name,
+            name,
             1,
             1,
-            format!("stack size {stack_size} exceeds the {MAX_CAPACITY}-byte cap"),
+            format_args!("stack size {stack_size} exceeds the {MAX_CAPACITY}-byte cap"),
         ));
     }
 
     package::assemble(
         path,
-        &unit.name,
-        functions,
-        instructions,
-        pool.bytes,
-        lines,
+        name,
+        functions.as_slice(),
+        instructions.as_slice(),
+        pool.data.as_slice(),
+        lines.as_slice(),
         state_size,
         stack_size,
         main_index as u32,
+        code,
+        manifest,
     )
 }
 
-fn resolve_type(
-    ty: &TypeRef,
-    consts: &HashMap<String, i64>,
-    path: &str,
-    unit: &str,
+fn resolve_type<'a>(
+    ty: &TypeRef<'a>,
+    consts: &[Const<'a>],
+    path: &'a str,
+    unit: &'a str,
 ) -> Result<Type, Diagnostic> {
-    let kind = match ty.name.as_str() {
+    let kind = match ty.name {
         "int" => Kind::Int,
         "uint" => Kind::Uint,
         "byte" => Kind::Byte,
@@ -395,12 +478,12 @@ fn resolve_type(
                 unit,
                 ty.line,
                 ty.column,
-                format!("unknown type `{other}`"),
+                format_args!("unknown type `{other}`"),
             ))
         }
     };
     if kind.is_buffer() {
-        let cap = match &ty.cap {
+        let cap = match ty.cap {
             Some(expr) => {
                 let value = eval_const(expr, consts, path, unit)?;
                 if value < 0 {
@@ -409,7 +492,7 @@ fn resolve_type(
                         unit,
                         expr.line,
                         expr.column,
-                        format!("capacity {value} is negative"),
+                        format_args!("capacity {value} is negative"),
                     ));
                 }
                 if value > MAX_CAPACITY as i64 {
@@ -418,7 +501,7 @@ fn resolve_type(
                         unit,
                         expr.line,
                         expr.column,
-                        format!("capacity {value} exceeds the {MAX_CAPACITY}-byte cap"),
+                        format_args!("capacity {value} exceeds the {MAX_CAPACITY}-byte cap"),
                     ));
                 }
                 value as u32
@@ -429,7 +512,7 @@ fn resolve_type(
                     unit,
                     ty.line,
                     ty.column,
-                    format!(
+                    format_args!(
                         "`{}` needs a capacity, e.g. `{}[64]`",
                         kind.name(),
                         kind.name()
@@ -445,24 +528,24 @@ fn resolve_type(
                 unit,
                 ty.line,
                 ty.column,
-                format!("scalar type `{}` does not take a capacity", kind.name()),
+                format_args!("scalar type `{}` does not take a capacity", kind.name()),
             ));
         }
         Ok(Type::scalar(kind))
     }
 }
 
-fn eval_const(
-    expr: &Expr,
-    consts: &HashMap<String, i64>,
-    path: &str,
-    unit: &str,
+fn eval_const<'a>(
+    expr: &Expr<'a>,
+    consts: &[Const<'a>],
+    path: &'a str,
+    unit: &'a str,
 ) -> Result<i64, Diagnostic> {
-    let error = |message: String| diag(path, unit, expr.line, expr.column, message);
-    match &expr.kind {
-        ExprKind::Int(value) => Ok(*value),
-        ExprKind::Ident(name) => consts.get(name).copied().ok_or_else(|| {
-            error(format!(
+    let error = |message: fmt::Arguments<'_>| diag(path, unit, expr.line, expr.column, message);
+    match expr.kind {
+        ExprKind::Int(value) => Ok(value),
+        ExprKind::Ident(name) => find_const(consts, name).ok_or_else(|| {
+            error(format_args!(
                 "unknown constant `{name}` in a constant expression"
             ))
         }),
@@ -470,44 +553,51 @@ fn eval_const(
             let value = eval_const(inner, consts, path, unit)?;
             value
                 .checked_neg()
-                .ok_or_else(|| error("constant expression overflows".to_string()))
+                .ok_or_else(|| error(format_args!("constant expression overflows")))
         }
         ExprKind::Binary(op, left, right) => {
             let a = eval_const(left, consts, path, unit)?;
             let b = eval_const(right, consts, path, unit)?;
-            let overflow = || error("constant expression overflows".to_string());
+            let overflow = || error(format_args!("constant expression overflows"));
             match op {
                 BinOp::Add => a.checked_add(b).ok_or_else(overflow),
                 BinOp::Sub => a.checked_sub(b).ok_or_else(overflow),
                 BinOp::Mul => a.checked_mul(b).ok_or_else(overflow),
                 BinOp::Div => {
                     if b == 0 {
-                        return Err(error("division by zero in constant expression".to_string()));
+                        return Err(error(format_args!(
+                            "division by zero in constant expression"
+                        )));
                     }
                     a.checked_div(b).ok_or_else(overflow)
                 }
                 BinOp::Mod => {
                     if b == 0 {
-                        return Err(error("division by zero in constant expression".to_string()));
+                        return Err(error(format_args!(
+                            "division by zero in constant expression"
+                        )));
                     }
                     a.checked_rem(b).ok_or_else(overflow)
                 }
-                _ => Err(error(
-                    "only `+`, `-`, `*`, `div` and `mod` are constant expressions".to_string(),
-                )),
+                _ => Err(error(format_args!(
+                    "only `+`, `-`, `*`, `div` and `mod` are constant expressions"
+                ))),
             }
         }
-        _ => Err(error("constant expression required".to_string())),
+        _ => Err(error(format_args!("constant expression required"))),
     }
 }
 
-struct Slot {
+#[derive(Clone, Copy)]
+struct Slot<'a> {
+    name: &'a str,
     base: u32,
     ty: Type,
     writable: bool,
     is_ref: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
 struct Pending {
     label: usize,
     imm_pos: usize,
@@ -515,6 +605,7 @@ struct Pending {
     op_pos: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
 enum Target {
     LocalScalar { off: u32, ty: Type, is_ref: bool },
     StateScalar { off: u32, ty: Type },
@@ -533,66 +624,120 @@ impl Target {
     }
 }
 
-struct FnCompiler<'a> {
+struct FnCompiler<'a, 'b, 'p> {
     path: &'a str,
     unit: &'a str,
-    sigs: &'a [Sig],
-    sig_index: &'a HashMap<String, usize>,
-    consts: &'a HashMap<String, i64>,
-    state_vars: &'a HashMap<String, StateVar>,
-    pool: &'a mut ConstantPool,
-    current: &'a Sig,
-    code: Vec<u8>,
-    slots: HashMap<String, Slot>,
+    sigs: &'b [Sig<'a>],
+    consts: &'b [Const<'a>],
+    state_vars: &'b [StateVar<'a>],
+    pool: &'p mut ConstantPool<'a, 'b>,
+    current: Sig<'a>,
+    bump: &'b Bump<'a>,
+    code: SliceVec<'a, 'b, u8>,
+    slots: SliceVec<'a, 'b, Slot<'a>>,
     next_local: u32,
     depth: i32,
     max_depth: i32,
-    labels: Vec<Option<usize>>,
-    pending: Vec<Pending>,
-    lines: Vec<LineEntry>,
+    labels: SliceVec<'a, 'b, Option<usize>>,
+    pending: SliceVec<'a, 'b, Pending>,
+    lines: SliceVec<'a, 'b, LineEntry>,
 }
 
-impl<'a> FnCompiler<'a> {
-    fn err(&self, line: u32, column: u32, message: impl Into<String>) -> Diagnostic {
+impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        path: &'a str,
+        unit: &'a str,
+        sigs: &'b [Sig<'a>],
+        consts: &'b [Const<'a>],
+        state_vars: &'b [StateVar<'a>],
+        pool: &'p mut ConstantPool<'a, 'b>,
+        current: Sig<'a>,
+        bump: &'b Bump<'a>,
+    ) -> Result<Self, Diagnostic> {
+        let line = current.line;
+        let column = current.column;
+        let code = SliceVec::new(bump).map_err(|_| arena_full(path, unit, line, column))?;
+        let slots = SliceVec::new(bump).map_err(|_| arena_full(path, unit, line, column))?;
+        let labels = SliceVec::new(bump).map_err(|_| arena_full(path, unit, line, column))?;
+        let pending = SliceVec::new(bump).map_err(|_| arena_full(path, unit, line, column))?;
+        let lines = SliceVec::new(bump).map_err(|_| arena_full(path, unit, line, column))?;
+        Ok(FnCompiler {
+            path,
+            unit,
+            sigs,
+            consts,
+            state_vars,
+            pool,
+            current,
+            bump,
+            code,
+            slots,
+            next_local: 0,
+            depth: 0,
+            max_depth: 0,
+            labels,
+            pending,
+            lines,
+        })
+    }
+
+    fn arena_error(&self, line: u32, column: u32) -> Diagnostic {
+        arena_full(self.path, self.unit, line, column)
+    }
+
+    fn err(&self, line: u32, column: u32, message: fmt::Arguments<'_>) -> Diagnostic {
         diag(self.path, self.unit, line, column, message)
     }
 
-    fn err_at(&self, expr: &Expr, message: impl Into<String>) -> Diagnostic {
+    fn err_at(&self, expr: &Expr<'_>, message: fmt::Arguments<'_>) -> Diagnostic {
         self.err(expr.line, expr.column, message)
     }
 
     fn internal(&self, message: &str) -> Diagnostic {
-        self.err(
+        diag(
+            self.path,
+            self.unit,
             self.current.line,
             self.current.column,
-            format!(
+            format_args!(
                 "internal compiler error in `{}`: {message}",
                 self.current.name
             ),
         )
     }
 
-    fn compile_procedure(&mut self, proc: &ProcDecl) -> Result<(), Diagnostic> {
-        for param in &self.current.params {
+    fn code_extend(&mut self, bytes: &[u8]) -> Result<(), Diagnostic> {
+        let line = self.current.line;
+        let column = self.current.column;
+        match self.code.extend_from_slice(bytes) {
+            Ok(()) => Ok(()),
+            Err(_) => Err(arena_full(self.path, self.unit, line, column)),
+        }
+    }
+
+    fn compile_procedure(&mut self, proc: &ProcDecl<'a>) -> Result<(), Diagnostic> {
+        for param in self.current.params {
             let base = self.next_local;
             self.next_local += 8;
             let is_ref = param.mode == ParamMode::Var || param.ty.is_buffer();
-            self.slots.insert(
-                param.name.clone(),
-                Slot {
-                    base,
-                    ty: param.ty,
-                    writable: param.mode != ParamMode::Const,
-                    is_ref,
-                },
-            );
+            let slot = Slot {
+                name: param.name,
+                base,
+                ty: param.ty,
+                writable: param.mode != ParamMode::Const,
+                is_ref,
+            };
+            self.slots
+                .push(slot)
+                .map_err(|_| self.arena_error(self.current.line, self.current.column))?;
         }
-        for local in &proc.locals {
-            if self.slots.contains_key(&local.name) {
+        for local in proc.locals {
+            if self.slot(local.name).is_some() {
                 return Err(self.err(
                     local.line,
                     local.column,
-                    format!("duplicate declaration of `{}`", local.name),
+                    format_args!("duplicate declaration of `{}`", local.name),
                 ));
             }
             let ty = resolve_type(&local.ty, self.consts, self.path, self.unit)?;
@@ -600,7 +745,7 @@ impl<'a> FnCompiler<'a> {
                 return Err(self.err(
                     local.line,
                     local.column,
-                    format!(
+                    format_args!(
                         "buffer variable `{}` needs a capacity of at least 1",
                         local.name
                     ),
@@ -612,35 +757,39 @@ impl<'a> FnCompiler<'a> {
                 return Err(self.err(
                     local.line,
                     local.column,
-                    format!(
+                    format_args!(
                         "procedure `{}` needs more than {MAX_CAPACITY} bytes of locals",
                         proc.name
                     ),
                 ));
             }
-            self.slots.insert(
-                local.name.clone(),
-                Slot {
-                    base,
-                    ty,
-                    writable: true,
-                    is_ref: false,
-                },
-            );
+            let slot = Slot {
+                name: local.name,
+                base,
+                ty,
+                writable: true,
+                is_ref: false,
+            };
+            self.slots
+                .push(slot)
+                .map_err(|_| self.arena_error(local.line, local.column))?;
         }
 
-        for stmt in &proc.body {
+        for stmt in proc.body {
             self.stmt(stmt)?;
         }
         if self.depth != 0 {
             return Err(self.internal("operand stack is not empty at the end of a procedure"));
         }
-        self.simple(opcodes::RET);
+        self.simple(opcodes::RET)?;
         self.finish_jumps()?;
         Ok(())
     }
 
-    fn finish(self) -> Result<CompiledFn, Diagnostic> {
+    fn finish(self) -> Result<CompiledFn<'a>, Diagnostic> {
+        let line = self.current.line;
+        let column = self.current.column;
+        let proc_name = self.current.name;
         let operand_off = FRAME_HEADER
             .checked_add(self.next_local)
             .ok_or_else(|| self.internal("frame size overflows"))?;
@@ -652,43 +801,53 @@ impl<'a> FnCompiler<'a> {
             .checked_add(operands)
             .ok_or_else(|| self.internal("frame size overflows"))?;
         if frame_size > MAX_CAPACITY {
-            return Err(self.err(
-                self.current.line,
-                self.current.column,
-                format!(
-                    "procedure `{}` needs a {frame_size}-byte frame, over the {MAX_CAPACITY}-byte cap",
-                    self.current.name
+            return Err(diag(
+                self.path,
+                self.unit,
+                line,
+                column,
+                format_args!(
+                    "procedure `{proc_name}` needs a {frame_size}-byte frame, over the {MAX_CAPACITY}-byte cap"
                 ),
             ));
         }
+        let param_count = self.current.params.len() as u8;
         Ok(CompiledFn {
-            code: self.code,
+            code: self.code.into_slice(),
             frame_size,
             operand_off,
-            param_count: self.current.params.len() as u8,
-            lines: self.lines,
+            param_count,
+            lines: self.lines.into_slice(),
         })
+    }
+
+    fn slot(&self, name: &str) -> Option<Slot<'a>> {
+        self.slots
+            .as_slice()
+            .iter()
+            .find(|s| s.name == name)
+            .copied()
     }
 
     // ---- emission ------------------------------------------------------
 
-    fn word(&mut self, op: u8, a: u8, b: u8, c: u8) -> usize {
+    fn word(&mut self, op: u8, a: u8, b: u8, c: u8) -> Result<usize, Diagnostic> {
         let pos = self.code.len();
-        self.code.extend_from_slice(&[op, a, b, c]);
-        pos
+        self.code_extend(&[op, a, b, c])?;
+        Ok(pos)
     }
 
-    fn imm32(&mut self, value: u32) {
-        self.code.extend_from_slice(&value.to_le_bytes());
+    fn imm32(&mut self, value: u32) -> Result<(), Diagnostic> {
+        self.code_extend(&value.to_le_bytes())
     }
 
-    fn simple(&mut self, op: u8) {
-        self.word(op, 0, 0, 0);
+    fn simple(&mut self, op: u8) -> Result<(), Diagnostic> {
+        self.word(op, 0, 0, 0).map(|_| ())
     }
 
-    fn one(&mut self, op: u8, imm: u32) {
-        self.word(op, 0, 0, 0);
-        self.imm32(imm);
+    fn one(&mut self, op: u8, imm: u32) -> Result<(), Diagnostic> {
+        self.word(op, 0, 0, 0)?;
+        self.imm32(imm)
     }
 
     fn push(&mut self) {
@@ -706,41 +865,59 @@ impl<'a> FnCompiler<'a> {
         Ok(())
     }
 
-    fn mark(&mut self, line: u32, column: u32) {
+    fn mark(&mut self, line: u32, column: u32) -> Result<(), Diagnostic> {
         let off = self.code.len() as u32;
         if self.lines.last().is_none_or(|entry| entry.off != off) {
-            self.lines.push(LineEntry { off, line, column });
+            let entry = LineEntry { off, line, column };
+            let at_line = self.current.line;
+            let at_column = self.current.column;
+            self.lines
+                .push(entry)
+                .map_err(|_| self.arena_error(at_line, at_column))?;
         }
+        Ok(())
     }
 
-    fn label(&mut self) -> usize {
-        self.labels.push(None);
-        self.labels.len() - 1
+    fn label(&mut self) -> Result<usize, Diagnostic> {
+        let at_line = self.current.line;
+        let at_column = self.current.column;
+        self.labels
+            .push(None)
+            .map_err(|_| self.arena_error(at_line, at_column))?;
+        Ok(self.labels.len() - 1)
     }
 
     fn bind(&mut self, label: usize) {
-        self.labels[label] = Some(self.code.len());
+        self.labels.set(label, Some(self.code.len()));
     }
 
     fn jump(&mut self, op: u8, label: usize, pops: bool) -> Result<(), Diagnostic> {
-        let pos = self.word(op, 0, 0, 0);
-        self.imm32(0);
+        let pos = self.word(op, 0, 0, 0)?;
+        self.imm32(0)?;
         if pops {
             self.pop(1)?;
         }
-        self.pending.push(Pending {
+        let pending = Pending {
             label,
             imm_pos: pos + 4,
             next: self.code.len(),
             op_pos: pos,
-        });
-        Ok(())
+        };
+        let at_line = self.current.line;
+        let at_column = self.current.column;
+        self.pending
+            .push(pending)
+            .map_err(|_| self.arena_error(at_line, at_column))
     }
 
     fn finish_jumps(&mut self) -> Result<(), Diagnostic> {
-        for pending in &self.pending {
-            let target =
-                self.labels[pending.label].ok_or_else(|| self.internal("unbound label"))?;
+        let count = self.pending.len();
+        for index in 0..count {
+            let pending = self.pending.get(index).expect("pending entry exists");
+            let target = match self.labels.get(pending.label) {
+                Some(Some(target)) => target,
+                _ => return Err(self.internal("unbound label")),
+            };
             let delta = target as i64 - pending.next as i64;
             if delta % 4 != 0 {
                 return Err(self.internal("jump target is not word aligned"));
@@ -749,41 +926,42 @@ impl<'a> FnCompiler<'a> {
             if words < i32::MIN as i64 || words > i32::MAX as i64 {
                 return Err(self.internal("jump offset overflows"));
             }
-            self.code[pending.imm_pos..pending.imm_pos + 4]
+            self.code.as_mut_slice()[pending.imm_pos..pending.imm_pos + 4]
                 .copy_from_slice(&(words as i32).to_le_bytes());
             if target < pending.op_pos {
                 // Explicit poll hint on backward branches (spec 0008, B3).
-                self.code[pending.op_pos + 3] = 1;
+                self.code.as_mut_slice()[pending.op_pos + 3] = 1;
             }
         }
         Ok(())
     }
 
-    fn const_i64(&mut self, value: i64) {
-        self.simple(opcodes::CONST);
-        self.imm32(value as u32);
-        self.imm32((value >> 32) as u32);
+    fn const_i64(&mut self, value: i64) -> Result<(), Diagnostic> {
+        self.simple(opcodes::CONST)?;
+        self.imm32(value as u32)?;
+        self.imm32((value >> 32) as u32)?;
         self.push();
+        Ok(())
     }
 
     // ---- statements ----------------------------------------------------
 
-    fn stmt(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
-        match stmt {
+    fn stmt(&mut self, stmt: &'a Stmt<'a>) -> Result<(), Diagnostic> {
+        match *stmt {
             Stmt::Assign {
                 target,
                 value,
                 line,
                 column,
             } => {
-                self.mark(*line, *column);
-                self.assign(target, value, *line, *column)
+                self.mark(line, column)?;
+                self.assign(target, value, line, column)
             }
             Stmt::Call(call) => {
-                self.mark(call.line, call.column);
-                let result = self.call(call)?;
+                self.mark(call.line, call.column)?;
+                let result = self.call(&call)?;
                 if result.is_some() {
-                    self.simple(opcodes::DROP);
+                    self.simple(opcodes::DROP)?;
                     self.pop(1)?;
                 }
                 Ok(())
@@ -796,8 +974,8 @@ impl<'a> FnCompiler<'a> {
                 let start_depth = self.depth;
                 match else_branch {
                     Some(else_branch) => {
-                        let else_label = self.label();
-                        let end_label = self.label();
+                        let else_label = self.label()?;
+                        let end_label = self.label()?;
                         self.condition(cond)?;
                         self.jump(opcodes::JZ, else_label, true)?;
                         self.stmt(then_branch)?;
@@ -807,7 +985,7 @@ impl<'a> FnCompiler<'a> {
                         self.bind(end_label);
                     }
                     None => {
-                        let end_label = self.label();
+                        let end_label = self.label()?;
                         self.condition(cond)?;
                         self.jump(opcodes::JZ, end_label, true)?;
                         self.stmt(then_branch)?;
@@ -821,8 +999,8 @@ impl<'a> FnCompiler<'a> {
             }
             Stmt::While { cond, body } => {
                 let start_depth = self.depth;
-                let start = self.label();
-                let end = self.label();
+                let start = self.label()?;
+                let end = self.label()?;
                 self.bind(start);
                 self.condition(cond)?;
                 self.jump(opcodes::JZ, end, true)?;
@@ -843,34 +1021,31 @@ impl<'a> FnCompiler<'a> {
         }
     }
 
-    fn condition(&mut self, expr: &Expr) -> Result<(), Diagnostic> {
+    fn condition(&mut self, expr: &'a Expr<'a>) -> Result<(), Diagnostic> {
         let ty = self.expr_scalar(expr)?;
         if ty.kind != Kind::Bool {
-            return Err(self.err_at(
-                expr,
-                format!("condition must be `bool`, found `{}`", ty.display()),
-            ));
+            return Err(self.err_at(expr, format_args!("condition must be `bool`, found `{ty}`")));
         }
         Ok(())
     }
 
     fn assign(
         &mut self,
-        name: &str,
-        value: &Expr,
+        name: &'a str,
+        value: &'a Expr<'a>,
         line: u32,
         column: u32,
     ) -> Result<(), Diagnostic> {
         let target = self.resolve_target(name, line, column)?;
-        match &target {
+        match target {
             Target::LocalScalar {
                 off,
                 ty,
                 is_ref: false,
             } => {
                 let value_ty = self.expr_scalar(value)?;
-                self.check_exact(*ty, value_ty, value)?;
-                self.one(opcodes::STORE_LOCAL, *off);
+                self.check_exact(ty, value_ty, value)?;
+                self.one(opcodes::STORE_LOCAL, off)?;
                 self.pop(1)?;
             }
             Target::LocalScalar {
@@ -880,17 +1055,17 @@ impl<'a> FnCompiler<'a> {
             } => {
                 // A `var` scalar parameter aliases the caller's variable: push
                 // the reference first, then the value, then store through it.
-                self.one(opcodes::LOAD_LOCAL, *off);
+                self.one(opcodes::LOAD_LOCAL, off)?;
                 self.push();
                 let value_ty = self.expr_scalar(value)?;
-                self.check_exact(*ty, value_ty, value)?;
-                self.simple(opcodes::STORE_REF);
+                self.check_exact(ty, value_ty, value)?;
+                self.simple(opcodes::STORE_REF)?;
                 self.pop(2)?;
             }
             Target::StateScalar { off, ty } => {
                 let value_ty = self.expr_scalar(value)?;
-                self.check_exact(*ty, value_ty, value)?;
-                self.one(opcodes::STORE_STATE, *off);
+                self.check_exact(ty, value_ty, value)?;
+                self.one(opcodes::STORE_STATE, off)?;
                 self.pop(1)?;
             }
             Target::LocalBuffer { .. } | Target::StateBuffer { .. } => {
@@ -900,28 +1075,24 @@ impl<'a> FnCompiler<'a> {
         Ok(())
     }
 
-    fn check_exact(&self, expected: Type, found: Type, expr: &Expr) -> Result<(), Diagnostic> {
+    fn check_exact(&self, expected: Type, found: Type, expr: &Expr<'_>) -> Result<(), Diagnostic> {
         if expected == found {
             Ok(())
         } else {
             Err(self.err_at(
                 expr,
-                format!(
-                    "type mismatch: expected `{}`, found `{}`",
-                    expected.display(),
-                    found.display()
-                ),
+                format_args!("type mismatch: expected `{expected}`, found `{found}`"),
             ))
         }
     }
 
     fn resolve_target(&self, name: &str, line: u32, column: u32) -> Result<Target, Diagnostic> {
-        if let Some(slot) = self.slots.get(name) {
+        if let Some(slot) = self.slot(name) {
             if !slot.writable {
                 return Err(self.err(
                     line,
                     column,
-                    format!("cannot assign to `const` parameter `{name}`"),
+                    format_args!("cannot assign to `const` parameter `{name}`"),
                 ));
             }
             return Ok(if slot.ty.is_buffer() {
@@ -938,7 +1109,7 @@ impl<'a> FnCompiler<'a> {
                 }
             });
         }
-        if let Some(var) = self.state_vars.get(name) {
+        if let Some(var) = find_state(self.state_vars, name) {
             return Ok(if var.ty.is_buffer() {
                 Target::StateBuffer {
                     off: var.off,
@@ -951,45 +1122,56 @@ impl<'a> FnCompiler<'a> {
                 }
             });
         }
-        if self.consts.contains_key(name) {
-            return Err(self.err(line, column, format!("cannot assign to constant `{name}`")));
+        if find_const(self.consts, name).is_some() {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("cannot assign to constant `{name}`"),
+            ));
         }
-        Err(self.err(line, column, format!("unknown identifier `{name}`")))
+        Err(self.err(line, column, format_args!("unknown identifier `{name}`")))
     }
 
-    fn push_target_ref(&mut self, target: &Target) {
-        match target {
+    fn push_target_ref(&mut self, target: &Target) -> Result<(), Diagnostic> {
+        match *target {
             Target::LocalBuffer {
                 base, is_ref: true, ..
-            } => self.one(opcodes::LOAD_LOCAL, *base),
+            } => self.one(opcodes::LOAD_LOCAL, base)?,
             Target::LocalBuffer {
                 base,
                 is_ref: false,
                 ..
-            } => self.one(opcodes::REF_LOCAL, *base + 8),
-            Target::StateBuffer { off, .. } => self.one(opcodes::REF_STATE, *off + 8),
+            } => self.one(opcodes::REF_LOCAL, base + 8)?,
+            Target::StateBuffer { off, .. } => self.one(opcodes::REF_STATE, off + 8)?,
             _ => unreachable!("push_target_ref is only used for buffers"),
         }
         self.push();
+        Ok(())
     }
 
     fn buffer_assign(
         &mut self,
-        name: &str,
+        name: &'a str,
         target: &Target,
-        value: &Expr,
+        value: &'a Expr<'a>,
     ) -> Result<(), Diagnostic> {
         let ty = target.ty();
-        let mut parts = Vec::new();
-        collect_concat(value, &mut parts);
+        let bump = self.bump;
+        let mut parts = SliceVec::<&'a Expr<'a>>::new(bump)
+            .map_err(|_| self.arena_error(value.line, value.column))?;
+        collect_concat(value, &mut parts)
+            .map_err(|_| self.arena_error(value.line, value.column))?;
 
-        for part in &parts {
-            match &part.kind {
+        for index in 0..parts.len() {
+            let part = parts.as_slice()[index];
+            match part.kind {
                 ExprKind::Ident(operand) if operand == name => {
                     return Err(self.err(
                         part.line,
                         part.column,
-                        format!("destination `{name}` aliases an operand; `{name} := {name} + ...` is not allowed"),
+                        format_args!(
+                            "destination `{name}` aliases an operand; `{name} := {name} + ...` is not allowed"
+                        ),
                     ));
                 }
                 ExprKind::Str(bytes) => {
@@ -997,42 +1179,34 @@ impl<'a> FnCompiler<'a> {
                         return Err(self.err(
                             part.line,
                             part.column,
-                            format!(
-                                "string literal ({} bytes) does not fit {}",
-                                bytes.len(),
-                                ty.display()
+                            format_args!(
+                                "string literal ({} bytes) does not fit {ty}",
+                                bytes.len()
                             ),
                         ));
                     }
-                    if ty.kind == Kind::String && std::str::from_utf8(bytes).is_err() {
+                    if ty.kind == Kind::String && core::str::from_utf8(bytes).is_err() {
                         return Err(self.err(
                             part.line,
                             part.column,
-                            "string literal is not valid UTF-8; use a `bytes` destination for raw data",
+                            format_args!(
+                                "string literal is not valid UTF-8; use a `bytes` destination for raw data"
+                            ),
                         ));
                     }
                 }
                 ExprKind::Ident(operand) => {
-                    let slot = self
-                        .slots
-                        .get(operand)
-                        .map(|slot| (slot.ty, slot.is_ref, slot.base))
-                        .or_else(|| {
-                            self.state_vars
-                                .get(operand)
-                                .map(|var| (var.ty, false, var.off))
-                        });
-                    match slot {
-                        Some((part_ty, is_ref, _)) if part_ty.is_buffer() => {
+                    let found = match self.slot(operand) {
+                        Some(slot) => Some((slot.ty, slot.is_ref)),
+                        None => find_state(self.state_vars, operand).map(|var| (var.ty, false)),
+                    };
+                    match found {
+                        Some((part_ty, is_ref)) if part_ty.is_buffer() => {
                             if part_ty.kind != ty.kind {
                                 return Err(self.err(
                                     part.line,
                                     part.column,
-                                    format!(
-                                        "cannot use `{}` in a `{}` construction",
-                                        part_ty.display(),
-                                        ty.display()
-                                    ),
+                                    format_args!("cannot use `{part_ty}` in a `{ty}` construction"),
                                 ));
                             }
                             // Direct assignment between two inline buffers is a
@@ -1045,10 +1219,8 @@ impl<'a> FnCompiler<'a> {
                                 return Err(self.err(
                                     part.line,
                                     part.column,
-                                    format!(
-                                        "capacity mismatch: `{}` cannot be assigned to `{}`",
-                                        part_ty.display(),
-                                        ty.display()
+                                    format_args!(
+                                        "capacity mismatch: `{part_ty}` cannot be assigned to `{ty}`"
                                     ),
                                 ));
                             }
@@ -1057,14 +1229,14 @@ impl<'a> FnCompiler<'a> {
                             return Err(self.err(
                                 part.line,
                                 part.column,
-                                format!("`{operand}` is not a buffer"),
+                                format_args!("`{operand}` is not a buffer"),
                             ))
                         }
                         None => {
                             return Err(self.err(
                                 part.line,
                                 part.column,
-                                format!("unknown identifier `{operand}`"),
+                                format_args!("unknown identifier `{operand}`"),
                             ))
                         }
                     }
@@ -1073,35 +1245,43 @@ impl<'a> FnCompiler<'a> {
                     return Err(self.err(
                         part.line,
                         part.column,
-                        "buffer construction accepts only literals, buffers and `+`",
+                        format_args!("buffer construction accepts only literals, buffers and `+`"),
                     ))
                 }
             }
         }
 
-        self.push_target_ref(target);
-        self.simple(opcodes::CLEAR);
+        self.push_target_ref(target)?;
+        self.simple(opcodes::CLEAR)?;
         self.pop(1)?;
 
-        for part in &parts {
-            if let ExprKind::Str(bytes) = &part.kind {
-                if bytes.is_empty() {
-                    continue;
+        for index in 0..parts.len() {
+            let part = parts.as_slice()[index];
+            match part.kind {
+                ExprKind::Str(bytes) => {
+                    if bytes.is_empty() {
+                        continue;
+                    }
+                    let offset = match self.pool.intern(bytes) {
+                        Ok(offset) => offset,
+                        Err(_) => return Err(self.arena_error(part.line, part.column)),
+                    };
+                    self.push_target_ref(target)?;
+                    self.one(opcodes::REF_CONST, offset)?;
+                    self.push();
                 }
-                let offset = self.pool.intern(bytes);
-                self.push_target_ref(target);
-                self.one(opcodes::REF_CONST, offset);
-                self.push();
-            } else if let ExprKind::Ident(operand) = &part.kind {
-                self.push_target_ref(target);
-                self.push_named_ref(operand, part)?;
-            } else {
-                return Err(self.err_at(
-                    part,
-                    "buffer construction accepts only literals, buffers and `+`",
-                ));
+                ExprKind::Ident(operand) => {
+                    self.push_target_ref(target)?;
+                    self.push_named_ref(operand, part)?;
+                }
+                _ => {
+                    return Err(self.err_at(
+                        part,
+                        format_args!("buffer construction accepts only literals, buffers and `+`"),
+                    ))
+                }
             }
-            self.one(opcodes::APPEND, ty.cap);
+            self.one(opcodes::APPEND, ty.cap)?;
             self.pop(2)?;
         }
 
@@ -1110,81 +1290,86 @@ impl<'a> FnCompiler<'a> {
 
     // ---- expressions ---------------------------------------------------
 
-    fn expr_scalar(&mut self, expr: &Expr) -> Result<Type, Diagnostic> {
-        match &expr.kind {
+    fn expr_scalar(&mut self, expr: &'a Expr<'a>) -> Result<Type, Diagnostic> {
+        match expr.kind {
             ExprKind::Int(value) => {
-                self.const_i64(*value);
+                self.const_i64(value)?;
                 Ok(Type::scalar(Kind::Int))
             }
             ExprKind::Float(value) => {
-                self.const_i64(value.to_bits() as i64);
+                self.const_i64(value.to_bits() as i64)?;
                 Ok(Type::scalar(Kind::Float))
             }
             ExprKind::Bool(value) => {
-                self.const_i64(u64::from(*value) as i64);
+                self.const_i64(u64::from(value) as i64)?;
                 Ok(Type::scalar(Kind::Bool))
             }
             ExprKind::Str(_) => Err(self.err_at(
                 expr,
-                "a string literal is a buffer; assign it into a buffer or pass it to a buffer parameter",
+                format_args!(
+                    "a string literal is a buffer; assign it into a buffer or pass it to a buffer parameter"
+                ),
             )),
             ExprKind::Ident(name) => self.load_scalar(name, expr),
-            ExprKind::Call(call) => match self.call(call)? {
+            ExprKind::Call(call) => match self.call(&call)? {
                 Some(ty) => Ok(ty),
                 None => Err(self.err_at(
                     expr,
-                    format!("procedure `{}` does not return a value", call.target),
+                    format_args!("procedure `{}` does not return a value", call.target),
                 )),
             },
             ExprKind::Cast(name, inner) => self.cast(name, inner, expr),
-            ExprKind::Unary(op, inner) => self.unary(*op, inner, expr),
-            ExprKind::Binary(op, left, right) => self.binary(*op, left, right, expr),
+            ExprKind::Unary(op, inner) => self.unary(op, inner, expr),
+            ExprKind::Binary(op, left, right) => self.binary(op, left, right, expr),
         }
     }
 
-    fn load_scalar(&mut self, name: &str, expr: &Expr) -> Result<Type, Diagnostic> {
-        if let Some(value) = self.consts.get(name) {
-            let value = *value;
-            self.const_i64(value);
+    fn load_scalar(&mut self, name: &'a str, expr: &'a Expr<'a>) -> Result<Type, Diagnostic> {
+        if let Some(value) = find_const(self.consts, name) {
+            self.const_i64(value)?;
             return Ok(Type::scalar(Kind::Int));
         }
-        if let Some(slot) = self.slots.get(name) {
-            let (base, ty, is_ref) = (slot.base, slot.ty, slot.is_ref);
-            if ty.is_buffer() {
+        if let Some(slot) = self.slot(name) {
+            if slot.ty.is_buffer() {
                 return Err(self.err_at(
                     expr,
-                    format!("buffer `{name}` cannot be used as a scalar value"),
+                    format_args!("buffer `{name}` cannot be used as a scalar value"),
                 ));
             }
-            if is_ref {
-                self.one(opcodes::LOAD_LOCAL, base);
-                self.simple(opcodes::LOAD_REF);
+            if slot.is_ref {
+                self.one(opcodes::LOAD_LOCAL, slot.base)?;
+                self.simple(opcodes::LOAD_REF)?;
             } else {
-                self.one(opcodes::LOAD_LOCAL, base);
+                self.one(opcodes::LOAD_LOCAL, slot.base)?;
             }
             self.push();
-            return Ok(ty);
+            return Ok(slot.ty);
         }
-        if let Some(var) = self.state_vars.get(name) {
+        if let Some(var) = find_state(self.state_vars, name) {
             if var.ty.is_buffer() {
                 return Err(self.err_at(
                     expr,
-                    format!("buffer `{name}` cannot be used as a scalar value"),
+                    format_args!("buffer `{name}` cannot be used as a scalar value"),
                 ));
             }
-            self.one(opcodes::LOAD_STATE, var.off);
+            self.one(opcodes::LOAD_STATE, var.off)?;
             self.push();
             return Ok(var.ty);
         }
-        let suggestion = if self.sig_index.contains_key(name) {
-            format!("`{name}` is a procedure; call it with `()`")
+        let suggestion = if find_sig(self.sigs, name).is_some() {
+            format_args!("`{name}` is a procedure; call it with `()`")
         } else {
-            format!("unknown identifier `{name}`")
+            format_args!("unknown identifier `{name}`")
         };
         Err(self.err_at(expr, suggestion))
     }
 
-    fn cast(&mut self, name: &str, inner: &Expr, expr: &Expr) -> Result<Type, Diagnostic> {
+    fn cast(
+        &mut self,
+        name: &'a str,
+        inner: &'a Expr<'a>,
+        expr: &'a Expr<'a>,
+    ) -> Result<Type, Diagnostic> {
         let target = match name {
             "int" => Kind::Int,
             "uint" => Kind::Uint,
@@ -1196,13 +1381,13 @@ impl<'a> FnCompiler<'a> {
         if !source.is_scalar() {
             return Err(self.err_at(
                 expr,
-                "buffer conversions are not casts; they are `stdlib` functions",
+                format_args!("buffer conversions are not casts; they are `stdlib` functions"),
             ));
         }
         if source.kind == Kind::Bool {
             return Err(self.err_at(
                 expr,
-                format!("cannot convert `bool` to `{}`", target.name()),
+                format_args!("cannot convert `bool` to `{}`", target.name()),
             ));
         }
         if source.kind == target {
@@ -1210,46 +1395,52 @@ impl<'a> FnCompiler<'a> {
         }
         let from = source
             .value_kind()
-            .ok_or_else(|| self.err_at(expr, "unsupported conversion"))?;
+            .ok_or_else(|| self.err_at(expr, format_args!("unsupported conversion")))?;
         let to = Type::scalar(target)
             .value_kind()
-            .ok_or_else(|| self.err_at(expr, "unsupported conversion"))?;
-        self.word(opcodes::CONVERT, from, to, 0);
+            .ok_or_else(|| self.err_at(expr, format_args!("unsupported conversion")))?;
+        self.word(opcodes::CONVERT, from, to, 0)?;
         Ok(Type::scalar(target))
     }
 
-    fn unary(&mut self, op: UnOp, inner: &Expr, expr: &Expr) -> Result<Type, Diagnostic> {
+    fn unary(
+        &mut self,
+        op: UnOp,
+        inner: &'a Expr<'a>,
+        expr: &'a Expr<'a>,
+    ) -> Result<Type, Diagnostic> {
         match op {
             UnOp::Neg => {
                 let ty = self.expr_scalar(inner)?;
                 match ty.kind {
                     Kind::Int => {
-                        self.simple(opcodes::NEG);
+                        self.simple(opcodes::NEG)?;
                         Ok(ty)
                     }
                     Kind::Float => {
-                        self.simple(opcodes::FNEG);
+                        self.simple(opcodes::FNEG)?;
                         Ok(ty)
                     }
                     Kind::Uint => Err(self.err_at(
                         expr,
-                        "unary `-` is not defined for `uint`; convert with `int(x)` first",
+                        format_args!(
+                            "unary `-` is not defined for `uint`; convert with `int(x)` first"
+                        ),
                     )),
                     other => Err(self.err_at(
                         expr,
-                        format!("unary `-` is not defined for `{}`", other.name()),
+                        format_args!("unary `-` is not defined for `{}`", other.name()),
                     )),
                 }
             }
             UnOp::Not => {
                 let ty = self.expr_scalar(inner)?;
                 if ty.kind != Kind::Bool {
-                    return Err(self.err_at(
-                        expr,
-                        format!("`not` needs a `bool`, found `{}`", ty.display()),
-                    ));
+                    return Err(
+                        self.err_at(expr, format_args!("`not` needs a `bool`, found `{ty}`"))
+                    );
                 }
-                self.simple(opcodes::NOT);
+                self.simple(opcodes::NOT)?;
                 Ok(ty)
             }
         }
@@ -1258,9 +1449,9 @@ impl<'a> FnCompiler<'a> {
     fn binary(
         &mut self,
         op: BinOp,
-        left: &Expr,
-        right: &Expr,
-        expr: &Expr,
+        left: &'a Expr<'a>,
+        right: &'a Expr<'a>,
+        expr: &'a Expr<'a>,
     ) -> Result<Type, Diagnostic> {
         // `and`/`or` short-circuit, so they are lowered to branches before the
         // right operand is evaluated.
@@ -1269,15 +1460,14 @@ impl<'a> FnCompiler<'a> {
             if left_ty.kind != Kind::Bool {
                 return Err(self.err_at(
                     left,
-                    format!(
-                        "`{}` needs `bool` operands, found `{}`",
-                        if op == BinOp::And { "and" } else { "or" },
-                        left_ty.display()
+                    format_args!(
+                        "`{}` needs `bool` operands, found `{left_ty}`",
+                        if op == BinOp::And { "and" } else { "or" }
                     ),
                 ));
             }
-            let end = self.label();
-            let short = self.label();
+            let end = self.label()?;
+            let short = self.label()?;
             if op == BinOp::And {
                 self.jump(opcodes::JZ, short, true)?;
             } else {
@@ -1290,17 +1480,16 @@ impl<'a> FnCompiler<'a> {
             if right_ty.kind != Kind::Bool {
                 return Err(self.err_at(
                     right,
-                    format!(
-                        "`{}` needs `bool` operands, found `{}`",
-                        if op == BinOp::And { "and" } else { "or" },
-                        right_ty.display()
+                    format_args!(
+                        "`{}` needs `bool` operands, found `{right_ty}`",
+                        if op == BinOp::And { "and" } else { "or" }
                     ),
                 ));
             }
             self.jump(opcodes::JMP, end, false)?;
             self.bind(short);
             self.depth = short_depth;
-            self.const_i64(u64::from(op == BinOp::Or) as i64);
+            self.const_i64(u64::from(op == BinOp::Or) as i64)?;
             self.bind(end);
             return Ok(Type::scalar(Kind::Bool));
         }
@@ -1310,15 +1499,16 @@ impl<'a> FnCompiler<'a> {
         if left_ty != right_ty {
             return Err(self.err_at(
                 expr,
-                format!(
-                    "type mismatch: `{}` and `{}`; there are no implicit conversions",
-                    left_ty.display(),
-                    right_ty.display()
+                format_args!(
+                    "type mismatch: `{left_ty}` and `{right_ty}`; there are no implicit conversions"
                 ),
             ));
         }
         if left_ty.is_buffer() {
-            return Err(self.err_at(expr, "buffer comparison is not implemented in this slice"));
+            return Err(self.err_at(
+                expr,
+                format_args!("buffer comparison is not implemented in this slice"),
+            ));
         }
 
         let arithmetic = matches!(
@@ -1344,7 +1534,10 @@ impl<'a> FnCompiler<'a> {
                 BinOp::Gt => opcodes::GT,
                 BinOp::Ge => opcodes::GE,
                 BinOp::Slash => {
-                    return Err(self.err_at(expr, "`/` is float division; use `div` for integers"))
+                    return Err(self.err_at(
+                        expr,
+                        format_args!("`/` is float division; use `div` for integers"),
+                    ))
                 }
                 BinOp::And | BinOp::Or => unreachable!(),
             },
@@ -1361,7 +1554,10 @@ impl<'a> FnCompiler<'a> {
                 BinOp::Gt => opcodes::GT_U,
                 BinOp::Ge => opcodes::GE_U,
                 BinOp::Slash => {
-                    return Err(self.err_at(expr, "`/` is float division; use `div` for integers"))
+                    return Err(self.err_at(
+                        expr,
+                        format_args!("`/` is float division; use `div` for integers"),
+                    ))
                 }
                 BinOp::And | BinOp::Or => unreachable!(),
             },
@@ -1369,7 +1565,9 @@ impl<'a> FnCompiler<'a> {
                 if arithmetic {
                     return Err(self.err_at(
                         expr,
-                        "arithmetic on `byte` is not defined; convert with `int(x)` first",
+                        format_args!(
+                            "arithmetic on `byte` is not defined; convert with `int(x)` first"
+                        ),
                     ));
                 }
                 match op {
@@ -1385,7 +1583,9 @@ impl<'a> FnCompiler<'a> {
             Kind::Bool => match op {
                 BinOp::Eq => opcodes::EQ,
                 BinOp::Ne => opcodes::NE,
-                _ => return Err(self.err_at(expr, "`bool` supports only `=` and `<>`")),
+                _ => {
+                    return Err(self.err_at(expr, format_args!("`bool` supports only `=` and `<>`")))
+                }
             },
             Kind::Float => match op {
                 BinOp::Add => opcodes::FADD,
@@ -1395,7 +1595,7 @@ impl<'a> FnCompiler<'a> {
                 BinOp::Div | BinOp::Mod => {
                     return Err(self.err_at(
                         expr,
-                        "use `/` for `f64`; `div` and `mod` are integer operations",
+                        format_args!("use `/` for `f64`; `div` and `mod` are integer operations"),
                     ))
                 }
                 BinOp::Eq => opcodes::FEQ,
@@ -1409,7 +1609,7 @@ impl<'a> FnCompiler<'a> {
             Kind::String | Kind::Bytes => unreachable!(),
         };
 
-        self.simple(encoded);
+        self.simple(encoded)?;
         self.pop(1)?;
         Ok(if comparison {
             Type::scalar(Kind::Bool)
@@ -1420,73 +1620,77 @@ impl<'a> FnCompiler<'a> {
 
     // ---- calls ---------------------------------------------------------
 
-    fn call(&mut self, call: &Call) -> Result<Option<Type>, Diagnostic> {
-        match call.target.as_str() {
+    fn call(&mut self, call: &Call<'a>) -> Result<Option<Type>, Diagnostic> {
+        let target = call.target;
+        let args = call.args;
+        let line = call.line;
+        let column = call.column;
+        match target {
             "core.write" => {
-                if call.args.len() != 1 {
+                if args.len() != 1 {
                     return Err(self.err(
-                        call.line,
-                        call.column,
-                        format!("`core.write` expects 1 argument, got {}", call.args.len()),
+                        line,
+                        column,
+                        format_args!("`core.write` expects 1 argument, got {}", args.len()),
                     ));
                 }
-                self.emit_ref(&call.args[0], None)?;
-                self.one(opcodes::BUILTIN, builtin::WRITE);
+                self.emit_ref(args[0], None)?;
+                self.one(opcodes::BUILTIN, builtin::WRITE)?;
                 self.pop(1)?;
                 Ok(None)
             }
             "core.clock" => {
-                if !call.args.is_empty() {
+                if !args.is_empty() {
                     return Err(self.err(
-                        call.line,
-                        call.column,
-                        format!("`core.clock` expects 0 arguments, got {}", call.args.len()),
+                        line,
+                        column,
+                        format_args!("`core.clock` expects 0 arguments, got {}", args.len()),
                     ));
                 }
-                self.one(opcodes::BUILTIN, builtin::CLOCK);
+                self.one(opcodes::BUILTIN, builtin::CLOCK)?;
                 self.push();
                 Ok(Some(Type::scalar(Kind::Uint)))
             }
             target => {
                 if target.contains('.') {
                     return Err(self.err(
-                        call.line,
-                        call.column,
-                        format!("undefined procedure `{target}`"),
+                        line,
+                        column,
+                        format_args!("undefined procedure `{target}`"),
                     ));
                 }
-                let index = *self.sig_index.get(target).ok_or_else(|| {
-                    self.err(
-                        call.line,
-                        call.column,
-                        format!("undefined procedure `{target}`"),
-                    )
+                let index = find_sig(self.sigs, target).ok_or_else(|| {
+                    self.err(line, column, format_args!("undefined procedure `{target}`"))
                 })?;
-                let params = self.sigs[index].params.clone();
-                if call.args.len() != params.len() {
+                let params = self.sigs[index].params;
+                if args.len() != params.len() {
                     return Err(self.err(
-                        call.line,
-                        call.column,
-                        format!(
+                        line,
+                        column,
+                        format_args!(
                             "procedure `{target}` expects {} argument(s), got {}",
                             params.len(),
-                            call.args.len()
+                            args.len()
                         ),
                     ));
                 }
-                for (position, (arg, param)) in call.args.iter().zip(params.iter()).enumerate() {
+                for (position, (arg, param)) in args.iter().zip(params.iter()).enumerate() {
                     self.argument(arg, param, position + 1)?;
                 }
-                let call_pos = self.word(opcodes::CALL, 0, 0, 1);
-                let _ = call_pos;
-                self.imm32(index as u32);
+                self.word(opcodes::CALL, 0, 0, 1)?;
+                self.imm32(index as u32)?;
                 self.pop(params.len() as i32)?;
                 Ok(None)
             }
         }
     }
 
-    fn argument(&mut self, arg: &Expr, param: &Param, position: usize) -> Result<(), Diagnostic> {
+    fn argument(
+        &mut self,
+        arg: &'a Expr<'a>,
+        param: &Param<'a>,
+        position: usize,
+    ) -> Result<(), Diagnostic> {
         if param.ty.is_buffer() {
             let found = if param.mode == ParamMode::Var {
                 self.emit_var_buffer_ref(arg)?
@@ -1496,17 +1700,16 @@ impl<'a> FnCompiler<'a> {
             if found.kind != param.ty.kind {
                 return Err(self.err_at(
                     arg,
-                    format!(
-                        "argument {position} expects `{}`, found `{}`",
-                        param.ty.display(),
-                        found.display()
+                    format_args!(
+                        "argument {position} expects `{}`, found `{found}`",
+                        param.ty
                     ),
                 ));
             }
             if found.cap < param.ty.cap {
                 return Err(self.err_at(
                     arg,
-                    format!(
+                    format_args!(
                         "argument {position} has capacity {}, but parameter `{}` requires at least {}",
                         found.cap, param.name, param.ty.cap
                     ),
@@ -1520,10 +1723,9 @@ impl<'a> FnCompiler<'a> {
                     if found != param.ty {
                         return Err(self.err_at(
                             arg,
-                            format!(
-                                "argument {position} expects `{}`, found `{}`",
-                                param.ty.display(),
-                                found.display()
+                            format_args!(
+                                "argument {position} expects `{}`, found `{found}`",
+                                param.ty
                             ),
                         ));
                     }
@@ -1534,10 +1736,9 @@ impl<'a> FnCompiler<'a> {
                     if found != param.ty {
                         return Err(self.err_at(
                             arg,
-                            format!(
-                                "argument {position} expects `{}`, found `{}`",
-                                param.ty.display(),
-                                found.display()
+                            format_args!(
+                                "argument {position} expects `{}`, found `{found}`",
+                                param.ty
                             ),
                         ));
                     }
@@ -1549,26 +1750,34 @@ impl<'a> FnCompiler<'a> {
 
     /// Pushes a reference to a buffer expression. `want` selects the nominal
     /// kind (`string` vs `bytes`) and enables UTF-8 validation of literals.
-    fn emit_ref(&mut self, expr: &Expr, want: Option<Kind>) -> Result<Type, Diagnostic> {
-        match &expr.kind {
+    fn emit_ref(&mut self, expr: &'a Expr<'a>, want: Option<Kind>) -> Result<Type, Diagnostic> {
+        match expr.kind {
             ExprKind::Str(bytes) => {
                 if let Some(kind) = want {
-                    if kind == Kind::String && std::str::from_utf8(bytes).is_err() {
+                    if kind == Kind::String && core::str::from_utf8(bytes).is_err() {
                         return Err(self.err_at(
                             expr,
-                            "string literal is not valid UTF-8; use a `bytes` destination for raw data",
+                            format_args!(
+                                "string literal is not valid UTF-8; use a `bytes` destination for raw data"
+                            ),
                         ));
                     }
                     if !kind.is_buffer() {
-                        return Err(self.err_at(expr, "expected a scalar, found a string literal"));
+                        return Err(self.err_at(
+                            expr,
+                            format_args!("expected a scalar, found a string literal"),
+                        ));
                     }
                 }
                 let kind = match want {
                     Some(kind) if kind.is_buffer() => kind,
                     _ => Kind::String,
                 };
-                let offset = self.pool.intern(bytes);
-                self.one(opcodes::REF_CONST, offset);
+                let offset = match self.pool.intern(bytes) {
+                    Ok(offset) => offset,
+                    Err(_) => return Err(self.arena_error(expr.line, expr.column)),
+                };
+                self.one(opcodes::REF_CONST, offset)?;
                 self.push();
                 Ok(Type::buffer(kind, bytes.len() as u32))
             }
@@ -1578,122 +1787,130 @@ impl<'a> FnCompiler<'a> {
                     if kind.is_buffer() && kind != ty.kind {
                         return Err(self.err_at(
                             expr,
-                            format!("expected `{}`, found `{}`", kind.name(), ty.display()),
+                            format_args!("expected `{}`, found `{ty}`", kind.name()),
                         ));
                     }
                 }
                 self.push_named_ref(name, expr)?;
                 Ok(ty)
             }
-            _ => Err(self.err_at(expr, "expected a buffer expression")),
+            _ => Err(self.err_at(expr, format_args!("expected a buffer expression"))),
         }
     }
 
-    fn emit_var_buffer_ref(&mut self, expr: &Expr) -> Result<Type, Diagnostic> {
-        let name = match &expr.kind {
+    fn emit_var_buffer_ref(&mut self, expr: &'a Expr<'a>) -> Result<Type, Diagnostic> {
+        let name = match expr.kind {
             ExprKind::Ident(name) => name,
             _ => {
                 return Err(self.err_at(
                     expr,
-                    "a `var` buffer argument must be a variable or parameter",
+                    format_args!("a `var` buffer argument must be a variable or parameter"),
                 ))
             }
         };
         let target = self.resolve_target(name, expr.line, expr.column)?;
-        match &target {
+        match target {
             Target::LocalBuffer { .. } | Target::StateBuffer { .. } => {
                 let ty = target.ty();
-                self.push_target_ref(&target);
+                self.push_target_ref(&target)?;
                 Ok(ty)
             }
-            _ => Err(self.err_at(expr, format!("`{name}` is not a buffer"))),
+            _ => Err(self.err_at(expr, format_args!("`{name}` is not a buffer"))),
         }
     }
 
-    fn emit_scalar_ref(&mut self, expr: &Expr) -> Result<Type, Diagnostic> {
-        let name = match &expr.kind {
+    fn emit_scalar_ref(&mut self, expr: &'a Expr<'a>) -> Result<Type, Diagnostic> {
+        let name = match expr.kind {
             ExprKind::Ident(name) => name,
-            _ => return Err(self.err_at(expr, "a `var` argument must be a variable or parameter")),
+            _ => {
+                return Err(self.err_at(
+                    expr,
+                    format_args!("a `var` argument must be a variable or parameter"),
+                ))
+            }
         };
-        if let Some(slot) = self.slots.get(name) {
+        if let Some(slot) = self.slot(name) {
             if !slot.writable {
                 return Err(self.err_at(
                     expr,
-                    format!("cannot pass `const` parameter `{name}` as `var`"),
+                    format_args!("cannot pass `const` parameter `{name}` as `var`"),
                 ));
             }
             if slot.ty.is_buffer() {
-                return Err(self.err_at(expr, format!("`{name}` is not a scalar")));
+                return Err(self.err_at(expr, format_args!("`{name}` is not a scalar")));
             }
-            let (base, ty, is_ref) = (slot.base, slot.ty, slot.is_ref);
-            if is_ref {
-                self.one(opcodes::LOAD_LOCAL, base);
+            if slot.is_ref {
+                self.one(opcodes::LOAD_LOCAL, slot.base)?;
             } else {
-                self.one(opcodes::REF_LOCAL, base);
+                self.one(opcodes::REF_LOCAL, slot.base)?;
             }
             self.push();
-            return Ok(ty);
+            return Ok(slot.ty);
         }
-        if let Some(var) = self.state_vars.get(name) {
+        if let Some(var) = find_state(self.state_vars, name) {
             if var.ty.is_buffer() {
-                return Err(self.err_at(expr, format!("`{name}` is not a scalar")));
+                return Err(self.err_at(expr, format_args!("`{name}` is not a scalar")));
             }
-            self.one(opcodes::REF_STATE, var.off);
+            self.one(opcodes::REF_STATE, var.off)?;
             self.push();
             return Ok(var.ty);
         }
-        if self.consts.contains_key(name) {
-            return Err(self.err_at(expr, format!("cannot pass constant `{name}` as `var`")));
+        if find_const(self.consts, name).is_some() {
+            return Err(self.err_at(expr, format_args!("cannot pass constant `{name}` as `var`")));
         }
-        Err(self.err_at(expr, format!("unknown identifier `{name}`")))
+        Err(self.err_at(expr, format_args!("unknown identifier `{name}`")))
     }
 
-    fn buffer_type(&self, name: &str, expr: &Expr) -> Result<Type, Diagnostic> {
-        if let Some(slot) = self.slots.get(name) {
+    fn buffer_type(&self, name: &str, expr: &Expr<'a>) -> Result<Type, Diagnostic> {
+        if let Some(slot) = self.slot(name) {
             if slot.ty.is_buffer() {
                 return Ok(slot.ty);
             }
-            return Err(self.err_at(expr, format!("`{name}` is not a buffer")));
+            return Err(self.err_at(expr, format_args!("`{name}` is not a buffer")));
         }
-        if let Some(var) = self.state_vars.get(name) {
+        if let Some(var) = find_state(self.state_vars, name) {
             if var.ty.is_buffer() {
                 return Ok(var.ty);
             }
-            return Err(self.err_at(expr, format!("`{name}` is not a buffer")));
+            return Err(self.err_at(expr, format_args!("`{name}` is not a buffer")));
         }
-        Err(self.err_at(expr, format!("unknown identifier `{name}`")))
+        Err(self.err_at(expr, format_args!("unknown identifier `{name}`")))
     }
 
-    fn push_named_ref(&mut self, name: &str, expr: &Expr) -> Result<(), Diagnostic> {
-        if let Some(slot) = self.slots.get(name) {
+    fn push_named_ref(&mut self, name: &str, expr: &'a Expr<'a>) -> Result<(), Diagnostic> {
+        if let Some(slot) = self.slot(name) {
             if !slot.ty.is_buffer() {
-                return Err(self.err_at(expr, format!("`{name}` is not a buffer")));
+                return Err(self.err_at(expr, format_args!("`{name}` is not a buffer")));
             }
             if slot.is_ref {
-                self.one(opcodes::LOAD_LOCAL, slot.base);
+                self.one(opcodes::LOAD_LOCAL, slot.base)?;
             } else {
-                self.one(opcodes::REF_LOCAL, slot.base + 8);
+                self.one(opcodes::REF_LOCAL, slot.base + 8)?;
             }
             self.push();
             return Ok(());
         }
-        if let Some(var) = self.state_vars.get(name) {
+        if let Some(var) = find_state(self.state_vars, name) {
             if !var.ty.is_buffer() {
-                return Err(self.err_at(expr, format!("`{name}` is not a buffer")));
+                return Err(self.err_at(expr, format_args!("`{name}` is not a buffer")));
             }
-            self.one(opcodes::REF_STATE, var.off + 8);
+            self.one(opcodes::REF_STATE, var.off + 8)?;
             self.push();
             return Ok(());
         }
-        Err(self.err_at(expr, format!("unknown identifier `{name}`")))
+        Err(self.err_at(expr, format_args!("unknown identifier `{name}`")))
     }
 }
 
-fn collect_concat<'e>(expr: &'e Expr, parts: &mut Vec<&'e Expr>) {
-    if let ExprKind::Binary(BinOp::Add, left, right) = &expr.kind {
-        collect_concat(left, parts);
-        collect_concat(right, parts);
+fn collect_concat<'a, 'b>(
+    expr: &'a Expr<'a>,
+    parts: &mut SliceVec<'a, 'b, &'a Expr<'a>>,
+) -> Result<(), OutOfSpace> {
+    if let ExprKind::Binary(BinOp::Add, left, right) = expr.kind {
+        collect_concat(left, parts)?;
+        collect_concat(right, parts)?;
     } else {
-        parts.push(expr);
+        parts.push(expr)?;
     }
+    Ok(())
 }

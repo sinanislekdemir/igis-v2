@@ -4,6 +4,8 @@
 //! distinct), so a [`Type`] is just a kind and a capacity. Scalars ignore the
 //! capacity field.
 
+use core::fmt;
+
 /// Maximum capacity accepted for a buffer, in bytes. This bounds both `state`
 /// and frame sizes; the first-milestone tuning cap is 1 MiB per value.
 pub const MAX_CAPACITY: u32 = 1 << 20;
@@ -97,12 +99,14 @@ impl Type {
             Kind::Bool | Kind::String | Kind::Bytes => None,
         }
     }
+}
 
+impl fmt::Display for Type {
     /// Renders the type the way source writes it.
-    pub fn display(self) -> String {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.kind {
-            Kind::String | Kind::Bytes => format!("{}[{}]", self.kind.name(), self.cap),
-            _ => self.kind.name().to_string(),
+            Kind::String | Kind::Bytes => write!(f, "{}[{}]", self.kind.name(), self.cap),
+            _ => f.write_str(self.kind.name()),
         }
     }
 }
