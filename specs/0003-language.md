@@ -290,7 +290,9 @@ if st <> Ok then
   no shared-memory concurrency. `spawn` starts a *separate application instance* with its
   own footprint; it does not share the caller's regions.
 - **C2 (MUST):** Communication is through `in_stream`/`out_stream` endpoints declared at
-  unit level. The variable name is the stream name recorded in the manifest.
+  unit level. The variable name is the stream name recorded in the manifest. Stream names
+  are application-wide identifiers and must be unique across every unit of the application
+  (`0006-streams.md`, S11).
 - **C3 (MUST):** `send` and `receive` block by default; `try_send` and `try_receive`
   return `WouldBlock` through `Status`.
 - **C4 (MUST):** `yield()` is the only explicit scheduling primitive. It is a hint, not a
@@ -484,3 +486,4 @@ is the signal.
 | 2026-11-12 | Added the fixed `string[1024]` argument, delivered as `main(args)` (ADR 0017 addendum). |
 | 2026-11-12 | Replaced task handles with global `TaskId`s; `spawn` returns an id, `wait`/`kill` take one; no per-task handle table (ADR 0017 addendum 2). |
 | 2026-11-13 | `Diagnostic` gained a `message: string[96]` field and is caller-owned; `core.run`/`core.spawn` take a `var diag` out-parameter filled on compile errors (spec 0005, whose OQ 7 is now closed). |
+| 2026-11-13 | Stream endpoint names are application-wide unique (spec 0006, S11); `stdlib` framing defaults to a length prefix with newline-delimited helpers for text. |

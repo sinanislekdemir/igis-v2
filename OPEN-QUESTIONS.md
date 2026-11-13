@@ -34,11 +34,8 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 
 | # | Question | Options / recommendation | Trigger |
 |---|----------|--------------------------|---------|
-| Q10 | Explicit close | none in M1; needed for long-lived services | streams v2 |
-| Q11 | Multiple senders/receivers | no; would require an MPMC queue | streams v2 |
-| Q12 | Stream name collisions across units | unit prefix or per-manifest namespace? | loader pairing |
-| Q13 | Framing helpers | length prefix, delimiter, or both; `stdlib` | `stdlib` |
-| Q14 | Auto-wire a console stream for REPL apps | after a console application exists | loader |
+| Q10 | Explicit close | deferred to streams v2; closed state is independent of owner lifetime; `close` drains then reports `Closed`, task death still discards | streams v2 |
+| Q14 | Auto-wire a console stream for REPL apps | no in M1; applications use `core.console_*`; wiring needs a console application and an ownership rule | when a console application exists |
 
 ## D. Language
 
@@ -96,7 +93,13 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
   (specs 0003, 0005).
 - **No debug/introspection primitive and no DMA/block primitive in M1** (Q8, Q9 stay open
   with later triggers).
-- Q5, Q6 and Q7 are resolved and removed from the table.
+- **Streams: one sender and one receiver, names unique application-wide.** A many-to-many
+  stream would be a new shared endpoint type, not a change to the FIFO; duplicate names are
+  a compile error. `stdlib` frames with a `u32` length prefix by default and offers
+  newline-delimited helpers for text. Explicit close is deferred to streams v2, with the
+  constraint that closed state is independent of the owner's lifetime and that `close`
+  drains before `Closed` (spec 0006, S11).
+- Q5, Q6, Q7, Q11, Q12 and Q13 are resolved and removed from the table.
 
 ## Decided in the 2026-11-12 session
 

@@ -5,7 +5,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0004, 0011, 0015
-- **Updated:** 2026-11-12
+- **Updated:** 2026-11-13
 
 ## Context
 
@@ -45,6 +45,8 @@ types. A byte FIFO is one implementation for every payload; the type system and 
   or when the peer closes.
 - **S10 (MUST):** The kernel has no notion of message boundaries, types or framing. Typed
   views are `stdlib` code.
+- **S11 (MUST):** A stream name is unique across the whole application. Two units may not
+  declare the same name, even with different directions; the compiler rejects it.
 
 ## Design
 
@@ -62,6 +64,9 @@ out_stream[N]  ──┐                 ┌── in_stream[N]
 - The endpoint handle carries direction, the queue reference and an open/closed state.
 - The queue holds a head, a tail, a count and N bytes of storage. No metadata is visible
   to the application.
+- A stream has exactly one sender and one receiver. A many-to-many stream would need a
+  different structure (an MPMC queue with several waiters), not a change to this FIFO; if
+  it is ever needed it arrives as a distinct shared endpoint type (open question 2).
 
 ### Send
 
@@ -113,8 +118,12 @@ There is no sub-range expression: `dst` and `chunk` are whole buffers, indexed w
 runtime bounds checks. A `stdlib` helper that wants to fill a buffer at an offset takes
 the buffer and the offset as separate parameters, not a view.
 
-`stdlib` provides `recv_u64`, `recv_string_into`, and length-prefixed framing helpers on
-top of this loop.
+`stdlib` provides `recv_u64`, `recv_string_into`, and framing helpers on top of this loop.
+The default frame is length-prefixed: a little-endian `u32` length followed by that many
+bytes, with the length required to fit both the destination and the endpoint capacity; a
+length that cannot be satisfied is an error, never a partial read. Text protocols use the
+delimiter helpers (`send_line`, `recv_line_into`, `\n`-terminated) instead. The kernel has
+no opinion: framing is a convention between the two peers.
 
 ### Close and peer death
 
@@ -123,8 +132,12 @@ top of this loop.
   `Closed`; a peer already blocked wakes with `Closed`.
 - Because sends are atomic, `Closed` never means "a partial record was delivered".
 - There is **no explicit close** primitive in the first milestone. A task can stop using
-  an endpoint, but the queue stays open until the task ends. This is a deliberate
-  simplification; explicit close is an open question.
+  an endpoint, but the queue stays open until the task ends.
+- Explicit close was deferred, not rejected. The constraint it leaves behind: an
+  endpoint's closed state is modelled independently of its owner's lifetime, so adding
+  `close` later does not rework the queue. When it is added, `close` means "drain what is
+  queued, then report `Closed`"; task death keeps its current meaning, "discard
+  immediately" (open question 1).
 
 ### Pairing
 
@@ -139,6 +152,9 @@ var
 
 - The loader reads every manifest, then pairs one `out` with one `in` of the same name.
   The two capacities must match; a mismatch is a load error.
+- A stream name is an application-wide identifier. Two units may not declare the same
+  name, even with different directions: the compiler sees every unit of the application
+  and rejects the duplicate, so the loader never has to guess which declaration was meant.
 - An unmatched declaration, a name with two senders, or a name with two receivers is a
   load error. There is no "maybe connected" state.
 - Pairing happens before the first task runs. There is no runtime connect/disconnect.
@@ -200,14 +216,15 @@ fn try_receive(ep: Endpoint, buf: &mut [u8]) -> Result<usize, Status>;
 
 | # | Question | Trigger / owner |
 |---|----------|-----------------|
-| 1 | Explicit close: should an application be able to close one endpoint while continuing to run? | Needed for long-lived services; not in the first milestone. |
-| 2 | Multiple senders or multiple receivers on one stream | Would turn the FIFO into an MPMC queue; not needed yet. |
-| 3 | Stream name collisions across units in one application | Pairing is per manifest name; a unit prefix may be required. |
-| 4 | Whether the loader should auto-wire a console stream for REPL-style applications | After the console application exists. |
-| 5 | Framing helpers: length prefix, delimiter, or both | `stdlib` design; does not affect the kernel. |
+| 1 | Explicit close: an application closes one endpoint and keeps running | Deferred to streams v2. The closed state is already independent of owner lifetime; `close` will drain before reporting `Closed`. |
+| 2 | ~~Multiple senders or multiple receivers on one stream~~ | **Resolved** — one sender, one receiver; a many-to-many need arrives as a distinct shared endpoint type, never as a change to the FIFO. |
+| 3 | ~~Stream name collisions across units in one application~~ | **Resolved** — names are unique application-wide; a duplicate is a compile error (S11). |
+| 4 | Whether the loader should auto-wire a console stream for REPL-style applications | After a console application exists; M1 applications use `core.console_*`. |
+| 5 | ~~Framing helpers: length prefix, delimiter, or both~~ | **Resolved** — both in `stdlib`; length-prefixed (`u32` LE) by default, newline-delimited helpers for text. |
 
 ## Changelog
 
 | Date | Change |
 |------|--------|
 | 2026-11-12 | Initial draft: byte FIFO, kernel-owned and copied, atomic sends, blocking plus try variants, immediate discard on peer death, manifest-based pairing, typed views in `stdlib`. |
+| 2026-11-13 | Stream names are unique application-wide (S11); one sender and one receiver are fixed, a shared type would be a separate addition; `stdlib` framing uses length prefixes by default and newline delimiters for text; explicit close is deferred to v2 with the constraint that closed state is independent of owner lifetime. |
