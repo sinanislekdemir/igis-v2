@@ -5,6 +5,9 @@ edition.workspace = true
 
 [dependencies]
 arch_x86_64 = { path = "../arch/x86_64" }
+abi = { path = "../abi" }
+compiler = { path = "../compiler" }
+interpreter = { path = "../interpreter" }
 
 [[bin]]
 name = "kernel"

@@ -28,12 +28,14 @@ constraints learned there.
 - **Status:** implementation. Specs 0001–0008 are accepted. The kernel boots under
   GRUB/multiboot2 into long mode, prints through a framebuffer console mirrored to serial,
   has a GDT/TSS and an exception path with a double-fault IST, runs a 1 kHz APIC timer
-  driving a global nanosecond clock, and owns a bitmap frame allocator. A host-side
-  vertical slice of the language (`abi`, `compiler`, `interpreter`, `langhost`) compiles
-  and runs source end-to-end. The compiler is `no_std` and allocation-free: it borrows the
-  source, compiles into caller-provided arena/code/manifest buffers
-  (`compiler::compile_into`) and exports the caps the kernel must place. Wiring it into the
-  kernel REPL is next.
+  driving a global nanosecond clock, and owns a bitmap frame allocator. The full vertical
+  slice now runs: `xtask image` builds a 4 MiB ext2 image from `samples/apps/` and attaches
+  it as a GRUB module, the kernel mounts it read-only, reads `shell` (falling back to
+  `entrypoint`), compiles the source in the kernel with `compiler::compile_into`, places
+  `code`/`state`/`stack` in contiguous frames, verifies and runs the package in the
+  interpreter, prints the application output, reclaims the frames, prints `exit: Ok` and
+  halts. The compiler is `no_std` and allocation-free; the kernel path adds no heap. The
+  next piece is the real scheduler (claim/release, quantum) and console input.
 
 ## Ground rules
 
@@ -61,8 +63,9 @@ constraints learned there.
 ├── compiler/          # lexer, parser, type check, codegen, manifest
 ├── interpreter/       # package verifier, machine, Host trait
 ├── langhost/          # host runner: compile, verify, run
-├── kernel/            # entry, multiboot2 walking, console, frame allocator, clock
+├── kernel/            # entry, multiboot2, console, frame allocator, clock, ext2, REPL
 ├── samples/lang/      # example programs
+├── samples/apps/      # source applications staged into the ext2 image
 ├── xtask/             # build, image and QEMU orchestration
 ├── Cargo.toml         # workspace
 ├── rust-toolchain.toml
@@ -206,3 +209,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-13 | GDT/TSS with a double-fault IST (verified with a real non-canonical-stack fault), local APIC enabled with the legacy PIC masked, timer calibrated against the PIT (~62.5k ticks/ms in QEMU), and a 1 kHz tick advancing the global nanosecond clock (Q6, spec 0007). |
 | 2026-11-13 | Host language slice: `abi` (ABI v1 opcodes/headers), `compiler` (lexer → parser → type/capacity check → deterministic package), `interpreter` (structural verifier, allocation-free machine, `Host` trait), `langhost` runner; 50 tests, kernel untouched. Spec 0008 open questions 1 and 3 resolved. |
 | 2026-11-13 | Compiler made `no_std` and allocation-free (B11): a bump arena over the caller's `&mut [u8]`, source-borrowing tokens and AST, arena-backed lists instead of `Vec`/`HashMap`, fixed-buffer diagnostics, and `compile_into(source, path, arena, code, manifest) -> Package<'a>` writing into caller buffers. Packages are byte-identical to the previous build; 54 tests; `langhost` keeps a std helper that allocates the caps. |
+| 2026-11-13 | First in-kernel vertical slice: `xtask image` stages `samples/apps/` into a 4 MiB ext2 image attached as the `apps` GRUB module; the kernel finds the module tag, mounts the image read-only (validated superblock, group descriptors, inodes, directories, direct/single/double indirect), reads `shell`, compiles it with `compile_into`, places `code`/`state`/`stack` in contiguous frames, verifies and runs it (`exit: Ok`), reclaims the frames and halts. Boot stack raised 16 KiB → 64 KiB after the in-kernel compiler overflowed into the boot page tables. |

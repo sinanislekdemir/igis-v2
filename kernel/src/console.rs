@@ -135,6 +135,19 @@ pub fn _print(args: fmt::Arguments<'_>) {
     }
 }
 
+/// Writes raw application bytes to the console (the interpreter's host
+/// `console_write`, spec 0005). The bytes are not validated: they may be
+/// arbitrary binary data, and non-printable bytes are dropped by the text
+/// console after being mirrored to serial.
+pub fn write_bytes(bytes: &[u8]) {
+    let mut guard = CONSOLE.lock();
+    if let Some(console) = guard.as_mut() {
+        for byte in bytes {
+            console.put_byte(*byte);
+        }
+    }
+}
+
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => {

@@ -28,7 +28,10 @@ dependencies = [
 name = "kernel"
 version = "0.0.0"
 dependencies = [
+ "abi",
  "arch_x86_64",
+ "compiler",
+ "interpreter",
 ]
 
 [[package]]

@@ -76,6 +76,75 @@ pub fn framebuffer(info: usize) -> Option<Framebuffer> {
     found
 }
 
+pub const MODULE_TAG: u32 = 3;
+
+/// A bootloader module: a byte range in identity-mapped physical memory.
+#[derive(Clone, Copy, Debug)]
+pub struct Module {
+    pub start: u64,
+    pub end: u64,
+}
+
+impl Module {
+    pub fn len(&self) -> usize {
+        (self.end - self.start) as usize
+    }
+}
+
+/// Visits every module tag with its inline command line.
+///
+/// Layout (multiboot2 3.6.6): `type`, `size`, `mod_start`, `mod_end`, then the
+/// UTF-8 command line, null-terminated, in the same tag.
+pub fn for_each_module(info: usize, mut visit: impl FnMut(Module, &[u8])) {
+    each_tag(info, |kind, tag, size| {
+        if kind != MODULE_TAG || size < 17 {
+            return;
+        }
+        // SAFETY: the module tag has at least the 16 bytes read here.
+        let start = u64::from(unsafe { read_u32(tag + 8) });
+        // SAFETY: as above.
+        let end = u64::from(unsafe { read_u32(tag + 12) });
+        // SAFETY: the command line starts at byte 16 and `size` bounds the tag.
+        let bytes = unsafe { core::slice::from_raw_parts((tag + 16) as *const u8, size - 16) };
+        let Some(length) = bytes.iter().position(|byte| *byte == 0) else {
+            return;
+        };
+        if start < end {
+            visit(Module { start, end }, &bytes[..length]);
+        }
+    });
+}
+
+/// Finds the module whose command line is exactly `name`.
+///
+/// The range is validated against the memory map: it must be non-empty, lie
+/// inside one available region and fit in `usize` arithmetic. A module that
+/// fails any check is treated as absent rather than read.
+pub fn module(info: usize, name: &str) -> Option<Module> {
+    let mut found = None;
+
+    for_each_module(info, |module, command| {
+        if found.is_some() || command != name.as_bytes() {
+            return;
+        }
+
+        let mut available = false;
+        memory_regions(info, |region| {
+            if region.kind == 1
+                && region.base <= module.start
+                && module.end <= region.base.saturating_add(region.len)
+            {
+                available = true;
+            }
+        });
+        if available && module.end <= usize::MAX as u64 {
+            found = Some(module);
+        }
+    });
+
+    found
+}
+
 pub fn memory_regions(info: usize, mut visit: impl FnMut(MemoryRegion)) {
     each_tag(info, |kind, tag, size| {
         if kind != 6 || size < 16 {

@@ -21,6 +21,7 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | Q2 | Total CPU budget | 10 s default; compile-time constant; blocked time excluded | first scheduler implementation |
 | Q3 | Handler emergency budget | 1 ms or 10 000 steps for `fault`/`exit` | fault/exit implementation |
 | Q4 | Realtime heartbeat interval | 1 s default; configurable per task? | realtime implementation |
+| Q42 | Kernel stack bound for in-kernel compilation | the recursive compiler runs on the boot stack (now 64 KiB); needs a guard page or a bounded recursion depth before untrusted source is accepted | before the REPL takes `run` requests |
 
 ## B. Host interface and I/O
 
@@ -144,6 +145,9 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
    `langhost`, 50 tests; ABI v1 opcode table fixed (spec 0008 OQ 1 and 3).
 6. ~~Bounded-memory compiler~~ — done: `no_std`, allocation-free, `compile_into` writes into
    caller-provided arena/code/manifest buffers; exhaustion is `CapacityExceeded`.
-7. Next: link `compiler` + `interpreter` into the kernel REPL service (ext2 source → code →
-   `state`/`stack` from the frame allocator → run), then the scheduler loop.
-8. Pick the tuning constants (Q1–Q4) when the scheduler first runs.
+7. ~~In-kernel REPL slice~~ — done: `xtask image` builds the ext2 `apps` module, the kernel
+   mounts it read-only, compiles `shell` in the kernel, places `code`/`state`/`stack` frames,
+   verifies and runs it, prints `exit: Ok`, reclaims and halts.
+8. Next: the real scheduler loop (global runnable set, claim/release, quantum, budget) and
+   console input; then streams and the `run`/`spawn` request queue.
+9. Pick the tuning constants (Q1–Q4) when the scheduler first runs.

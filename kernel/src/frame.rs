@@ -82,6 +82,13 @@ pub fn init(info: usize, framebuffer: Option<Framebuffer>) {
     let info_size = unsafe { core::ptr::read_unaligned(info as *const u32) } as u64;
     mark_used(words, info as u64, info as u64 + info_size);
 
+    // Bootloader modules (the ext2 application image) are outside the kernel
+    // image but must never be handed out as frames: the loader reads them for
+    // the lifetime of the system.
+    mb2::for_each_module(info, |module, _command| {
+        mark_used(words, module.start, module.end);
+    });
+
     // The framebuffer is device memory even when the map calls its range free.
     if let Some(fb) = framebuffer {
         let end = fb.addr + u64::from(fb.pitch) * u64::from(fb.height);
@@ -136,4 +143,62 @@ pub fn free_frame(addr: u64) {
         set_free(words, frame);
         FREE_FRAMES.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// Allocates `count` physically contiguous frames and returns the address of
+/// the first. Task regions are contiguous so that a region is one slice.
+///
+/// Returns `None` when no run of that length is free. The scan starts at the
+/// allocator hint and wraps once, but a run never wraps around the end of
+/// physical memory.
+pub fn alloc_contiguous(count: usize) -> Option<u64> {
+    if count == 0 {
+        return None;
+    }
+    let count = count.min(FRAME_COUNT);
+
+    let mut guard = BITMAP.lock();
+    let words: &mut [u64] = &mut guard[..];
+
+    let last_start = FRAME_COUNT - count;
+    let hint = NEXT_HINT.load(Ordering::Relaxed) as usize % FRAME_COUNT;
+    let hint = hint.min(last_start);
+
+    let first = first_run(words, hint, last_start, count).or_else(|| {
+        if hint > 0 {
+            first_run(words, 0, hint - 1, count)
+        } else {
+            None
+        }
+    })?;
+
+    for frame in first..first + count {
+        set_used(words, frame);
+    }
+    NEXT_HINT.store(((first + count) % FRAME_COUNT) as u64, Ordering::Relaxed);
+    FREE_FRAMES.fetch_sub(count as u64, Ordering::Relaxed);
+    Some(first as u64 * FRAME_SIZE)
+}
+
+/// Releases `count` frames starting at `addr`.
+pub fn free_contiguous(addr: u64, count: usize) {
+    for index in 0..count {
+        free_frame(addr + index as u64 * FRAME_SIZE);
+    }
+}
+
+/// First run of `count` free frames whose first frame is in `first..=last`.
+fn first_run(words: &[u64], first: usize, last: usize, count: usize) -> Option<usize> {
+    if last < first {
+        return None;
+    }
+    'start: for start in first..=last {
+        for frame in start..start + count {
+            if is_used(words, frame) {
+                continue 'start;
+            }
+        }
+        return Some(start);
+    }
+    None
 }

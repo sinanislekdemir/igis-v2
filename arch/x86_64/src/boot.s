@@ -153,7 +153,10 @@ pd3:   .space 4096, 0
 
 .balign 16
 stack:
-    .space 16384, 0
+    # 64 KiB: the in-kernel compiler is recursive and runs on this stack at
+    # boot. It sits directly above the boot page tables, so an overflow here
+    # corrupts paging; keep the headroom generous.
+    .space 65536, 0
 stack_top:
 
 .balign 8

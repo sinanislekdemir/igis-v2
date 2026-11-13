@@ -83,14 +83,24 @@ fn image() -> ExitCode {
     fs::create_dir_all(&grub).expect("create ISO tree");
     fs::copy(&elf, boot.join("kernel.elf")).expect("copy kernel ELF");
 
+    let apps = match apps_image() {
+        Ok(image) => image,
+        Err(message) => {
+            eprintln!("apps image: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    fs::copy(&apps, boot.join("apps.img")).expect("copy apps image");
+
     let cmdline = "multiboot2 /boot/kernel.elf";
+    let module = "module2 /boot/apps.img apps";
     let config = format!(
         "serial --unit=0 --speed=115200\n\
          terminal_input serial\n\
          terminal_output serial\n\
          set timeout=0\n\
          set default=0\n\n\
-         menuentry \"igis-v2\" {{\n    {cmdline}\n    boot\n}}\n"
+         menuentry \"igis-v2\" {{\n    {cmdline}\n    {module}\n    boot\n}}\n"
     );
     fs::write(grub.join("grub.cfg"), config).expect("write grub.cfg");
 
@@ -108,6 +118,77 @@ fn image() -> ExitCode {
 
     println!("image: {}", iso.display());
     ExitCode::SUCCESS
+}
+
+/// Builds the read-only ext2 application image from `samples/apps/`.
+///
+/// The staging directory and the image live under `build/`; `mke2fs -d` copies
+/// the staged tree into a fresh 4 MiB ext2 filesystem with 1 KiB blocks. The
+/// image carries source files only (ADR 0019).
+fn apps_image() -> Result<PathBuf, String> {
+    let source = root().join("samples").join("apps");
+    if !source.is_dir() {
+        return Err(format!("{} is not a directory", source.display()));
+    }
+
+    let staging = root().join("build").join("apps-root");
+    if staging.exists() {
+        fs::remove_dir_all(&staging).map_err(|error| format!("{}: {error}", staging.display()))?;
+    }
+    fs::create_dir_all(&staging).map_err(|error| format!("{}: {error}", staging.display()))?;
+    stage_files(&source, &staging)?;
+
+    let image = root().join("build").join("apps.img");
+    if image.exists() {
+        fs::remove_file(&image).map_err(|error| format!("{}: {error}", image.display()))?;
+    }
+
+    let status = Command::new("mke2fs")
+        .arg("-q")
+        .arg("-t")
+        .arg("ext2")
+        .arg("-b")
+        .arg("1024")
+        .arg("-d")
+        .arg(&staging)
+        .arg("-F")
+        .arg(&image)
+        .arg("4M")
+        .status()
+        .map_err(|error| format!("failed to run mke2fs: {error}"))?;
+    if !status.success() {
+        return Err(format!("mke2fs failed with {status}"));
+    }
+
+    Ok(image)
+}
+
+/// Copies the regular files of `source` into `destination` (recursively).
+///
+/// The ext2 reader only serves the image root, so a nested directory would be
+/// unreachable from an application. Refusing it here keeps the image honest.
+fn stage_files(source: &Path, destination: &Path) -> Result<(), String> {
+    let entries = fs::read_dir(source).map_err(|error| format!("{}: {error}", source.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("{}: {error}", source.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            return Err(format!(
+                "{}: directories below the image root are not supported",
+                path.display()
+            ));
+        }
+        if !path.is_file() {
+            continue;
+        }
+        let name = match path.file_name() {
+            Some(name) => name,
+            None => return Err(format!("{}: no file name", path.display())),
+        };
+        fs::copy(&path, destination.join(name))
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn run(headless: bool) -> ExitCode {

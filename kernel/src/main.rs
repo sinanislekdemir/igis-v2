@@ -3,10 +3,13 @@
 
 mod clock;
 mod console;
+mod ext2;
 mod fb;
 mod font8x8;
 mod frame;
 mod mb2;
+mod module;
+mod repl;
 mod sync;
 
 use arch_x86_64::{apic, gdt, idt, serial};
@@ -125,8 +128,63 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
         _ => println!("frame test: allocation failed"),
     }
 
-    println!("boot stub complete; halting");
-    arch_x86_64::halt();
+    println!("modules:");
+    mb2::for_each_module(mb2_info as usize, |found, command| {
+        let command = core::str::from_utf8(command).unwrap_or("<non-utf8>");
+        println!(
+            "  {:#x}..{:#x} ({} KiB) `{command}`",
+            found.start,
+            found.end,
+            found.len() / 1024
+        );
+    });
+    match module::find(mb2_info as usize, "apps") {
+        Some(apps) => {
+            println!(
+                "  apps: {:#x}..{:#x} ({} KiB)",
+                apps.start(),
+                apps.start() + apps.len(),
+                apps.len() / 1024
+            );
+            let device = ext2::BlockDevice::new(apps.bytes());
+            match ext2::Ext2::mount(device) {
+                Ok(fs) => {
+                    println!(
+                        "ext2: mounted, {} byte blocks, {} KiB",
+                        fs.block_size(),
+                        fs.size_bytes() / 1024
+                    );
+                    let mut entries = 0u32;
+                    let listed = fs.list(&mut |name, inode, size| {
+                        let name = core::str::from_utf8(name).unwrap_or("<non-utf8>");
+                        println!("  {name:<24} inode {inode:>4} {size:>6} bytes");
+                        entries += 1;
+                        Ok(())
+                    });
+                    match listed {
+                        Ok(()) => println!("  {entries} root entries"),
+                        Err(status) => println!("  root listing failed: {}", status.name()),
+                    }
+                    match fs.file_size("shell") {
+                        Ok(size) => println!("ext2: shell is {size} bytes"),
+                        Err(status) => println!("ext2: shell: {}", status.name()),
+                    }
+
+                    repl::boot(&fs);
+                }
+                Err(status) => {
+                    println!("ext2: mount refused ({})", status.name());
+                    println!("no entry");
+                    arch_x86_64::halt();
+                }
+            }
+        }
+        None => {
+            println!("  apps: missing");
+            println!("no entry");
+            arch_x86_64::halt();
+        }
+    }
 }
 
 /// Called by the timer stub in `arch_x86_64` on every tick.
@@ -142,25 +200,46 @@ pub extern "C" fn exception_dispatch(frame: *const idt::InterruptFrame) -> ! {
     // SAFETY: `frame` points at the stack image built by `isr_common`.
     let frame = unsafe { &*frame };
 
-    println!();
-    println!(
+    // The console lock may be held by the code that faulted, so the fault path
+    // writes to serial directly (spec 0002: "Log to serial, halt").
+    use core::fmt::Write as _;
+    let mut out = serial::Writer;
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
         "EXCEPTION {} ({}), error {:#x}",
         frame.vector,
         idt::name(frame.vector as usize),
         frame.error
     );
-    println!(
+    let _ = writeln!(
+        out,
         "  rip={:#018x} cs={:#x} rflags={:#x} rsp={:#x} ss={:#x}",
         frame.rip, frame.cs, frame.rflags, frame.rsp, frame.ss
     );
-    println!("  rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x}", frame.rax, frame.rbx, frame.rcx, frame.rdx);
+    let _ = writeln!(
+        out,
+        "  rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x}",
+        frame.rax, frame.rbx, frame.rcx, frame.rdx
+    );
+
+    let (cr2, cr3): (u64, u64);
+    // SAFETY: reading control registers is legal at ring 0.
+    unsafe {
+        core::arch::asm!("mov {}, cr2", out(reg) cr2);
+        core::arch::asm!("mov {}, cr3", out(reg) cr3);
+    }
+    let _ = writeln!(out, "  cr2={cr2:#x} cr3={cr3:#x}");
 
     arch_x86_64::halt();
 }
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    println!();
-    println!("PANIC: {info}");
+    // As above: never take the console lock on the way out.
+    use core::fmt::Write as _;
+    let mut out = serial::Writer;
+    let _ = writeln!(out);
+    let _ = writeln!(out, "PANIC: {info}");
     arch_x86_64::halt();
 }

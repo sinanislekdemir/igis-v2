@@ -1,0 +1,28 @@
+unit shell;
+
+uses core;
+
+var
+  banner: string[32];
+  n: int;
+
+procedure say(text: const string[0]);
+begin
+  core.write(text);
+end;
+
+procedure main(args: const string[1024]);
+begin
+  banner := "igis-v2 shell\n";
+  say(banner);
+  say("argv: ");
+  say(args);
+  say("\n");
+  n := 0;
+  while n < 3 do
+  begin
+    n := n + 1;
+  end;
+  if n = 3 then
+    say("three steps done\n");
+end;
