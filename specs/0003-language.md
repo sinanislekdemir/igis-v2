@@ -5,7 +5,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0002, 0004, 0005, 0007, 0010, 0011, 0016, 0018
-- **Updated:** 2026-11-14
+- **Updated:** 2026-11-15
 
 ## Context
 
@@ -252,8 +252,9 @@ Rules:
   "Arrays" below for the layout, index and copy rules.
 - **Rings (implemented):** `ring[T, N]` — fixed-capacity FIFO with `push`/`pop`/`peek`/
   `full`/`empty`. See "Rings" below for the layout, operations and statuses.
-- **Maps:** `map[K, V, N]` — at most N entries, open addressing, no growth. `K` is
-  restricted to `int`, `bytes[N]` or `string[N]`.
+- **Maps (implemented):** `map[K, V, N]` — at most `N` entries, open addressing,
+  no growth. `K` is restricted to `int`, `bytes[N]` or `string[N]`. See "Maps" below
+  for the layout, hashing, probing and deletion rules.
 - **Stream endpoints:** `in_stream[N]` (receive only) and `out_stream[N]` (send only),
   N bytes of queue capacity. Distinct nominal types, so a receive endpoint cannot be sent
   to. The declaration's variable name is the stream name: at most 31 bytes matching
@@ -470,6 +471,76 @@ var
 - No opcode is added: the operations lower to `ref_offset`/`ref_element`/`load_ref`/
   `store_ref`/`copy_refs`, the buffer opcodes for a buffer element, `eq` for the checks,
   `mod` for the wrap and ordinary branches (spec 0008, "Rings").
+
+#### Maps (implemented)
+
+```text
+var
+  counts: map[int, int, 4];
+  labels: map[string[8], string[16], 8];
+  slots: map[int, Point, 2];
+```
+
+- `map[K, V, N]` holds at most `N` entries and never grows. `N` is a positive
+  constant expression (an integer literal or a `const`); `N = 0` and a negative `N` are
+  compile errors. `K` is `int`, `string[M]` or `bytes[M]`; any other key type
+  (`byte`, `bool`, `f64`, an enum, record, sum, array or ring) is a compile error.
+  `V` is any fixed-size type already supported: scalar, enum, buffer, record, sum,
+  array, ring or another map.
+- **Nominal identity:** a map is identified by `(K, V, N)`, so `map[int, int, 4]` and
+  `map[int, int, 8]` are distinct, as are `map[string[8], int, 4]` and
+  `map[bytes[8], int, 4]`. Assignment, whole-map copies and parameters require the
+  exact same type; the at-least-N rule does not apply to the map type itself.
+  Comparison is not defined for maps.
+- **Layout:** `count: u64` at offset 0, then `capacity` slots at offset 8. The
+  capacity is the smallest power of two at least `2 * N` (`N=1 → 2`, `N=3 → 8`,
+  `N=4 → 8`, `N=5 → 16`), so an empty slot always exists while `count <= N` and
+  probing terminates. A slot is `state: u64` at 0 (`0` empty, `1` occupied),
+  `hash: u64` at 8, the key image at 16 and the value image at `16 + key_size`;
+  `slot_stride = 16 + key_size + value_size` and the total is
+  `8 + capacity * slot_stride`, all 8-byte multiples. `key_size` is 8 for an `int`
+  key and `align8(8 + M)` for a buffer key; `value_size` is `size_of(V)`. A map whose
+  total exceeds the section cap is a compile error.
+- **Hashing and probing:** FNV-1a, 64-bit (offset basis `14695981039346656037`,
+  prime `1099511628211`), over the eight little-endian bytes of an `int` key or the
+  `[0..len)` bytes of a buffer key. The home slot is `hash & (capacity - 1)`; probing
+  is linear (`+1`, same mask). The stored hash is compared first and only then the
+  key (length, then bytes for a buffer), so deletion never re-hashes. No key is
+  special: key `0`, an empty buffer key and a key whose hash is `0` are ordinary.
+- **Deletion is backward-shift, with no tombstones.** The found slot is cleared, then
+  the walk continues forward through the cluster and moves an entry back when its
+  distance from its home slot (recomputed from the stored hash with the mask) is
+  greater than the distance from home to the hole, repeating until an empty slot.
+  Every remaining key stays findable at any load factor.
+- **Operations** are built-in procedures in the `core` namespace, resolved by the
+  compiler and lowered to the `map_*` opcodes (spec 0008, "Maps"). `m` is the map;
+  `key` and `value` are the key and value operands.
+  - `core.map_put(m, key, value) -> Status`, `m` a writable map. Replaces an existing
+    key in place and returns `Ok`; a new key while `count < N` inserts and returns
+    `Ok`; a new key when `count = N` returns `Full` and changes nothing.
+  - `core.map_get(m, key, var value) -> Status` writes the value through `value` and
+    returns `Ok`, or returns `NotFound` and leaves `value` untouched.
+  - `core.map_has(m, key) -> bool` is the membership test, `false` for a missing key.
+  - `core.map_remove(m, key) -> Status` removes a key (`Ok`) or returns `NotFound`.
+  - `core.map_count(m) -> int` returns the live entry count.
+
+  `put`/`remove` need a writable place: a `const` parameter is a compile error, while
+  a `value` parameter is an ordinary writable copy (like a `value` record or ring), so
+  the caller's map is unchanged. `get`/`has`/`count` accept any of the three modes. A
+  non-map receiver, a wrong argument count, a wrong value or out-parameter type and a
+  mutation of a `const` map are compile errors.
+- **Keys and values:** a buffer key follows the at-least-N rule because the map only
+  reads it, so a `const string[16]` parameter may be used with a `string[8]` key type;
+  a literal is typed by `K` and must fit its capacity. Mixing `string` and `bytes` in
+  either direction is a compile error. `put`'s value and `get`'s out-parameter must be
+  exactly `V` (a literal is typed by `V`).
+- Maps may be `state` variables, locals, record fields, sum payloads, array elements,
+  ring elements and `value`/`const`/`var` parameters. `dst := src` copies the whole
+  `8 + capacity * slot_stride` image, header and slots included, exactly like a ring
+  copy; a `value` parameter is a by-value copy and `const`/`var` parameters are
+  call-scoped references. A library signature may carry a map: the structural map
+  table is shared by the application and `stdlib`.
+- Iteration order is not specified, and this slice has no iteration operation.
 
 #### Predeclared records and sum type
 
@@ -904,9 +975,10 @@ declared capacities and the at-least-N rule applies to callers.
 | `function stdlib.contains_byte(src: const string[0]; value: byte): bool` | True when `core.find` finds the byte. |
 | `function stdlib.drain_into(dst: var array[int, 8]; count: var int; src: var ring[int, 8]): Status` | Moves up to eight integers out of `src`, oldest first, and writes the moved count. `NotFound` (nothing written) when `src` is empty. The first helper whose signature carries a `ring`. |
 
-Still missing for a complete standard library: `map` (language support and helpers), UTF-8
-helpers (code-point iteration, checked `utf8_decode_into`), the move of `substr_into` from
-`core`, `f64` formatting/parsing, and typed stream views.
+Still missing for a complete standard library: UTF-8 helpers (code-point iteration,
+checked `utf8_decode_into`), the move of `substr_into` from `core`, `f64`
+formatting/parsing, and typed stream views. `map` support and `map_get_or` landed with
+the structural map table (spec 0003, "Maps").
 
 ## Failure modes
 
@@ -920,6 +992,7 @@ helpers (code-point iteration, checked `utf8_decode_into`), the move of `substr_
 | `core.ring_push` on a full ring | `Status.Full`; value and ring unchanged |
 | `core.ring_pop`/`peek` on an empty ring | `Status.NotFound`; out-parameter untouched |
 | `core.ring_push`/`pop` on a `const` ring parameter | Compile error |
+| `core.map_put`/`map_remove` on a `const` map parameter | Compile error |
 | `core.ring_push`/`pop` on a `value` ring parameter | Mutates the callee's private copy; the caller's ring is unchanged |
 | Buffers of different kinds compared (`string` = `bytes`) | Compile error |
 | `string`/`bytes` write past capacity | `fault(CapacityExceeded)`; no truncation, no growth |
@@ -929,7 +1002,7 @@ helpers (code-point iteration, checked `utf8_decode_into`), the move of `substr_
 | Integer division by zero | `fault(DivideByZero)` |
 | Float division by zero | `Inf`/`NaN` per IEEE-754; not a fault |
 | `int(f)`, `uint(f)` or `byte(f)` with `NaN` or out of range | `fault(Overflow)` |
-| `f64` used as a map key | Compile error |
+| A map key that is not `int`, `string[M]` or `bytes[M]` (including `f64`) | Compile error |
 | Shift count outside `0..63` | `fault(IllegalOperation)` |
 | Duplicate or malformed stream name | Compile error |
 | Duplicate enum or sum type, duplicate variant, or a variant colliding with another top-level name | Compile error |

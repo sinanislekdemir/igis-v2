@@ -3,7 +3,7 @@
 Operational guide for humans and coding agents working in this repository.
 Keep this file short and current. It points at documents; it does not duplicate them.
 
-**Last updated:** 2026-11-14
+**Last updated:** 2026-11-15
 
 ## What this is
 
@@ -104,8 +104,18 @@ constraints learned there.
   one; `push`/`pop` reject `const` receivers (a `value` copy is writable and private to
   the callee). One structural ring table is
   shared with `stdlib`, whose `drain_into` takes a `ring[int, 8]`; `samples/lang/ring.ig`
-  covers FIFO order, wrap-around, copies and every element kind. The next pieces are maps
-  and UTF-8 helpers, then APs, the realtime class and streams.
+  covers FIFO order, wrap-around, copies and every element kind. Fixed-capacity maps are
+  implemented too: `map[K, V, N]` (`N` a positive const, `K` one of `int`, `string[M]`,
+  `bytes[M]`) is nominal in `(K, V, N)`, lays out a `count` header then `capacity` (the
+  next power of two at least `2N`) slots of state/hash/key/value, and hashes with FNV-1a,
+  probes linearly and deletes with backward shift. `core.map_put`/`get`/`has`/`remove`/
+  `count` are five new opcodes (`MAP_PUT` … `MAP_COUNT`) so the algorithm lives once in
+  the interpreter; `put` at `N` entries returns `Full`, a missing key is `NotFound`, and
+  `get` leaves its out-parameter untouched. One structural map table is shared with
+  `stdlib`, whose `map_get_or` takes a concrete map; `samples/lang/map.ig` covers
+  collisions, backward shift, key 0, the empty buffer key, aggregate values, copies and
+  the three parameter modes. The next pieces are UTF-8 helpers, then APs, the realtime
+  class and streams.
 
 ## Ground rules
 
@@ -253,6 +263,7 @@ host tools are unaffected.
 | Functions: `function Name(...): T;` with `return value;`, scalar results only, `return` on every path | spec 0003, spec 0008 |
 | Arrays: `array[T, N]` is nominal in element type and count, `N` a positive const, index `0..N-1` faults `OutOfBounds`; element refs via `ref_element`, whole copies via `copy_refs` | spec 0003, spec 0008 |
 | Rings: `ring[T, N]` is nominal in element and count, elements then `head`/`count`, `core.ring_push`/`pop`/`peek`/`full`/`empty` lowered by the compiler with no opcode; `Full`/`NotFound` leave the ring and out-parameter untouched | spec 0003, spec 0008 |
+| Maps: `map[K, V, N]` is nominal in key, value and count; `count` then `capacity` slots of state/hash/key/value; FNV-1a, linear probing, backward-shift deletion; `core.map_put`/`get`/`has`/`remove`/`count` are five `map_*` opcodes and `put` at `N` is `Full` | spec 0003, spec 0008 |
 
 ## Open questions
 
@@ -308,3 +319,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-14 | Multi-unit `stdlib`: `stdlib/stdlib.ig` is real source embedded with `include_str!`; an application with `uses stdlib;` compiles it into the same package (library functions first, shared constant pool, line-table unit ids 0 app / 1 stdlib, manifest keeps the app unit name, diagnostics name the failing unit). `function ... : T` with `return` (scalar results) and the first helpers `trim_into`, `split_once`, `parse_int_into`, `starts_with`, `contains_byte` landed; `samples/apps/text` runs `run text 42 hi` in the kernel. The stdlib adds ~5.3 KiB of source, ~4.1 KiB of code blob and ~154 KiB of compile scratch to the sample app. |
 | 2026-11-14 | Fixed-size arrays: `array[T, N]` (positive const N) in state, locals, records, sum payloads and `value`/`const`/`var` parameters. Layout is N elements at `align8(element size)` with the array rounded to 8; arrays are nominal in element type and count. `a[i]` reads/writes the element (`index < N` at run time, `fault(OutOfBounds)`, never a clamp), nested `a[i][j]`/`a[i].field` composes, whole-array assignment and `value` parameters copy `N * stride` bytes, and `const`/`var` parameters are call-scoped references. One new opcode `ref_element` (immediates stride, count; ABI v1 61 → 62) forms an element reference; the verifier requires an 8-byte-multiple stride and a non-zero count whose product fits a section. One structural array table is shared by the app and `stdlib`, so arrays cross the unit boundary; `stdlib.split_all` fills an `array[string[64], 8]`. `samples/lang/array.ig` and `array_bounds.ig` cover reads, writes, copies, records, nested arrays, buffers, parameters, the stdlib helper and the bounds fault. |
 | 2026-11-14 | Fixed-capacity rings: `ring[T, N]` (positive const N) in state, locals, records, sum payloads, arrays and `value`/`const`/`var` parameters; nominal in element and count; layout is the `N` elements at `align8(element size)` followed by `head: u64` and `count: u64`; whole-ring copies include the header. `core.ring_push`/`pop`/`peek`/`full`/`empty` are compiler-lowered over `ref_offset`/`load_ref`/`store_ref`/`copy_refs`/`ref_element`, `add_u`/`mod_u` and `eq`+`jz`, so the ABI v1 opcode table is unchanged. `push` on full returns `Full` and writes nothing; `pop`/`peek` on empty return `NotFound` and leave the out-parameter untouched; `push`/`pop` require a writable place, so `const` is rejected while a `value` copy is writable and private to the callee. The structural ring table is shared with `stdlib` (`drain_into` takes a `ring[int, 8]`); `samples/lang/ring.ig` covers FIFO order, peek, full/empty, wrap-around, whole copies and buffer/record/array/nested-ring elements. |
+| 2026-11-15 | Fixed-capacity maps: `map[K, V, N]` (`N` a positive const, `K` one of `int`, `string[M]`, `bytes[M]`) in state, locals, records, sum payloads, array and ring elements, and `value`/`const`/`var` parameters; nominal in `(K, V, N)`, no at-least-N, no comparison. Layout is `count: u64` then `capacity` (smallest power of two at least `2N`) slots of `state`/`hash`/key/value; the hash is FNV-1a over the eight little-endian bytes of an `int` key or the `[0..len)` bytes of a buffer key, probing is linear and deletion is backward-shift with no tombstones. `core.map_put`/`get`/`has`/`remove`/`count` are five new opcodes (`MAP_PUT` … `MAP_COUNT`, key and value kinds in the opcode word, `capacity`/`count`/`key_size`/`value_size` immediates), so the algorithm lives once in the interpreter; `put` at `N` entries returns `Full` and writes nothing, a missing key is `NotFound`/`false`, and `get` leaves its out-parameter untouched. One structural map table is shared with `stdlib` (`map_get_or` takes a `map[int, int, 8]`); `samples/lang/map.ig` covers collisions, backward shift, key 0, the empty buffer key, aggregate values, whole copies and the three parameter modes. |

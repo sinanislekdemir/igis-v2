@@ -228,3 +228,16 @@ begin
   end;
   return Ok;
 end;
+
+// Reads `key` from a concrete map and returns `fallback` when it is absent.
+// A `const` map parameter is read-only; this is the first helper whose
+// signature carries a `map`, which crosses the unit boundary through the
+// shared structural map table (spec 0003, "Maps").
+function map_get_or(src: const map[int, int, 8]; key: int; fallback: int): int;
+var
+  value: int;
+begin
+  if core.map_get(src, key, value) <> Ok then
+    return fallback;
+  return value;
+end;

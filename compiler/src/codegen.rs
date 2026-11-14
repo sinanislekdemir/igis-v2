@@ -160,6 +160,33 @@ struct RingDef {
     size: u32,
 }
 
+/// One fixed-capacity map type known to this compilation. The index in this
+/// table is the compiler-local map id carried by [`Kind::Map`].
+///
+/// Layout (spec 0003, "Maps"): `count: u64` at offset 0, then `capacity` slots
+/// at offset 8. A slot is `state: u64` (0 empty, 1 occupied), `hash: u64`, the
+/// key image and the value image; `16 + key_size + value_size` bytes, always a
+/// multiple of 8. The table capacity is the smallest power of two at least
+/// twice `count`, so an empty slot always exists while `count <= N`.
+#[derive(Debug, Clone, Copy)]
+struct MapDef {
+    /// Key type: `int`, `string[M]` or `bytes[M]`.
+    key: Type,
+    /// Value type: any fixed-size type.
+    value: Type,
+    /// Entry count `N`, always at least 1.
+    count: u32,
+    /// Table capacity: a power of two, at least `2 * count`.
+    capacity: u32,
+    /// Key image size in bytes (`8` for `int`, `align8(8 + cap)` for buffers).
+    key_size: u32,
+    /// Value image size in bytes.
+    value_size: u32,
+    /// Total size in bytes: `8 + capacity * slot_stride`, where
+    /// `slot_stride = 16 + key_size + value_size`.
+    size: u32,
+}
+
 /// Compiler-local id of the predeclared `Diagnostic` record.
 const DIAGNOSTIC_RECORD: u16 = 0;
 
@@ -350,19 +377,23 @@ impl<'a, 'b> ConstantPool<'a, 'b> {
 /// True when a type can cross the library/application unit boundary.
 ///
 /// Scalars, buffers and the predeclared enums have representation-only
-/// identity; records, sums and user enums are compiler-local ids. Array and
-/// ring ids are shared by the one interning table, but their element type must
-/// itself be safe.
-fn cross_unit_type_ok(ty: Type, arrays: &[ArrayDef], rings: &[RingDef]) -> bool {
+/// identity; records, sums and user enums are compiler-local ids. Array, ring
+/// and map ids are shared by the one interning table, but their element and
+/// key/value types must themselves be safe.
+fn cross_unit_type_ok(ty: Type, arrays: &[ArrayDef], rings: &[RingDef], maps: &[MapDef]) -> bool {
     match ty.kind {
         Kind::Record(_) | Kind::Sum(_) => false,
         Kind::Enum(id) => id <= FAULT_CODE_ENUM,
         Kind::Array(id) => arrays
             .get(id as usize)
-            .is_some_and(|array| cross_unit_type_ok(array.elem, arrays, rings)),
+            .is_some_and(|array| cross_unit_type_ok(array.elem, arrays, rings, maps)),
         Kind::Ring(id) => rings
             .get(id as usize)
-            .is_some_and(|ring| cross_unit_type_ok(ring.elem, arrays, rings)),
+            .is_some_and(|ring| cross_unit_type_ok(ring.elem, arrays, rings, maps)),
+        Kind::Map(id) => maps.get(id as usize).is_some_and(|map| {
+            cross_unit_type_ok(map.key, arrays, rings, maps)
+                && cross_unit_type_ok(map.value, arrays, rings, maps)
+        }),
         _ => true,
     }
 }
@@ -552,6 +583,105 @@ fn intern_ring<'a>(
     Ok(Type::ring(index, align8(size)))
 }
 
+/// Finds a map type by its compiler-local id, returning its layout.
+fn map_of(maps: &[MapDef], ty: Type) -> Option<MapDef> {
+    match ty.kind {
+        Kind::Map(id) => maps.get(id as usize).copied(),
+        _ => None,
+    }
+}
+
+/// The smallest power of two at least `2 * count` (spec 0003, "Maps").
+fn map_table_capacity(count: u32) -> Option<u32> {
+    let wanted = count.checked_mul(2)?;
+    let capacity = wanted.checked_next_power_of_two()?;
+    // `u32::MAX` is not a power of two, so `next_power_of_two` cannot return
+    // a value that is too small; the caller bounds `count`.
+    Some(capacity)
+}
+
+/// Interns `(key, value, count)` structurally and returns the map type.
+///
+/// The table is shared by both units of one compilation, so the same written
+/// `map[K, V, N]` resolves to the same id on either side of a call. Interning
+/// scans existing entries, so the numbering is first-use order and
+/// deterministic.
+#[allow(clippy::too_many_arguments)]
+fn intern_map<'a>(
+    maps: &mut SliceVec<'a, '_, MapDef>,
+    key: Type,
+    value: Type,
+    count: u32,
+    line: u32,
+    column: u32,
+    path: &'a str,
+    unit: &'a str,
+) -> Result<Type, Diagnostic> {
+    for (index, entry) in maps.as_slice().iter().enumerate() {
+        if entry.key == key && entry.value == value && entry.count == count {
+            return Ok(Type::map(index as u16, entry.size));
+        }
+    }
+    let capacity = map_table_capacity(count).ok_or_else(|| {
+        diag(
+            path,
+            unit,
+            line,
+            column,
+            format_args!("map table capacity overflows"),
+        )
+    })?;
+    let key_size = key.size();
+    let value_size = value.size();
+    let slot_stride = 16u32
+        .checked_add(key_size)
+        .and_then(|size| size.checked_add(value_size))
+        .ok_or_else(|| {
+            diag(
+                path,
+                unit,
+                line,
+                column,
+                format_args!("map slot size overflows"),
+            )
+        })?;
+    let size = capacity
+        .checked_mul(slot_stride)
+        .and_then(|size| size.checked_add(8))
+        .ok_or_else(|| diag(path, unit, line, column, format_args!("map size overflows")))?;
+    if size > MAX_CAPACITY {
+        return Err(diag(
+            path,
+            unit,
+            line,
+            column,
+            format_args!(
+                "map of {count} entries is {size} bytes ({capacity} slots of {slot_stride}), over the {MAX_CAPACITY}-byte cap"
+            ),
+        ));
+    }
+    let index = u16::try_from(maps.len()).map_err(|_| {
+        diag(
+            path,
+            unit,
+            line,
+            column,
+            format_args!("too many distinct map types"),
+        )
+    })?;
+    maps.push(MapDef {
+        key,
+        value,
+        count,
+        capacity,
+        key_size,
+        value_size,
+        size,
+    })
+    .map_err(|_| arena_full(path, unit, line, column))?;
+    Ok(Type::map(index, size))
+}
+
 /// Returns the sum definition a type names, if it is a sum type.
 fn sum_of<'a>(sums: &[SumDef<'a>], ty: Type) -> Option<SumDef<'a>> {
     match ty.kind {
@@ -634,7 +764,7 @@ fn has_variant(enums: &[EnumDef<'_>], name: &str) -> bool {
 fn is_builtin_type_name(name: &str) -> bool {
     matches!(
         name,
-        "int" | "uint" | "byte" | "bool" | "f64" | "string" | "bytes" | "array" | "ring"
+        "int" | "uint" | "byte" | "bool" | "f64" | "string" | "bytes" | "array" | "ring" | "map"
     )
 }
 
@@ -686,6 +816,7 @@ fn build_tables<'a>(
     bump: &Bump<'a>,
     arrays: &mut SliceVec<'a, '_, ArrayDef>,
     rings: &mut SliceVec<'a, '_, RingDef>,
+    maps: &mut SliceVec<'a, '_, MapDef>,
 ) -> Result<UnitTables<'a>, Diagnostic> {
     let name = unit.name;
     if name.is_empty() {
@@ -855,6 +986,7 @@ fn build_tables<'a>(
                         sums.as_slice(),
                         arrays,
                         rings,
+                        maps,
                         path,
                         name,
                     )?;
@@ -963,6 +1095,7 @@ fn build_tables<'a>(
                                 sums.as_slice(),
                                 arrays,
                                 rings,
+                                maps,
                                 path,
                                 name,
                             )?;
@@ -1068,6 +1201,7 @@ fn build_tables<'a>(
             sums.as_slice(),
             arrays,
             rings,
+            maps,
             path,
             name,
         )?;
@@ -1159,6 +1293,7 @@ fn build_tables<'a>(
                 sums.as_slice(),
                 arrays,
                 rings,
+                maps,
                 path,
                 name,
             )?;
@@ -1207,6 +1342,7 @@ fn build_tables<'a>(
                     sums.as_slice(),
                     arrays,
                     rings,
+                    maps,
                     path,
                     name,
                 )?;
@@ -1217,7 +1353,7 @@ fn build_tables<'a>(
                         ty.line,
                         ty.column,
                         format_args!(
-                            "function `{}` must return a scalar type; buffer, record, sum and array results are not implemented",
+                            "function `{}` must return a scalar type; buffer, record, sum, array, ring and map results are not implemented",
                             proc.name
                         ),
                     ));
@@ -1262,6 +1398,7 @@ fn compile_procs<'a, 'b>(
     state_vars: &'a [StateVar<'a>],
     arrays: &mut SliceVec<'a, 'b, ArrayDef>,
     rings: &mut SliceVec<'a, 'b, RingDef>,
+    maps: &mut SliceVec<'a, 'b, MapDef>,
     unit_id: u32,
     pool: &mut ConstantPool<'a, 'b>,
     bump: &'b Bump<'a>,
@@ -1282,6 +1419,7 @@ fn compile_procs<'a, 'b>(
             tables.sums,
             &mut *arrays,
             &mut *rings,
+            &mut *maps,
             call_base,
             library_sigs,
             unit_id,
@@ -1421,14 +1559,23 @@ fn assemble_units<'a>(
     manifest: &'a mut [u8],
 ) -> Result<Package<'a>, Diagnostic> {
     check_uses(application, application_path, is_application)?;
-    // One array table and one ring table serve both units: interning is
-    // structural, so an `array[T, N]` or `ring[T, N]` written on either side
-    // of a call resolves to the same id.
+    // One array, ring and map table serve both units: interning is
+    // structural, so an `array[T, N]`, `ring[T, N]` or `map[K, V, N]` written
+    // on either side of a call resolves to the same id.
     let mut arrays = SliceVec::<ArrayDef>::new(bump)
         .map_err(|_| arena_full(application_path, application.name, 1, 1))?;
     let mut rings = SliceVec::<RingDef>::new(bump)
         .map_err(|_| arena_full(application_path, application.name, 1, 1))?;
-    let app = build_tables(application, application_path, bump, &mut arrays, &mut rings)?;
+    let mut maps = SliceVec::<MapDef>::new(bump)
+        .map_err(|_| arena_full(application_path, application.name, 1, 1))?;
+    let app = build_tables(
+        application,
+        application_path,
+        bump,
+        &mut arrays,
+        &mut rings,
+        &mut maps,
+    )?;
     let lib = match library {
         Some(unit) => {
             check_uses(unit, library_path, false)?;
@@ -1438,6 +1585,7 @@ fn assemble_units<'a>(
                 bump,
                 &mut arrays,
                 &mut rings,
+                &mut maps,
             )?)
         }
         None => None,
@@ -1516,6 +1664,7 @@ fn assemble_units<'a>(
                 rebased,
                 &mut arrays,
                 &mut rings,
+                &mut maps,
                 1,
                 &mut pool,
                 bump,
@@ -1533,6 +1682,7 @@ fn assemble_units<'a>(
         app.state_vars,
         &mut arrays,
         &mut rings,
+        &mut maps,
         0,
         &mut pool,
         bump,
@@ -1620,9 +1770,101 @@ fn resolve_type<'a>(
     sums: &[SumDef<'a>],
     arrays: &mut SliceVec<'a, '_, ArrayDef>,
     rings: &mut SliceVec<'a, '_, RingDef>,
+    maps: &mut SliceVec<'a, '_, MapDef>,
     path: &'a str,
     unit: &'a str,
 ) -> Result<Type, Diagnostic> {
+    if ty.name == "map" {
+        let Some(key_ref) = ty.elem else {
+            return Err(diag(
+                path,
+                unit,
+                ty.line,
+                ty.column,
+                format_args!("`map` needs a key type, e.g. `map[int, string[8], 4]`"),
+            ));
+        };
+        let Some(value_ref) = ty.value else {
+            return Err(diag(
+                path,
+                unit,
+                ty.line,
+                ty.column,
+                format_args!("`map` needs a value type, e.g. `map[int, string[8], 4]`"),
+            ));
+        };
+        let Some(count_expr) = ty.count else {
+            return Err(diag(
+                path,
+                unit,
+                ty.line,
+                ty.column,
+                format_args!("`map` needs an entry count, e.g. `map[int, string[8], 4]`"),
+            ));
+        };
+        let key = resolve_type(
+            key_ref, consts, enums, records, sums, arrays, rings, maps, path, unit,
+        )?;
+        if !matches!(key.kind, Kind::Int | Kind::String | Kind::Bytes) {
+            return Err(diag(
+                path,
+                unit,
+                key_ref.line,
+                key_ref.column,
+                format_args!("a map key must be `int`, `string[M]` or `bytes[M]`, found `{key}`"),
+            ));
+        }
+        if key.is_buffer() && key.cap == 0 {
+            return Err(diag(
+                path,
+                unit,
+                key_ref.line,
+                key_ref.column,
+                format_args!("a map key buffer needs a capacity of at least 1"),
+            ));
+        }
+        let value = resolve_type(
+            value_ref, consts, enums, records, sums, arrays, rings, maps, path, unit,
+        )?;
+        if value.is_buffer() && value.cap == 0 {
+            return Err(diag(
+                path,
+                unit,
+                value_ref.line,
+                value_ref.column,
+                format_args!("a map value buffer needs a capacity of at least 1"),
+            ));
+        }
+        let count = eval_const(count_expr, consts, path, unit, 0)?;
+        if count <= 0 {
+            return Err(diag(
+                path,
+                unit,
+                count_expr.line,
+                count_expr.column,
+                format_args!("map entry count must be a positive constant, found {count}"),
+            ));
+        }
+        if count > MAX_CAPACITY as i64 {
+            return Err(diag(
+                path,
+                unit,
+                count_expr.line,
+                count_expr.column,
+                format_args!("map entry count {count} exceeds the {MAX_CAPACITY}-entry cap"),
+            ));
+        }
+        return intern_map(
+            maps,
+            key,
+            value,
+            count as u32,
+            ty.line,
+            ty.column,
+            path,
+            unit,
+        );
+    }
     if matches!(ty.name, "array" | "ring") {
         let word = ty.name;
         let example = if word == "array" {
@@ -1649,7 +1891,7 @@ fn resolve_type<'a>(
             ));
         };
         let elem = resolve_type(
-            elem_ref, consts, enums, records, sums, arrays, rings, path, unit,
+            elem_ref, consts, enums, records, sums, arrays, rings, maps, path, unit,
         )?;
         if elem.is_buffer() && elem.cap == 0 {
             return Err(diag(
@@ -1693,7 +1935,7 @@ fn resolve_type<'a>(
         }
         return intern_ring(rings, elem, count as u32, ty.line, ty.column, path, unit);
     }
-    if ty.elem.is_some() || ty.count.is_some() {
+    if ty.elem.is_some() || ty.value.is_some() || ty.count.is_some() {
         return Err(diag(
             path,
             unit,
@@ -1904,6 +2146,8 @@ enum Target {
     StateArray { off: u32, ty: Type },
     LocalRing { base: u32, ty: Type, is_ref: bool },
     StateRing { off: u32, ty: Type },
+    LocalMap { base: u32, ty: Type, is_ref: bool },
+    StateMap { off: u32, ty: Type },
 }
 
 /// Where a designator's storage starts, before any field path is applied.
@@ -1950,6 +2194,8 @@ struct FnCompiler<'a, 'b, 'p> {
     arrays: &'p mut SliceVec<'a, 'b, ArrayDef>,
     /// Every ring type of this compilation, shared with the library unit.
     rings: &'p mut SliceVec<'a, 'b, RingDef>,
+    /// Every map type of this compilation, shared with the library unit.
+    maps: &'p mut SliceVec<'a, 'b, MapDef>,
     /// Index of this unit's first function in the shared function table.
     call_base: u32,
     /// Top-level procedures of the imported `stdlib` unit, reachable only as
@@ -1984,6 +2230,7 @@ struct TypeName<'a, 'b, 'c> {
     sums: &'b [SumDef<'a>],
     arrays: &'c [ArrayDef],
     rings: &'c [RingDef],
+    maps: &'c [MapDef],
 }
 
 impl fmt::Display for TypeName<'_, '_, '_> {
@@ -2012,6 +2259,7 @@ impl fmt::Display for TypeName<'_, '_, '_> {
                         sums: self.sums,
                         arrays: self.arrays,
                         rings: self.rings,
+                        maps: self.maps,
                     },
                     array.count
                 ),
@@ -2028,10 +2276,37 @@ impl fmt::Display for TypeName<'_, '_, '_> {
                         sums: self.sums,
                         arrays: self.arrays,
                         rings: self.rings,
+                        maps: self.maps,
                     },
                     ring.count
                 ),
                 None => f.write_str("ring"),
+            },
+            Kind::Map(id) => match self.maps.get(id as usize) {
+                Some(map) => write!(
+                    f,
+                    "map[{}, {}, {}]",
+                    TypeName {
+                        ty: map.key,
+                        enums: self.enums,
+                        records: self.records,
+                        sums: self.sums,
+                        arrays: self.arrays,
+                        rings: self.rings,
+                        maps: self.maps,
+                    },
+                    TypeName {
+                        ty: map.value,
+                        enums: self.enums,
+                        records: self.records,
+                        sums: self.sums,
+                        arrays: self.arrays,
+                        rings: self.rings,
+                        maps: self.maps,
+                    },
+                    map.count
+                ),
+                None => f.write_str("map"),
             },
             _ => write!(f, "{}", self.ty),
         }
@@ -2068,6 +2343,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             sums: self.sums,
             arrays: self.arrays.as_slice(),
             rings: self.rings.as_slice(),
+            maps: self.maps.as_slice(),
         }
     }
 
@@ -2083,6 +2359,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         sums: &'b [SumDef<'a>],
         arrays: &'p mut SliceVec<'a, 'b, ArrayDef>,
         rings: &'p mut SliceVec<'a, 'b, RingDef>,
+        maps: &'p mut SliceVec<'a, 'b, MapDef>,
         call_base: u32,
         library_sigs: Option<&'b [Sig<'a>]>,
         unit_id: u32,
@@ -2108,6 +2385,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             sums,
             arrays,
             rings,
+            maps,
             call_base,
             library_sigs,
             unit_id,
@@ -2193,7 +2471,8 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             let aggregate = param.ty.is_record()
                 || param.ty.is_sum()
                 || param.ty.is_array()
-                || param.ty.is_ring();
+                || param.ty.is_ring()
+                || param.ty.is_map();
             let is_ref = param.mode == ParamMode::Var
                 || param.ty.is_buffer()
                 || (aggregate && param.mode != ParamMode::Value);
@@ -2254,6 +2533,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.sums,
                 &mut *self.arrays,
                 &mut *self.rings,
+                &mut *self.maps,
                 self.path,
                 self.unit,
             )?;
@@ -2865,6 +3145,9 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         if place.ty.is_ring() {
             return self.assign_ring(&place, value);
         }
+        if place.ty.is_map() {
+            return self.assign_map(&place, value);
+        }
         if place.ty.is_buffer() {
             return self.buffer_assign(BufferDest::Place(place), Some(target), value);
         }
@@ -2938,6 +3221,10 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             Target::LocalRing { .. } | Target::StateRing { .. } => {
                 let place = self.place_of_target(&target);
                 self.assign_ring(&place, value)?;
+            }
+            Target::LocalMap { .. } | Target::StateMap { .. } => {
+                let place = self.place_of_target(&target);
+                self.assign_map(&place, value)?;
             }
         }
         Ok(())
@@ -3062,6 +3349,12 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     ty: slot.ty,
                     is_ref: slot.is_ref,
                 }
+            } else if slot.ty.is_map() {
+                Target::LocalMap {
+                    base: slot.base,
+                    ty: slot.ty,
+                    is_ref: slot.is_ref,
+                }
             } else {
                 Target::LocalScalar {
                     off: slot.base,
@@ -3093,6 +3386,11 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 }
             } else if var.ty.is_ring() {
                 Target::StateRing {
+                    off: var.off,
+                    ty: var.ty,
+                }
+            } else if var.ty.is_map() {
+                Target::StateMap {
                     off: var.off,
                     ty: var.ty,
                 }
@@ -3332,6 +3630,14 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 writable: true,
                 byte_buffer: None,
             },
+            Target::LocalMap { base, ty, is_ref } => Place {
+                base: Base::Local { off: base, is_ref },
+                base_ty: ty,
+                path: &[],
+                ty,
+                writable: true,
+                byte_buffer: None,
+            },
             Target::StateBuffer { off, ty } | Target::StateRecord { off, ty } => Place {
                 base: Base::State { off },
                 base_ty: ty,
@@ -3349,6 +3655,14 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 byte_buffer: None,
             },
             Target::StateRing { off, ty } => Place {
+                base: Base::State { off },
+                base_ty: ty,
+                path: &[],
+                ty,
+                writable: true,
+                byte_buffer: None,
+            },
+            Target::StateMap { off, ty } => Place {
                 base: Base::State { off },
                 base_ty: ty,
                 path: &[],
@@ -3474,15 +3788,13 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             ));
         };
         let place = self.place(designator.base, designator.path, expr.line, expr.column)?;
-        if !place.ty.is_record()
-            && !place.ty.is_sum()
-            && !place.ty.is_array()
-            && !place.ty.is_ring()
-        {
+        if !place.ty.is_aggregate() {
             let found = self.type_name(place.ty);
             return Err(self.err_at(
                 expr,
-                format_args!("{what} expects a record, sum, array or ring value, found `{found}`"),
+                format_args!(
+                    "{what} expects a record, sum, array, ring or map value, found `{found}`"
+                ),
             ));
         }
         if writable && !place.writable {
@@ -3535,6 +3847,22 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
     ) -> Result<(), Diagnostic> {
         self.push_value_ref(destination)?;
         let source = self.emit_aggregate_ref(value, false, "a ring assignment")?;
+        self.check_exact(destination.ty, source, value)?;
+        self.const_i64(destination.ty.size() as i64)?;
+        self.simple(opcodes::COPY_REFS)?;
+        self.pop(3)?;
+        Ok(())
+    }
+
+    /// Assigns a whole map: a byte copy of the whole image, header and slots
+    /// included, exactly like a ring copy (spec 0003, "Maps").
+    fn assign_map(
+        &mut self,
+        destination: &Place<'a>,
+        value: &'a Expr<'a>,
+    ) -> Result<(), Diagnostic> {
+        self.push_value_ref(destination)?;
+        let source = self.emit_aggregate_ref(value, false, "a map assignment")?;
         self.check_exact(destination.ty, source, value)?;
         self.const_i64(destination.ty.size() as i64)?;
         self.simple(opcodes::COPY_REFS)?;
@@ -3690,6 +4018,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             || payload_ty.is_sum()
             || payload_ty.is_array()
             || payload_ty.is_ring()
+            || payload_ty.is_map()
         {
             let source = self.emit_aggregate_ref(payload, false, "a sum payload")?;
             self.check_exact(payload_ty, source, payload)?;
@@ -4073,6 +4402,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 ),
             ));
         }
+        if place.ty.is_map() {
+            let found = self.type_name(place.ty);
+            return Err(self.err_at(
+                expr,
+                format_args!(
+                    "map `{found}` cannot be used as a scalar value; use `core.map_get`/`map_put` and copy it whole"
+                ),
+            ));
+        }
         self.push_value_ref(&place)?;
         self.simple(opcodes::LOAD_REF)?;
         // `push_value_ref` counts the reference; `load_ref` replaces it with
@@ -4128,6 +4466,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     ),
                 ));
             }
+            if slot.ty.is_map() {
+                let found = self.type_name(slot.ty);
+                return Err(self.err_at(
+                    expr,
+                    format_args!(
+                        "map `{name}` of type `{found}` cannot be used as a scalar value; use `core.map_get`/`map_put` and copy it whole"
+                    ),
+                ));
+            }
             if slot.is_ref {
                 self.one(opcodes::LOAD_LOCAL, slot.base)?;
                 self.simple(opcodes::LOAD_REF)?;
@@ -4177,6 +4524,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     expr,
                     format_args!(
                         "ring `{name}` of type `{found}` cannot be used as a scalar value; use `core.ring_push`/`pop`/`peek` and copy it whole"
+                    ),
+                ));
+            }
+            if var.ty.is_map() {
+                let found = self.type_name(var.ty);
+                return Err(self.err_at(
+                    expr,
+                    format_args!(
+                        "map `{name}` of type `{found}` cannot be used as a scalar value; use `core.map_get`/`map_put` and copy it whole"
                     ),
                 ));
             }
@@ -4527,7 +4883,9 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 BinOp::And | BinOp::Or => unreachable!(),
             },
             Kind::String | Kind::Bytes => unreachable!(),
-            Kind::Record(_) | Kind::Sum(_) | Kind::Array(_) | Kind::Ring(_) => unreachable!(),
+            Kind::Record(_) | Kind::Sum(_) | Kind::Array(_) | Kind::Ring(_) | Kind::Map(_) => {
+                unreachable!()
+            }
             Kind::Enum(_) => match op {
                 // Ordinals are non-negative, so unsigned ordering is the
                 // declaration order (spec 0003, "Enums").
@@ -4936,6 +5294,92 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.pop(1)?;
                 Ok(Some(Type::scalar(Kind::Bool)))
             }
+            // Map operations (spec 0003, "Maps") are built-in procedures that
+            // emit one `map_*` opcode carrying the layout: hashing, probing
+            // and backward-shift deletion live in the interpreter, once,
+            // instead of inlined at every call site. `put`/`remove` mutate the
+            // receiver; `get`/`has`/`count` read it.
+            "core.map_put" => {
+                if args.len() != 3 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.map_put` expects 3 arguments, got {}", args.len()),
+                    ));
+                }
+                let (place, map) = self.map_receiver(args[0], "core.map_put", true)?;
+                self.push_value_ref(&place)?;
+                self.emit_map_key(&map, args[1], "core.map_put")?;
+                self.emit_map_put_value(&map, args[2])?;
+                self.emit_map_op(opcodes::MAP_PUT, &map)?;
+                self.pop(3)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "core.map_get" => {
+                if args.len() != 3 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.map_get` expects 3 arguments, got {}", args.len()),
+                    ));
+                }
+                let (place, map) = self.map_receiver(args[0], "core.map_get", false)?;
+                self.push_value_ref(&place)?;
+                self.emit_map_key(&map, args[1], "core.map_get")?;
+                self.emit_map_get_value(&map, args[2])?;
+                self.emit_map_op(opcodes::MAP_GET, &map)?;
+                self.pop(3)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "core.map_has" => {
+                if args.len() != 2 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.map_has` expects 2 arguments, got {}", args.len()),
+                    ));
+                }
+                let (place, map) = self.map_receiver(args[0], "core.map_has", false)?;
+                self.push_value_ref(&place)?;
+                self.emit_map_key(&map, args[1], "core.map_has")?;
+                self.emit_map_op(opcodes::MAP_HAS, &map)?;
+                self.pop(2)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Bool)))
+            }
+            "core.map_remove" => {
+                if args.len() != 2 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.map_remove` expects 2 arguments, got {}", args.len()),
+                    ));
+                }
+                let (place, map) = self.map_receiver(args[0], "core.map_remove", true)?;
+                self.push_value_ref(&place)?;
+                self.emit_map_key(&map, args[1], "core.map_remove")?;
+                self.emit_map_op(opcodes::MAP_REMOVE, &map)?;
+                self.pop(2)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "core.map_count" => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.map_count` expects 1 argument, got {}", args.len()),
+                    ));
+                }
+                let (place, _map) = self.map_receiver(args[0], "core.map_count", false)?;
+                self.push_value_ref(&place)?;
+                self.simple(opcodes::MAP_COUNT)?;
+                self.pop(1)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Int)))
+            }
             // `Spawn`/`wait`/`kill` return the predeclared `Status` enum and
             // write their results through `var` out-parameters (spec 0003,
             // E1; spec 0005). `Status` ordinals are the `abi::Status`
@@ -5095,11 +5539,16 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 // those and the two predeclared enums (`Status`, `FaultCode`)
                 // are safe; the array table itself is shared by both units.
                 if target.starts_with("stdlib.") {
-                    let incompatible = signature.params.iter().any(|param| {
-                        !cross_unit_type_ok(param.ty, self.arrays.as_slice(), self.rings.as_slice())
-                    }) || signature.ret.is_some_and(|ty| {
-                        !cross_unit_type_ok(ty, self.arrays.as_slice(), self.rings.as_slice())
-                    });
+                    let arrays = self.arrays.as_slice();
+                    let rings = self.rings.as_slice();
+                    let maps = self.maps.as_slice();
+                    let incompatible = signature
+                        .params
+                        .iter()
+                        .any(|param| !cross_unit_type_ok(param.ty, arrays, rings, maps))
+                        || signature
+                            .ret
+                            .is_some_and(|ty| !cross_unit_type_ok(ty, arrays, rings, maps));
                     if incompatible {
                         return Err(self.err(
                             line,
@@ -5173,7 +5622,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         param: &Param<'a>,
         position: usize,
     ) -> Result<(), Diagnostic> {
-        if param.ty.is_record() || param.ty.is_sum() || param.ty.is_array() || param.ty.is_ring() {
+        if param.ty.is_aggregate() {
             let writable = param.mode == ParamMode::Var;
             let found = self.emit_aggregate_ref(arg, writable, "argument")?;
             if found != param.ty {
@@ -5711,6 +6160,221 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         self.pop(1)?;
         self.simple(opcodes::STORE_REF)?;
         self.pop(2)?;
+        Ok(())
+    }
+
+    // ---- maps (spec 0003, "Maps") --------------------------------------
+
+    /// Resolves a `core.map_*` receiver: a designator of a map type, and
+    /// writable storage when the operation mutates the map (`put`/`remove`).
+    ///
+    /// A `value` parameter is an ordinary writable copy, so mutating through
+    /// one changes the callee's copy only. A `const` parameter is read-only.
+    fn map_receiver(
+        &mut self,
+        expr: &'a Expr<'a>,
+        what: &str,
+        mutate: bool,
+    ) -> Result<(Place<'a>, MapDef), Diagnostic> {
+        let Some(designator) = Self::designator(expr) else {
+            return Err(self.err_at(
+                expr,
+                format_args!("`{what}` expects a map variable as its first argument"),
+            ));
+        };
+        let place = self.place(designator.base, designator.path, expr.line, expr.column)?;
+        let Some(map) = map_of(self.maps.as_slice(), place.ty) else {
+            let found = self.type_name(place.ty);
+            return Err(self.err_at(
+                expr,
+                format_args!("`{what}` expects a `map[K, V, N]` first argument, found `{found}`"),
+            ));
+        };
+        if mutate && !place.writable {
+            return Err(self.err_at(
+                expr,
+                format_args!(
+                    "cannot mutate `const` parameter `{}`; declare the map parameter `var`",
+                    designator.base
+                ),
+            ));
+        }
+        Ok((place, map))
+    }
+
+    /// Emits one `map_*` opcode with the layout immediates: capacity, key
+    /// image size and value image size. The key and value kinds ride in the
+    /// opcode word (spec 0008, "Maps").
+    fn emit_map_op(&mut self, op: u8, map: &MapDef) -> Result<(), Diagnostic> {
+        let key_kind = match map.key.kind {
+            Kind::Int => opcodes::map_key_kind::INT,
+            Kind::Bytes => opcodes::map_key_kind::BYTES,
+            Kind::String => opcodes::map_key_kind::STRING,
+            _ => return Err(self.internal("a map key has an unsupported kind")),
+        };
+        let value_kind = if map.value.is_buffer() {
+            opcodes::map_value_kind::BUFFER
+        } else if map.value.is_scalar() {
+            opcodes::map_value_kind::SCALAR
+        } else {
+            opcodes::map_value_kind::FIXED
+        };
+        self.word(op, key_kind, value_kind, 0)?;
+        self.imm32(map.capacity)?;
+        self.imm32(map.count)?;
+        self.imm32(map.key_size)?;
+        self.imm32(map.value_size)?;
+        Ok(())
+    }
+
+    /// Pushes one key operand: the 8-byte value of an `int` key, or a data
+    /// reference for a buffer key. A buffer key follows the at-least-N rule
+    /// (the map only reads it); a literal is typed by the key type.
+    fn emit_map_key(
+        &mut self,
+        map: &MapDef,
+        expr: &'a Expr<'a>,
+        what: &str,
+    ) -> Result<(), Diagnostic> {
+        if map.key.kind == Kind::Int {
+            // A buffer expression is a clearer diagnostic than the generic
+            // "string literal is a buffer" message.
+            if let Some(found) = self.probe_buffer(expr) {
+                let expected = self.type_name(map.key);
+                let found = self.type_name(found);
+                return Err(self.err_at(
+                    expr,
+                    format_args!("`{what}` expects key `{expected}`, found `{found}`"),
+                ));
+            }
+            let found = self.expr_scalar(expr)?;
+            if found != map.key {
+                let expected = self.type_name(map.key);
+                let found = self.type_name(found);
+                return Err(self.err_at(
+                    expr,
+                    format_args!("`{what}` expects key `{expected}`, found `{found}`"),
+                ));
+            }
+            return Ok(());
+        }
+        let literal = matches!(expr.kind, ExprKind::Str(_));
+        if let ExprKind::Str(bytes) = expr.kind {
+            if bytes.len() as u64 > map.key.cap as u64 {
+                let expected = self.type_name(map.key);
+                return Err(self.err_at(
+                    expr,
+                    format_args!(
+                        "string literal ({} bytes) does not fit map key `{expected}`",
+                        bytes.len()
+                    ),
+                ));
+            }
+        }
+        let found = self.emit_ref(expr, Some(map.key.kind))?;
+        if found.kind != map.key.kind {
+            let expected = self.type_name(map.key);
+            let found = self.type_name(found);
+            return Err(self.err_at(
+                expr,
+                format_args!("`{what}` expects key `{expected}`, found `{found}`"),
+            ));
+        }
+        if !literal && found.cap < map.key.cap {
+            let expected = self.type_name(map.key);
+            let found = self.type_name(found);
+            return Err(self.err_at(
+                expr,
+                format_args!(
+                    "`{what}` expects key `{expected}` (at least {} bytes), found `{found}`",
+                    map.key.cap
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Pushes one value operand for `map_put`: an 8-byte scalar, a reference
+    /// to a fixed aggregate, or a data reference for a buffer value. The value
+    /// must be exactly `V`; a literal is typed by `V`.
+    fn emit_map_put_value(&mut self, map: &MapDef, expr: &'a Expr<'a>) -> Result<(), Diagnostic> {
+        let value = map.value;
+        if value.is_buffer() {
+            let literal = matches!(expr.kind, ExprKind::Str(_));
+            if let ExprKind::Str(bytes) = expr.kind {
+                if bytes.len() as u64 > value.cap as u64 {
+                    let expected = self.type_name(value);
+                    return Err(self.err_at(
+                        expr,
+                        format_args!(
+                            "string literal ({} bytes) does not fit map value `{expected}`",
+                            bytes.len()
+                        ),
+                    ));
+                }
+            }
+            let found = self.emit_ref(expr, Some(value.kind))?;
+            if found != value && !literal {
+                let expected = self.type_name(value);
+                let found = self.type_name(found);
+                return Err(self.err_at(
+                    expr,
+                    format_args!("`core.map_put` expects value `{expected}`, found `{found}`"),
+                ));
+            }
+            return Ok(());
+        }
+        if value.is_scalar() {
+            if let Some(found) = self.probe_buffer(expr) {
+                let expected = self.type_name(value);
+                let found = self.type_name(found);
+                return Err(self.err_at(
+                    expr,
+                    format_args!("`core.map_put` expects value `{expected}`, found `{found}`"),
+                ));
+            }
+            let found = self.expr_scalar(expr)?;
+            if found != value {
+                let expected = self.type_name(value);
+                let found = self.type_name(found);
+                return Err(self.err_at(
+                    expr,
+                    format_args!("`core.map_put` expects value `{expected}`, found `{found}`"),
+                ));
+            }
+            return Ok(());
+        }
+        let found = self.emit_aggregate_ref(expr, false, "a map value")?;
+        if found != value {
+            let expected = self.type_name(value);
+            let found = self.type_name(found);
+            return Err(self.err_at(
+                expr,
+                format_args!("`core.map_put` expects value `{expected}`, found `{found}`"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Pushes the destination of `map_get`: a writable place of exactly the
+    /// value type, referenced the way a value operand is.
+    fn emit_map_get_value(&mut self, map: &MapDef, expr: &'a Expr<'a>) -> Result<(), Diagnostic> {
+        let value = map.value;
+        let found = if value.is_buffer() {
+            self.emit_var_buffer_ref(expr)?
+        } else if value.is_scalar() {
+            self.emit_scalar_ref(expr)?
+        } else {
+            self.emit_aggregate_ref(expr, true, "`var value`")?
+        };
+        if found != value {
+            let expected = self.type_name(value);
+            let found = self.type_name(found);
+            return Err(self.err_at(
+                expr,
+                format_args!("`core.map_get` expects `var value: {expected}`, found `{found}`"),
+            ));
+        }
         Ok(())
     }
 }

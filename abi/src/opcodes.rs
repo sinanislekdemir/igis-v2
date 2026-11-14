@@ -192,6 +192,55 @@ pub const FORMAT_INT: u8 = 0x45;
 /// ordinal already is the representation.
 pub const ENUM_CAST: u8 = 0x46;
 
+// ---- maps ---------------------------------------------------------------
+//
+// A `map[K, V, N]` value is `count: u64` at offset 0, then `capacity` slots of
+// `slot_stride = 16 + key_size + value_size` bytes at offset 8. A slot is
+// `state: u64` (0 empty, 1 occupied), `hash: u64`, the key image and the value
+// image. These five opcodes carry the layout in their immediates, because
+// hashing, probing and backward-shift deletion are one algorithm that the
+// compiler must not inline at every call site (spec 0003, "Maps").
+//
+// Operand stack order, references as usual:
+//   map_put:    [map][key][value]      -> Status
+//   map_get:    [map][key][destination]-> Status
+//   map_has:    [map][key]             -> bool
+//   map_remove: [map][key]             -> Status
+//   map_count:  [map]                  -> int
+//
+// `a` is the key kind ([`map_key_kind`]) and `b` is the value kind
+// ([`map_value_kind`]). Immediates: `capacity: u32`, `count: u32` (the entry
+// limit N), `key_size: u32`, `value_size: u32`; `slot_stride` is
+// `16 + key_size + value_size`. A buffer key arrives as a reference to its data
+// with the runtime length at `ref - 8`; a buffer value arrives the same way. A
+// scalar key and a scalar value are the 8-byte value itself; a fixed aggregate
+// value (record, sum, array, ring, nested map) is a reference to its first byte.
+
+/// Insert or replace: pop value, key, map and push `Status` (`Ok`, or `Full`
+/// when the map already holds `N` distinct keys and the key is new).
+///
+/// Immediates: `capacity`, `count`, `key_size`, `value_size`. `a` is the key
+/// kind, `b` the value kind.
+pub const MAP_PUT: u8 = 0x47;
+/// Look up a key and copy its value through the destination reference: pop
+/// destination, key, map and push `Status` (`Ok`, or `NotFound` with the
+/// destination untouched).
+///
+/// Immediates: `capacity`, `count`, `key_size`, `value_size`.
+pub const MAP_GET: u8 = 0x48;
+/// Pop key and map, push `bool`: true when the key is present.
+///
+/// Immediates: `capacity`, `count`, `key_size`, `value_size`.
+pub const MAP_HAS: u8 = 0x49;
+/// Remove a key with backward-shift deletion: pop key and map and push
+/// `Status` (`Ok`, or `NotFound`).
+///
+/// Immediates: `capacity`, `count`, `key_size`, `value_size`.
+pub const MAP_REMOVE: u8 = 0x4A;
+/// Pop a map reference, push the live entry count as an `int`. The map's
+/// `count` word is the first 8 bytes of the value, so there are no immediates.
+pub const MAP_COUNT: u8 = 0x4B;
+
 /// Invoke a host builtin. Immediate: `builtin: u32` (see [`builtin`]).
 pub const BUILTIN: u8 = 0x50;
 
@@ -241,6 +290,31 @@ pub mod buffer_kind {
     pub const STRING: u8 = 0;
     /// Raw bytes; no UTF-8 check.
     pub const BYTES: u8 = 1;
+}
+
+/// Map key kinds used by the `MAP_*` opcodes (spec 0003, "Maps").
+///
+/// A buffer key is hashed over `[0..len)` and compared by length then bytes;
+/// `string` and `bytes` are distinct key kinds, like they are distinct types.
+pub mod map_key_kind {
+    /// A signed 64-bit integer, hashed over its eight little-endian bytes.
+    pub const INT: u8 = 0;
+    /// A `bytes[M]` key, hashed over `[0..len)`.
+    pub const BYTES: u8 = 1;
+    /// A `string[M]` key, hashed over `[0..len)` (byte-wise).
+    pub const STRING: u8 = 2;
+}
+
+/// Map value kinds used by the `MAP_*` opcodes (spec 0003, "Maps").
+pub mod map_value_kind {
+    /// A scalar or enum: one 8-byte value on the operand stack.
+    pub const SCALAR: u8 = 0;
+    /// A record, sum, array, ring or map: a reference to its first byte, copied
+    /// whole (`value_size` bytes).
+    pub const FIXED: u8 = 1;
+    /// A `string`/`bytes` value: a reference to its data (length at `ref - 8`),
+    /// copied as a `[len][data]` image into `value_size` bytes.
+    pub const BUFFER: u8 = 2;
 }
 
 /// Host builtin identifiers used by [`BUILTIN`].
@@ -320,6 +394,8 @@ pub const fn instruction_words(op: u8) -> Option<u32> {
         | REF_STATE | REF_CONST | APPEND | READ_LINE | STORE_U8 | BUILTIN | SUBSTR | FORMAT_INT
         | ENUM_CAST | REF_OFFSET => Some(2),
         REF_ELEMENT => Some(3),
+        MAP_PUT | MAP_GET | MAP_HAS | MAP_REMOVE => Some(5),
+        MAP_COUNT => Some(1),
         _ => None,
     }
 }
@@ -378,6 +454,11 @@ pub const fn mnemonic(op: u8) -> Option<&'static str> {
         SUBSTR => Some("substr"),
         FORMAT_INT => Some("format_int"),
         ENUM_CAST => Some("enum_cast"),
+        MAP_PUT => Some("map_put"),
+        MAP_GET => Some("map_get"),
+        MAP_HAS => Some("map_has"),
+        MAP_REMOVE => Some("map_remove"),
+        MAP_COUNT => Some("map_count"),
         BUILTIN => Some("builtin"),
         FADD => Some("fadd"),
         FSUB => Some("fsub"),

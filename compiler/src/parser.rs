@@ -503,49 +503,68 @@ impl<'a, 'b> Parser<'a, 'b> {
         result
     }
 
-    /// The body of [`Self::type_ref`]; array and ring element types recurse
-    /// through the bounded wrapper, so a deeply nested `array[array[...]]` or
-    /// `ring[ring[...]]` is a diagnostic rather than a stack fault.
+    /// The body of [`Self::type_ref`]; array, ring and map element types recurse
+    /// through the bounded wrapper, so a deeply nested `array[array[...]]`,
+    /// `ring[ring[...]]` or `map[int, array[...], 4]` is a diagnostic rather
+    /// than a stack fault.
     fn type_ref_inner(&mut self) -> Result<TypeRef<'a>, Diagnostic> {
         let token = self.peek();
         let name = self.ident("a type name")?;
-        let (cap, elem, count) = if matches!(name, "array" | "ring") {
+        let mut cap = None;
+        let mut elem = None;
+        let mut value = None;
+        let mut count = None;
+        if matches!(name, "array" | "ring" | "map") {
             self.expect(
                 &TokenKind::LBracket,
-                if name == "array" {
+                if name == "map" {
+                    "`[` after `map`"
+                } else if name == "array" {
                     "`[` after `array`"
                 } else {
                     "`[` after `ring`"
                 },
             )?;
-            let elem = self.type_ref()?;
-            let elem = self
+            let first = self.type_ref()?;
+            let first = self
                 .bump
-                .alloc(elem)
+                .alloc(first)
                 .map_err(|_| self.arena_error(token.line, token.column))?;
+            elem = Some(&*first);
             self.expect(
                 &TokenKind::Comma,
-                if name == "array" {
+                if name == "map" {
+                    "`,` between a map's key type and value type"
+                } else if name == "array" {
                     "`,` between an array's element type and count"
                 } else {
                     "`,` between a ring's element type and count"
                 },
             )?;
-            let count = self.expression()?;
+            if name == "map" {
+                let second = self.type_ref()?;
+                let second = self
+                    .bump
+                    .alloc(second)
+                    .map_err(|_| self.arena_error(token.line, token.column))?;
+                value = Some(&*second);
+                self.expect(
+                    &TokenKind::Comma,
+                    "`,` between a map's value type and count",
+                )?;
+            }
+            count = Some(self.expression()?);
             self.expect(&TokenKind::RBracket, "`]`")?;
-            (None, Some(&*elem), Some(count))
         } else if matches!(name, "string" | "bytes") {
             self.expect(&TokenKind::LBracket, "`[` after `string`/`bytes`")?;
-            let cap = self.expression()?;
+            cap = Some(self.expression()?);
             self.expect(&TokenKind::RBracket, "`]`")?;
-            (Some(cap), None, None)
-        } else {
-            (None, None, None)
-        };
+        }
         Ok(TypeRef {
             name,
             cap,
             elem,
+            value,
             count,
             line: token.line,
             column: token.column,

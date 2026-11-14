@@ -572,6 +572,23 @@ impl Machine {
                     args,
                 )?;
             }
+            opcodes::MAP_PUT | opcodes::MAP_GET | opcodes::MAP_HAS | opcodes::MAP_REMOVE => {
+                let layout = MapLayout::decode(
+                    a,
+                    b,
+                    read_u32(code, pc + 4)?,
+                    read_u32(code, pc + 8)?,
+                    read_u32(code, pc + 12)?,
+                    read_u32(code, pc + 16)?,
+                )?;
+                self.map_operation(op, &layout, state, stack, constants, args)?;
+            }
+            opcodes::MAP_COUNT => {
+                let bits = self.pop(stack)?;
+                let (region, offset) = self.resolve(bits, state, stack, constants, args)?;
+                let count = region_read_u64(region, offset, state, stack, constants, args)?;
+                self.push(stack, count)?;
+            }
             opcodes::CMP_BUFFERS => {
                 let right_bits = self.pop(stack)?;
                 let left_bits = self.pop(stack)?;
@@ -1458,6 +1475,560 @@ impl Machine {
         Ok(())
     }
 
+    /// Executes one `map_*` operation (spec 0003, "Maps"; spec 0008).
+    ///
+    /// The probe finds the target slot first and every byte to be written is
+    /// checked before the first write, so a failure leaves the map unchanged.
+    fn map_operation(
+        &mut self,
+        op: u8,
+        layout: &MapLayout,
+        state: &mut [u8],
+        stack: &mut [u8],
+        code: &[u8],
+        args: &[u8],
+    ) -> Result<(), FaultCode> {
+        match op {
+            opcodes::MAP_PUT => {
+                let value_bits = self.pop(stack)?;
+                let key_bits = self.pop(stack)?;
+                let map_bits = self.pop(stack)?;
+                let (map_region, map_off) = self.resolve(map_bits, state, stack, code, args)?;
+                self.map_check_region(layout, map_region, map_off, state, stack, code, args)?;
+                if map_region != refs::REGION_STATE && map_region != refs::REGION_STACK {
+                    return Err(FaultCode::IllegalOperation);
+                }
+                let (hash, key) =
+                    self.resolve_map_key(layout, key_bits, state, stack, code, args)?;
+                let count = region_read_u64(map_region, map_off, state, stack, code, args)?;
+                match self.map_probe(
+                    layout, map_region, map_off, hash, &key, state, stack, code, args,
+                )? {
+                    MapProbe::Found(slot) => {
+                        self.map_check_value(layout, value_bits, state, stack, code, args)?;
+                        self.map_write_value(
+                            layout, map_region, map_off, slot, value_bits, state, stack, code, args,
+                        )?;
+                        self.push(stack, Status::Ok as u64)?;
+                    }
+                    MapProbe::Empty(slot) => {
+                        if count >= layout.limit {
+                            self.push(stack, Status::Full as u64)?;
+                        } else {
+                            // Validate every write before the first one: the
+                            // key image is already bounded, the value image is
+                            // checked here.
+                            self.map_check_value(layout, value_bits, state, stack, code, args)?;
+                            let slot_off = map_off + map_slot_offset(layout, slot)?;
+                            self.map_write_key(
+                                layout, map_region, slot_off, &key, state, stack, code, args,
+                            )?;
+                            self.map_write_value(
+                                layout, map_region, map_off, slot, value_bits, state, stack, code,
+                                args,
+                            )?;
+                            region_write_u64(
+                                map_region,
+                                slot_off + 8,
+                                hash,
+                                state,
+                                stack,
+                                code,
+                                args,
+                            )?;
+                            // The occupancy word goes last, so a slot is never
+                            // visible as occupied without its key and value.
+                            region_write_u64(map_region, slot_off, 1, state, stack, code, args)?;
+                            region_write_u64(
+                                map_region,
+                                map_off,
+                                count + 1,
+                                state,
+                                stack,
+                                code,
+                                args,
+                            )?;
+                            self.push(stack, Status::Ok as u64)?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            opcodes::MAP_GET => {
+                let destination_bits = self.pop(stack)?;
+                let key_bits = self.pop(stack)?;
+                let map_bits = self.pop(stack)?;
+                let (map_region, map_off) = self.resolve(map_bits, state, stack, code, args)?;
+                self.map_check_region(layout, map_region, map_off, state, stack, code, args)?;
+                let (hash, key) =
+                    self.resolve_map_key(layout, key_bits, state, stack, code, args)?;
+                match self.map_probe(
+                    layout, map_region, map_off, hash, &key, state, stack, code, args,
+                )? {
+                    MapProbe::Found(slot) => {
+                        self.map_read_value(
+                            layout,
+                            map_region,
+                            map_off,
+                            slot,
+                            destination_bits,
+                            state,
+                            stack,
+                            code,
+                            args,
+                        )?;
+                        self.push(stack, Status::Ok as u64)?;
+                    }
+                    MapProbe::Empty(_) => self.push(stack, Status::NotFound as u64)?,
+                }
+                Ok(())
+            }
+            opcodes::MAP_HAS => {
+                let key_bits = self.pop(stack)?;
+                let map_bits = self.pop(stack)?;
+                let (map_region, map_off) = self.resolve(map_bits, state, stack, code, args)?;
+                self.map_check_region(layout, map_region, map_off, state, stack, code, args)?;
+                let (hash, key) =
+                    self.resolve_map_key(layout, key_bits, state, stack, code, args)?;
+                let present = matches!(
+                    self.map_probe(
+                        layout, map_region, map_off, hash, &key, state, stack, code, args
+                    )?,
+                    MapProbe::Found(_)
+                );
+                self.push_bool(stack, present)
+            }
+            opcodes::MAP_REMOVE => {
+                let key_bits = self.pop(stack)?;
+                let map_bits = self.pop(stack)?;
+                let (map_region, map_off) = self.resolve(map_bits, state, stack, code, args)?;
+                self.map_check_region(layout, map_region, map_off, state, stack, code, args)?;
+                if map_region != refs::REGION_STATE && map_region != refs::REGION_STACK {
+                    return Err(FaultCode::IllegalOperation);
+                }
+                let (hash, key) =
+                    self.resolve_map_key(layout, key_bits, state, stack, code, args)?;
+                match self.map_probe(
+                    layout, map_region, map_off, hash, &key, state, stack, code, args,
+                )? {
+                    MapProbe::Found(slot) => {
+                        let count = region_read_u64(map_region, map_off, state, stack, code, args)?;
+                        self.map_backward_shift(
+                            layout, map_region, map_off, slot, state, stack, code, args,
+                        )?;
+                        region_write_u64(
+                            map_region,
+                            map_off,
+                            count.saturating_sub(1),
+                            state,
+                            stack,
+                            code,
+                            args,
+                        )?;
+                        self.push(stack, Status::Ok as u64)?;
+                    }
+                    MapProbe::Empty(_) => self.push(stack, Status::NotFound as u64)?,
+                }
+                Ok(())
+            }
+            _ => Err(FaultCode::IllegalOperation),
+        }
+    }
+
+    /// Checks that the whole map image lies inside its region. One check here
+    /// makes every later slot access inside that image in bounds.
+    #[allow(clippy::too_many_arguments)]
+    fn map_check_region(
+        &self,
+        layout: &MapLayout,
+        region: u8,
+        offset: usize,
+        state: &[u8],
+        stack: &[u8],
+        code: &[u8],
+        args: &[u8],
+    ) -> Result<(), FaultCode> {
+        if region != refs::REGION_STATE && region != refs::REGION_STACK {
+            return Err(FaultCode::IllegalOperation);
+        }
+        let end = offset
+            .checked_add(layout.total_size()?)
+            .ok_or(FaultCode::OutOfBounds)?;
+        if end > region_len(region, state, stack, code, args).ok_or(FaultCode::OutOfBounds)? {
+            return Err(FaultCode::OutOfBounds);
+        }
+        Ok(())
+    }
+
+    /// Resolves the key operand to its FNV-1a hash and a view the probe can
+    /// compare against slot keys.
+    fn resolve_map_key(
+        &self,
+        layout: &MapLayout,
+        key_bits: u64,
+        state: &[u8],
+        stack: &[u8],
+        code: &[u8],
+        args: &[u8],
+    ) -> Result<(u64, MapKey), FaultCode> {
+        if layout.key_kind == opcodes::map_key_kind::INT {
+            return Ok((fnv1a(&key_bits.to_le_bytes()), MapKey::Int(key_bits)));
+        }
+        let (region, offset) = self.resolve(key_bits, state, stack, code, args)?;
+        let length = self.buffer_len(region, offset, state, stack, code, args)?;
+        if length as u64 > layout.key_capacity()? {
+            return Err(FaultCode::OutOfBounds);
+        }
+        let bytes = buffer_slice(region, offset, length, state, stack, code, args)?;
+        Ok((
+            fnv1a(bytes),
+            MapKey::Buffer {
+                region,
+                offset,
+                length,
+            },
+        ))
+    }
+
+    /// Probes the table linearly from the key's home slot (spec 0003, "Maps").
+    /// The caller has already checked that the whole map image fits its
+    /// region. A slot word other than 0 or 1, or a table with no empty slot,
+    /// is a corrupt image.
+    #[allow(clippy::too_many_arguments)]
+    fn map_probe(
+        &self,
+        layout: &MapLayout,
+        map_region: u8,
+        map_off: usize,
+        hash: u64,
+        key: &MapKey,
+        state: &[u8],
+        stack: &[u8],
+        code: &[u8],
+        args: &[u8],
+    ) -> Result<MapProbe, FaultCode> {
+        let mut index = hash & layout.mask;
+        for _ in 0..layout.capacity {
+            let slot_off = map_off + map_slot_offset(layout, index)?;
+            let occupied = region_read_u64(map_region, slot_off, state, stack, code, args)?;
+            if occupied == 0 {
+                return Ok(MapProbe::Empty(index));
+            }
+            if occupied != 1 {
+                return Err(FaultCode::IllegalOperation);
+            }
+            let stored = region_read_u64(map_region, slot_off + 8, state, stack, code, args)?;
+            if stored == hash
+                && self
+                    .map_key_matches(layout, map_region, slot_off, key, state, stack, code, args)?
+            {
+                return Ok(MapProbe::Found(index));
+            }
+            index = (index + 1) & layout.mask;
+        }
+        Err(FaultCode::IllegalOperation)
+    }
+
+    /// Compares the key stored in a slot with the probe key.
+    #[allow(clippy::too_many_arguments)]
+    fn map_key_matches(
+        &self,
+        _layout: &MapLayout,
+        map_region: u8,
+        slot_off: usize,
+        key: &MapKey,
+        state: &[u8],
+        stack: &[u8],
+        code: &[u8],
+        args: &[u8],
+    ) -> Result<bool, FaultCode> {
+        let key_off = slot_off + 16;
+        match *key {
+            MapKey::Int(value) => {
+                Ok(region_read_u64(map_region, key_off, state, stack, code, args)? == value)
+            }
+            MapKey::Buffer {
+                region,
+                offset,
+                length,
+            } => {
+                let stored = region_read_u64(map_region, key_off, state, stack, code, args)?;
+                if stored != length as u64 {
+                    return Ok(false);
+                }
+                let stored_bytes =
+                    buffer_slice(map_region, key_off + 8, length, state, stack, code, args)?;
+                let probe = buffer_slice(region, offset, length, state, stack, code, args)?;
+                Ok(stored_bytes == probe)
+            }
+        }
+    }
+
+    /// Validates a value operand before any slot write: the image size is the
+    /// immediate, and a buffer value's runtime length must fit its capacity.
+    fn map_check_value(
+        &self,
+        layout: &MapLayout,
+        value_bits: u64,
+        state: &[u8],
+        stack: &[u8],
+        code: &[u8],
+        args: &[u8],
+    ) -> Result<(), FaultCode> {
+        if layout.value_kind != opcodes::map_value_kind::BUFFER {
+            return Ok(());
+        }
+        let (region, offset) = self.resolve(value_bits, state, stack, code, args)?;
+        let length = self.buffer_len(region, offset, state, stack, code, args)?;
+        if length as u64 > layout.value_capacity()? {
+            return Err(FaultCode::OutOfBounds);
+        }
+        buffer_slice(region, offset, length, state, stack, code, args)?;
+        Ok(())
+    }
+
+    /// Writes the value operand into a slot's value image.
+    #[allow(clippy::too_many_arguments)]
+    fn map_write_value(
+        &mut self,
+        layout: &MapLayout,
+        map_region: u8,
+        map_off: usize,
+        slot: u64,
+        value_bits: u64,
+        state: &mut [u8],
+        stack: &mut [u8],
+        code: &[u8],
+        args: &[u8],
+    ) -> Result<(), FaultCode> {
+        let slot_off = map_off + map_slot_offset(layout, slot)?;
+        let value_off = slot_off + 16 + layout.key_size as usize;
+        match layout.value_kind {
+            opcodes::map_value_kind::SCALAR => {
+                region_write_u64(map_region, value_off, value_bits, state, stack, code, args)
+            }
+            opcodes::map_value_kind::FIXED => {
+                let (region, offset) = self.resolve(value_bits, state, stack, code, args)?;
+                region_copy(
+                    map_region,
+                    value_off,
+                    region,
+                    offset,
+                    layout.value_size as usize,
+                    state,
+                    stack,
+                    code,
+                    args,
+                )
+            }
+            _ => {
+                let (region, offset) = self.resolve(value_bits, state, stack, code, args)?;
+                let length = self.buffer_len(region, offset, state, stack, code, args)?;
+                if length as u64 > layout.value_capacity()? {
+                    return Err(FaultCode::OutOfBounds);
+                }
+                region_write_u64(
+                    map_region,
+                    value_off,
+                    length as u64,
+                    state,
+                    stack,
+                    code,
+                    args,
+                )?;
+                region_copy(
+                    map_region,
+                    value_off + 8,
+                    region,
+                    offset,
+                    length,
+                    state,
+                    stack,
+                    code,
+                    args,
+                )
+            }
+        }
+    }
+
+    /// Copies a slot's value image through a `var` out-parameter reference.
+    #[allow(clippy::too_many_arguments)]
+    fn map_read_value(
+        &mut self,
+        layout: &MapLayout,
+        map_region: u8,
+        map_off: usize,
+        slot: u64,
+        destination_bits: u64,
+        state: &mut [u8],
+        stack: &mut [u8],
+        code: &[u8],
+        args: &[u8],
+    ) -> Result<(), FaultCode> {
+        let slot_off = map_off + map_slot_offset(layout, slot)?;
+        let value_off = slot_off + 16 + layout.key_size as usize;
+        let (destination_region, destination) =
+            self.resolve(destination_bits, state, stack, code, args)?;
+        if destination_region != refs::REGION_STATE && destination_region != refs::REGION_STACK {
+            return Err(FaultCode::IllegalOperation);
+        }
+        match layout.value_kind {
+            opcodes::map_value_kind::SCALAR => region_write_u64(
+                destination_region,
+                destination,
+                region_read_u64(map_region, value_off, state, stack, code, args)?,
+                state,
+                stack,
+                code,
+                args,
+            ),
+            opcodes::map_value_kind::FIXED => region_copy(
+                destination_region,
+                destination,
+                map_region,
+                value_off,
+                layout.value_size as usize,
+                state,
+                stack,
+                code,
+                args,
+            ),
+            _ => {
+                let length =
+                    region_read_u64(map_region, value_off, state, stack, code, args)? as usize;
+                if length as u64 > layout.value_capacity()? {
+                    return Err(FaultCode::OutOfBounds);
+                }
+                // Validate the whole destination image before writing the
+                // length, so a failure leaves the out-parameter untouched.
+                if destination < 8 {
+                    return Err(FaultCode::OutOfBounds);
+                }
+                let end = destination
+                    .checked_add(length)
+                    .ok_or(FaultCode::OutOfBounds)?;
+                if end
+                    > region_len(destination_region, state, stack, code, args)
+                        .ok_or(FaultCode::OutOfBounds)?
+                {
+                    return Err(FaultCode::OutOfBounds);
+                }
+                region_write_u64(
+                    destination_region,
+                    destination - 8,
+                    length as u64,
+                    state,
+                    stack,
+                    code,
+                    args,
+                )?;
+                region_copy(
+                    destination_region,
+                    destination,
+                    map_region,
+                    value_off + 8,
+                    length,
+                    state,
+                    stack,
+                    code,
+                    args,
+                )
+            }
+        }
+    }
+
+    /// Writes the key operand into a slot's key image.
+    #[allow(clippy::too_many_arguments)]
+    fn map_write_key(
+        &mut self,
+        _layout: &MapLayout,
+        map_region: u8,
+        slot_off: usize,
+        key: &MapKey,
+        state: &mut [u8],
+        stack: &mut [u8],
+        code: &[u8],
+        args: &[u8],
+    ) -> Result<(), FaultCode> {
+        let key_off = slot_off + 16;
+        match *key {
+            MapKey::Int(value) => {
+                region_write_u64(map_region, key_off, value, state, stack, code, args)
+            }
+            MapKey::Buffer {
+                region,
+                offset,
+                length,
+            } => {
+                region_write_u64(map_region, key_off, length as u64, state, stack, code, args)?;
+                region_copy(
+                    map_region,
+                    key_off + 8,
+                    region,
+                    offset,
+                    length,
+                    state,
+                    stack,
+                    code,
+                    args,
+                )
+            }
+        }
+    }
+
+    /// Backward-shift deletion: clear the found slot, then walk forward through
+    /// the cluster and move an entry back when its distance from its home slot
+    /// is greater than the distance from home to the hole (spec 0003, "Maps").
+    /// No tombstones exist, so every survivor stays findable.
+    #[allow(clippy::too_many_arguments)]
+    fn map_backward_shift(
+        &mut self,
+        layout: &MapLayout,
+        map_region: u8,
+        map_off: usize,
+        slot: u64,
+        state: &mut [u8],
+        stack: &mut [u8],
+        code: &[u8],
+        args: &[u8],
+    ) -> Result<(), FaultCode> {
+        let mut hole = slot;
+        for _ in 0..layout.capacity {
+            let next = (hole + 1) & layout.mask;
+            let next_off = map_off + map_slot_offset(layout, next)?;
+            let occupied = region_read_u64(map_region, next_off, state, stack, code, args)?;
+            if occupied == 0 {
+                break;
+            }
+            if occupied != 1 {
+                return Err(FaultCode::IllegalOperation);
+            }
+            let home =
+                region_read_u64(map_region, next_off + 8, state, stack, code, args)? & layout.mask;
+            let distance_next = next.wrapping_sub(home) & layout.mask;
+            let distance_hole = hole.wrapping_sub(home) & layout.mask;
+            if distance_next > distance_hole {
+                let hole_off = map_off + map_slot_offset(layout, hole)?;
+                region_copy(
+                    map_region,
+                    hole_off,
+                    map_region,
+                    next_off,
+                    layout.stride as usize,
+                    state,
+                    stack,
+                    code,
+                    args,
+                )?;
+                hole = next;
+            }
+        }
+        let hole_off = map_off + map_slot_offset(layout, hole)?;
+        region_write_u64(map_region, hole_off, 0, state, stack, code, args)?;
+        region_write_u64(map_region, hole_off + 8, 0, state, stack, code, args)?;
+        Ok(())
+    }
+
     fn buffer_len(
         &self,
         region: u8,
@@ -1912,6 +2483,235 @@ fn region_len(region: u8, state: &[u8], stack: &[u8], code: &[u8], args: &[u8]) 
         refs::REGION_ARGS => Some(args.len()),
         _ => None,
     }
+}
+
+/// The layout a `map_*` instruction carries in its opcode word and immediates
+/// (spec 0008, "Maps"). The verifier has already accepted these values; the
+/// machine revalidates them so a hand-built package cannot make it loop.
+struct MapLayout {
+    key_kind: u8,
+    value_kind: u8,
+    capacity: u64,
+    mask: u64,
+    /// Entry limit `N`: `put` returns `Full` at this count.
+    limit: u64,
+    key_size: u64,
+    value_size: u64,
+    /// Bytes per slot: `16 + key_size + value_size`.
+    stride: u64,
+}
+
+impl MapLayout {
+    fn decode(
+        key_kind: u8,
+        value_kind: u8,
+        capacity: u32,
+        limit: u32,
+        key_size: u32,
+        value_size: u32,
+    ) -> Result<Self, FaultCode> {
+        if key_kind > opcodes::map_key_kind::STRING || value_kind > opcodes::map_value_kind::BUFFER
+        {
+            return Err(FaultCode::IllegalOperation);
+        }
+        if !capacity.is_power_of_two() || capacity < 2 || limit == 0 {
+            return Err(FaultCode::IllegalOperation);
+        }
+        if u64::from(limit) * 2 > u64::from(capacity) {
+            return Err(FaultCode::IllegalOperation);
+        }
+        if key_size == 0
+            || !key_size.is_multiple_of(8)
+            || value_size == 0
+            || !value_size.is_multiple_of(8)
+        {
+            return Err(FaultCode::IllegalOperation);
+        }
+        // A buffer image is `[len: u64][data: cap]`, so it needs at least one
+        // data byte plus the length word.
+        if key_kind != opcodes::map_key_kind::INT && key_size < 16 {
+            return Err(FaultCode::IllegalOperation);
+        }
+        if value_kind == opcodes::map_value_kind::BUFFER && value_size < 16 {
+            return Err(FaultCode::IllegalOperation);
+        }
+        let stride = 16u64
+            .checked_add(u64::from(key_size))
+            .and_then(|size| size.checked_add(u64::from(value_size)))
+            .ok_or(FaultCode::IllegalOperation)?;
+        Ok(MapLayout {
+            key_kind,
+            value_kind,
+            capacity: u64::from(capacity),
+            mask: u64::from(capacity) - 1,
+            limit: u64::from(limit),
+            key_size: u64::from(key_size),
+            value_size: u64::from(value_size),
+            stride,
+        })
+    }
+
+    /// Total map image: `8 + capacity * stride`.
+    fn total_size(&self) -> Result<usize, FaultCode> {
+        self.capacity
+            .checked_mul(self.stride)
+            .and_then(|size| size.checked_add(8))
+            .and_then(|size| usize::try_from(size).ok())
+            .ok_or(FaultCode::OutOfBounds)
+    }
+
+    /// Data capacity of a buffer key: `key_size - 8`.
+    fn key_capacity(&self) -> Result<u64, FaultCode> {
+        self.key_size
+            .checked_sub(8)
+            .ok_or(FaultCode::IllegalOperation)
+    }
+
+    /// Data capacity of a buffer value: `value_size - 8`.
+    fn value_capacity(&self) -> Result<u64, FaultCode> {
+        self.value_size
+            .checked_sub(8)
+            .ok_or(FaultCode::IllegalOperation)
+    }
+}
+
+/// Offset of a slot from the map's first byte: the `count` header is 8 bytes.
+fn map_slot_offset(layout: &MapLayout, index: u64) -> Result<usize, FaultCode> {
+    index
+        .checked_mul(layout.stride)
+        .and_then(|offset| offset.checked_add(8))
+        .and_then(|offset| usize::try_from(offset).ok())
+        .ok_or(FaultCode::OutOfBounds)
+}
+
+/// A resolved probe key: the 8-byte value of an `int` key, or a bounded view of
+/// a buffer key's data.
+#[derive(Clone, Copy)]
+enum MapKey {
+    Int(u64),
+    Buffer {
+        region: u8,
+        offset: usize,
+        length: usize,
+    },
+}
+
+/// What one linear probe found: a matching entry, or the empty slot where a
+/// new entry belongs.
+#[derive(Clone, Copy)]
+enum MapProbe {
+    Found(u64),
+    Empty(u64),
+}
+
+/// FNV-1a, 64-bit (spec 0003, "Collections"): offset basis
+/// `14695981039346656037`, prime `1099511628211`.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash = 14_695_981_039_346_656_037u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(1_099_511_628_211);
+    }
+    hash
+}
+
+/// Reads one 8-byte word from a region.
+fn region_read_u64(
+    region: u8,
+    offset: usize,
+    state: &[u8],
+    stack: &[u8],
+    code: &[u8],
+    args: &[u8],
+) -> Result<u64, FaultCode> {
+    match region {
+        refs::REGION_STATE => read_u64(state, offset),
+        refs::REGION_STACK => read_u64(stack, offset),
+        refs::REGION_CODE => read_u64(code, offset),
+        refs::REGION_ARGS => read_u64(args, offset),
+        _ => Err(FaultCode::OutOfBounds),
+    }
+}
+
+/// Writes one 8-byte word to a writable region.
+fn region_write_u64(
+    region: u8,
+    offset: usize,
+    value: u64,
+    state: &mut [u8],
+    stack: &mut [u8],
+    code: &[u8],
+    args: &[u8],
+) -> Result<(), FaultCode> {
+    let _ = (code, args);
+    match region {
+        refs::REGION_STATE => write_u64(state, offset, value),
+        refs::REGION_STACK => write_u64(stack, offset, value),
+        _ => Err(FaultCode::IllegalOperation),
+    }
+}
+
+/// Copies `count` bytes between two regions, bounds-checked on both sides and
+/// overlap-safe inside one region (like [`Machine::copy_refs`]).
+#[allow(clippy::too_many_arguments)]
+fn region_copy(
+    destination_region: u8,
+    destination: usize,
+    source_region: u8,
+    source: usize,
+    count: usize,
+    state: &mut [u8],
+    stack: &mut [u8],
+    code: &[u8],
+    args: &[u8],
+) -> Result<(), FaultCode> {
+    if destination_region != refs::REGION_STATE && destination_region != refs::REGION_STACK {
+        return Err(FaultCode::IllegalOperation);
+    }
+    let destination_end = destination
+        .checked_add(count)
+        .ok_or(FaultCode::OutOfBounds)?;
+    let source_end = source.checked_add(count).ok_or(FaultCode::OutOfBounds)?;
+    if destination_end
+        > region_len(destination_region, state, stack, code, args).ok_or(FaultCode::OutOfBounds)?
+        || source_end
+            > region_len(source_region, state, stack, code, args).ok_or(FaultCode::OutOfBounds)?
+    {
+        return Err(FaultCode::OutOfBounds);
+    }
+    if count == 0 {
+        return Ok(());
+    }
+    if destination_region == source_region {
+        match destination_region {
+            refs::REGION_STATE => state.copy_within(source..source_end, destination),
+            refs::REGION_STACK => stack.copy_within(source..source_end, destination),
+            _ => return Err(FaultCode::IllegalOperation),
+        }
+        return Ok(());
+    }
+    match destination_region {
+        refs::REGION_STATE => {
+            let source_bytes = match source_region {
+                refs::REGION_STACK => &stack[source..source_end],
+                refs::REGION_CODE => &code[source..source_end],
+                refs::REGION_ARGS => &args[source..source_end],
+                _ => return Err(FaultCode::OutOfBounds),
+            };
+            state[destination..destination_end].copy_from_slice(source_bytes);
+        }
+        refs::REGION_STACK => {
+            let source_bytes = match source_region {
+                refs::REGION_STATE => &state[source..source_end],
+                refs::REGION_CODE => &code[source..source_end],
+                refs::REGION_ARGS => &args[source..source_end],
+                _ => return Err(FaultCode::OutOfBounds),
+            };
+            stack[destination..destination_end].copy_from_slice(source_bytes);
+        }
+        _ => return Err(FaultCode::IllegalOperation),
+    }
+    Ok(())
 }
 
 fn jump_target(next: usize, code: &[u8], pc: usize) -> Result<usize, FaultCode> {

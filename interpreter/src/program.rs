@@ -382,6 +382,16 @@ fn verify_instructions(
                 }
             } else if matches!(
                 op,
+                opcodes::MAP_PUT | opcodes::MAP_GET | opcodes::MAP_HAS | opcodes::MAP_REMOVE
+            ) {
+                if a > opcodes::map_key_kind::STRING
+                    || b > opcodes::map_value_kind::BUFFER
+                    || c != 0
+                {
+                    return Err(invalid(base + pc, "map kinds are out of range"));
+                }
+            } else if matches!(
+                op,
                 opcodes::JMP | opcodes::JZ | opcodes::JNZ | opcodes::CALL
             ) {
                 if a != 0 || b != 0 || c > 1 {
@@ -503,6 +513,43 @@ fn verify_instructions(
                             base + pc + 8,
                             "array element count is out of range",
                         ));
+                    }
+                }
+                opcodes::MAP_PUT | opcodes::MAP_GET | opcodes::MAP_HAS | opcodes::MAP_REMOVE => {
+                    let capacity = read_u32(instructions, pc + 4)
+                        .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;
+                    let count = read_u32(instructions, pc + 8)
+                        .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;
+                    let key_size = read_u32(instructions, pc + 12)
+                        .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;
+                    let value_size = read_u32(instructions, pc + 16)
+                        .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;
+                    // The map layout (spec 0003, "Maps"): a power-of-two table
+                    // of at least twice the entry limit, 8-byte-multiple key
+                    // and value images, and a whole image inside one section.
+                    if !capacity.is_power_of_two() || capacity < 2 {
+                        return Err(invalid(
+                            base + pc + 4,
+                            "map table capacity must be a power of two of at least 2",
+                        ));
+                    }
+                    if count == 0 || u64::from(count) * 2 > u64::from(capacity) {
+                        return Err(invalid(
+                            base + pc + 8,
+                            "map entry limit does not fit the table capacity",
+                        ));
+                    }
+                    if key_size == 0 || !key_size.is_multiple_of(8) || key_size > MAX_SECTION {
+                        return Err(invalid(base + pc + 12, "map key image is out of range"));
+                    }
+                    if value_size == 0 || !value_size.is_multiple_of(8) || value_size > MAX_SECTION
+                    {
+                        return Err(invalid(base + pc + 16, "map value image is out of range"));
+                    }
+                    let stride = 16u64 + u64::from(key_size) + u64::from(value_size);
+                    let total = 8u64 + stride * u64::from(capacity);
+                    if total > u64::from(MAX_SECTION) {
+                        return Err(invalid(base + pc + 4, "map image exceeds the section cap"));
                     }
                 }
                 opcodes::BUILTIN => {

@@ -8,7 +8,7 @@
 - **ADRs:** 0002 (interpreted applications), 0005 (internal bytecode, no JIT), 0007 (fully
   static placement), 0011 (work stealing), 0018 (floating point), 0019 (source-only
   delivery)
-- **Updated:** 2026-11-14
+- **Updated:** 2026-11-15
 
 ## Context
 
@@ -135,7 +135,7 @@ particular core count or quantum size.
 | record | fields in declaration order, each aligned to 8; size rounded to 8 (spec 0003) |
 | sum type | 8-byte tag at offset 0, then the largest variant payload at offset 8; size rounded to 8 (spec 0003) |
 | `ring[T,N]` | `N` elements at `stride = align8(size_of(T))`, then `head: u64` and `count: u64`; size `align8(N*stride + 16)` (spec 0003) |
-| `map[K,V,N]` | table of `2^ceil(log2(2N))` entries, FNV-1a hashing (spec 0003) |
+| `map[K,V,N]` | `count: u64` at 0, then `capacity` (next power of two ≥ 2N) slots of `state: u64`, `hash: u64`, key image and value image; FNV-1a hashing (spec 0003) |
 | endpoint | 8-byte handle, direction checked by the type checker |
 | `TaskId` | 8-byte integer; zero is invalid |
 | reference | 64-bit `(region:2, offset:62)` |
@@ -189,6 +189,49 @@ ring parameter are `copy_refs` with the compile-time image size, header included
 compiler interns `(element type, count)` in one structural ring table shared by the
 application and `stdlib`, so a ring crosses the unit boundary with one id.
 
+### Maps
+
+Maps add five opcodes, `map_put`, `map_get`, `map_has`, `map_remove` and
+`map_count`, because hashing, probing and backward-shift deletion are one cohesive
+algorithm and inlining it at every call site would duplicate the deletion logic. The
+map image is `count: u64` at offset 0 and then `capacity` slots at offset 8, each
+`state: u64` (0 empty, 1 occupied), `hash: u64`, the key image and the value image.
+
+The opcode word of `map_put`/`map_get`/`map_has`/`map_remove` carries the key kind in
+`a` (`int` 0, `bytes` 1, `string` 2) and the value kind in `b` (`scalar` 0, `fixed`
+aggregate 1, buffer 2), with `c` reserved. Four immediate words follow: `capacity`,
+`count` (the entry limit `N`), `key_size` and `value_size`; `slot_stride` is
+`16 + key_size + value_size`. `map_count` has no immediates: it reads the header
+count word.
+
+Operands are pushed in reference order and popped in reverse:
+`put` is `[map][key][value] -> Status`, `get` is `[map][key][destination] -> Status`,
+`has` is `[map][key] -> bool`, `remove` is `[map][key] -> Status` and `count` is
+`[map] -> int`. An `int` key and a scalar value are the 8-byte operand itself; a
+buffer key, a buffer value and a fixed aggregate value are references (a buffer
+reference names its data, with the runtime length at `ref - 8`).
+
+The machine checks that the whole map image lies inside its region, resolves and
+hashes the key (FNV-1a), and probes linearly from `hash & (capacity - 1)`. `put`
+writes a matching value in place, or inserts into the empty slot the probe stopped
+at when `count < N`; at `count = N` it pushes `Full` and writes nothing. `get` copies
+the slot's value image through the destination reference, or pushes `NotFound` and
+leaves it untouched. `remove` clears the found slot and then walks the cluster,
+moving an entry back when its distance from home is greater than the distance from
+home to the hole, until it reaches an empty slot; no tombstones exist. Every byte to
+be written is checked before the first write, so a failure leaves the map unchanged.
+
+The verifier checks the key and value kinds, that the capacity is a power of two of
+at least 2 with `2 * count <= capacity`, non-zero 8-byte-multiple key and value
+sizes (buffer images at least 16 bytes), and that the whole image fits the section
+cap. A buffer key or value is copied as `[len][data]`, so only its runtime length is
+read and written, never its unused capacity.
+
+A whole-map assignment and a `value` map parameter are `copy_refs` with the
+compile-time image size, header included. The compiler interns `(key, value, count)`
+in one structural map table shared by the application and `stdlib`, so a map crosses
+the unit boundary with one id.
+
 ### Frames
 
 Each call pushes one frame on the task's stack region:
@@ -238,7 +281,7 @@ artifact:
 | Comparisons | `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `cmp_buffers` for buffers |
 | Conversions | `i2f`, `f2i` (truncate and range-check), `trunc8`, `sext`, `zext` |
 | Control flow | `jmp`, `jz`, `jnz`, `call`, `ret` |
-| Buffers and aggregates | `append` (capacity-checked), `load_u8`/`store_u8` (length- and capacity-checked), `find` (byte scan), `substr` (checked slice), `format_int` (decimal/hex formatting), `enum_cast` (range-checked ordinal → enum), `ref_offset` (field reference), `ref_element` (array element reference, index-checked), `copy_refs` (record, sum, array, ring and `case` payload copies) |
+| Buffers and aggregates | `append` (capacity-checked), `load_u8`/`store_u8` (length- and capacity-checked), `find` (byte scan), `substr` (checked slice), `format_int` (decimal/hex formatting), `enum_cast` (range-checked ordinal → enum), `ref_offset` (field reference), `ref_element` (array element reference, index-checked), `copy_refs` (record, sum, array, ring and `case` payload copies), `map_put`/`map_get`/`map_has`/`map_remove`/`map_count` (open-addressing map, layout in the immediates) |
 | Builtins | `call_builtin n` — host-interface and `core` primitives |
 | System | `safe` (explicit poll), `trap` (compiler-inserted fault) |
 
@@ -362,7 +405,7 @@ pub fn run(task: &mut Task);
 
 | # | Question | Trigger / owner |
 |---|----------|-----------------|
-| 1 | ~~Exact opcode table and operand encodings~~ | **Resolved** — ABI v1 is `abi::opcodes`: 63 opcodes, one 4-byte opcode word plus up to two immediate words, `i32` jump offsets in instruction words, 8-byte operand slots. The interpreter implements it. |
+| 1 | ~~Exact opcode table and operand encodings~~ | **Resolved** — ABI v1 is `abi::opcodes`: 67 opcodes, one 4-byte opcode word plus up to four immediate words (the `map_*` ops carry the layout), `i32` jump offsets in instruction words, 8-byte operand slots. The interpreter implements it. |
 | 2 | Stack machine vs a small register machine | Performance measurement after the first loops run. |
 | 3 | ~~Verifier depth: structural only, or limited control-flow and stack-depth checks~~ | **Resolved for v1** — structural checks plus one instruction-boundary bit per word for jump targets; operand-stack depth is enforced at run time against the frame's operand area, not by dataflow analysis. |
 | 4 | Line-table encoding and compaction | When packages grow past the first few units. |
@@ -386,3 +429,4 @@ pub fn run(task: &mut Task);
 | 2026-11-14 | Sum types need no new opcodes: construction is `const` + `store_ref` for the tag plus the payload type's ordinary instructions, `case` is `load_ref`/`eq`/`jz` over the tag, and a whole-sum copy or `case` binding is `copy_refs` with the compile-time size. ABI v1 stays at 63 opcodes. `ExitReason` becomes the real sum type at the same 16-byte layout (`TAG_OFFSET` 0, `PAYLOAD_OFFSET` 8); `WAIT` writes the tag and the `FaultCode` payload unchanged. |
 | 2026-11-14 | Multi-unit packages: an application with `uses stdlib;` compiles the embedded `stdlib/stdlib.ig` into the same package. Library functions come first in one function table (entry is the application's `main`), the constant pool and instruction section are shared, and line-table entries carry a unit id (0 application, 1 stdlib; verifier accepts `0..=1`). The manifest keeps the application's unit name; compile diagnostics name the failing unit. Type ids stay per-unit, so records, sums and user enums may not cross the boundary yet. |
 | 2026-11-14 | Rings need no new opcodes: `core.ring_push`/`pop`/`peek`/`full`/`empty` are compiler-lowered with `ref_offset`/`load_ref` for the header, `add_u`/`mod_u` for the wrap, `ref_element` for the element, `load_ref`/`store_ref` or `copy_refs`/`clear`+`append` for the value, and `eq`+`jz` for the status branches. The ABI v1 opcode table is unchanged. The ring value is `N` elements followed by `head` and `count`, and the structural ring table is shared with `stdlib`. |
+| 2026-11-15 | Maps add five opcodes: `map_put`, `map_get`, `map_has`, `map_remove` (opcode word `a` = key kind, `b` = value kind; immediates `capacity`, `count`, `key_size`, `value_size`) and `map_count` (no immediates). The interpreter hashes with FNV-1a, probes linearly and deletes with backward shift; a `put` past the entry limit pushes `Full` and writes nothing. The map image is `count` then `capacity` slots of state/hash/key/value, the structural map table is shared with `stdlib`, and a library signature may carry a map. |

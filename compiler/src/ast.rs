@@ -108,16 +108,20 @@ pub struct VarDecl<'a> {
     pub column: u32,
 }
 
-/// A written type such as `int`, `string[64]` or `array[int, 4]`.
+/// A written type such as `int`, `string[64]`, `array[int, 4]` or
+/// `map[int, string[8], 4]`.
 #[derive(Debug, Clone, Copy)]
 pub struct TypeRef<'a> {
     /// Type name, before resolution.
     pub name: &'a str,
     /// Capacity expression for `string`/`bytes`.
     pub cap: Option<&'a Expr<'a>>,
-    /// Element type for `array[T, N]`.
+    /// Element type for `array[T, N]` and key type for `map[K, V, N]`.
     pub elem: Option<&'a TypeRef<'a>>,
-    /// Element count expression for `array[T, N]`.
+    /// Value type for `map[K, V, N]`.
+    pub value: Option<&'a TypeRef<'a>>,
+    /// Element count expression for `array[T, N]`, entry count for
+    /// `map[K, V, N]`.
     pub count: Option<&'a Expr<'a>>,
     /// 1-based source line.
     pub line: u32,

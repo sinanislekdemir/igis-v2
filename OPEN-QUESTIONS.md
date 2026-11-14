@@ -4,7 +4,7 @@ Parked decisions for igis-v2. This is the working register; each spec's own
 "Open questions" section remains authoritative for that document. When an item is
 resolved, record the answer in the relevant spec or in a new ADR, then remove it here.
 
-**Status:** implementation phase. Last updated: 2026-11-14.
+**Status:** implementation phase. Last updated: 2026-11-15.
 **Snapshot:** specs 0001–0008, ADRs 0001–0019.
 
 ## How to use
@@ -182,10 +182,11 @@ These are no longer open; they were recorded in specs and ADRs:
   Arrays may be state, locals, parameters, record fields and sum payloads. One structural
   array table is shared by the application and `stdlib`, so arrays cross the unit
   boundary; `stdlib.split_all` fills an `array[string[64], 8]`.
-- **Still missing for a complete stdlib:** `map` (language support and helpers), UTF-8
-  helpers (`utf8_decode_into`, code-point iteration), moving `substr_into` from `core` to
-  `stdlib`, `f64` formatting/parsing, typed stream views, and a shared cross-unit type
-  table so library signatures can use records, sums and user enums.
+- **Still missing for a complete stdlib:** UTF-8 helpers (`utf8_decode_into`,
+  code-point iteration), moving `substr_into` from `core` to `stdlib`, `f64`
+  formatting/parsing, typed stream views, and a shared cross-unit type table so library
+  signatures can use records, sums and user enums. `map` support landed with
+  `map_get_or` (below).
 - **Rings (2026-11-14).** `ring[T, N]` is a fixed-capacity FIFO, nominal in element type
   and count, with the `N` elements first and `head: u64`/`count: u64` after them. The
   built-in `core.ring_push`/`pop`/`peek`/`full`/`empty` are compiler-recognised
@@ -194,8 +195,17 @@ These are no longer open; they were recorded in specs and ADRs:
   `Full` on a full ring and writes nothing; `pop`/`peek` return `NotFound` on an empty
   ring and leave the out-parameter untouched; `push`/`pop` require a writable place,
   so `const` is rejected and a `value` copy is writable but private to the callee. The structural ring table is shared with `stdlib`, whose `drain_into` takes
-  a `ring[int, 8]`. Next on this track: `map`, which reuses the hash/probe design already
-  fixed in Q4.
+  a `ring[int, 8]`.
+- **Maps (2026-11-15).** `map[K, V, N]` is a fixed-capacity open-addressing map, nominal
+  in `(K, V, N)`: `N` a positive const, `K` one of `int`, `string[M]`, `bytes[M]`, `V` any
+  fixed-size type. The image is `count: u64` then `capacity` (smallest power of two at
+  least `2N`) slots of `state`/`hash`/key/value; FNV-1a, linear probing, backward-shift
+  deletion with no tombstones. `core.map_put`/`get`/`has`/`remove`/`count` are five new
+  opcodes (`MAP_PUT` … `MAP_COUNT`), not inlined per call site. `put` at `N` entries
+  returns `Full` and writes nothing; a missing key is `NotFound`/`false`; `get` leaves its
+  out-parameter untouched. One structural map table is shared with `stdlib`, whose
+  `map_get_or` takes a `map[int, int, 8]`. The design was already fixed (Q18, "Maps are
+  FNV-1a with linear probing"); this session implemented it.
 
 ## Suggested next step
 
@@ -292,3 +302,15 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
     `add_u`/`mod_u` and `eq`+`jz`, adding no opcode (the opcode table is unchanged). `samples/lang/
     ring.ig` covers FIFO order, peek, full/empty transitions, wrap-around, copies, every
     element kind and the stdlib `drain_into` helper. Next: `map`, then UTF-8 helpers.
+21. ~~Fixed-capacity maps~~ — done: `map[K, V, N]` (positive const N, `K` = `int`,
+    `string[M]` or `bytes[M]`) in state, locals, records, sum payloads, array and ring
+    elements and `value`/`const`/`var` parameters; nominal in `(K, V, N)`; `count` header
+    then `capacity` (next power of two at least `2N`) slots of state/hash/key/value;
+    FNV-1a, linear probing, backward-shift deletion. Five new opcodes (`MAP_PUT`,
+    `MAP_GET`, `MAP_HAS`, `MAP_REMOVE`, `MAP_COUNT`) because the algorithm is not inlined
+    per call site. `put` at `N` returns `Full`; a missing key is `NotFound`/`false`; `get`
+    leaves its out-parameter untouched. The structural map table is shared with `stdlib`
+    (`map_get_or`), and `samples/lang/map.ig` covers collisions, backward shift, key 0,
+    the empty buffer key, aggregate values, whole copies and the three parameter modes.
+    Next: UTF-8 helpers, then the `substr_into` move, then APs, the realtime class and
+    streams.

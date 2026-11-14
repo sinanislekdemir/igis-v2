@@ -1993,3 +1993,641 @@ fn a_lowered_ring_wraps_around_several_times() {
     assert_eq!(state_u64(&state, 72), 5);
     assert_eq!(state_u64(&state, head_off as usize + 8), 0, "empty");
 }
+
+// ---- maps -----------------------------------------------------------------
+//
+// A map is `count: u64` at offset 0, then `capacity` slots of
+// `16 + key_size + value_size` bytes: state (0 empty, 1 occupied), the stored
+// FNV-1a hash, the key image and the value image. These tests hand-assemble
+// the `map_*` opcodes over a known layout and prove insert/replace/get/has/
+// remove/count, probing past colliding entries, backward-shift deletion, key 0,
+// buffer keys, aggregate values, whole-map copies and the verifier's checks.
+//
+// `map[int, int, 3]`: capacity 8, limit 3, key 8, value 8, stride 32,
+// total 8 + 8*32 = 264. Keys 5, 13 and 21 all hash to home slot 0.
+
+#[allow(clippy::too_many_arguments)]
+fn op_map(
+    out: &mut Vec<u8>,
+    opcode: u8,
+    key_kind: u8,
+    value_kind: u8,
+    capacity: u32,
+    limit: u32,
+    key_size: u32,
+    value_size: u32,
+) {
+    op_word(out, opcode, key_kind, value_kind, 0);
+    for immediate in [capacity, limit, key_size, value_size] {
+        out.extend_from_slice(&immediate.to_le_bytes());
+    }
+}
+
+fn op_int_map_put(out: &mut Vec<u8>, base: u32, key: i64, value: i64) {
+    op_imm(out, opcodes::REF_STATE, base);
+    op_const(out, key);
+    op_const(out, value);
+    op_map(
+        out,
+        opcodes::MAP_PUT,
+        opcodes::map_key_kind::INT,
+        opcodes::map_value_kind::SCALAR,
+        8,
+        3,
+        8,
+        8,
+    );
+}
+
+fn op_int_map_key(out: &mut Vec<u8>, opcode: u8, base: u32, key: i64, destination: u32) {
+    op_imm(out, opcodes::REF_STATE, base);
+    op_const(out, key);
+    if opcode == opcodes::MAP_GET {
+        op_imm(out, opcodes::REF_STATE, destination);
+    }
+    op_map(
+        out,
+        opcode,
+        opcodes::map_key_kind::INT,
+        opcodes::map_value_kind::SCALAR,
+        8,
+        3,
+        8,
+        8,
+    );
+}
+
+/// Runs a hand-assembled body against a fresh state and returns the state, the
+/// outcome and the operand stack.
+fn run_map(code: &[u8], state: &mut [u8], state_size: u32) -> (Outcome, Vec<u8>) {
+    let _ = state_size;
+    let spec = FnSpec {
+        frame_size: 128,
+        ..MAIN
+    };
+    let package = build(&[spec], code, &[], state.len() as u32, 128, 0);
+    let mut scratch = scratch_for(&package);
+    let program = Program::parse(&package, &mut scratch).expect("verifies");
+    let mut stack = vec![0u8; 128];
+    let args = vec![0u8; 8 + 1024];
+    let mut machine = Machine::new();
+    let mut host = Recorder { output: Vec::new() };
+    let outcome = machine.run(&program, &mut host, state, &mut stack, &args, 10_000);
+    (outcome, stack)
+}
+
+/// Runs a body that must fault and returns the fault code.
+fn map_fault(code: &[u8], state_size: u32) -> FaultCode {
+    let spec = FnSpec {
+        frame_size: 128,
+        ..MAIN
+    };
+    let package = build(&[spec], code, &[], state_size, 128, 0);
+    let mut scratch = scratch_for(&package);
+    let program = Program::parse(&package, &mut scratch).expect("verifies");
+    let mut state = vec![0u8; state_size as usize];
+    let mut stack = vec![0u8; 128];
+    let args = vec![0u8; 8 + 1024];
+    let mut machine = Machine::new();
+    let mut host = Recorder { output: Vec::new() };
+    match machine.run(&program, &mut host, &mut state, &mut stack, &args, 10_000) {
+        Outcome::Exited(ExitReason::Faulted(code)) => code,
+        other => panic!("expected a fault, got {other:?}"),
+    }
+}
+
+#[test]
+fn map_put_get_has_remove_and_count() {
+    // map at 0 (264 bytes); statuses and out-parameters after it.
+    let mut instructions = Vec::new();
+    op_int_map_put(&mut instructions, 0, 5, 50);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 264);
+    op_int_map_put(&mut instructions, 0, 13, 130);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 272);
+    op_int_map_put(&mut instructions, 0, 21, 210);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 280);
+    // get 21 -> 288
+    op_int_map_key(&mut instructions, opcodes::MAP_GET, 0, 21, 288);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 296);
+    // has 13 -> 304
+    op_int_map_key(&mut instructions, opcodes::MAP_HAS, 0, 13, 0);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 304);
+    // remove 13 -> 312
+    op_int_map_key(&mut instructions, opcodes::MAP_REMOVE, 0, 13, 0);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 312);
+    // get 13 -> 320 (preloaded, must stay untouched)
+    op_int_map_key(&mut instructions, opcodes::MAP_GET, 0, 13, 320);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 328);
+    // get 5 -> 336, get 21 -> 344 (both must survive the shift)
+    op_int_map_key(&mut instructions, opcodes::MAP_GET, 0, 5, 336);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 352);
+    op_int_map_key(&mut instructions, opcodes::MAP_GET, 0, 21, 344);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 360);
+    // count -> 368
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op(&mut instructions, opcodes::MAP_COUNT);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 368);
+    op(&mut instructions, opcodes::RET);
+
+    let mut state = vec![0u8; 512];
+    state[320..328].copy_from_slice(&0xDEADu64.to_le_bytes());
+    let (outcome, _) = run_map(&instructions, &mut state, 512);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    for status in [264, 272, 280, 296, 312, 352, 360] {
+        assert_eq!(state_u64(&state, status), 0, "operation {status} was Ok");
+    }
+    assert_eq!(state_u64(&state, 288), 210, "colliding key found");
+    assert_eq!(state_u64(&state, 304), 1, "has a live key");
+    assert_eq!(state_u64(&state, 320), 0xDEAD, "missing get left the value");
+    assert_eq!(state_u64(&state, 328), 3, "the removed key is NotFound");
+    assert_eq!(state_u64(&state, 336), 50);
+    assert_eq!(state_u64(&state, 344), 210, "survivor after the shift");
+    assert_eq!(state_u64(&state, 368), 2, "count after removal");
+    assert_eq!(state_u64(&state, 0), 2, "the header count agrees");
+}
+
+#[test]
+fn map_put_replaces_and_full_stops_growth() {
+    let mut instructions = Vec::new();
+    op_int_map_put(&mut instructions, 0, 5, 50);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 264);
+    // Replace 5 in place.
+    op_int_map_put(&mut instructions, 0, 5, 51);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 272);
+    op_int_map_key(&mut instructions, opcodes::MAP_GET, 0, 5, 280);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 288);
+    // Fill to the limit.
+    op_int_map_put(&mut instructions, 0, 13, 130);
+    op(&mut instructions, opcodes::DROP);
+    op_int_map_put(&mut instructions, 0, 21, 210);
+    op(&mut instructions, opcodes::DROP);
+    // A fourth distinct key is Full and changes nothing.
+    op_int_map_put(&mut instructions, 0, 29, 290);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 296);
+    op_int_map_key(&mut instructions, opcodes::MAP_GET, 0, 29, 304);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 312);
+    op_int_map_key(&mut instructions, opcodes::MAP_HAS, 0, 29, 0);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 320);
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op(&mut instructions, opcodes::MAP_COUNT);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 328);
+    // An existing key still replaces at the limit.
+    op_int_map_put(&mut instructions, 0, 13, 131);
+    op(&mut instructions, opcodes::DROP);
+    op_int_map_key(&mut instructions, opcodes::MAP_GET, 0, 13, 336);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 344);
+    op(&mut instructions, opcodes::RET);
+
+    let mut state = vec![0u8; 512];
+    state[304..312].copy_from_slice(&0xBEEFu64.to_le_bytes());
+    let (outcome, _) = run_map(&instructions, &mut state, 512);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(state_u64(&state, 264), 0);
+    assert_eq!(state_u64(&state, 272), 0);
+    assert_eq!(state_u64(&state, 280), 51, "value replaced in place");
+    assert_eq!(state_u64(&state, 288), 0);
+    assert_eq!(state_u64(&state, 296), 5, "Full is reported");
+    assert_eq!(state_u64(&state, 304), 0xBEEF, "failed get left the value");
+    assert_eq!(state_u64(&state, 312), 3, "NotFound");
+    assert_eq!(state_u64(&state, 320), 0, "the new key was not inserted");
+    assert_eq!(state_u64(&state, 328), 3, "count stayed at the limit");
+    assert_eq!(state_u64(&state, 336), 131, "existing key replaced");
+    assert_eq!(state_u64(&state, 344), 0);
+}
+
+#[test]
+fn map_backward_shift_keeps_every_survivor_findable() {
+    // 5, 13 and 21 home to slot 0, 1 and 2 when inserted in that order? No:
+    // all three hash to slot 0, so they land in slots 0, 1 and 2. Removing 13
+    // (slot 1) moves 21 back to slot 1 and clears slot 2.
+    let mut instructions = Vec::new();
+    for (key, value) in [(5, 50), (13, 130), (21, 210)] {
+        op_int_map_put(&mut instructions, 0, key, value);
+        op(&mut instructions, opcodes::DROP);
+    }
+    op_int_map_key(&mut instructions, opcodes::MAP_REMOVE, 0, 13, 0);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 264);
+    // Capture the slot 1 key and the slot 1/2 occupancy now, before the later
+    // removals empty the map again.
+    op_imm(&mut instructions, opcodes::REF_STATE, 56);
+    op(&mut instructions, opcodes::LOAD_REF);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 400);
+    op_imm(&mut instructions, opcodes::REF_STATE, 40);
+    op(&mut instructions, opcodes::LOAD_REF);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 408);
+    op_imm(&mut instructions, opcodes::REF_STATE, 72);
+    op(&mut instructions, opcodes::LOAD_REF);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 416);
+    op_int_map_key(&mut instructions, opcodes::MAP_GET, 0, 21, 272);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 280);
+    op_int_map_key(&mut instructions, opcodes::MAP_REMOVE, 0, 5, 0);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 288);
+    op_int_map_key(&mut instructions, opcodes::MAP_GET, 0, 21, 296);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 304);
+    op_int_map_key(&mut instructions, opcodes::MAP_REMOVE, 0, 21, 0);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 312);
+    op_int_map_key(&mut instructions, opcodes::MAP_GET, 0, 5, 320);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 328);
+    op(&mut instructions, opcodes::RET);
+
+    let mut state = vec![0u8; 512];
+    state[320..328].copy_from_slice(&0xCAFEu64.to_le_bytes());
+    let (outcome, _) = run_map(&instructions, &mut state, 512);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(state_u64(&state, 264), 0, "middle of the cluster removed");
+    assert_eq!(state_u64(&state, 272), 210, "the next entry was found");
+    assert_eq!(state_u64(&state, 280), 0);
+    // Slot 1 is still occupied (21 moved back into it), slot 2 was cleared.
+    assert_eq!(state_u64(&state, 400), 21, "21 sits in slot 1");
+    assert_eq!(state_u64(&state, 408), 1, "slot 1 is occupied");
+    assert_eq!(state_u64(&state, 416), 0, "slot 2 was cleared");
+    assert_eq!(state_u64(&state, 288), 0);
+    assert_eq!(
+        state_u64(&state, 296),
+        210,
+        "still findable after the shift"
+    );
+    assert_eq!(state_u64(&state, 304), 0);
+    assert_eq!(state_u64(&state, 312), 0, "last entry removed");
+    assert_eq!(state_u64(&state, 320), 0xCAFE, "empty map left the value");
+    assert_eq!(state_u64(&state, 328), 3, "NotFound");
+    assert_eq!(state_u64(&state, 0), 0, "count back to zero");
+}
+
+#[test]
+fn map_key_zero_is_an_ordinary_key() {
+    let mut instructions = Vec::new();
+    op_int_map_put(&mut instructions, 0, 0, 7);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 264);
+    op_int_map_key(&mut instructions, opcodes::MAP_GET, 0, 0, 272);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 280);
+    op_int_map_key(&mut instructions, opcodes::MAP_HAS, 0, 0, 0);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 288);
+    op_int_map_key(&mut instructions, opcodes::MAP_HAS, 0, 1, 0);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 296);
+    op_int_map_key(&mut instructions, opcodes::MAP_REMOVE, 0, 0, 0);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 304);
+    op(&mut instructions, opcodes::RET);
+
+    let mut state = vec![0u8; 512];
+    let (outcome, _) = run_map(&instructions, &mut state, 512);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(state_u64(&state, 264), 0);
+    assert_eq!(state_u64(&state, 272), 7);
+    assert_eq!(state_u64(&state, 288), 1);
+    assert_eq!(state_u64(&state, 296), 0);
+    assert_eq!(state_u64(&state, 304), 0);
+    assert_eq!(state_u64(&state, 0), 0);
+}
+
+#[test]
+fn map_buffer_keys_include_the_empty_key() {
+    // map[string[8], int, 2]: capacity 4, limit 2, key_size 16, value_size 8,
+    // stride 40, total 8 + 4*40 = 168. The constant blob holds an empty image
+    // at 0..8 (data ref 8) and "ab" at 8..24 (data ref 16).
+    let constants = {
+        let mut blob = constant(b"");
+        blob.extend_from_slice(&constant(b"ab"));
+        blob
+    };
+    let mut instructions = Vec::new();
+    let put = |instructions: &mut Vec<u8>, key_ref: u32, value: i64| {
+        op_imm(instructions, opcodes::REF_STATE, 0);
+        op_imm(instructions, opcodes::REF_CONST, key_ref);
+        op_const(instructions, value);
+        op_map(
+            instructions,
+            opcodes::MAP_PUT,
+            opcodes::map_key_kind::STRING,
+            opcodes::map_value_kind::SCALAR,
+            4,
+            2,
+            16,
+            8,
+        );
+    };
+    put(&mut instructions, 8, 11);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 168);
+    put(&mut instructions, 16, 22);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 176);
+    // get "" -> 184 (empty key)
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_imm(&mut instructions, opcodes::REF_CONST, 8);
+    op_imm(&mut instructions, opcodes::REF_STATE, 184);
+    op_map(
+        &mut instructions,
+        opcodes::MAP_GET,
+        opcodes::map_key_kind::STRING,
+        opcodes::map_value_kind::SCALAR,
+        4,
+        2,
+        16,
+        8,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 192);
+    // get "ab" -> 200
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_imm(&mut instructions, opcodes::REF_CONST, 16);
+    op_imm(&mut instructions, opcodes::REF_STATE, 200);
+    op_map(
+        &mut instructions,
+        opcodes::MAP_GET,
+        opcodes::map_key_kind::STRING,
+        opcodes::map_value_kind::SCALAR,
+        4,
+        2,
+        16,
+        8,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 208);
+    // remove "" and look it up again
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_imm(&mut instructions, opcodes::REF_CONST, 8);
+    op_map(
+        &mut instructions,
+        opcodes::MAP_REMOVE,
+        opcodes::map_key_kind::STRING,
+        opcodes::map_value_kind::SCALAR,
+        4,
+        2,
+        16,
+        8,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 216);
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_imm(&mut instructions, opcodes::REF_CONST, 8);
+    op_imm(&mut instructions, opcodes::REF_STATE, 224);
+    op_map(
+        &mut instructions,
+        opcodes::MAP_GET,
+        opcodes::map_key_kind::STRING,
+        opcodes::map_value_kind::SCALAR,
+        4,
+        2,
+        16,
+        8,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 232);
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op(&mut instructions, opcodes::MAP_COUNT);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 240);
+    op(&mut instructions, opcodes::RET);
+
+    let mut state = vec![0u8; 512];
+    state[224..232].copy_from_slice(&0xFEEDu64.to_le_bytes());
+    let spec = FnSpec {
+        frame_size: 128,
+        ..MAIN
+    };
+    let package = build(&[spec], &instructions, &constants, 512, 128, 0);
+    let mut scratch = scratch_for(&package);
+    let program = Program::parse(&package, &mut scratch).expect("verifies");
+    let mut stack = vec![0u8; 128];
+    let args = vec![0u8; 8 + 1024];
+    let mut machine = Machine::new();
+    let mut host = Recorder { output: Vec::new() };
+    let outcome = machine.run(&program, &mut host, &mut state, &mut stack, &args, 10_000);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(state_u64(&state, 168), 0);
+    assert_eq!(state_u64(&state, 176), 0);
+    assert_eq!(state_u64(&state, 184), 11, "empty key found");
+    assert_eq!(state_u64(&state, 192), 0);
+    assert_eq!(state_u64(&state, 200), 22);
+    assert_eq!(state_u64(&state, 208), 0);
+    assert_eq!(state_u64(&state, 216), 0);
+    assert_eq!(state_u64(&state, 224), 0xFEED, "removed key left the value");
+    assert_eq!(state_u64(&state, 232), 3, "NotFound");
+    assert_eq!(state_u64(&state, 240), 1);
+}
+
+#[test]
+fn map_aggregate_and_buffer_values_are_copied_whole() {
+    let mut instructions = Vec::new();
+    // A fixed 16-byte value image at state 168 is copied into the slot.
+    for (at, word) in [(168u32, 0x1111u64), (176, 0x2222)] {
+        op_const(&mut instructions, word as i64);
+        op_imm(&mut instructions, opcodes::STORE_STATE, at);
+    }
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_const(&mut instructions, 7);
+    op_imm(&mut instructions, opcodes::REF_STATE, 168);
+    op_map(
+        &mut instructions,
+        opcodes::MAP_PUT,
+        opcodes::map_key_kind::INT,
+        opcodes::map_value_kind::FIXED,
+        4,
+        2,
+        8,
+        16,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 200);
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_const(&mut instructions, 7);
+    op_imm(&mut instructions, opcodes::REF_STATE, 184);
+    op_map(
+        &mut instructions,
+        opcodes::MAP_GET,
+        opcodes::map_key_kind::INT,
+        opcodes::map_value_kind::FIXED,
+        4,
+        2,
+        8,
+        16,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 208);
+    // A buffer value: map at 216 holds [len][data] in a 16-byte image.
+    op_imm(&mut instructions, opcodes::REF_STATE, 216);
+    op_const(&mut instructions, 1);
+    op_imm(&mut instructions, opcodes::REF_CONST, 8);
+    op_map(
+        &mut instructions,
+        opcodes::MAP_PUT,
+        opcodes::map_key_kind::INT,
+        opcodes::map_value_kind::BUFFER,
+        4,
+        2,
+        8,
+        16,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 392);
+    op_imm(&mut instructions, opcodes::REF_STATE, 216);
+    op_const(&mut instructions, 1);
+    op_imm(&mut instructions, opcodes::REF_STATE, 424);
+    op_map(
+        &mut instructions,
+        opcodes::MAP_GET,
+        opcodes::map_key_kind::INT,
+        opcodes::map_value_kind::BUFFER,
+        4,
+        2,
+        8,
+        16,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 400);
+    op(&mut instructions, opcodes::RET);
+
+    let constants = constant(b"hi");
+    let mut state = vec![0u8; 512];
+    let spec = FnSpec {
+        frame_size: 160,
+        ..MAIN
+    };
+    let package = build(&[spec], &instructions, &constants, 512, 160, 0);
+    let mut scratch = scratch_for(&package);
+    let program = Program::parse(&package, &mut scratch).expect("verifies");
+    let mut stack = vec![0u8; 160];
+    let args = vec![0u8; 8 + 1024];
+    let mut machine = Machine::new();
+    let mut host = Recorder { output: Vec::new() };
+    let outcome = machine.run(&program, &mut host, &mut state, &mut stack, &args, 10_000);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(state_u64(&state, 200), 0);
+    assert_eq!(state_u64(&state, 208), 0);
+    assert_eq!(state_u64(&state, 184), 0x1111);
+    assert_eq!(state_u64(&state, 192), 0x2222);
+    assert_eq!(state_u64(&state, 392), 0);
+    assert_eq!(state_u64(&state, 400), 0);
+    assert_eq!(state_u64(&state, 416), 2, "copied buffer length");
+    assert_eq!(&state[424..426], b"hi", "copied buffer data");
+}
+
+#[test]
+fn map_whole_copy_duplicates_header_and_slots() {
+    // map[int, int, 2] is 8 + 4*32 = 136 bytes; A at 0, B at 144.
+    let mut instructions = Vec::new();
+    for (key, value) in [(5, 50), (13, 130)] {
+        op_imm(&mut instructions, opcodes::REF_STATE, 0);
+        op_const(&mut instructions, key);
+        op_const(&mut instructions, value);
+        op_map(
+            &mut instructions,
+            opcodes::MAP_PUT,
+            opcodes::map_key_kind::INT,
+            opcodes::map_value_kind::SCALAR,
+            4,
+            2,
+            8,
+            8,
+        );
+        op(&mut instructions, opcodes::DROP);
+    }
+    // B := A (whole image, header and slots).
+    op_imm(&mut instructions, opcodes::REF_STATE, 144);
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_const(&mut instructions, 136);
+    op(&mut instructions, opcodes::COPY_REFS);
+    // remove 5 from B only
+    op_imm(&mut instructions, opcodes::REF_STATE, 144);
+    op_const(&mut instructions, 5);
+    op_map(
+        &mut instructions,
+        opcodes::MAP_REMOVE,
+        opcodes::map_key_kind::INT,
+        opcodes::map_value_kind::SCALAR,
+        4,
+        2,
+        8,
+        8,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 288);
+    // A still has 5; B does not.
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_const(&mut instructions, 5);
+    op_imm(&mut instructions, opcodes::REF_STATE, 296);
+    op_map(
+        &mut instructions,
+        opcodes::MAP_GET,
+        opcodes::map_key_kind::INT,
+        opcodes::map_value_kind::SCALAR,
+        4,
+        2,
+        8,
+        8,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 304);
+    op_imm(&mut instructions, opcodes::REF_STATE, 144);
+    op_const(&mut instructions, 5);
+    op_map(
+        &mut instructions,
+        opcodes::MAP_HAS,
+        opcodes::map_key_kind::INT,
+        opcodes::map_value_kind::SCALAR,
+        4,
+        2,
+        8,
+        8,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 312);
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op(&mut instructions, opcodes::MAP_COUNT);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 320);
+    op_imm(&mut instructions, opcodes::REF_STATE, 144);
+    op(&mut instructions, opcodes::MAP_COUNT);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 328);
+    op(&mut instructions, opcodes::RET);
+
+    let mut state = vec![0u8; 512];
+    let (outcome, _) = run_map(&instructions, &mut state, 512);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(state_u64(&state, 288), 0);
+    assert_eq!(state_u64(&state, 296), 50, "the original still has 5");
+    assert_eq!(state_u64(&state, 304), 0);
+    assert_eq!(state_u64(&state, 312), 0, "the copy lost 5");
+    assert_eq!(state_u64(&state, 320), 2);
+    assert_eq!(state_u64(&state, 328), 1);
+}
+
+#[test]
+fn map_operations_bounds_check_the_image() {
+    // The map image is 264 bytes but the state region is only 128: the first
+    // operation must fault before it touches anything.
+    let mut instructions = Vec::new();
+    op_int_map_put(&mut instructions, 0, 5, 50);
+    op(&mut instructions, opcodes::RET);
+    assert_eq!(map_fault(&instructions, 128), FaultCode::OutOfBounds);
+}
+
+#[test]
+fn the_verifier_rejects_bad_map_immediates() {
+    let invalid = [
+        (0u8, 0u8, 3u32, 1u32, 8u32, 8u32),
+        (0, 0, 1, 1, 8, 8),
+        (0, 0, 8, 0, 8, 8),
+        (0, 0, 8, 5, 8, 8),
+        (0, 0, 8, 3, 4, 8),
+        (0, 0, 8, 3, 8, 4),
+        (3, 0, 8, 3, 8, 8),
+        (0, 3, 8, 3, 8, 8),
+        (0, 0, 1 << 20, 1, 8, 8),
+    ];
+    for (key_kind, value_kind, capacity, limit, key_size, value_size) in invalid {
+        let mut instructions = Vec::new();
+        op_imm(&mut instructions, opcodes::REF_STATE, 0);
+        op_const(&mut instructions, 0);
+        op_map(
+            &mut instructions,
+            opcodes::MAP_HAS,
+            key_kind,
+            value_kind,
+            capacity,
+            limit,
+            key_size,
+            value_size,
+        );
+        op(&mut instructions, opcodes::DROP);
+        op(&mut instructions, opcodes::RET);
+        let spec = FnSpec {
+            frame_size: 64,
+            ..MAIN
+        };
+        let code = build(&[spec], &instructions, &[], 64, 64, 0);
+        let mut scratch = scratch_for(&code);
+        let error = Program::parse(&code, &mut scratch).expect_err("must be rejected");
+        assert!(
+            error.message.contains("map"),
+            "{key_kind}/{value_kind}/{capacity}/{limit}/{key_size}/{value_size}: {}",
+            error.message
+        );
+    }
+}

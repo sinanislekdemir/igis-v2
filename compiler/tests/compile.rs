@@ -2488,8 +2488,8 @@ fn the_embedded_stdlib_compiles_on_its_own() {
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(manifest_unit(&package), "stdlib");
     assert_eq!(
-        header.function_count, 7,
-        "trim_into, split_once, parse_int_into, starts_with, contains_byte, split_all, drain_into"
+        header.function_count, 8,
+        "trim_into, split_once, parse_int_into, starts_with, contains_byte, split_all, drain_into, map_get_or"
     );
     assert_eq!(header.entry, 0);
     assert_eq!(header.state_size, 0, "the stdlib declares no state");
@@ -3472,4 +3472,728 @@ end;
 "#;
     let error = compile(source, "t.ig").expect_err("a built-in type name cannot be shadowed");
     assert!(error.message.contains("built-in type"), "{}", error.message);
+}
+
+// ---- maps -----------------------------------------------------------------
+
+fn state_size(package: &Owned) -> u32 {
+    CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE])
+        .expect("header")
+        .state_size
+}
+
+#[test]
+fn maps_of_every_key_and_value_kind_compile() {
+    let source = br#"
+unit t;
+
+type
+  Point = record x, y: int; end;
+  Sum = A | B(value: int);
+
+var
+  ints: map[int, int, 2];
+  words: map[string[4], string[4], 2];
+  raws: map[bytes[4], int, 2];
+  records: map[int, Point, 2];
+  sums: map[int, Sum, 2];
+  arrays: map[int, array[int, 2], 2];
+  rings: map[int, ring[int, 2], 2];
+  nested: map[int, map[int, int, 2], 2];
+  inner: map[int, int, 2];
+  other: map[int, int, 2];
+  st: Status;
+  i: int;
+  word: string[4];
+  raw: bytes[4];
+  p: Point;
+  s: Sum;
+  a: array[int, 2];
+  r: ring[int, 2];
+
+procedure main(args: const string[1024]);
+begin
+  st := core.map_put(ints, 1, 10);
+  st := core.map_get(ints, 1, i);
+  st := core.map_put(words, "ab", "cd");
+  st := core.map_get(words, "ab", word);
+  st := core.map_put(raws, "ef", 20);
+  st := core.map_get(raws, "ef", i);
+  p.x := 3;
+  p.y := 4;
+  st := core.map_put(records, 2, p);
+  st := core.map_get(records, 2, p);
+  s := A;
+  st := core.map_put(sums, 3, s);
+  st := core.map_get(sums, 3, s);
+  a[0] := 5;
+  st := core.map_put(arrays, 4, a);
+  st := core.map_get(arrays, 4, a);
+  st := core.ring_push(r, 6);
+  st := core.map_put(rings, 5, r);
+  st := core.map_get(rings, 5, r);
+  st := core.map_put(inner, 7, 8);
+  st := core.map_put(nested, 6, inner);
+  st := core.map_get(nested, 6, other);
+  other := ints;
+  if core.map_has(ints, 1) then
+    i := i + 1;
+  st := core.map_remove(ints, 1);
+  i := core.map_count(ints);
+end;
+"#;
+    let package = compile(source, "t.ig").expect("maps compile");
+    let ops = opcodes_of(&package);
+    assert!(ops.contains(&abi::opcodes::MAP_PUT), "{ops:?}");
+    assert!(ops.contains(&abi::opcodes::MAP_GET), "{ops:?}");
+    assert!(ops.contains(&abi::opcodes::MAP_HAS), "{ops:?}");
+    assert!(ops.contains(&abi::opcodes::MAP_REMOVE), "{ops:?}");
+    assert!(ops.contains(&abi::opcodes::MAP_COUNT), "{ops:?}");
+}
+
+#[test]
+fn a_map_entry_count_comes_from_a_positive_constant() {
+    let good = br#"
+unit t;
+
+const
+  Capacity = 1 + 1;
+
+var
+  cells: map[int, int, Capacity];
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    compile(good, "t.ig").expect("a const expression sizes a map");
+
+    for count in ["0", "-1"] {
+        let source = format!(
+            r#"
+unit t;
+
+var
+  cells: map[int, int, {count}];
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#
+        );
+        let error = compile(source.as_bytes(), "t.ig").expect_err("count must be positive");
+        assert!(
+            error.message.contains("positive constant"),
+            "{}",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn map_table_capacity_is_the_next_power_of_two_at_least_twice_the_limit() {
+    // Layout: 8-byte count plus capacity * (16 + 8 + 8). N=1 -> 2 slots (72),
+    // N=3 and N=4 -> 8 slots (264), N=5 -> 16 slots (520), N=9 -> 32 (1032).
+    for (count, expected) in [
+        ("1", 72u32),
+        ("3", 264),
+        ("4", 264),
+        ("5", 520),
+        ("9", 1032),
+    ] {
+        let source = format!(
+            r#"
+unit t;
+
+var
+  cells: map[int, int, {count}];
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#
+        );
+        let package = compile(source.as_bytes(), "t.ig").expect("compiles");
+        assert_eq!(
+            state_size(&package),
+            expected,
+            "map[int, int, {count}] size"
+        );
+    }
+}
+
+#[test]
+fn map_key_types_are_restricted() {
+    for (declared, key) in [
+        ("", "f64"),
+        ("", "byte"),
+        ("", "bool"),
+        ("Color = (Red, Green);", "Color"),
+        ("Point = record x: int; end;", "Point"),
+        ("Sum = A | B(value: int);", "Sum"),
+        ("", "array[int, 2]"),
+        ("", "ring[int, 2]"),
+    ] {
+        let type_section = if declared.is_empty() {
+            String::new()
+        } else {
+            format!("type\n  {declared}\n")
+        };
+        let source = format!(
+            r#"
+unit t;
+
+{type_section}
+var
+  cells: map[{key}, int, 2];
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#
+        );
+        let error = compile(source.as_bytes(), "t.ig").expect_err("bad key type");
+        assert!(
+            error
+                .message
+                .contains("a map key must be `int`, `string[M]` or `bytes[M]`"),
+            "{key}: {}",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn map_types_are_nominal_in_key_value_and_count() {
+    let cases = [
+        (
+            "a: map[int, string[4], 2];\n  b: map[int, string[8], 2];",
+            "map[int, string[4], 2]",
+            "map[int, string[8], 2]",
+        ),
+        (
+            "a: map[int, int, 2];\n  b: map[int, uint, 2];",
+            "map[int, int, 2]",
+            "map[int, uint, 2]",
+        ),
+        (
+            "a: map[int, int, 2];\n  b: map[int, int, 3];",
+            "map[int, int, 2]",
+            "map[int, int, 3]",
+        ),
+    ];
+    for (vars, expected, found) in cases {
+        let source = format!(
+            r#"
+unit t;
+
+var
+  {vars}
+
+procedure main(args: const string[1024]);
+begin
+  a := b;
+end;
+"#
+        );
+        let error = compile(source.as_bytes(), "t.ig").expect_err("types differ");
+        assert!(
+            error
+                .message
+                .contains(&format!("expected `{expected}`, found `{found}`")),
+            "{}",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn map_buffer_keys_follow_at_least_n_and_keep_their_kind() {
+    let good = br#"
+unit t;
+
+var
+  m: map[string[8], int, 2];
+
+function store(target: var map[string[8], int, 2]; key: const string[16]): Status;
+begin
+  return core.map_put(target, key, 1);
+end;
+
+procedure main(args: const string[1024]);
+var
+  name: string[8];
+  wide: string[16];
+begin
+  name := "x";
+  wide := "z";
+  if core.map_put(m, "y", 2) = Ok then
+    if store(m, wide) = Ok then
+      core.write("ok\n");
+end;
+"#;
+    compile(good, "t.ig").expect("a wider buffer key is accepted");
+
+    // A narrower key parameter is rejected.
+    let source = br#"
+unit t;
+
+var
+  m: map[string[8], int, 2];
+
+procedure main(args: const string[1024]);
+var
+  key: string[4];
+begin
+  key := "x";
+  core.map_put(m, key, 1);
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("too narrow");
+    assert!(
+        error.message.contains("at least 8 bytes"),
+        "{}",
+        error.message
+    );
+
+    // A literal longer than the key capacity is rejected.
+    let source = br#"
+unit t;
+
+var
+  m: map[string[8], int, 2];
+
+procedure main(args: const string[1024]);
+begin
+  core.map_put(m, "abcdefghij", 1);
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("literal too long");
+    assert!(
+        error.message.contains("does not fit map key"),
+        "{}",
+        error.message
+    );
+
+    // `string` and `bytes` do not mix, in either direction.
+    let source = br#"
+unit t;
+
+var
+  m: map[string[8], int, 2];
+  raw: bytes[8];
+
+procedure main(args: const string[1024]);
+begin
+  core.map_put(m, raw, 1);
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("bytes key into a string map");
+    assert!(
+        error
+            .message
+            .contains("expected `string`, found `bytes[8]`"),
+        "{}",
+        error.message
+    );
+
+    let source = br#"
+unit t;
+
+var
+  m: map[bytes[8], int, 2];
+  text: string[8];
+
+procedure main(args: const string[1024]);
+begin
+  core.map_put(m, text, 1);
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("string key into a bytes map");
+    assert!(
+        error
+            .message
+            .contains("expected `bytes`, found `string[8]`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn map_calls_check_receiver_arity_and_value_types() {
+    // Non-map receiver.
+    let source = br#"
+unit t;
+
+var
+  x: int;
+
+procedure main(args: const string[1024]);
+begin
+  x := 1;
+  core.map_put(x, 1, 1);
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("x is not a map");
+    assert!(
+        error
+            .message
+            .contains("`core.map_put` expects a `map[K, V, N]` first argument"),
+        "{}",
+        error.message
+    );
+
+    // Wrong argument count.
+    let source = br#"
+unit t;
+
+var
+  m: map[int, int, 2];
+
+procedure main(args: const string[1024]);
+begin
+  core.map_count(m, 1);
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("one argument only");
+    assert!(
+        error
+            .message
+            .contains("`core.map_count` expects 1 argument, got 2"),
+        "{}",
+        error.message
+    );
+
+    // Wrong value type.
+    let source = br#"
+unit t;
+
+var
+  m: map[int, int, 2];
+
+procedure main(args: const string[1024]);
+begin
+  core.map_put(m, 1, 1.5);
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("value must be int");
+    assert!(
+        error
+            .message
+            .contains("`core.map_put` expects value `int`, found `f64`"),
+        "{}",
+        error.message
+    );
+
+    // Wrong get destination type.
+    let source = br#"
+unit t;
+
+var
+  m: map[int, int, 2];
+
+procedure main(args: const string[1024]);
+var
+  out: uint;
+begin
+  core.map_get(m, 1, out);
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("destination must be int");
+    assert!(
+        error
+            .message
+            .contains("`core.map_get` expects `var value: int`, found `uint`"),
+        "{}",
+        error.message
+    );
+
+    // A string key in an int-keyed map.
+    let source = br#"
+unit t;
+
+var
+  m: map[int, int, 2];
+
+procedure main(args: const string[1024]);
+begin
+  core.map_put(m, "x", 1);
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("string key in an int map");
+    assert!(
+        error
+            .message
+            .contains("`core.map_put` expects key `int`, found `string[1]`"),
+        "{}",
+        error.message
+    );
+
+    // A map is not comparable.
+    let source = br#"
+unit t;
+
+var
+  a: map[int, int, 2];
+  b: map[int, int, 2];
+
+procedure main(args: const string[1024]);
+begin
+  if a = b then
+    core.write("same\n");
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("maps do not compare");
+    assert!(
+        error.message.contains("cannot be used as a scalar value"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn mutating_a_const_map_parameter_is_rejected_but_value_is_writable() {
+    let source = br#"
+unit t;
+
+function peek(source: const map[int, int, 2]): Status;
+begin
+  return core.map_put(source, 1, 1);
+end;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("const is read-only");
+    assert!(
+        error
+            .message
+            .contains("cannot mutate `const` parameter `source`"),
+        "{}",
+        error.message
+    );
+
+    let source = br#"
+unit t;
+
+function fill(source: map[int, int, 2]): int;
+var
+  status: Status;
+begin
+  status := core.map_put(source, 1, 10);
+  return core.map_count(source);
+end;
+
+procedure main(args: const string[1024]);
+var
+  m: map[int, int, 2];
+begin
+  if fill(m) = 0 then
+    core.write("empty\n");
+end;
+"#;
+    compile(source, "t.ig").expect("a value map parameter is a writable copy");
+}
+
+#[test]
+fn map_positions_and_parameters_work() {
+    let source = br#"
+unit t;
+
+type
+  Box = record m: map[int, int, 2]; end;
+  Maybe = Empty | Holds(m: map[int, int, 2]);
+
+var
+  box: Box;
+  maybe: Maybe;
+  cells: array[map[int, int, 2], 2];
+  queue: ring[map[int, int, 2], 2];
+  local: map[int, int, 2];
+  inner: map[int, int, 2];
+  outer: map[int, int, 2];
+  st: Status;
+  value: int;
+
+function peek(source: const map[int, int, 2]): int;
+begin
+  value := -1;
+  if core.map_get(source, 1, value) <> Ok then
+    return -1;
+  return value;
+end;
+
+function store(target: var map[int, int, 2]): Status;
+begin
+  return core.map_put(target, 1, 10);
+end;
+
+procedure main(args: const string[1024]);
+begin
+  st := core.map_put(box.m, 1, 10);
+  st := core.map_get(box.m, 1, value);
+  st := core.map_put(cells[0], 2, 20);
+  st := core.map_get(cells[0], 2, value);
+  st := core.map_put(inner, 3, 30);
+  st := core.ring_push(queue, inner);
+  st := core.ring_pop(queue, inner);
+  maybe := Holds(inner);
+  case maybe of
+    Empty: value := 0;
+    Holds(m): st := core.map_put(m, 4, 40);
+  end;
+  st := store(local);
+  value := peek(local);
+  outer := local;
+  st := core.map_remove(outer, 1);
+  if core.map_count(outer) = 0 then
+    core.write("removed\n");
+end;
+"#;
+    compile(source, "t.ig").expect("maps in every position compile");
+}
+
+#[test]
+fn map_calls_emit_the_map_opcodes() {
+    let source = br#"
+unit t;
+
+var
+  m: map[string[8], int, 2];
+  out: int;
+  st: Status;
+  word: string[8];
+
+procedure main(args: const string[1024]);
+begin
+  word := "a";
+  st := core.map_put(m, word, 1);
+  st := core.map_get(m, word, out);
+  if core.map_has(m, word) then
+    out := out + 1;
+  st := core.map_remove(m, word);
+  out := core.map_count(m);
+end;
+"#;
+    let package = compile(source, "t.ig").expect("compiles");
+    let ops = opcodes_of(&package);
+    for opcode in [
+        abi::opcodes::MAP_PUT,
+        abi::opcodes::MAP_GET,
+        abi::opcodes::MAP_HAS,
+        abi::opcodes::MAP_REMOVE,
+        abi::opcodes::MAP_COUNT,
+    ] {
+        assert!(ops.contains(&opcode), "missing {opcode:#x} in {ops:?}");
+    }
+    assert!(
+        !ops.contains(&abi::opcodes::BUILTIN),
+        "maps are opcodes, not host builtins"
+    );
+}
+
+#[test]
+fn the_map_sample_compiles() {
+    let source = include_bytes!("../../samples/lang/map.ig");
+    let package = compile(source, "map.ig").expect("the map sample compiles");
+    // Smallest arena the sample accepts, found by bisection: the real scratch
+    // cost, because `compile_into` caps the arena to its slice length.
+    let mut low = 4 * 1024usize;
+    let mut high = compiler::MAX_ARENA_BYTES;
+    while low < high {
+        let mid = (low + high) / 2;
+        let mut arena = vec![0u8; mid];
+        let mut code = vec![0u8; compiler::MAX_CODE_BYTES];
+        let mut manifest = vec![0u8; compiler::MAX_MANIFEST_BYTES];
+        match compiler::compile_into(source, "map.ig", &mut arena, &mut code, &mut manifest) {
+            Ok(_) => high = mid,
+            Err(error) if error.status == abi::Status::CapacityExceeded => low = mid + 1,
+            Err(error) => panic!("unexpected diagnostic: {error}"),
+        }
+    }
+    println!(
+        "map sample: source {} B, code {} B (package {} B), state {} B, stack {} B, arena {} B",
+        source.len(),
+        CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE])
+            .expect("header")
+            .code_len,
+        package.code.len(),
+        state_size(&package),
+        CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE])
+            .expect("header")
+            .stack_size,
+        low,
+    );
+}
+
+#[test]
+fn compile_cost_of_a_map_is_bounded_and_reported() {
+    // The same application with and without one map isolates the cost of the
+    // type and its operations.
+    let without = br#"
+unit cost;
+uses core;
+procedure main(args: const string[1024]);
+begin
+  core.write("map\n");
+end;
+"#;
+    let with = br#"
+unit cost;
+uses core;
+var
+  m: map[int, int, 4];
+procedure main(args: const string[1024]);
+var
+  value: int;
+begin
+  if core.map_put(m, 1, 2) = Ok then
+    value := core.map_count(m);
+  if core.map_get(m, 1, value) = Ok then
+    core.write("map\n");
+end;
+"#;
+    let plain = compile(without, "cost.ig").expect("compiles");
+    let map = compile(with, "cost.ig").expect("compiles");
+
+    let minimum_arena = |source: &[u8]| -> usize {
+        let mut low = 4 * 1024usize;
+        let mut high = compiler::MAX_ARENA_BYTES;
+        while low < high {
+            let mid = (low + high) / 2;
+            let mut arena = vec![0u8; mid];
+            let mut code = vec![0u8; compiler::MAX_CODE_BYTES];
+            let mut manifest = vec![0u8; compiler::MAX_MANIFEST_BYTES];
+            match compiler::compile_into(source, "cost.ig", &mut arena, &mut code, &mut manifest) {
+                Ok(_) => high = mid,
+                Err(error) if error.status == abi::Status::CapacityExceeded => low = mid + 1,
+                Err(error) => panic!("unexpected diagnostic: {error}"),
+            }
+        }
+        low
+    };
+    let plain_arena = minimum_arena(without);
+    let map_arena = minimum_arena(with);
+    println!(
+        "map cost: code {} B (app alone {} B), state {} B, stack {} B, arena {} B (app alone {} B)",
+        map.code.len(),
+        plain.code.len(),
+        state_size(&map),
+        CodeHeader::from_bytes(&map.code[..abi::CODE_HEADER_SIZE])
+            .expect("header")
+            .stack_size,
+        map_arena,
+        plain_arena,
+    );
+    assert!(
+        map_arena <= compiler::MAX_ARENA_BYTES,
+        "the map app fits the published arena cap"
+    );
+    assert!(map.code.len() > plain.code.len());
+    assert_eq!(
+        state_size(&map),
+        264,
+        "map[int, int, 4] is 8 + 8 slots of 32"
+    );
 }
