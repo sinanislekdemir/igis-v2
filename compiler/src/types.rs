@@ -10,6 +10,14 @@ use core::fmt;
 /// and frame sizes; the first-milestone tuning cap is 1 MiB per value.
 pub const MAX_CAPACITY: u32 = 1 << 20;
 
+/// Enum id of the predeclared `Status` type (spec 0003, "Errors").
+///
+/// Enum ids are local to one compilation and assigned in declaration order,
+/// with `Status` first. The id never reaches the artifact: an enum value is its
+/// ordinal in one 8-byte slot, and casts carry the variant count as an
+/// immediate.
+pub const STATUS_ENUM: u16 = 0;
+
 /// Value kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -27,6 +35,9 @@ pub enum Kind {
     String,
     /// Raw bytes with a fixed capacity.
     Bytes,
+    /// A nominal enum type, by compiler-local enum id. The value is the
+    /// variant ordinal in one 8-byte slot (spec 0003).
+    Enum(u16),
 }
 
 impl Kind {
@@ -40,6 +51,7 @@ impl Kind {
             Kind::Float => "f64",
             Kind::String => "string",
             Kind::Bytes => "bytes",
+            Kind::Enum(_) => "enum",
         }
     }
 
@@ -62,6 +74,14 @@ impl Type {
     /// A scalar type with no capacity.
     pub const fn scalar(kind: Kind) -> Self {
         Type { kind, cap: 0 }
+    }
+
+    /// An enum type by compiler-local id.
+    pub const fn enumeration(id: u16) -> Self {
+        Type {
+            kind: Kind::Enum(id),
+            cap: 0,
+        }
     }
 
     /// A buffer type with a capacity.
@@ -96,13 +116,15 @@ impl Type {
             Kind::Uint => Some(value_kind::UINT),
             Kind::Byte => Some(value_kind::BYTE),
             Kind::Float => Some(value_kind::F64),
-            Kind::Bool | Kind::String | Kind::Bytes => None,
+            Kind::Bool | Kind::String | Kind::Bytes | Kind::Enum(_) => None,
         }
     }
 }
 
 impl fmt::Display for Type {
-    /// Renders the type the way source writes it.
+    /// Renders the type the way source writes it. An enum has no name here
+    /// because [`Type`] carries only its id; codegen renders diagnostics
+    /// through its enum table.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.kind {
             Kind::String | Kind::Bytes => write!(f, "{}[{}]", self.kind.name(), self.cap),

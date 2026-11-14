@@ -133,6 +133,7 @@ pub const READ_LINE: u8 = 0x42;
 /// Works for both `string` and `bytes`; a `string` is searched byte-wise, not by
 /// code point.
 pub const FIND: u8 = 0x43;
+
 /// Pop a length, pop a start, pop a source reference, pop a destination
 /// reference, copy the slice and push the copied length (`core.substr_into`).
 ///
@@ -155,6 +156,14 @@ pub const SUBSTR: u8 = 0x44;
 /// (the sign is additional). A result that does not fit the capacity pushes
 /// `-6` (`Status::CapacityExceeded`) and leaves the destination length alone.
 pub const FORMAT_INT: u8 = 0x45;
+/// Checked cast from an `int` ordinal to an enum value (`EnumName(int)`).
+/// Immediate: `count: u32`, the number of variants of the destination enum.
+///
+/// The operand is the ordinal; the result is the same 8-byte value, now typed
+/// as the enum. An ordinal outside `0..count` faults `Overflow`, so an invalid
+/// enum value cannot be constructed. `int(enum_value)` emits nothing: the
+/// ordinal already is the representation.
+pub const ENUM_CAST: u8 = 0x46;
 
 /// Invoke a host builtin. Immediate: `builtin: u32` (see [`builtin`]).
 pub const BUILTIN: u8 = 0x50;
@@ -214,15 +223,19 @@ pub mod builtin {
     pub const WRITE: u32 = 1;
     /// `core.clock()`: push the host's monotonic nanosecond counter.
     pub const CLOCK: u32 = 2;
-    /// `core.spawn(path, args)`: pop two buffer references, push the new task
-    /// id (positive) or the negated `Status` discriminant.
+    /// `core.spawn(path, args, var id)`: pop an id reference, two buffer
+    /// references; on success write the reserved task id through the reference
+    /// and push `Ok` (0). On failure the reference is untouched and the error
+    /// `Status` ordinal is pushed (spec 0005).
     pub const SPAWN: u32 = 3;
-    /// `core.wait(id)`: pop a task id, push `0` (Ok), `1` (Killed) or
-    /// `2 + fault_code` (Faulted), or the negated `Status` discriminant. May
-    /// block; the instruction is retried on wake without consuming operands.
+    /// `core.wait(id, var reason)`: pop a reason reference and a task id; when
+    /// the child has terminated write the reason int (`0` Ok, `1` Killed,
+    /// `2 + fault_code` Faulted) through the reference and push `Ok`; when the
+    /// wait itself fails push that `Status` ordinal. May block; the instruction
+    /// is retried on wake without consuming operands.
     pub const WAIT: u32 = 4;
-    /// `core.kill(id)`: pop a task id, push `0` on success or the negated
-    /// `Status` discriminant.
+    /// `core.kill(id)`: pop a task id, push the `Status` ordinal (`Ok` on
+    /// success, `NotFound` for an unknown or finished id).
     pub const KILL: u32 = 5;
     /// `core.len(buffer)`: pop a `string` or `bytes` reference, push its
     /// runtime length as a `uint`. One builtin serves both kinds; the length is
@@ -242,8 +255,9 @@ pub mod builtin {
         match id {
             WRITE => Some((1, 0)),
             CLOCK => Some((0, 1)),
-            SPAWN => Some((2, 1)),
-            WAIT | KILL => Some((1, 1)),
+            SPAWN => Some((3, 1)),
+            WAIT => Some((2, 1)),
+            KILL => Some((1, 1)),
             LEN => Some((1, 1)),
             PORT_IN8 => Some((1, 1)),
             PORT_OUT8 => Some((2, 1)),
@@ -262,9 +276,8 @@ pub const fn instruction_words(op: u8) -> Option<u32> {
         | LT | LE | GT | GE | LT_U | LE_U | GT_U | GE_U | LOAD_U8 | CMP_BUFFERS | FIND => Some(1),
         CONST => Some(3),
         JMP | JZ | JNZ | CALL | LOAD_LOCAL | STORE_LOCAL | REF_LOCAL | LOAD_STATE | STORE_STATE
-        | REF_STATE | REF_CONST | APPEND | READ_LINE | STORE_U8 | BUILTIN | SUBSTR | FORMAT_INT => {
-            Some(2)
-        }
+        | REF_STATE | REF_CONST | APPEND | READ_LINE | STORE_U8 | BUILTIN | SUBSTR | FORMAT_INT
+        | ENUM_CAST => Some(2),
         _ => None,
     }
 }
@@ -319,6 +332,7 @@ pub const fn mnemonic(op: u8) -> Option<&'static str> {
         FIND => Some("find"),
         SUBSTR => Some("substr"),
         FORMAT_INT => Some("format_int"),
+        ENUM_CAST => Some("enum_cast"),
         BUILTIN => Some("builtin"),
         FADD => Some("fadd"),
         FSUB => Some("fsub"),

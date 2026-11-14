@@ -9,6 +9,7 @@ var
   rest: string[256];
   path: string[256];
   argv: string[256];
+  st: Status;
   id: int;
   code: int;
   space: int;
@@ -20,26 +21,37 @@ begin
   core.write(text);
 end;
 
+// Reports the staged reason int from `core.wait`: `0` Ok, `1` Killed,
+// `2 + fault_code` Faulted. `ExitReason` is not a language type yet (spec
+// 0005), so the reason stays an `int` and this procedure decodes it.
+procedure report(reason: int);
+begin
+  if reason = 0 then
+    say("child: ok\n")
+  else if reason = 1 then
+    say("child: killed\n")
+  else if reason >= 2 then
+    say("child: faulted\n")
+  else
+    say("child: bad reason\n");
+end;
+
 procedure main(args: const string[1024]);
 begin
   banner := "igis-v2 shell\n";
   say(banner);
   say("shell: spawning child\n");
 
-  // Staged ABI: a positive result is a task id, a negative one is -Status.
-  id := core.spawn("child", "hello");
-  if id > 0 then
+  // `core.spawn` returns `Status` and writes the reserved task id through the
+  // `var` out-parameter (spec 0003 E1, spec 0005). `core.wait` blocks until
+  // the child exits and writes its reason int.
+  st := core.spawn("child", "hello", id);
+  if st = Ok then
   begin
     say("shell: child task id assigned\n");
-
-    // Blocks on the child; the scheduler runs it and wakes us on exit.
-    code := core.wait(id);
-    if code = 0 then
-      say("child: ok\n")
-    else if code = 1 then
-      say("child: killed\n")
-    else if code >= 2 then
-      say("child: faulted\n")
+    st := core.wait(id, code);
+    if st = Ok then
+      report(code)
     else
       say("child: wait failed\n");
   end
@@ -99,17 +111,13 @@ begin
         say("usage: run <app> [args]\n")
       else
       begin
-        id := core.spawn(path, argv);
-        if id > 0 then
+        st := core.spawn(path, argv, id);
+        if st = Ok then
         begin
           say("started\n");
-          code := core.wait(id);
-          if code = 0 then
-            say("child: ok\n")
-          else if code = 1 then
-            say("child: killed\n")
-          else if code >= 2 then
-            say("child: faulted\n")
+          st := core.wait(id, code);
+          if st = Ok then
+            report(code)
           else
             say("wait failed\n");
         end

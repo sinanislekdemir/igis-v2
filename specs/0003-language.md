@@ -260,6 +260,36 @@ Rules:
   zero is invalid. The application stores the id in its own `state` only if it wants to
   `wait` or `kill` the child later; there is no per-task handle table.
 
+#### Enums (implemented)
+
+```text
+type Color = (Red, Green, Blue);
+```
+
+- A `type` section sits with `const` and `var` at unit level and may appear in any
+  order; one declaration is `Name = (Variant, Variant, ...);`. A unit may have several
+  `type` sections. Records and sum types are still future work; only the enum form is
+  accepted.
+- Enum types are **nominal**: `Color` and another enum with identical variants are
+  distinct types. An enum name and its variant names share the one top-level namespace
+  with constants, variables, procedures and other enum names. A duplicate type name, a
+  duplicate variant (in one enum or across enums), or a variant/type name that collides
+  with another top-level declaration is a compile error. An enum may not shadow a
+  built-in type name.
+- A variant is a **global constant of its enum type**, with ordinal `0..n-1` assigned in
+  declaration order. The representation is one 8-byte slot holding the ordinal.
+- Assignment and comparison accept the same enum type only. `=` and `<>` compare
+  ordinals; `<`, `<=`, `>`, `>=` order by ordinal. Mixing two enums, or an enum with
+  `int`/`uint`/`byte`, is a compile error without an explicit cast. Arithmetic on an
+  enum is a compile error.
+- Casts: `int(value)` yields the ordinal of an enum value. `EnumName(integer)` is the
+  checked construction from an `int` ordinal and faults `Overflow` at run time when the
+  value is outside `0..variant_count`, so an invalid enum value cannot exist. Other
+  numeric casts from an enum must go through `int(x)` first; the only accepted source
+  for an enum cast is `int` (or the same enum, which is the identity).
+- The declaration emits no runtime type tag; only `EnumName(int)` emits an `enum_cast`
+  instruction carrying the variant count (spec 0008).
+
 There are **no user-defined generics**. The parametric types above are built in; the
 compiler knows their layout and operations. Generic algorithms are either built-ins
 (`ring`, `map`) or written per type in `stdlib`.
@@ -363,10 +393,18 @@ conditions use `Status`:
 type Status = (Ok, WouldBlock, Closed, NotFound, Invalid, Full, CapacityExceeded, IoError);
 ```
 
+`Status` is **predeclared**: it exists in every unit without a `type` declaration, and
+its variant names (`Ok`, `WouldBlock`, ...) resolve as global constants with ordinals
+`0..7` in exactly that order. A user `type Status = ...` is a compile error. The ordinal
+of `Ok` is zero, so `st = Ok` is an ordinary enum comparison. The compiler's `Status`
+and `abi::Status` share the same order; the interpreter pushes a host-returned `Status`
+directly (spec 0005).
+
 - **E1 (MUST):** A fallible operation returns `Status` and writes its result through a
   `var` out-parameter.
 - **E2 (MUST):** The compiler warns when the `Status` returned by a call is discarded
-  without being compared to `Ok`.
+  without being compared to `Ok`. (No warning channel exists yet; the rule stands for
+  the first milestone.)
 - **E3 (MUST):** The language has no exceptions, no unwinding and no hidden error values.
 
 Example:
@@ -379,6 +417,19 @@ st := stdlib.parse_int(input, var n);
 if st <> Ok then
   core.write("not a number\n");
 ```
+
+The implemented REPL primitives follow E1 and return `Status`:
+
+```text
+core.spawn(path: const string[0], args: const string[0], var id: int) -> Status
+core.wait(id: int, var reason: int) -> Status
+core.kill(id: int) -> Status
+```
+
+`ExitReason` and `Diagnostic` are not language types yet, so `wait` writes a reason
+`int` (`0` Ok, `1` Killed, `2 + fault_code` Faulted) and there is no `var diag`
+parameter; `run`/`spawn` compile diagnostics still go to the serial log (spec 0005,
+"Staged ABI"). `TaskId` is an `int` for now.
 
 ## Modules
 
@@ -428,6 +479,9 @@ if st <> Ok then
   root (`0005-host-interface.md`). `kill(id)` on a queued request cancels it and records
   `Killed`; on a live task it requests termination at the next safe point; on an unknown or
   finished id it returns `Status.NotFound`.
+  **Implemented slice:** `spawn`/`wait`/`kill` return `Status` and use `var id: int` /
+  `var reason: int`; `diag` and `ExitReason` wait for records, and `run` is not exposed
+  yet (spec 0005).
 - **C8 (MUST):** A spawned child is a separate application instance with its own regions.
   It shares no memory with the parent; communication is through streams.
 - **C9 (MUST):** The argument passed to `run`/`spawn` is a fixed `string[1024]`, delivered
@@ -601,6 +655,11 @@ is the signal.
 | `f64` used as a map key | Compile error |
 | Shift count outside `0..63` | `fault(IllegalOperation)` |
 | Duplicate or malformed stream name | Compile error |
+| Duplicate enum type, duplicate variant, or a variant colliding with another top-level name | Compile error |
+| `type Status = ...` (predeclared) | Compile error |
+| Enum compared or assigned to a different enum, or to an integer, without a cast | Compile error |
+| Arithmetic on an enum | Compile error |
+| `EnumName(x)` with `x` outside `0..variant_count` | `fault(Overflow)`; no invalid enum value can exist |
 | Stream capacity outside `1..=65536` | Compile error |
 | Path longer than 256 bytes | `Status.CapacityExceeded` |
 | Recursion past the declared stack | Guard-page fault; `fault(StackOverflow)` |
@@ -648,3 +707,4 @@ is the signal.
 | 2026-11-13 | Buffer indexing, comparison and length: `buf[i]` yields a `byte` (raw for `string`, T4); writes are `bytes`-only and extend the length to `index + 1`, zero-filling the gap; reads check the runtime length and writes the declared capacity; `=`/`<>` compare buffers of the same kind across capacities; `core.len(buf) -> uint`. |
 | 2026-11-14 | Staged slicing and search: `core.substr_into(dst, src, start, len) -> int` (same kind, negative → `-4`, past-end → 0, clamped copy, UTF-8 boundary check for `string`) and `core.find(buf, byte) -> int` (first index or `-1`, `0..len`, both kinds). Both are `core` opcodes until `stdlib.substr_into` exists (T4 staging). |
 | 2026-11-14 | Staged integer formatting: `core.format_int_into(dst, value, base, width) -> int` (decimal/hex, negative sign, zero padding, exact capacity or `-6`, bad base `-4`). First `syslib` slice: `port_in8`/`port_out8` with `Port` staged as a scalar `uint` (Q45); MMIO/DMA handles remain the target design. |
+| 2026-11-14 | Enums implemented: `type Name = (Variant, ...);` with nominal types, ordinals `0..n-1`, variants as global constants in the top-level namespace, one 8-byte slot, same-enum assignment/comparison plus ordinal ordering, `int(enum)` and range-checked `EnumName(int)` (`fault(Overflow)`). `Status` is predeclared with the spec's eight variants (`Ok` = 0); a user declaration is an error. `spawn`/`wait`/`kill` return `Status` with `var id`/`var reason` out-parameters (Q43 narrowed; spec 0005, spec 0008 `enum_cast`). |

@@ -8,10 +8,11 @@
 //! path uses, validates the package, places `code`/`state`/`stack` and enqueues
 //! the task under the reserved id.
 //!
-//! A failure is not reported to the caller directly (the staged `spawn` ABI
-//! returns the id before the compile happens). It is written to the console and
-//! recorded in the exit ring as `Faulted(IoError)` under the reserved id, so a
-//! parent blocked in `core.wait` wakes and observes a failed child.
+//! A failure is not reported to the caller directly (`core.spawn` returns
+//! `Status.Ok` once the id is reserved; the compile happens later). It is
+//! written to the console and recorded in the exit ring as `Faulted(IoError)`
+//! under the reserved id, so a parent blocked in `core.wait` wakes and observes
+//! a failed child.
 //!
 //! The exit ring holds the last [`EXIT_RING_CAPACITY`] terminations as
 //! `{id, reason}`. `core.wait` consumes the record; the oldest is evicted when

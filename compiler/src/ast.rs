@@ -16,12 +16,29 @@ pub struct Unit<'a> {
     pub name: &'a str,
     /// Names in the optional `uses ...;` clause.
     pub uses: &'a [&'a str],
+    /// Top-level `type` declarations, in declaration order.
+    pub types: &'a [TypeDecl<'a>],
     /// Top-level constants, in declaration order.
     pub consts: &'a [ConstDecl<'a>],
     /// Top-level variables, in declaration order.
     pub vars: &'a [VarDecl<'a>],
     /// Procedures, in declaration order. The order fixes the function indices.
     pub procs: &'a [ProcDecl<'a>],
+}
+
+/// `type Name = (Variant, Variant, ...);`
+///
+/// This slice implements enums only; records and sum types stay future work.
+#[derive(Debug, Clone, Copy)]
+pub struct TypeDecl<'a> {
+    /// Enum type name.
+    pub name: &'a str,
+    /// Variant names, in declaration order (their ordinals are `0..n-1`).
+    pub variants: &'a [&'a str],
+    /// 1-based source line.
+    pub line: u32,
+    /// 1-based source column.
+    pub column: u32,
 }
 
 /// `const Name = <expression>;`

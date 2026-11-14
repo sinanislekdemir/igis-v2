@@ -276,3 +276,98 @@ fn find_and_substr_work_end_to_end() {
     );
     assert_eq!(result.reason, ExitReason::Ok);
 }
+
+#[test]
+fn enums_carry_ordinals_and_check_casts_end_to_end() {
+    let source = br#"
+unit enumapp;
+
+uses core;
+
+type Color = (Red, Green, Blue);
+
+var
+  c: Color;
+  text: string[8];
+  n: int;
+  ok: bool;
+
+procedure main(args: const string[1024]);
+begin
+  c := Green;
+  n := core.format_int_into(text, int(c), uint(10), uint(0));
+  core.write(text);
+  core.write("\n");
+  ok := c = Green;
+  if ok then core.write("eq ok\n");
+  ok := Red < Blue;
+  if ok then core.write("order ok\n");
+  c := Color(2);
+  ok := c = Blue;
+  if ok then core.write("cast ok\n");
+  ok := c <> Red;
+  if ok then core.write("ne ok\n");
+end;
+"#;
+    let package = langhost::compile(source, "enumapp").expect("enums compile");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"1\neq ok\norder ok\ncast ok\nne ok\n");
+}
+
+#[test]
+fn an_out_of_range_enum_cast_faults_overflow() {
+    let source = br#"
+unit badenum;
+
+type Color = (Red, Green);
+
+var
+  c: Color;
+
+procedure main(args: const string[1024]);
+begin
+  c := Red;
+  c := Color(5);
+end;
+"#;
+    let package = langhost::compile(source, "badenum").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Faulted(FaultCode::Overflow));
+    assert_eq!(result.fault_at.map(|(line, _)| line), Some(12));
+}
+
+#[test]
+fn spawn_and_kill_report_status_values_on_the_host() {
+    let source = br#"
+unit spawnstatus;
+
+uses core;
+
+var
+  st: Status;
+  id: int;
+  code: int;
+
+procedure main(args: const string[1024]);
+begin
+  st := core.spawn("does_not_exist", "", id);
+  if st = NotFound then
+    core.write("spawn not found ok\n")
+  else
+    core.write("wrong spawn status\n");
+  st := core.kill(id);
+  if st = NotFound then
+    core.write("kill not found ok\n")
+  else
+    core.write("wrong kill status\n");
+end;
+"#;
+    let package = langhost::compile(source, "spawnstatus").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(
+        result.output,
+        b"spawn not found ok\nkill not found ok\n".to_vec()
+    );
+}

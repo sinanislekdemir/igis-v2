@@ -655,6 +655,17 @@ impl Machine {
                 let capacity = read_u32(code, pc + 4)? as usize;
                 self.format_int(kind, capacity, state, stack, constants, args)?;
             }
+            opcodes::ENUM_CAST => {
+                // `EnumName(int)` construction: the ordinal must name a variant.
+                // Anything else faults `Overflow`, so an invalid enum value
+                // cannot exist (spec 0003, "Enums").
+                let count = read_u32(code, pc + 4)? as u64;
+                let value = self.pop(stack)?;
+                if value >= count {
+                    return Err(FaultCode::Overflow);
+                }
+                self.push(stack, value)?;
+            }
             opcodes::BUILTIN => {
                 let id = read_u32(code, pc + 4)?;
                 match id {
@@ -682,9 +693,12 @@ impl Machine {
                         self.push(stack, now)?;
                     }
                     builtin::SPAWN => {
+                        // `core.spawn(path, args, var id) -> Status`: the id
+                        // reference is on top, then the two buffer references.
+                        let id_bits = self.pop(stack)?;
                         let args_bits = self.pop(stack)?;
                         let path_bits = self.pop(stack)?;
-                        let value = {
+                        let result = {
                             let (path_region, path_offset) =
                                 self.resolve(path_bits, state, stack, constants, args)?;
                             let (args_region, args_offset) =
@@ -723,26 +737,44 @@ impl Machine {
                                 constants,
                                 args,
                             )?;
-                            match host.spawn(path, argument) {
-                                Ok(id) => id,
-                                Err(status) => status_code(status),
-                            }
+                            host.spawn(path, argument)
                         };
-                        self.push(stack, value)?;
+                        match result {
+                            Ok(id) => {
+                                self.write_ref(id_bits, id, state, stack, constants, args)?;
+                                self.push(stack, Status::Ok as u64)?;
+                            }
+                            Err(status) => {
+                                // The out-parameter is untouched on failure.
+                                self.push(stack, status as u64)?;
+                            }
+                        }
                     }
                     builtin::WAIT => {
+                        // `core.wait(id, var reason) -> Status`: the reason
+                        // reference is on top of the id.
+                        let reason_bits = self.pop(stack)?;
                         let id = self.pop(stack)?;
                         match host.wait(id) {
                             WaitOutcome::Exited(reason) => {
-                                self.push(stack, exit_code(reason))?;
+                                self.write_ref(
+                                    reason_bits,
+                                    exit_code(reason),
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.push(stack, Status::Ok as u64)?;
                             }
                             WaitOutcome::Status(status) => {
-                                self.push(stack, status_code(status))?;
+                                self.push(stack, status as u64)?;
                             }
                             WaitOutcome::Blocked => {
-                                // Put the id back on the operand stack and point
-                                // `pc` at the same instruction: the retry after
-                                // the wake-up must see an unchanged boundary.
+                                // Put both operands back on the operand stack
+                                // and point `pc` at the same instruction: the
+                                // retry after the wake-up must see an unchanged
+                                // boundary.
                                 self.pc = pc;
                                 self.sp = saved_sp;
                                 return Ok(Step::Blocked(WaitKind::ChildExit(id)));
@@ -752,7 +784,7 @@ impl Machine {
                     builtin::KILL => {
                         let id = self.pop(stack)?;
                         let status = host.kill(id);
-                        self.push(stack, status_code(status))?;
+                        self.push(stack, status as u64)?;
                     }
                     builtin::LEN => {
                         let bits = self.pop(stack)?;
@@ -1096,6 +1128,26 @@ impl Machine {
             return Err(FaultCode::OutOfBounds);
         }
         Ok((reference.region, offset))
+    }
+
+    /// Writes one scalar through a `var` reference (`core.spawn`'s id and
+    /// `core.wait`'s reason). Only `state` and `stack` are writable; a
+    /// reference into code or the argument buffer is `IllegalOperation`.
+    fn write_ref(
+        &self,
+        bits: u64,
+        value: u64,
+        state: &mut [u8],
+        stack: &mut [u8],
+        code: &[u8],
+        args: &[u8],
+    ) -> Result<(), FaultCode> {
+        let (region, offset) = self.resolve(bits, state, stack, code, args)?;
+        match region {
+            refs::REGION_STATE => write_u64(state, offset, value),
+            refs::REGION_STACK => write_u64(stack, offset, value),
+            _ => Err(FaultCode::IllegalOperation),
+        }
     }
 
     fn buffer_len(
@@ -1515,14 +1567,17 @@ fn byte_at(
     bytes.get(offset).copied().ok_or(FaultCode::OutOfBounds)
 }
 
-/// Maps an [`abi::Status`] to the language's `int` result: the negated
-/// discriminant (`Invalid` is `-4`, `NotFound` is `-3`, ...).
+/// Maps an [`abi::Status`] to the staged `int` result the buffer primitives
+/// still use: the negated discriminant (`Invalid` is `-4`, `NotFound` is `-3`,
+/// ...). `core.spawn`/`wait`/`kill` return the `Status` value itself, not this
+/// encoding (spec 0005).
 fn status_code(status: Status) -> u64 {
     (-(status as i64)) as u64
 }
 
-/// Maps a finished child to the staged `core.wait` result: `0` for `Ok`, `1`
-/// for `Killed`, `2 + code` for `Faulted(code)`.
+/// Maps a finished child to the staged `core.wait` reason int: `0` for `Ok`,
+/// `1` for `Killed`, `2 + code` for `Faulted(code)`. `ExitReason` is not a
+/// language type yet (spec 0005).
 fn exit_code(reason: ExitReason) -> u64 {
     match reason {
         ExitReason::Ok => 0,

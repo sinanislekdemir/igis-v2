@@ -6,8 +6,8 @@
 //! The target design keeps the kernel out of line editing: input is a byte
 //! stream, and `stdlib`/the shell echo and assemble lines. A shell can now
 //! index and compare buffers, but the language still has no way to delete or
-//! insert a byte inside one, so this milestone stages that work here, exactly
-//! like the scalar `spawn`/`wait` ABI. The service opportunity polls COM1 and the
+//! insert a byte inside one, so this milestone stages that work here. The
+//! service opportunity polls COM1 and the
 //! PS/2 keyboard into one static FIFO; printable bytes are appended to a
 //! pending line and echoed, Backspace erases, Enter completes the line into a
 //! small ring, and Ctrl+C clears it. `core.read_line` pops a finished line and

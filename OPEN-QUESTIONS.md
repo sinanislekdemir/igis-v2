@@ -27,7 +27,7 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | Q8 | Debug/introspection primitive | shape open (task listing, counters, trace); none in M1 | after the shell exists |
 | Q9 | DMA and block primitives | handle model fixed; no primitive in M1 | first real block device |
 | Q39 | Console/stream multiplexing (`poll`/`select`) | none in M1; a task blocks on one source at a time | when an application must serve two input sources |
-| Q43 | Staged scalar `spawn`/`wait`/`kill` ABI | `int` task ids, negated `Status`, `0`/`1`/`2 + fault_code` wait results; replace with `Status`/`Diagnostic`/`ExitReason` records when the language has enums/records (spec 0005, "Staged ABI") | before `stdlib` exposes `run`, and before console input builds a shell on top of it |
+| Q43 | Records for `Diagnostic`/`ExitReason` | the REPL primitives now return the predeclared `Status` enum (`core.spawn(path, args, var id)`, `core.wait(id, var reason)`, `core.kill(id)`), so only the two records are left: `wait` still writes a staged reason `int` (`0`/`1`/`2 + fault_code`), there is no `var diag: Diagnostic`, `TaskId` is an `int`, and `core.run` is not exposed. Replace them when records and sum types exist (spec 0005, "Implemented ABI") | before `stdlib` exposes `run` |
 | Q44 | Staged kernel line discipline (`core.read_line`) | the kernel polls COM1/PS-2, echoes, assembles and stores lines in a 4-line ring; `core.read_line(var buf)` blocks until a line exists and truncates to the buffer. Replace with application-side editing when string length/truncate/insert operations exist: indexing alone reads and writes single bytes but cannot delete one (spec 0005, "Staged line discipline") | when `stdlib` string editing exists |
 | Q45 | Staged `syslib` handles | `syslib.port_in8`/`port_out8` are implemented with `Port` as a plain scalar `uint` (low 16 bits used); there are no opaque `Port`/`MmioRegion` types, MMIO mapping, or DMA/block primitives yet. Replace with the handle model when MMIO or DMA lands (specs 0003, 0005) | first MMIO or DMA device |
 
@@ -179,7 +179,8 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
 10. ~~REPL request service and blocking~~ — done: `core.spawn`/`wait`/`kill`, a 1024-slot
     request queue serviced before every claim, a 64-entry exit ring, blocked tasks skipped
     by `claim` and woken on child termination; the `shell` → `child` sample proves the
-    path. The ABI is staged as scalars (Q43).
+    path. The primitives return `Status`; only `Diagnostic`/`ExitReason` remain staged
+    (Q43).
 11. ~~Console input~~ — done: COM1 and the PS/2 keyboard are polled in the service
     opportunity, a kernel-staged line ring echoes/edits, and `core.read_line` blocks the
     shell until a line exists (Q44; spec 0005).
@@ -201,9 +202,15 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
     seconds/minutes/hours as BCD and prints `HH:MM:SS`; the host mock prints `00:00:00`.
     `Port` is staged as a scalar `uint` (Q45). Next for `syslib`: opaque `Port`/`MmioRegion`
     types, MMIO mapping and bounds checks, then DMA and block access. On the language side:
-    `stdlib` text helpers, records/enums and the record-based `spawn` ABI (Q43); then APs,
+    `stdlib` text helpers and records/sum types (`Diagnostic`, `ExitReason`, Q43); then APs,
     the realtime class and streams (Q3/Q4 when their features land).
 15. ~~Kernel stack bound for compilation~~ — done (Q42): a fixed 32-level compiler nesting
     limit with a diagnostic, plus a dedicated 256 KiB guarded kernel stack for everything
     after early boot (one not-present frame, 2 MiB page split to 4 KiB PTEs, `#PF` on its
     own IST). The boot stack is now early-boot only. Per-task stack guards stay future work.
+16. ~~Enums and the `Status` ABI~~ — done: `type Name = (Variant, ...)` with nominal
+    types, ordinals `0..n-1`, same-enum assignment/comparison and ordinal ordering,
+    `int(enum)` and range-checked `EnumName(int)` (`fault(Overflow)`, opcode `enum_cast`,
+    ABI v1 60 → 61). `Status` is predeclared (`Ok` = 0). `core.spawn(path, args, var id)`,
+    `core.wait(id, var reason)` and `core.kill(id)` return `Status`; the shell checks them
+    and decodes the staged reason int. Records are the remaining piece of Q43.

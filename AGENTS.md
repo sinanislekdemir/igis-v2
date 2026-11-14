@@ -63,9 +63,11 @@ constraints learned there.
   levels with a `Diagnostic`, and after early boot `kmain` switches from the `.boot` stack
   to a 256 KiB stack with a not-present guard frame below it (the guard's 2 MiB identity
   page is split to 4 KiB PTEs; `#PF` uses its own IST). A stack overflow now faults cleanly
-  at the guard instead of writing into the boot page tables (Q42). The next pieces are
-  `stdlib` text helpers, records/enums and the record-based spawn ABI, then APs, the
-  realtime class and streams.
+  at the guard instead of writing into the boot page tables (Q42). Enums are implemented
+  (`type Name = (Variant, ...)`, nominal, one 8-byte ordinal, checked `EnumName(int)`),
+  `Status` is predeclared, and `core.spawn`/`wait`/`kill` return `Status` with `var`
+  out-parameters. The next pieces are records/sum types (`Diagnostic`, `ExitReason`) and
+  `stdlib` text helpers, then APs, the realtime class and streams.
 
 ## Ground rules
 
@@ -202,6 +204,8 @@ host tools are unaffected.
 | Scheduler: slot table of 64 tasks, claim takes the value under a per-slot spin lock, 10 000-step quantum, 10 s / 200M-step budget | spec 0007, ADR 0011 |
 | Delivery is source-only, permanently: the image never carries bytecode and packages live only in memory | ADR 0019 (Accepted) |
 | Integer formatting is a staged `core` opcode; `syslib` ports are staged as scalar `uint`s | specs 0003, 0008; Q45 |
+| Enums: nominal `type Name = (Variant, ...)`, variants are global ordinal constants in one 8-byte slot; `Status` predeclared; `EnumName(int)` faults `Overflow` out of range | spec 0003, spec 0008 (`enum_cast`) |
+| `core.spawn`/`wait`/`kill` return `Status`; the wait reason stays a staged `int` until `ExitReason` exists | spec 0005, Q43 |
 | Compiler nesting limit 32; post-boot kernel stack is 256 KiB with a guard frame | Q42, spec 0002, `arch/x86_64/src/stack.rs` |
 
 ## Open questions
@@ -251,3 +255,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-14 | String search and slicing: `core.find` (first index of a `byte` or `-1`) and `core.substr_into` (same-kind checked slice, negative → `-4`, past-end → 0, clamped copy, UTF-8 boundary check for `string`) as ABI v1 opcodes `find`/`substr` (57 → 59). The shell splits `cmd`/`rest` and the `run` tail into path/args; `child` prints its `main(args)`, `echo` writes the tail, and `run missing` exercises the `-3` spawn failure. |
 | 2026-11-14 | Integer formatting and the first `syslib` primitives: `core.format_int_into` (opcode `format_int`, 59 → 60; decimal/hex, sign, zero padding, exact fit or `-6`, bad base `-4`) and `syslib.port_in8`/`port_out8` (builtin ids 7/8 through `Host::port_in8`/`port_out8`, kernel over `arch_x86_64::port`). `Port` is staged as a scalar `uint` (Q45). `samples/apps/clock` polls the CMOS RTC and prints a real `HH:MM:SS`; the host mock prints `00:00:00`. The boot stack grew 64 → 128 KiB because the added compiler paths tipped the in-kernel compile of the shell's child over the old limit and corrupted the boot page tables. |
 | 2026-11-14 | Q42 closed: the compiler has a fixed 32-level nesting limit (parser expression/statement/unary recursion and independent codegen walks; a `Diagnostic` beyond it), and everything after early boot runs on a 256 KiB kernel stack with a not-present guard frame. The guard's 2 MiB identity page is split into 4 KiB PTEs in a static `.bss` table, CR3 is reloaded and the higher-half alias is shared. `#PF` got its own IST so an exhausted stack still reports a clean fault; the `.boot` stack is early-boot only. Deep-source test: clean `#PF` with CR2 in the guard frame. Per-task stack guards remain future work. |
+| 2026-11-14 | Enums and the `Status` ABI: `type Name = (Variant, ...)` declares a nominal enum whose variants are global ordinal constants (`0..n-1`) in one 8-byte slot; assignment/comparison only within the same enum (ordering by ordinal), `int(enum)` yields the ordinal, `EnumName(int)` is range-checked and faults `Overflow` (opcode `enum_cast`, 60 → 61). `Status` is predeclared with `Ok` = 0; a user `type Status` and a duplicate type/variant are compile errors. `core.spawn(path, args, var id)`, `core.wait(id, var reason)` and `core.kill(id)` now return `Status`; the reason stays a staged `int` and `Diagnostic`/`ExitReason` records remain missing (Q43 narrowed). The shell checks each `Status` and prints `spawn failed`/`wait failed` plus ok/killed/faulted. |

@@ -22,6 +22,10 @@ struct Parser<'a, 'b> {
     path: &'a str,
     unit: &'a str,
     bump: &'b Bump<'a>,
+    /// Every type name declared in a `type` section anywhere in the unit, plus
+    /// the predeclared `Status`. Collected before parsing so a cast in a
+    /// procedure that precedes its `type` section still parses as a cast.
+    type_names: SliceVec<'a, 'b, &'a str>,
     /// Nesting levels currently on the recursive-descent stack. Per
     /// compilation, incremented by `expression`, `statement` and recursive
     /// unary operators, and always decremented before returning.
@@ -34,12 +38,32 @@ pub fn parse<'a>(
     path: &'a str,
     bump: &Bump<'a>,
 ) -> Result<Unit<'a>, Diagnostic> {
+    // Collect declared type names before parsing: a procedure may precede the
+    // `type` section that defines a name it casts to. `Status` is predeclared
+    // (spec 0003, "Errors") and is always spellable as a cast.
+    let mut type_names =
+        SliceVec::new(bump).map_err(|_| crate::out_of_space(path, "", 1, 1, Resource::Arena))?;
+    for (index, token) in tokens.iter().enumerate() {
+        if token.kind != TokenKind::Type {
+            continue;
+        }
+        let Some(next) = tokens.get(index + 1) else {
+            break;
+        };
+        let TokenKind::Ident(name) = next.kind else {
+            continue;
+        };
+        type_names
+            .push(name)
+            .map_err(|_| crate::out_of_space(path, "", next.line, next.column, Resource::Arena))?;
+    }
     let mut parser = Parser {
         tokens,
         pos: 0,
         path,
         unit: "",
         bump,
+        type_names,
         nesting: 0,
     };
     parser.unit()
@@ -209,6 +233,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             self.expect(&TokenKind::Semi, "`;`")?;
         }
 
+        let mut types = self.list::<TypeDecl<'a>>(start.line, start.column)?;
         let mut consts = self.list::<ConstDecl<'a>>(start.line, start.column)?;
         let mut vars = self.list::<VarDecl<'a>>(start.line, start.column)?;
         let mut procs = self.list::<ProcDecl<'a>>(start.line, start.column)?;
@@ -216,6 +241,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         loop {
             let token = self.peek();
             match token.kind {
+                TokenKind::Type => self.type_section(&mut types)?,
                 TokenKind::Const => self.const_section(&mut consts)?,
                 TokenKind::Var => self.var_section(&mut vars)?,
                 TokenKind::Procedure => {
@@ -229,7 +255,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 }
                 other => {
                     return Err(self.here(format_args!(
-                        "expected `const`, `var`, `procedure` or end of file, found {other}"
+                        "expected `type`, `const`, `var`, `procedure` or end of file, found {other}"
                     )))
                 }
             }
@@ -238,10 +264,67 @@ impl<'a, 'b> Parser<'a, 'b> {
         Ok(Unit {
             name,
             uses: uses.into_slice(),
+            types: types.into_slice(),
             consts: consts.into_slice(),
             vars: vars.into_slice(),
             procs: procs.into_slice(),
         })
+    }
+
+    /// Parses a `type` section. This slice accepts enums only:
+    /// `type Name = (Variant, ...);`.
+    fn type_section(
+        &mut self,
+        decls: &mut SliceVec<'a, 'b, TypeDecl<'a>>,
+    ) -> Result<(), Diagnostic> {
+        let start = self.peek();
+        self.expect(&TokenKind::Type, "`type`")?;
+        let mut count = 0;
+        while matches!(self.peek().kind, TokenKind::Ident(_)) {
+            let token = self.peek();
+            let name = self.ident("a type name")?;
+            self.expect(&TokenKind::Eq, "`=`")?;
+            self.expect(&TokenKind::LParen, "`(` after `=`")?;
+            let mut variants = self.list::<&'a str>(token.line, token.column)?;
+            if !self.check(&TokenKind::RParen) {
+                loop {
+                    let variant = self.ident("a variant name")?;
+                    self.push(&mut variants, variant, token.line, token.column)?;
+                    if self.eat(&TokenKind::Comma) {
+                        if self.check(&TokenKind::RParen) {
+                            break;
+                        }
+                        continue;
+                    }
+                    break;
+                }
+            }
+            self.expect(&TokenKind::RParen, "`)`")?;
+            self.expect(&TokenKind::Semi, "`;`")?;
+            if variants.len() == 0 {
+                return Err(self.error(
+                    token.line,
+                    token.column,
+                    format_args!("enum `{name}` needs at least one variant"),
+                ));
+            }
+            let decl = TypeDecl {
+                name,
+                variants: variants.into_slice(),
+                line: token.line,
+                column: token.column,
+            };
+            self.push(decls, decl, token.line, token.column)?;
+            count += 1;
+        }
+        if count == 0 {
+            return Err(self.error(
+                start.line,
+                start.column,
+                format_args!("`type` must be followed by at least one `Name = (Variant, ...);`"),
+            ));
+        }
+        Ok(())
     }
 
     fn const_section(
@@ -750,8 +833,9 @@ impl<'a, 'b> Parser<'a, 'b> {
             TokenKind::Ident(_) => {
                 let (name, line, column) = self.name_path()?;
                 if self.check(&TokenKind::LParen) {
-                    let is_cast =
-                        !name.contains('.') && matches!(name, "int" | "uint" | "byte" | "f64");
+                    let is_cast = !name.contains('.')
+                        && (matches!(name, "int" | "uint" | "byte" | "f64" | "Status")
+                            || self.type_names.as_slice().contains(&name));
                     if is_cast {
                         self.advance();
                         let inner = self.expression()?;

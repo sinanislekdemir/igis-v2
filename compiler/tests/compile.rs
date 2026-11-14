@@ -295,14 +295,15 @@ unit t;
 uses core;
 
 var
+  st: Status;
   id: int;
   code: int;
 
 procedure main(args: const string[1024]);
 begin
-  id := core.spawn("child", "hello");
-  code := core.wait(id);
-  code := core.kill(id);
+  st := core.spawn("child", "hello", id);
+  st := core.wait(id, code);
+  st := core.kill(id);
 end;
 "#;
     let package = compile(source, "t.ig").expect("compiles");
@@ -338,7 +339,7 @@ end;
 "#;
     let error = compile(wrong_count, "t.ig").expect_err("must not compile");
     assert!(
-        error.message.contains("`core.spawn` expects 2 arguments"),
+        error.message.contains("`core.spawn` expects 3 arguments"),
         "{}",
         error.message
     );
@@ -350,15 +351,39 @@ uses core;
 
 var
   u: uint;
+  code: int;
 
 procedure main(args: const string[1024]);
 begin
   u := uint(1);
-  core.wait(u);
+  core.wait(u, code);
 end;
 "#;
     let error = compile(wrong_type, "t.ig").expect_err("must not compile");
     assert!(error.message.contains("task id"), "{}", error.message);
+
+    let wrong_out_parameter = br#"
+unit t;
+
+uses core;
+
+var
+  st: Status;
+  id: int;
+  code: uint;
+
+procedure main(args: const string[1024]);
+begin
+  st := core.spawn("child", "hello", id);
+  st := core.wait(id, code);
+end;
+"#;
+    let error = compile(wrong_out_parameter, "t.ig").expect_err("reason is an int");
+    assert!(
+        error.message.contains("var reason: int"),
+        "{}",
+        error.message
+    );
 }
 
 /// Walks the instruction section and returns every opcode in order.
@@ -1296,4 +1321,335 @@ fn left_deep_const_and_buffer_chains_are_bounded() {
             error.message
         );
     });
+}
+
+/// Returns the variant-count immediate of every `enum_cast` in order.
+fn enum_cast_counts(package: &Owned) -> Vec<u32> {
+    use abi::opcodes;
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+    let mut seen = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        if op == opcodes::ENUM_CAST {
+            seen.push(u32::from_le_bytes(
+                instructions[pc + 4..pc + 8].try_into().unwrap(),
+            ));
+        }
+        pc += words * 4;
+    }
+    seen
+}
+
+#[test]
+fn enums_compile_with_ordinals_comparisons_and_casts() {
+    let source = br#"
+unit t;
+
+type Color = (Red, Green, Blue);
+
+var
+  c: Color;
+  other: Color;
+  n: int;
+  same: bool;
+
+procedure main(args: const string[1024]);
+begin
+  c := Green;
+  n := int(c);
+  c := Color(2);
+  same := c = Blue;
+  same := c <> Red;
+  same := Red < Blue;
+  same := Red <= Green;
+  same := Blue > Red;
+  same := Blue >= Green;
+end;
+"#;
+    let package = compile(source, "t.ig").expect("enums compile");
+    assert_eq!(enum_cast_counts(&package), vec![3]);
+}
+
+#[test]
+fn status_is_predeclared_and_its_variants_are_globals() {
+    let source = br#"
+unit t;
+
+var
+  st: Status;
+  ok: bool;
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  st := Ok;
+  ok := st = Ok;
+  n := int(WouldBlock);
+  st := Status(7);
+  ok := st = IoError;
+  ok := st <> Ok;
+  ok := Ok < Full;
+end;
+"#;
+    let package = compile(source, "t.ig").expect("Status is predeclared");
+    // One cast into the predeclared type, whose variant count is eight.
+    assert_eq!(enum_cast_counts(&package), vec![8]);
+}
+
+#[test]
+fn a_duplicate_variant_is_rejected() {
+    let source = br#"
+unit t;
+
+type Color = (Red, Green, Red);
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("must not compile");
+    assert!(
+        error.message.contains("duplicate variant `Red`"),
+        "{}",
+        error.message
+    );
+    assert_eq!(error.line, 4);
+}
+
+#[test]
+fn a_variant_collides_with_another_enums_variant() {
+    let source = br#"
+unit t;
+
+type Left = (A, B);
+type Right = (B, C);
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("must not compile");
+    assert!(
+        error.message.contains("duplicate variant `B`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_second_type_with_the_same_name_is_rejected() {
+    let source = br#"
+unit t;
+
+type Color = (Red);
+type Color = (Blue);
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("must not compile");
+    assert!(
+        error
+            .message
+            .contains("duplicate declaration of type `Color`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn user_declared_status_is_rejected() {
+    let source = br#"
+unit t;
+
+type Status = (Ok, Bad);
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("must not compile");
+    assert!(
+        error.message.contains("`Status` is predeclared"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn enums_and_ints_do_not_mix_without_a_cast() {
+    let write_int = br#"
+unit t;
+
+type Color = (Red, Green);
+
+var
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := Red;
+end;
+"#;
+    let error = compile(write_int, "t.ig").expect_err("enum is not int");
+    assert!(
+        error
+            .message
+            .contains("type mismatch: expected `int`, found `Color`"),
+        "{}",
+        error.message
+    );
+
+    let compare_int = br#"
+unit t;
+
+type Color = (Red, Green);
+
+var
+  same: bool;
+
+procedure main(args: const string[1024]);
+begin
+  same := 1 = Red;
+end;
+"#;
+    let error = compile(compare_int, "t.ig").expect_err("enum is not int");
+    assert!(
+        error.message.contains("same enum type"),
+        "{}",
+        error.message
+    );
+
+    let mixed_enums = br#"
+unit t;
+
+type Color = (Red, Green);
+type Shape = (Circle, Square);
+
+var
+  same: bool;
+
+procedure main(args: const string[1024]);
+begin
+  same := Red = Circle;
+end;
+"#;
+    let error = compile(mixed_enums, "t.ig").expect_err("nominal enums do not mix");
+    assert!(
+        error.message.contains("same enum type"),
+        "{}",
+        error.message
+    );
+
+    let arithmetic = br#"
+unit t;
+
+type Color = (Red, Green);
+
+var
+  c: Color;
+
+procedure main(args: const string[1024]);
+begin
+  c := Red + Green;
+end;
+"#;
+    let error = compile(arithmetic, "t.ig").expect_err("enums have no arithmetic");
+    assert!(
+        error.message.contains("ordinal ordering"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn enum_casts_are_checked() {
+    let from_uint = br#"
+unit t;
+
+type Color = (Red, Green);
+
+var
+  c: Color;
+  u: uint;
+
+procedure main(args: const string[1024]);
+begin
+  u := uint(0);
+  c := Color(u);
+end;
+"#;
+    let error = compile(from_uint, "t.ig").expect_err("the ordinal is an int");
+    assert!(
+        error.message.contains("needs an `int` ordinal"),
+        "{}",
+        error.message
+    );
+
+    let to_float = br#"
+unit t;
+
+type Color = (Red, Green);
+
+var
+  f: f64;
+  c: Color;
+
+procedure main(args: const string[1024]);
+begin
+  c := Red;
+  f := f64(c);
+end;
+"#;
+    let error = compile(to_float, "t.ig").expect_err("cast through int first");
+    assert!(
+        error.message.contains("convert it with `int(x)` first"),
+        "{}",
+        error.message
+    );
+
+    let to_int = br#"
+unit t;
+
+type Color = (Red, Green);
+
+var
+  n: int;
+  c: Color;
+
+procedure main(args: const string[1024]);
+begin
+  c := Blue;
+  n := int(c);
+end;
+"#;
+    let error = compile(to_int, "t.ig").expect_err("Blue is not a Color variant");
+    assert!(
+        error.message.contains("unknown identifier `Blue`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_variant_is_not_assignable() {
+    let source = br#"
+unit t;
+
+procedure main(args: const string[1024]);
+begin
+  Ok := Full;
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("must not compile");
+    assert!(
+        error.message.contains("cannot assign to enum variant `Ok`"),
+        "{}",
+        error.message
+    );
 }

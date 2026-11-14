@@ -462,6 +462,15 @@ fn verify_instructions(
                         return Err(invalid(base + pc + 4, "buffer capacity is out of range"));
                     }
                 }
+                opcodes::ENUM_CAST => {
+                    let count = read_u32(instructions, pc + 4)
+                        .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;
+                    // An enum has at least one variant; the count bounds the
+                    // ordinal check, so a zero or absurd count is invalid.
+                    if count == 0 || count > MAX_SECTION {
+                        return Err(invalid(base + pc + 4, "enum variant count is out of range"));
+                    }
+                }
                 opcodes::BUILTIN => {
                     let id = read_u32(instructions, pc + 4)
                         .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;

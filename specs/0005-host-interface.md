@@ -114,7 +114,8 @@ The interface is split into two namespaces:
   a line or a full key sequence.
 - The kernel does not echo, does not assemble lines, does no editing and exposes no key
   events; prompt, echo, history and line editing are `stdlib`/shell code. The staged
-  `core.read_line` below is a deliberate first-milestone exception until indexing exists.
+  `core.read_line` below is a deliberate first-milestone exception until application-side
+  editing exists (Q44).
 - Console bytes pass through unvalidated: the kernel never checks UTF-8 and never
   interprets escape sequences. In the first milestone the keyboard driver emits US ASCII,
   with `Enter` as `\n` (LF only), `Backspace` as `0x7F`, `Tab` as `\t` and `Ctrl+C` as
@@ -131,31 +132,40 @@ The interface is split into two namespaces:
 - `receive` copies what is available, up to the destination length; a byte stream has no
   message boundaries. Framing is a `stdlib` concern.
 
-#### Staged ABI: `spawn`/`wait`/`kill` as scalars
+#### Implemented ABI: `spawn`/`wait`/`kill` return `Status`
 
-The first milestone has no language values for `Status`, `ExitReason` or `Diagnostic`
-(no enums or records, spec 0003), so the implemented primitives take and return `int`:
+`Status` is a predeclared enum (spec 0003), so the REPL primitives now use the real
+return type and `var` out-parameters. `ExitReason` and `Diagnostic` are still records
+the language cannot express, so those two stay staged:
 
-| Primitive | Staged signature | Result |
-|-----------|------------------|--------|
-| `core.spawn` | `(path: const string[0], args: const string[0]) -> int` | positive `TaskId`, or `-Status` (`-3` NotFound, `-4` Invalid, `-5` Full, `-6` CapacityExceeded) |
-| `core.wait` | `(id: int) -> int` | `0` `Ok`, `1` `Killed`, `2 + fault_code` `Faulted(code)`, or `-Status` (`-3` NotFound, `-4` Invalid) |
-| `core.kill` | `(id: int) -> int` | `0` on success, or `-Status` |
+| Primitive | Implemented signature | Result |
+|-----------|-----------------------|--------|
+| `core.spawn` | `(path: const string[0], args: const string[0], var id: int) -> Status` | `Ok` with the reserved global id written through `id`; `NotFound`, `Invalid`, `Full` or `CapacityExceeded` with `id` untouched and no task created |
+| `core.wait` | `(id: int, var reason: int) -> Status` | `Ok` with the reason int written (`0` Ok, `1` Killed, `2 + fault_code` Faulted); `NotFound` for an unknown or evicted id; `Invalid` for id zero or the caller itself |
+| `core.kill` | `(id: int) -> Status` | `Ok`, `NotFound` (unknown or finished), or `Invalid` (id zero or the caller itself) |
 
-This is a staging shape, not the ABI. The target API keeps the signatures in the
-`core` table above: a caller-owned `var diag: Diagnostic`, `var reason: ExitReason` and
-`Status` as a return value. A failure the service discovers after `spawn` returned (a
-compile error, a read failure) is recorded as `Faulted(IoError)` and the kernel prints the
-compiler diagnostic; the final API reports `Status.Invalid` with `diag` filled instead.
-Replacing the scalar form is required before `stdlib` exposes `run`.
+- The interpreter maps them directly: `Host::spawn` returns `Result<u64, Status>`, so
+  success writes the id through the reference and pushes `Status.Ok` (ordinal 0), and a
+  failure pushes the returned `Status` ordinal. `Host::wait`'s `Exited(reason)` writes
+  the staged reason int and pushes `Ok`; `WaitOutcome::Status(s)` pushes `s`; `Blocked`
+  keeps both operands on the stack and retries the instruction after a wake-up.
+  `Host::kill` pushes its returned `Status`. `abi::Status` and the language `Status`
+  share ordinals, so neither side translates.
+- `TaskId` is an `int` (`0` is invalid) until a distinct type exists.
+- **Still staged:** there is no `var diag: Diagnostic` parameter and no `ExitReason`
+  value. A failure the service discovers after `spawn` returned (a compile error, a read
+  failure) is printed to the kernel console and recorded as `Faulted(IoError)`; the
+  parent's `wait` observes reason `2 + 11`. The target signature keeps
+  `var diag: Diagnostic` and `var reason: ExitReason`, and `core.run` is not exposed
+  until both records exist (Q43).
 
 #### Staged line discipline: `core.read_line`
 
 The target rule above stands: `console_read` is a byte stream, the kernel does not echo
 or assemble lines, and prompt/history/editing are application code. The first milestone
-cannot follow it yet because the language has no buffer indexing or string slicing, so
-this slice stages a line reader in the kernel console layer, the same staging shape as
-the scalar `spawn` ABI:
+cannot follow it yet because the language can read and write single bytes but cannot
+delete or insert one inside a buffer, so this slice stages a line reader in the kernel
+console layer:
 
 | Primitive | Staged signature | Result |
 |-----------|------------------|--------|
@@ -328,3 +338,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-13 | Staged scalar `spawn`/`wait`/`kill` ABI added for the first milestone (`int` task id, negated `Status`, `0`/`1`/`2 + fault_code` wait results); the record-based `Diagnostic`/`Status`/`ExitReason` form remains the target API (see "Staged ABI"). |
 | 2026-11-13 | Staged `core.read_line` line discipline added: polled COM1/PS-2 bytes, kernel echo and a four-line ring, blocking on an unfinished line. Temporary until indexing exists (Q44). |
 | 2026-11-14 | First `syslib` slice: `port_in8`/`port_out8` as `uint` scalars through `Host::port_in8`/`port_out8` defaults, kernel implementation over `arch_x86_64::port`; opaque `Port`/MMIO/DMA remain the target (Q45). |
+| 2026-11-14 | REPL ABI now uses the predeclared `Status` enum: `core.spawn(path, args, var id)`, `core.wait(id, var reason)` and `core.kill(id)` return `Status`; only the `Diagnostic` and `ExitReason` records remain staged (Q43 narrowed). `Host` is unchanged (`Result<u64, Status>`, `WaitOutcome`, `Status`); the kernel maps `abi::Status` directly. |

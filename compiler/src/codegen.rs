@@ -33,7 +33,7 @@ use abi::opcodes::{self, builtin};
 use crate::arena::{Bump, OutOfSpace, SliceVec};
 use crate::ast::*;
 use crate::package::LineEntry;
-use crate::types::{align8, Kind, Type, MAX_CAPACITY};
+use crate::types::{align8, Kind, Type, MAX_CAPACITY, STATUS_ENUM};
 use crate::{diag, out_of_space, package, Diagnostic, Package, Resource, MAX_NESTING};
 
 /// Bytes reserved at the bottom of every frame (spec 0008, "Frames" plus the
@@ -53,6 +53,28 @@ struct Const<'a> {
     name: &'a str,
     value: i64,
 }
+
+/// One enum type known to this compilation: the predeclared `Status` first,
+/// then every `type` declaration in source order. The index in this table is
+/// the compiler-local enum id carried by [`Kind::Enum`].
+#[derive(Debug, Clone, Copy)]
+struct EnumDef<'a> {
+    name: &'a str,
+    variants: &'a [&'a str],
+}
+
+/// Variants of the predeclared `Status` type, in the order spec 0003 fixes.
+/// Their ordinals are `0..7` and match `abi::Status`.
+const STATUS_VARIANTS: [&str; 8] = [
+    "Ok",
+    "WouldBlock",
+    "Closed",
+    "NotFound",
+    "Invalid",
+    "Full",
+    "CapacityExceeded",
+    "IoError",
+];
 
 #[derive(Debug, Clone, Copy)]
 struct StateVar<'a> {
@@ -142,6 +164,41 @@ fn find_sig<'a>(sigs: &[Sig<'a>], name: &str) -> Option<usize> {
     sigs.iter().position(|s| s.name == name)
 }
 
+/// Finds an enum type by name.
+fn find_enum(enums: &[EnumDef<'_>], name: &str) -> Option<u16> {
+    enums
+        .iter()
+        .position(|e| e.name == name)
+        .and_then(|index| u16::try_from(index).ok())
+}
+
+/// Finds a variant in any enum, returning its enum id and ordinal.
+fn find_variant(enums: &[EnumDef<'_>], name: &str) -> Option<(u16, u32)> {
+    for (index, enumeration) in enums.iter().enumerate() {
+        if let Some(ordinal) = enumeration
+            .variants
+            .iter()
+            .position(|variant| *variant == name)
+        {
+            return Some((u16::try_from(index).ok()?, ordinal as u32));
+        }
+    }
+    None
+}
+
+/// True when any enum already uses `name` as a variant.
+fn has_variant(enums: &[EnumDef<'_>], name: &str) -> bool {
+    find_variant(enums, name).is_some()
+}
+
+/// True for the built-in type names an enum may not shadow.
+fn is_builtin_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "int" | "uint" | "byte" | "bool" | "f64" | "string" | "bytes"
+    )
+}
+
 /// Compiles one parsed unit into a package.
 pub(crate) fn compile_unit<'a>(
     unit: &Unit<'a>,
@@ -166,9 +223,74 @@ pub(crate) fn compile_unit<'a>(
         }
     }
 
+    // The predeclared `Status` comes first, so its id is `STATUS_ENUM` and its
+    // ordinals match `abi::Status`. User `type` declarations follow in source
+    // order; the index in this table is the compiler-local enum id.
+    let mut enums = SliceVec::<EnumDef<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
+    enums
+        .push(EnumDef {
+            name: "Status",
+            variants: &STATUS_VARIANTS,
+        })
+        .map_err(|_| arena_full(path, name, 1, 1))?;
+    for decl in unit.types {
+        if decl.name == "Status" {
+            return Err(diag(
+                path,
+                name,
+                decl.line,
+                decl.column,
+                format_args!("`Status` is predeclared by the language and cannot be declared"),
+            ));
+        }
+        if is_builtin_type_name(decl.name) {
+            return Err(diag(
+                path,
+                name,
+                decl.line,
+                decl.column,
+                format_args!(
+                    "enum name `{}` shadows a built-in type; choose another name",
+                    decl.name
+                ),
+            ));
+        }
+        if find_enum(enums.as_slice(), decl.name).is_some() {
+            return Err(diag(
+                path,
+                name,
+                decl.line,
+                decl.column,
+                format_args!("duplicate declaration of type `{}`", decl.name),
+            ));
+        }
+        for (index, variant) in decl.variants.iter().enumerate() {
+            if has_variant(enums.as_slice(), variant) || decl.variants[..index].contains(variant) {
+                return Err(diag(
+                    path,
+                    name,
+                    decl.line,
+                    decl.column,
+                    format_args!(
+                        "duplicate variant `{variant}`; variants share one top-level namespace"
+                    ),
+                ));
+            }
+        }
+        enums
+            .push(EnumDef {
+                name: decl.name,
+                variants: decl.variants,
+            })
+            .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
+    }
+
     let mut consts = SliceVec::<Const<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
     for decl in unit.consts {
-        if find_const(consts.as_slice(), decl.name).is_some() {
+        if find_const(consts.as_slice(), decl.name).is_some()
+            || find_enum(enums.as_slice(), decl.name).is_some()
+            || has_variant(enums.as_slice(), decl.name)
+        {
             return Err(diag(
                 path,
                 name,
@@ -192,6 +314,8 @@ pub(crate) fn compile_unit<'a>(
     for decl in unit.vars {
         if find_const(consts.as_slice(), decl.name).is_some()
             || find_state(state_vars.as_slice(), decl.name).is_some()
+            || find_enum(enums.as_slice(), decl.name).is_some()
+            || has_variant(enums.as_slice(), decl.name)
         {
             return Err(diag(
                 path,
@@ -201,7 +325,7 @@ pub(crate) fn compile_unit<'a>(
                 format_args!("duplicate declaration of `{}`", decl.name),
             ));
         }
-        let ty = resolve_type(&decl.ty, consts.as_slice(), path, name)?;
+        let ty = resolve_type(&decl.ty, consts.as_slice(), enums.as_slice(), path, name)?;
         if ty.is_buffer() && ty.cap == 0 {
             return Err(diag(
                 path,
@@ -247,6 +371,8 @@ pub(crate) fn compile_unit<'a>(
         if find_const(consts.as_slice(), proc.name).is_some()
             || find_state(state_vars.as_slice(), proc.name).is_some()
             || find_sig(sigs.as_slice(), proc.name).is_some()
+            || find_enum(enums.as_slice(), proc.name).is_some()
+            || has_variant(enums.as_slice(), proc.name)
         {
             return Err(diag(
                 path,
@@ -277,7 +403,7 @@ pub(crate) fn compile_unit<'a>(
                     format_args!("duplicate parameter `{}`", param.name),
                 ));
             }
-            let ty = resolve_type(&param.ty, consts.as_slice(), path, name)?;
+            let ty = resolve_type(&param.ty, consts.as_slice(), enums.as_slice(), path, name)?;
             if ty.is_buffer() {
                 if param.mode == ParamMode::Value {
                     return Err(diag(
@@ -361,6 +487,7 @@ pub(crate) fn compile_unit<'a>(
             sigs.as_slice(),
             consts.as_slice(),
             state_vars.as_slice(),
+            enums.as_slice(),
             &mut pool,
             current,
             bump,
@@ -461,9 +588,22 @@ pub(crate) fn compile_unit<'a>(
 fn resolve_type<'a>(
     ty: &TypeRef<'a>,
     consts: &[Const<'a>],
+    enums: &[EnumDef<'a>],
     path: &'a str,
     unit: &'a str,
 ) -> Result<Type, Diagnostic> {
+    if let Some(id) = find_enum(enums, ty.name) {
+        if ty.cap.is_some() {
+            return Err(diag(
+                path,
+                unit,
+                ty.line,
+                ty.column,
+                format_args!("enum type `{}` does not take a capacity", ty.name),
+            ));
+        }
+        return Ok(Type::enumeration(id));
+    }
     let kind = match ty.name {
         "int" => Kind::Int,
         "uint" => Kind::Uint,
@@ -636,6 +776,7 @@ struct FnCompiler<'a, 'b, 'p> {
     sigs: &'b [Sig<'a>],
     consts: &'b [Const<'a>],
     state_vars: &'b [StateVar<'a>],
+    enums: &'b [EnumDef<'a>],
     pool: &'p mut ConstantPool<'a, 'b>,
     current: Sig<'a>,
     bump: &'b Bump<'a>,
@@ -653,7 +794,35 @@ struct FnCompiler<'a, 'b, 'p> {
     lines: SliceVec<'a, 'b, LineEntry>,
 }
 
+/// Renders a resolved type for a diagnostic. [`Type`]'s own `Display` carries
+/// only the enum id, so codegen resolves the name through this table.
+struct TypeName<'a, 'b> {
+    ty: Type,
+    enums: &'b [EnumDef<'a>],
+}
+
+impl fmt::Display for TypeName<'_, '_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.ty.kind {
+            Kind::Enum(id) => match self.enums.get(id as usize) {
+                Some(enumeration) => f.write_str(enumeration.name),
+                None => f.write_str("enum"),
+            },
+            _ => write!(f, "{}", self.ty),
+        }
+    }
+}
+
 impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
+    /// Renders a type for a diagnostic. [`Type`]'s own `Display` knows only
+    /// that an enum is an enum; this resolves the name through the table.
+    fn type_name(&self, ty: Type) -> TypeName<'a, '_> {
+        TypeName {
+            ty,
+            enums: self.enums,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new(
         path: &'a str,
@@ -661,6 +830,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         sigs: &'b [Sig<'a>],
         consts: &'b [Const<'a>],
         state_vars: &'b [StateVar<'a>],
+        enums: &'b [EnumDef<'a>],
         pool: &'p mut ConstantPool<'a, 'b>,
         current: Sig<'a>,
         bump: &'b Bump<'a>,
@@ -678,6 +848,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             sigs,
             consts,
             state_vars,
+            enums,
             pool,
             current,
             bump,
@@ -771,7 +942,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     format_args!("duplicate declaration of `{}`", local.name),
                 ));
             }
-            let ty = resolve_type(&local.ty, self.consts, self.path, self.unit)?;
+            let ty = resolve_type(&local.ty, self.consts, self.enums, self.path, self.unit)?;
             if ty.is_buffer() && ty.cap == 0 {
                 return Err(self.err(
                     local.line,
@@ -1181,6 +1352,8 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         if expected == found {
             Ok(())
         } else {
+            let expected = self.type_name(expected);
+            let found = self.type_name(found);
             Err(self.err_at(
                 expr,
                 format_args!("type mismatch: expected `{expected}`, found `{found}`"),
@@ -1229,6 +1402,20 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 line,
                 column,
                 format_args!("cannot assign to constant `{name}`"),
+            ));
+        }
+        if find_enum(self.enums, name).is_some() {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("cannot assign to enum type `{name}`"),
+            ));
+        }
+        if let Some((_, ordinal)) = find_variant(self.enums, name) {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("cannot assign to enum variant `{name}` (ordinal {ordinal})"),
             ));
         }
         Err(self.err(line, column, format_args!("unknown identifier `{name}`")))
@@ -1568,6 +1755,12 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             self.push();
             return Ok(var.ty);
         }
+        // A variant is a global constant of its enum type with its ordinal as
+        // the value (spec 0003, "Enums").
+        if let Some((id, ordinal)) = find_variant(self.enums, name) {
+            self.const_i64(ordinal as i64)?;
+            return Ok(Type::enumeration(id));
+        }
         let suggestion = if find_sig(self.sigs, name).is_some() {
             format_args!("`{name}` is a procedure; call it with `()`")
         } else {
@@ -1582,6 +1775,32 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         inner: &'a Expr<'a>,
         expr: &'a Expr<'a>,
     ) -> Result<Type, Diagnostic> {
+        // An enum name is a checked construction from an `int` ordinal:
+        // `Status(int_value)` fault(Overflow) outside `0..variant_count`
+        // (spec 0003, "Enums").
+        if let Some(id) = find_enum(self.enums, name) {
+            let source = self.expr_scalar(inner)?;
+            let target = Type::enumeration(id);
+            if source == target {
+                return Ok(target);
+            }
+            if source.kind != Kind::Int {
+                let found = self.type_name(source);
+                return Err(self.err_at(
+                    expr,
+                    format_args!(
+                        "`{name}(x)` needs an `int` ordinal, found `{found}`; convert the value with `int(x)` first"
+                    ),
+                ));
+            }
+            let count = self
+                .enums
+                .get(id as usize)
+                .map(|enumeration| enumeration.variants.len() as u32)
+                .unwrap_or(0);
+            self.one(opcodes::ENUM_CAST, count)?;
+            return Ok(target);
+        }
         let target = match name {
             "int" => Kind::Int,
             "uint" => Kind::Uint,
@@ -1594,6 +1813,22 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             return Err(self.err_at(
                 expr,
                 format_args!("buffer conversions are not casts; they are `stdlib` functions"),
+            ));
+        }
+        // `int(enum_value)` is the ordinal; it needs no instruction because the
+        // slot already holds the ordinal. Every other numeric cast from an enum
+        // has to go through `int` first.
+        if matches!(source.kind, Kind::Enum(_)) {
+            if target == Kind::Int {
+                return Ok(Type::scalar(Kind::Int));
+            }
+            let found = self.type_name(source);
+            return Err(self.err_at(
+                expr,
+                format_args!(
+                    "cannot convert `{found}` to `{}`; convert it with `int(x)` first",
+                    target.name()
+                ),
             ));
         }
         if source.kind == Kind::Bool {
@@ -1728,10 +1963,22 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         let left_ty = self.expr_scalar(left)?;
         let right_ty = self.expr_scalar(right)?;
         if left_ty != right_ty {
+            if matches!(left_ty.kind, Kind::Enum(_)) || matches!(right_ty.kind, Kind::Enum(_)) {
+                let left_name = self.type_name(left_ty);
+                let right_name = self.type_name(right_ty);
+                return Err(self.err_at(
+                    expr,
+                    format_args!(
+                        "type mismatch: `{left_name}` and `{right_name}`; an enum compares only with the same enum type (use `int(x)` for its ordinal)"
+                    ),
+                ));
+            }
+            let left_name = self.type_name(left_ty);
+            let right_name = self.type_name(right_ty);
             return Err(self.err_at(
                 expr,
                 format_args!(
-                    "type mismatch: `{left_ty}` and `{right_ty}`; there are no implicit conversions"
+                    "type mismatch: `{left_name}` and `{right_name}`; there are no implicit conversions"
                 ),
             ));
         }
@@ -1832,6 +2079,24 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 BinOp::And | BinOp::Or => unreachable!(),
             },
             Kind::String | Kind::Bytes => unreachable!(),
+            Kind::Enum(_) => match op {
+                // Ordinals are non-negative, so unsigned ordering is the
+                // declaration order (spec 0003, "Enums").
+                BinOp::Eq => opcodes::EQ,
+                BinOp::Ne => opcodes::NE,
+                BinOp::Lt => opcodes::LT_U,
+                BinOp::Le => opcodes::LE_U,
+                BinOp::Gt => opcodes::GT_U,
+                BinOp::Ge => opcodes::GE_U,
+                _ => {
+                    return Err(self.err_at(
+                        expr,
+                        format_args!(
+                            "an enum supports `=`, `<>` and ordinal ordering; use `int(x)` for arithmetic"
+                        ),
+                    ))
+                }
+            },
         };
 
         self.simple(encoded)?;
@@ -2103,39 +2368,54 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::scalar(Kind::Int)))
             }
-            // Staged scalar ABI (spec 0005, "Staged ABI"): `Status`,
-            // `ExitReason` and `Diagnostic` are not language types yet, so the
-            // spawn/wait/kill slice speaks in `int`. A positive spawn result is
-            // a task id; a negative one is `-Status`; wait is `0` for Ok, `1`
-            // for Killed, `2 + fault_code` for Faulted.
+            // `Spawn`/`wait`/`kill` return the predeclared `Status` enum and
+            // write their results through `var` out-parameters (spec 0003,
+            // E1; spec 0005). `Status` ordinals are the `abi::Status`
+            // discriminants, so the interpreter pushes them directly.
             "core.spawn" => {
-                if args.len() != 2 {
+                if args.len() != 3 {
                     return Err(self.err(
                         line,
                         column,
-                        format_args!("`core.spawn` expects 2 arguments, got {}", args.len()),
+                        format_args!("`core.spawn` expects 3 arguments, got {}", args.len()),
                     ));
                 }
                 self.emit_ref(args[0], Some(Kind::String))?;
                 self.emit_ref(args[1], Some(Kind::String))?;
+                let id = self.emit_scalar_ref(args[2])?;
+                if id.kind != Kind::Int {
+                    let found = self.type_name(id);
+                    return Err(self.err_at(
+                        args[2],
+                        format_args!("`core.spawn` expects `var id: int`, found `{found}`"),
+                    ));
+                }
                 self.one(opcodes::BUILTIN, builtin::SPAWN)?;
-                self.pop(2)?;
+                self.pop(3)?;
                 self.push();
-                Ok(Some(Type::scalar(Kind::Int)))
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
             }
             "core.wait" => {
-                if args.len() != 1 {
+                if args.len() != 2 {
                     return Err(self.err(
                         line,
                         column,
-                        format_args!("`core.wait` expects 1 argument, got {}", args.len()),
+                        format_args!("`core.wait` expects 2 arguments, got {}", args.len()),
                     ));
                 }
                 self.builtin_id(args[0])?;
+                let reason = self.emit_scalar_ref(args[1])?;
+                if reason.kind != Kind::Int {
+                    let found = self.type_name(reason);
+                    return Err(self.err_at(
+                        args[1],
+                        format_args!("`core.wait` expects `var reason: int`, found `{found}`"),
+                    ));
+                }
                 self.one(opcodes::BUILTIN, builtin::WAIT)?;
-                self.pop(1)?;
+                self.pop(2)?;
                 self.push();
-                Ok(Some(Type::scalar(Kind::Int)))
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
             }
             "core.kill" => {
                 if args.len() != 1 {
@@ -2149,7 +2429,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.one(opcodes::BUILTIN, builtin::KILL)?;
                 self.pop(1)?;
                 self.push();
-                Ok(Some(Type::scalar(Kind::Int)))
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
             }
             target => {
                 if target.contains('.') {
@@ -2198,12 +2478,11 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.emit_ref(arg, Some(param.ty.kind))?
             };
             if found.kind != param.ty.kind {
+                let expected = self.type_name(param.ty);
+                let found = self.type_name(found);
                 return Err(self.err_at(
                     arg,
-                    format_args!(
-                        "argument {position} expects `{}`, found `{found}`",
-                        param.ty
-                    ),
+                    format_args!("argument {position} expects `{expected}`, found `{found}`"),
                 ));
             }
             if found.cap < param.ty.cap {
@@ -2221,11 +2500,12 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 ParamMode::Var => {
                     let found = self.emit_scalar_ref(arg)?;
                     if found != param.ty {
+                        let expected = self.type_name(param.ty);
+                        let found = self.type_name(found);
                         return Err(self.err_at(
                             arg,
                             format_args!(
-                                "argument {position} expects `{}`, found `{found}`",
-                                param.ty
+                                "argument {position} expects `{expected}`, found `{found}`"
                             ),
                         ));
                     }
@@ -2234,11 +2514,12 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 _ => {
                     let found = self.expr_scalar(arg)?;
                     if found != param.ty {
+                        let expected = self.type_name(param.ty);
+                        let found = self.type_name(found);
                         return Err(self.err_at(
                             arg,
                             format_args!(
-                                "argument {position} expects `{}`, found `{found}`",
-                                param.ty
+                                "argument {position} expects `{expected}`, found `{found}`"
                             ),
                         ));
                     }
@@ -2248,11 +2529,12 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         }
     }
 
-    /// Emits a scalar expression and requires it to be an `int` task id, the
-    /// staged type of `core.wait`/`core.kill`.
+    /// Emits a scalar expression and requires it to be an `int` task id.
+    /// `TaskId` is still an `int` (spec 0003, "Task ids").
     fn builtin_id(&mut self, expr: &'a Expr<'a>) -> Result<(), Diagnostic> {
         let found = self.expr_scalar(expr)?;
         if found.kind != Kind::Int {
+            let found = self.type_name(found);
             return Err(self.err_at(
                 expr,
                 format_args!("expected an `int` task id, found `{found}`"),

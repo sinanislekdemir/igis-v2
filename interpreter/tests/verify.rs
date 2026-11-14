@@ -431,8 +431,9 @@ fn spawn_package(spawn_result: Result<u64, Status>) -> (Vec<u8>, Vec<u8>, Vec<u8
     let mut instructions = Vec::new();
     op_imm(&mut instructions, opcodes::REF_CONST, 8);
     op_imm(&mut instructions, opcodes::REF_CONST, 24);
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
     op_imm(&mut instructions, opcodes::BUILTIN, opcodes::builtin::SPAWN);
-    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 8);
     op(&mut instructions, opcodes::RET);
     let mut constants = constant(b"child");
     constants.extend_from_slice(&constant(b"hello"));
@@ -440,12 +441,12 @@ fn spawn_package(spawn_result: Result<u64, Status>) -> (Vec<u8>, Vec<u8>, Vec<u8
         frame_size: 64,
         ..MAIN
     };
-    let code = build(&[spec], &instructions, &constants, 8, 64, 0);
+    let code = build(&[spec], &instructions, &constants, 16, 64, 0);
     let mut host = MockHost {
         spawn_result: Some(spawn_result),
         ..Default::default()
     };
-    let mut state = vec![0u8; 8];
+    let mut state = vec![0u8; 16];
     let mut stack = vec![0u8; 64];
     let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
     assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
@@ -453,35 +454,39 @@ fn spawn_package(spawn_result: Result<u64, Status>) -> (Vec<u8>, Vec<u8>, Vec<u8
     (state, path, args)
 }
 
+fn state_u64(state: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(state[offset..offset + 8].try_into().unwrap())
+}
+
 #[test]
-fn spawn_pushes_the_reserved_id_and_forwards_both_buffers() {
+fn spawn_writes_the_reserved_id_and_pushes_ok() {
     let (state, path, args) = spawn_package(Ok(7));
-    assert_eq!(u64::from_le_bytes(state[..8].try_into().unwrap()), 7);
+    assert_eq!(state_u64(&state, 0), 7, "the id goes through the var slot");
+    assert_eq!(state_u64(&state, 8), Status::Ok as u64);
     assert_eq!(path, b"child");
     assert_eq!(args, b"hello");
 }
 
 #[test]
-fn spawn_failure_pushes_the_negated_status() {
+fn spawn_failure_pushes_the_status_and_leaves_the_id_alone() {
     let (state, _, _) = spawn_package(Err(Status::Full));
-    assert_eq!(
-        u64::from_le_bytes(state[..8].try_into().unwrap()),
-        (-5i64) as u64
-    );
+    assert_eq!(state_u64(&state, 0), 0, "the out-parameter is untouched");
+    assert_eq!(state_u64(&state, 8), Status::Full as u64);
 }
 
 #[test]
 fn wait_blocks_without_advancing_and_retries_the_same_instruction() {
     let mut instructions = Vec::new();
     op_const(&mut instructions, 3);
+    op_imm(&mut instructions, opcodes::REF_STATE, 8);
     op_imm(&mut instructions, opcodes::BUILTIN, opcodes::builtin::WAIT);
     op_imm(&mut instructions, opcodes::STORE_STATE, 0);
     op(&mut instructions, opcodes::RET);
     let spec = FnSpec {
-        frame_size: 48,
+        frame_size: 56,
         ..MAIN
     };
-    let code = build(&[spec], &instructions, &[], 8, 64, 0);
+    let code = build(&[spec], &instructions, &[], 16, 64, 0);
 
     let mut host = MockHost {
         wait_results: vec![
@@ -490,53 +495,53 @@ fn wait_blocks_without_advancing_and_retries_the_same_instruction() {
         ],
         ..Default::default()
     };
-    let mut state = vec![0u8; 8];
+    let mut state = vec![0u8; 16];
     let mut stack = vec![0u8; 64];
 
     let (outcome, machine) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
     assert_eq!(outcome, Outcome::Blocked(WaitKind::ChildExit(3)));
-    assert_eq!(machine.pc(), 12, "pc stays on the wait instruction");
-    assert_eq!(state, vec![0u8; 8], "the id is not consumed or stored");
+    assert_eq!(machine.pc(), 20, "pc stays on the wait instruction");
+    assert_eq!(state, vec![0u8; 16], "nothing is consumed or stored");
 
     let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
     assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
     assert_eq!(host.wait_calls, 2);
+    assert_eq!(state_u64(&state, 0), Status::Ok as u64);
     assert_eq!(
-        u64::from_le_bytes(state[..8].try_into().unwrap()),
-        2 + FaultCode::Overflow as u64
+        state_u64(&state, 8),
+        2 + FaultCode::Overflow as u64,
+        "the reason int keeps the staged 0/1/2+code encoding"
     );
 }
 
 #[test]
 fn wait_maps_exit_reasons_and_status_errors() {
-    for (outcome, expected) in [
-        (WaitOutcome::Exited(ExitReason::Ok), 0i64),
-        (WaitOutcome::Exited(ExitReason::Killed), 1),
-        (WaitOutcome::Status(Status::NotFound), -3),
+    for (outcome, status, reason) in [
+        (WaitOutcome::Exited(ExitReason::Ok), 0u64, 0u64),
+        (WaitOutcome::Exited(ExitReason::Killed), 0, 1),
+        (WaitOutcome::Status(Status::NotFound), 3, 0),
     ] {
         let mut instructions = Vec::new();
         op_const(&mut instructions, 9);
+        op_imm(&mut instructions, opcodes::REF_STATE, 8);
         op_imm(&mut instructions, opcodes::BUILTIN, opcodes::builtin::WAIT);
         op_imm(&mut instructions, opcodes::STORE_STATE, 0);
         op(&mut instructions, opcodes::RET);
         let spec = FnSpec {
-            frame_size: 48,
+            frame_size: 56,
             ..MAIN
         };
-        let code = build(&[spec], &instructions, &[], 8, 64, 0);
+        let code = build(&[spec], &instructions, &[], 16, 64, 0);
         let mut host = MockHost {
             wait_results: vec![outcome],
             ..Default::default()
         };
-        let mut state = vec![0u8; 8];
+        let mut state = vec![0u8; 16];
         let mut stack = vec![0u8; 64];
         let (result, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
         assert_eq!(result, Outcome::Exited(ExitReason::Ok));
-        assert_eq!(
-            i64::from_le_bytes(state[..8].try_into().unwrap()),
-            expected,
-            "{outcome:?}"
-        );
+        assert_eq!(state_u64(&state, 0), status, "{outcome:?}");
+        assert_eq!(state_u64(&state, 8), reason, "{outcome:?}");
     }
 }
 
@@ -622,6 +627,36 @@ fn kill_forwards_the_id_and_pushes_zero() {
     assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
     assert_eq!(host.killed, vec![4]);
     assert_eq!(u64::from_le_bytes(state[..8].try_into().unwrap()), 0);
+}
+
+#[test]
+fn enum_cast_keeps_a_valid_ordinal_and_faults_overflow_past_it() {
+    // A three-variant enum: ordinals 0, 1 and 2 are valid; 3 and -1 are not.
+    for (ordinal, expected) in [
+        (0u64, ExitReason::Ok),
+        (2, ExitReason::Ok),
+        (3, ExitReason::Faulted(FaultCode::Overflow)),
+        (u64::MAX, ExitReason::Faulted(FaultCode::Overflow)),
+    ] {
+        let mut instructions = Vec::new();
+        op_const(&mut instructions, ordinal as i64);
+        op_imm(&mut instructions, opcodes::ENUM_CAST, 3);
+        op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+        op(&mut instructions, opcodes::RET);
+        let spec = FnSpec {
+            frame_size: 48,
+            ..MAIN
+        };
+        let code = build(&[spec], &instructions, &[], 8, 64, 0);
+        let mut host = MockHost::default();
+        let mut state = vec![0u8; 8];
+        let mut stack = vec![0u8; 64];
+        let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+        assert_eq!(outcome, Outcome::Exited(expected), "ordinal {ordinal}");
+        if expected == ExitReason::Ok {
+            assert_eq!(u64::from_le_bytes(state[..8].try_into().unwrap()), ordinal);
+        }
+    }
 }
 
 // ---- buffer indexing, comparison and length -----------------------------
