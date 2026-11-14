@@ -206,3 +206,25 @@ begin
   end;
   return Ok;
 end;
+
+// Moves up to eight integers out of `src` into `dst`, oldest first, and writes
+// how many were moved through `count`. Returns Ok, or NotFound when `src` is
+// empty (then nothing is written). This is the first helper whose signature
+// carries a `ring`, which crosses the unit boundary through the shared
+// structural ring table (spec 0003, "Rings").
+function drain_into(dst: var array[int, 8]; count: var int; src: var ring[int, 8]): Status;
+var
+  value: int;
+  status: Status;
+begin
+  count := 0;
+  while count < 8 and not core.ring_empty(src) do
+  begin
+    status := core.ring_pop(src, value);
+    if status <> Ok then
+      return status;
+    dst[count] := value;
+    count := count + 1;
+  end;
+  return Ok;
+end;

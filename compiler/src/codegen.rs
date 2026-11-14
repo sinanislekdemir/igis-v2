@@ -137,6 +137,29 @@ struct ArrayDef {
     size: u32,
 }
 
+/// One fixed-capacity ring type known to this compilation. The index in this
+/// table is the compiler-local ring id carried by [`Kind::Ring`].
+///
+/// Layout (spec 0003, "Rings"): the `count` elements (each `element_stride`
+/// bytes) come first, so an element reference uses the ring base directly;
+/// then `head: u64` at `count * stride` and `count: u64` eight bytes later.
+/// The total is `align8(count * stride + 16)`.
+#[derive(Debug, Clone, Copy)]
+struct RingDef {
+    /// Element type.
+    elem: Type,
+    /// Capacity, always at least 1.
+    count: u32,
+    /// Element stride in bytes, always a multiple of 8.
+    stride: u32,
+    /// Offset of the `head` word: `count * stride`.
+    head_off: u32,
+    /// Offset of the `count` word: `head_off + 8`.
+    count_off: u32,
+    /// Total size in bytes, header included, already rounded to 8.
+    size: u32,
+}
+
 /// Compiler-local id of the predeclared `Diagnostic` record.
 const DIAGNOSTIC_RECORD: u16 = 0;
 
@@ -239,6 +262,12 @@ const STATUS_VARIANTS: [&str; 8] = [
     "IoError",
 ];
 
+/// Ordinals used by the compiler-lowered ring operations. They follow
+/// [`STATUS_VARIANTS`] (and `abi::Status`): `Ok` 0, `NotFound` 3, `Full` 5.
+const STATUS_OK: i64 = 0;
+const STATUS_NOT_FOUND: i64 = 3;
+const STATUS_FULL: i64 = 5;
+
 #[derive(Debug, Clone, Copy)]
 struct StateVar<'a> {
     name: &'a str,
@@ -321,16 +350,19 @@ impl<'a, 'b> ConstantPool<'a, 'b> {
 /// True when a type can cross the library/application unit boundary.
 ///
 /// Scalars, buffers and the predeclared enums have representation-only
-/// identity; records, sums and user enums are compiler-local ids. Array ids
-/// are shared by the one interning table, but their element type must itself
-/// be safe.
-fn cross_unit_type_ok(ty: Type, arrays: &[ArrayDef]) -> bool {
+/// identity; records, sums and user enums are compiler-local ids. Array and
+/// ring ids are shared by the one interning table, but their element type must
+/// itself be safe.
+fn cross_unit_type_ok(ty: Type, arrays: &[ArrayDef], rings: &[RingDef]) -> bool {
     match ty.kind {
         Kind::Record(_) | Kind::Sum(_) => false,
         Kind::Enum(id) => id <= FAULT_CODE_ENUM,
         Kind::Array(id) => arrays
             .get(id as usize)
-            .is_some_and(|array| cross_unit_type_ok(array.elem, arrays)),
+            .is_some_and(|array| cross_unit_type_ok(array.elem, arrays, rings)),
+        Kind::Ring(id) => rings
+            .get(id as usize)
+            .is_some_and(|ring| cross_unit_type_ok(ring.elem, arrays, rings)),
         _ => true,
     }
 }
@@ -440,6 +472,86 @@ fn intern_array<'a>(
     Ok(Type::array(index, size))
 }
 
+/// Finds a ring type by its compiler-local id, returning its layout.
+fn ring_of(rings: &[RingDef], ty: Type) -> Option<RingDef> {
+    match ty.kind {
+        Kind::Ring(id) => rings.get(id as usize).copied(),
+        _ => None,
+    }
+}
+
+/// Interns `elem × count` structurally and returns the ring type.
+///
+/// The table is shared by both units of one compilation, so the same written
+/// `ring[T, N]` resolves to the same id on either side of a call. Interning
+/// scans existing entries, so the numbering is first-use order and
+/// deterministic.
+fn intern_ring<'a>(
+    rings: &mut SliceVec<'a, '_, RingDef>,
+    elem: Type,
+    count: u32,
+    line: u32,
+    column: u32,
+    path: &'a str,
+    unit: &'a str,
+) -> Result<Type, Diagnostic> {
+    for (index, entry) in rings.as_slice().iter().enumerate() {
+        if entry.elem == elem && entry.count == count {
+            return Ok(Type::ring(index as u16, entry.size));
+        }
+    }
+    let stride = align8(elem.size());
+    let storage = count.checked_mul(stride).ok_or_else(|| {
+        diag(
+            path,
+            unit,
+            line,
+            column,
+            format_args!("ring size overflows"),
+        )
+    })?;
+    let size = storage.checked_add(16).ok_or_else(|| {
+        diag(
+            path,
+            unit,
+            line,
+            column,
+            format_args!("ring size overflows"),
+        )
+    })?;
+    if size > MAX_CAPACITY {
+        return Err(diag(
+            path,
+            unit,
+            line,
+            column,
+            format_args!(
+                "ring of {count} elements is {size} bytes, over the {MAX_CAPACITY}-byte cap"
+            ),
+        ));
+    }
+    let index = u16::try_from(rings.len()).map_err(|_| {
+        diag(
+            path,
+            unit,
+            line,
+            column,
+            format_args!("too many distinct ring types"),
+        )
+    })?;
+    rings
+        .push(RingDef {
+            elem,
+            count,
+            stride,
+            head_off: storage,
+            count_off: storage + 8,
+            size: align8(size),
+        })
+        .map_err(|_| arena_full(path, unit, line, column))?;
+    Ok(Type::ring(index, align8(size)))
+}
+
 /// Returns the sum definition a type names, if it is a sum type.
 fn sum_of<'a>(sums: &[SumDef<'a>], ty: Type) -> Option<SumDef<'a>> {
     match ty.kind {
@@ -522,7 +634,7 @@ fn has_variant(enums: &[EnumDef<'_>], name: &str) -> bool {
 fn is_builtin_type_name(name: &str) -> bool {
     matches!(
         name,
-        "int" | "uint" | "byte" | "bool" | "f64" | "string" | "bytes" | "array"
+        "int" | "uint" | "byte" | "bool" | "f64" | "string" | "bytes" | "array" | "ring"
     )
 }
 
@@ -573,6 +685,7 @@ fn build_tables<'a>(
     path: &'a str,
     bump: &Bump<'a>,
     arrays: &mut SliceVec<'a, '_, ArrayDef>,
+    rings: &mut SliceVec<'a, '_, RingDef>,
 ) -> Result<UnitTables<'a>, Diagnostic> {
     let name = unit.name;
     if name.is_empty() {
@@ -741,6 +854,7 @@ fn build_tables<'a>(
                         records.as_slice(),
                         sums.as_slice(),
                         arrays,
+                        rings,
                         path,
                         name,
                     )?;
@@ -848,6 +962,7 @@ fn build_tables<'a>(
                                 records.as_slice(),
                                 sums.as_slice(),
                                 arrays,
+                                rings,
                                 path,
                                 name,
                             )?;
@@ -952,6 +1067,7 @@ fn build_tables<'a>(
             records.as_slice(),
             sums.as_slice(),
             arrays,
+            rings,
             path,
             name,
         )?;
@@ -1042,6 +1158,7 @@ fn build_tables<'a>(
                 records.as_slice(),
                 sums.as_slice(),
                 arrays,
+                rings,
                 path,
                 name,
             )?;
@@ -1089,6 +1206,7 @@ fn build_tables<'a>(
                     records.as_slice(),
                     sums.as_slice(),
                     arrays,
+                    rings,
                     path,
                     name,
                 )?;
@@ -1143,6 +1261,7 @@ fn compile_procs<'a, 'b>(
     library_sigs: Option<&'a [Sig<'a>]>,
     state_vars: &'a [StateVar<'a>],
     arrays: &mut SliceVec<'a, 'b, ArrayDef>,
+    rings: &mut SliceVec<'a, 'b, RingDef>,
     unit_id: u32,
     pool: &mut ConstantPool<'a, 'b>,
     bump: &'b Bump<'a>,
@@ -1162,6 +1281,7 @@ fn compile_procs<'a, 'b>(
             tables.records,
             tables.sums,
             &mut *arrays,
+            &mut *rings,
             call_base,
             library_sigs,
             unit_id,
@@ -1301,15 +1421,24 @@ fn assemble_units<'a>(
     manifest: &'a mut [u8],
 ) -> Result<Package<'a>, Diagnostic> {
     check_uses(application, application_path, is_application)?;
-    // One array table serves both units: interning is structural, so an
-    // `array[T, N]` written on either side of a call resolves to the same id.
+    // One array table and one ring table serve both units: interning is
+    // structural, so an `array[T, N]` or `ring[T, N]` written on either side
+    // of a call resolves to the same id.
     let mut arrays = SliceVec::<ArrayDef>::new(bump)
         .map_err(|_| arena_full(application_path, application.name, 1, 1))?;
-    let app = build_tables(application, application_path, bump, &mut arrays)?;
+    let mut rings = SliceVec::<RingDef>::new(bump)
+        .map_err(|_| arena_full(application_path, application.name, 1, 1))?;
+    let app = build_tables(application, application_path, bump, &mut arrays, &mut rings)?;
     let lib = match library {
         Some(unit) => {
             check_uses(unit, library_path, false)?;
-            Some(build_tables(unit, library_path, bump, &mut arrays)?)
+            Some(build_tables(
+                unit,
+                library_path,
+                bump,
+                &mut arrays,
+                &mut rings,
+            )?)
         }
         None => None,
     };
@@ -1386,6 +1515,7 @@ fn assemble_units<'a>(
                 None,
                 rebased,
                 &mut arrays,
+                &mut rings,
                 1,
                 &mut pool,
                 bump,
@@ -1402,6 +1532,7 @@ fn assemble_units<'a>(
         library_sigs,
         app.state_vars,
         &mut arrays,
+        &mut rings,
         0,
         &mut pool,
         bump,
@@ -1488,17 +1619,24 @@ fn resolve_type<'a>(
     records: &[RecordDef<'a>],
     sums: &[SumDef<'a>],
     arrays: &mut SliceVec<'a, '_, ArrayDef>,
+    rings: &mut SliceVec<'a, '_, RingDef>,
     path: &'a str,
     unit: &'a str,
 ) -> Result<Type, Diagnostic> {
-    if ty.name == "array" {
+    if matches!(ty.name, "array" | "ring") {
+        let word = ty.name;
+        let example = if word == "array" {
+            "array[int, 4]"
+        } else {
+            "ring[int, 4]"
+        };
         let Some(elem_ref) = ty.elem else {
             return Err(diag(
                 path,
                 unit,
                 ty.line,
                 ty.column,
-                format_args!("`array` needs an element type, e.g. `array[int, 4]`"),
+                format_args!("`{word}` needs an element type, e.g. `{example}`"),
             ));
         };
         let Some(count_expr) = ty.count else {
@@ -1507,17 +1645,19 @@ fn resolve_type<'a>(
                 unit,
                 ty.line,
                 ty.column,
-                format_args!("`array` needs a count, e.g. `array[int, 4]`"),
+                format_args!("`{word}` needs a count, e.g. `{example}`"),
             ));
         };
-        let elem = resolve_type(elem_ref, consts, enums, records, sums, arrays, path, unit)?;
+        let elem = resolve_type(
+            elem_ref, consts, enums, records, sums, arrays, rings, path, unit,
+        )?;
         if elem.is_buffer() && elem.cap == 0 {
             return Err(diag(
                 path,
                 unit,
                 elem_ref.line,
                 elem_ref.column,
-                format_args!("an array element buffer needs a capacity of at least 1"),
+                format_args!("a `{word}` element buffer needs a capacity of at least 1"),
             ));
         }
         if elem.size() == 0 {
@@ -1526,7 +1666,7 @@ fn resolve_type<'a>(
                 unit,
                 elem_ref.line,
                 elem_ref.column,
-                format_args!("the array element type has no size"),
+                format_args!("the `{word}` element type has no size"),
             ));
         }
         let count = eval_const(count_expr, consts, path, unit, 0)?;
@@ -1536,7 +1676,7 @@ fn resolve_type<'a>(
                 unit,
                 count_expr.line,
                 count_expr.column,
-                format_args!("array count must be a positive constant, found {count}"),
+                format_args!("{word} count must be a positive constant, found {count}"),
             ));
         }
         if count > MAX_CAPACITY as i64 {
@@ -1545,10 +1685,13 @@ fn resolve_type<'a>(
                 unit,
                 count_expr.line,
                 count_expr.column,
-                format_args!("array count {count} exceeds the {MAX_CAPACITY}-element cap"),
+                format_args!("{word} count {count} exceeds the {MAX_CAPACITY}-element cap"),
             ));
         }
-        return intern_array(arrays, elem, count as u32, ty.line, ty.column, path, unit);
+        if word == "array" {
+            return intern_array(arrays, elem, count as u32, ty.line, ty.column, path, unit);
+        }
+        return intern_ring(rings, elem, count as u32, ty.line, ty.column, path, unit);
     }
     if ty.elem.is_some() || ty.count.is_some() {
         return Err(diag(
@@ -1759,6 +1902,8 @@ enum Target {
     StateSum { off: u32, ty: Type },
     LocalArray { base: u32, ty: Type, is_ref: bool },
     StateArray { off: u32, ty: Type },
+    LocalRing { base: u32, ty: Type, is_ref: bool },
+    StateRing { off: u32, ty: Type },
 }
 
 /// Where a designator's storage starts, before any field path is applied.
@@ -1803,6 +1948,8 @@ struct FnCompiler<'a, 'b, 'p> {
     /// Codegen may intern a local's element type here, so the table stays
     /// mutable until both units are compiled.
     arrays: &'p mut SliceVec<'a, 'b, ArrayDef>,
+    /// Every ring type of this compilation, shared with the library unit.
+    rings: &'p mut SliceVec<'a, 'b, RingDef>,
     /// Index of this unit's first function in the shared function table.
     call_base: u32,
     /// Top-level procedures of the imported `stdlib` unit, reachable only as
@@ -1836,6 +1983,7 @@ struct TypeName<'a, 'b, 'c> {
     records: &'b [RecordDef<'a>],
     sums: &'b [SumDef<'a>],
     arrays: &'c [ArrayDef],
+    rings: &'c [RingDef],
 }
 
 impl fmt::Display for TypeName<'_, '_, '_> {
@@ -1863,10 +2011,27 @@ impl fmt::Display for TypeName<'_, '_, '_> {
                         records: self.records,
                         sums: self.sums,
                         arrays: self.arrays,
+                        rings: self.rings,
                     },
                     array.count
                 ),
                 None => f.write_str("array"),
+            },
+            Kind::Ring(id) => match self.rings.get(id as usize) {
+                Some(ring) => write!(
+                    f,
+                    "ring[{}, {}]",
+                    TypeName {
+                        ty: ring.elem,
+                        enums: self.enums,
+                        records: self.records,
+                        sums: self.sums,
+                        arrays: self.arrays,
+                        rings: self.rings,
+                    },
+                    ring.count
+                ),
+                None => f.write_str("ring"),
             },
             _ => write!(f, "{}", self.ty),
         }
@@ -1902,6 +2067,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             records: self.records,
             sums: self.sums,
             arrays: self.arrays.as_slice(),
+            rings: self.rings.as_slice(),
         }
     }
 
@@ -1916,6 +2082,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         records: &'b [RecordDef<'a>],
         sums: &'b [SumDef<'a>],
         arrays: &'p mut SliceVec<'a, 'b, ArrayDef>,
+        rings: &'p mut SliceVec<'a, 'b, RingDef>,
         call_base: u32,
         library_sigs: Option<&'b [Sig<'a>]>,
         unit_id: u32,
@@ -1940,6 +2107,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             records,
             sums,
             arrays,
+            rings,
             call_base,
             library_sigs,
             unit_id,
@@ -2022,7 +2190,10 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         for (index, param) in self.current.params.iter().enumerate() {
             let base = self.next_local;
             self.next_local += 8;
-            let aggregate = param.ty.is_record() || param.ty.is_sum() || param.ty.is_array();
+            let aggregate = param.ty.is_record()
+                || param.ty.is_sum()
+                || param.ty.is_array()
+                || param.ty.is_ring();
             let is_ref = param.mode == ParamMode::Var
                 || param.ty.is_buffer()
                 || (aggregate && param.mode != ParamMode::Value);
@@ -2082,6 +2253,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.records,
                 self.sums,
                 &mut *self.arrays,
+                &mut *self.rings,
                 self.path,
                 self.unit,
             )?;
@@ -2690,6 +2862,9 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         if place.ty.is_array() {
             return self.assign_array(&place, value);
         }
+        if place.ty.is_ring() {
+            return self.assign_ring(&place, value);
+        }
         if place.ty.is_buffer() {
             return self.buffer_assign(BufferDest::Place(place), Some(target), value);
         }
@@ -2759,6 +2934,10 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             Target::LocalArray { .. } | Target::StateArray { .. } => {
                 let place = self.place_of_target(&target);
                 self.assign_array(&place, value)?;
+            }
+            Target::LocalRing { .. } | Target::StateRing { .. } => {
+                let place = self.place_of_target(&target);
+                self.assign_ring(&place, value)?;
             }
         }
         Ok(())
@@ -2877,6 +3056,12 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     ty: slot.ty,
                     is_ref: slot.is_ref,
                 }
+            } else if slot.ty.is_ring() {
+                Target::LocalRing {
+                    base: slot.base,
+                    ty: slot.ty,
+                    is_ref: slot.is_ref,
+                }
             } else {
                 Target::LocalScalar {
                     off: slot.base,
@@ -2903,6 +3088,11 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 }
             } else if var.ty.is_array() {
                 Target::StateArray {
+                    off: var.off,
+                    ty: var.ty,
+                }
+            } else if var.ty.is_ring() {
+                Target::StateRing {
                     off: var.off,
                     ty: var.ty,
                 }
@@ -3134,6 +3324,14 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     byte_buffer: None,
                 }
             }
+            Target::LocalRing { base, ty, is_ref } => Place {
+                base: Base::Local { off: base, is_ref },
+                base_ty: ty,
+                path: &[],
+                ty,
+                writable: true,
+                byte_buffer: None,
+            },
             Target::StateBuffer { off, ty } | Target::StateRecord { off, ty } => Place {
                 base: Base::State { off },
                 base_ty: ty,
@@ -3143,6 +3341,14 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 byte_buffer: None,
             },
             Target::StateSum { off, ty } | Target::StateArray { off, ty } => Place {
+                base: Base::State { off },
+                base_ty: ty,
+                path: &[],
+                ty,
+                writable: true,
+                byte_buffer: None,
+            },
+            Target::StateRing { off, ty } => Place {
                 base: Base::State { off },
                 base_ty: ty,
                 path: &[],
@@ -3268,11 +3474,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             ));
         };
         let place = self.place(designator.base, designator.path, expr.line, expr.column)?;
-        if !place.ty.is_record() && !place.ty.is_sum() && !place.ty.is_array() {
+        if !place.ty.is_record()
+            && !place.ty.is_sum()
+            && !place.ty.is_array()
+            && !place.ty.is_ring()
+        {
             let found = self.type_name(place.ty);
             return Err(self.err_at(
                 expr,
-                format_args!("{what} expects a record, sum or array value, found `{found}`"),
+                format_args!("{what} expects a record, sum, array or ring value, found `{found}`"),
             ));
         }
         if writable && !place.writable {
@@ -3309,6 +3519,22 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
     ) -> Result<(), Diagnostic> {
         self.push_value_ref(destination)?;
         let source = self.emit_aggregate_ref(value, false, "an array assignment")?;
+        self.check_exact(destination.ty, source, value)?;
+        self.const_i64(destination.ty.size() as i64)?;
+        self.simple(opcodes::COPY_REFS)?;
+        self.pop(3)?;
+        Ok(())
+    }
+
+    /// Assigns a whole ring: a byte copy of the whole image, header included,
+    /// so `head` and `count` travel with the storage (spec 0003, "Rings").
+    fn assign_ring(
+        &mut self,
+        destination: &Place<'a>,
+        value: &'a Expr<'a>,
+    ) -> Result<(), Diagnostic> {
+        self.push_value_ref(destination)?;
+        let source = self.emit_aggregate_ref(value, false, "a ring assignment")?;
         self.check_exact(destination.ty, source, value)?;
         self.const_i64(destination.ty.size() as i64)?;
         self.simple(opcodes::COPY_REFS)?;
@@ -3460,7 +3686,11 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         }
         self.push_value_ref(destination)?;
         self.one(opcodes::REF_OFFSET, 8)?;
-        if payload_ty.is_record() || payload_ty.is_sum() || payload_ty.is_array() {
+        if payload_ty.is_record()
+            || payload_ty.is_sum()
+            || payload_ty.is_array()
+            || payload_ty.is_ring()
+        {
             let source = self.emit_aggregate_ref(payload, false, "a sum payload")?;
             self.check_exact(payload_ty, source, payload)?;
             self.const_i64(payload_ty.size() as i64)?;
@@ -3834,6 +4064,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 ),
             ));
         }
+        if place.ty.is_ring() {
+            let found = self.type_name(place.ty);
+            return Err(self.err_at(
+                expr,
+                format_args!(
+                    "ring `{found}` cannot be used as a scalar value; use `core.ring_push`/`pop`/`peek` and copy it whole"
+                ),
+            ));
+        }
         self.push_value_ref(&place)?;
         self.simple(opcodes::LOAD_REF)?;
         // `push_value_ref` counts the reference; `load_ref` replaces it with
@@ -3880,6 +4119,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     ),
                 ));
             }
+            if slot.ty.is_ring() {
+                let found = self.type_name(slot.ty);
+                return Err(self.err_at(
+                    expr,
+                    format_args!(
+                        "ring `{name}` of type `{found}` cannot be used as a scalar value; use `core.ring_push`/`pop`/`peek` and copy it whole"
+                    ),
+                ));
+            }
             if slot.is_ref {
                 self.one(opcodes::LOAD_LOCAL, slot.base)?;
                 self.simple(opcodes::LOAD_REF)?;
@@ -3920,6 +4168,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     expr,
                     format_args!(
                         "array `{name}` of type `{found}` cannot be used as a scalar value; index it or copy it whole"
+                    ),
+                ));
+            }
+            if var.ty.is_ring() {
+                let found = self.type_name(var.ty);
+                return Err(self.err_at(
+                    expr,
+                    format_args!(
+                        "ring `{name}` of type `{found}` cannot be used as a scalar value; use `core.ring_push`/`pop`/`peek` and copy it whole"
                     ),
                 ));
             }
@@ -4270,7 +4527,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 BinOp::And | BinOp::Or => unreachable!(),
             },
             Kind::String | Kind::Bytes => unreachable!(),
-            Kind::Record(_) | Kind::Sum(_) | Kind::Array(_) => unreachable!(),
+            Kind::Record(_) | Kind::Sum(_) | Kind::Array(_) | Kind::Ring(_) => unreachable!(),
             Kind::Enum(_) => match op {
                 // Ordinals are non-negative, so unsigned ordering is the
                 // declaration order (spec 0003, "Enums").
@@ -4560,6 +4817,125 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::scalar(Kind::Int)))
             }
+            // Ring operations (spec 0003, "Rings") are compiler-recognised
+            // built-in procedures, not host builtins: they lower to the
+            // ordinary reference/copy/branch instructions over the ring's
+            // layout, so no opcode and no interpreter builtin id is involved.
+            // `push` and `pop` mutate the receiver; `peek`, `full` and
+            // `empty` read it.
+            "core.ring_push" => {
+                if args.len() != 2 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.ring_push` expects 2 arguments, got {}", args.len()),
+                    ));
+                }
+                let (place, ring) = self.ring_receiver(args[0], "core.ring_push", true)?;
+                let start_depth = self.depth;
+                let full = self.label()?;
+                let end = self.label()?;
+                self.push_ring_header(&place, ring.count_off)?;
+                self.const_i64(ring.count as i64)?;
+                self.simple(opcodes::EQ)?;
+                self.pop(1)?;
+                self.jump(opcodes::JNZ, full, true)?;
+                self.write_ring_element(&place, &ring, args[1])?;
+                self.adjust_ring_count(&place, &ring, 1)?;
+                self.const_i64(STATUS_OK)?;
+                self.jump(opcodes::JMP, end, false)?;
+                // Both paths leave one status operand; the join restarts from
+                // the depth the call began with.
+                self.depth = start_depth;
+                self.bind(full);
+                self.const_i64(STATUS_FULL)?;
+                self.bind(end);
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "core.ring_pop" => {
+                if args.len() != 2 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.ring_pop` expects 2 arguments, got {}", args.len()),
+                    ));
+                }
+                let (place, ring) = self.ring_receiver(args[0], "core.ring_pop", true)?;
+                let start_depth = self.depth;
+                let empty = self.label()?;
+                let end = self.label()?;
+                self.push_ring_header(&place, ring.count_off)?;
+                self.const_i64(0)?;
+                self.simple(opcodes::EQ)?;
+                self.pop(1)?;
+                self.jump(opcodes::JNZ, empty, true)?;
+                self.read_ring_element_into(&place, &ring, args[1], "core.ring_pop")?;
+                self.advance_ring_head(&place, &ring)?;
+                self.adjust_ring_count(&place, &ring, -1)?;
+                self.const_i64(STATUS_OK)?;
+                self.jump(opcodes::JMP, end, false)?;
+                self.depth = start_depth;
+                self.bind(empty);
+                self.const_i64(STATUS_NOT_FOUND)?;
+                self.bind(end);
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "core.ring_peek" => {
+                if args.len() != 2 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.ring_peek` expects 2 arguments, got {}", args.len()),
+                    ));
+                }
+                let (place, ring) = self.ring_receiver(args[0], "core.ring_peek", false)?;
+                let start_depth = self.depth;
+                let empty = self.label()?;
+                let end = self.label()?;
+                self.push_ring_header(&place, ring.count_off)?;
+                self.const_i64(0)?;
+                self.simple(opcodes::EQ)?;
+                self.pop(1)?;
+                self.jump(opcodes::JNZ, empty, true)?;
+                self.read_ring_element_into(&place, &ring, args[1], "core.ring_peek")?;
+                self.const_i64(STATUS_OK)?;
+                self.jump(opcodes::JMP, end, false)?;
+                self.depth = start_depth;
+                self.bind(empty);
+                self.const_i64(STATUS_NOT_FOUND)?;
+                self.bind(end);
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "core.ring_full" => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.ring_full` expects 1 argument, got {}", args.len()),
+                    ));
+                }
+                let (place, ring) = self.ring_receiver(args[0], "core.ring_full", false)?;
+                self.push_ring_header(&place, ring.count_off)?;
+                self.const_i64(ring.count as i64)?;
+                self.simple(opcodes::EQ)?;
+                self.pop(1)?;
+                Ok(Some(Type::scalar(Kind::Bool)))
+            }
+            "core.ring_empty" => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.ring_empty` expects 1 argument, got {}", args.len()),
+                    ));
+                }
+                let (place, ring) = self.ring_receiver(args[0], "core.ring_empty", false)?;
+                self.push_ring_header(&place, ring.count_off)?;
+                self.const_i64(0)?;
+                self.simple(opcodes::EQ)?;
+                self.pop(1)?;
+                Ok(Some(Type::scalar(Kind::Bool)))
+            }
             // `Spawn`/`wait`/`kill` return the predeclared `Status` enum and
             // write their results through `var` out-parameters (spec 0003,
             // E1; spec 0005). `Status` ordinals are the `abi::Status`
@@ -4719,13 +5095,11 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 // those and the two predeclared enums (`Status`, `FaultCode`)
                 // are safe; the array table itself is shared by both units.
                 if target.starts_with("stdlib.") {
-                    let incompatible = signature
-                        .params
-                        .iter()
-                        .any(|param| !cross_unit_type_ok(param.ty, self.arrays.as_slice()))
-                        || signature
-                            .ret
-                            .is_some_and(|ty| !cross_unit_type_ok(ty, self.arrays.as_slice()));
+                    let incompatible = signature.params.iter().any(|param| {
+                        !cross_unit_type_ok(param.ty, self.arrays.as_slice(), self.rings.as_slice())
+                    }) || signature.ret.is_some_and(|ty| {
+                        !cross_unit_type_ok(ty, self.arrays.as_slice(), self.rings.as_slice())
+                    });
                     if incompatible {
                         return Err(self.err(
                             line,
@@ -4799,7 +5173,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         param: &Param<'a>,
         position: usize,
     ) -> Result<(), Diagnostic> {
-        if param.ty.is_record() || param.ty.is_sum() || param.ty.is_array() {
+        if param.ty.is_record() || param.ty.is_sum() || param.ty.is_array() || param.ty.is_ring() {
             let writable = param.mode == ParamMode::Var;
             let found = self.emit_aggregate_ref(arg, writable, "argument")?;
             if found != param.ty {
@@ -4942,6 +5316,13 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
     }
 
     fn emit_var_buffer_ref(&mut self, expr: &'a Expr<'a>) -> Result<Type, Diagnostic> {
+        let place = self.var_buffer_place(expr)?;
+        self.push_buffer_data_ref(&place)?;
+        Ok(place.ty)
+    }
+
+    /// Resolves a writable buffer designator without emitting its reference.
+    fn var_buffer_place(&self, expr: &'a Expr<'a>) -> Result<Place<'a>, Diagnostic> {
         let Some(designator) = Self::designator(expr) else {
             return Err(self.err_at(
                 expr,
@@ -4961,8 +5342,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 ),
             ));
         }
-        self.push_buffer_data_ref(&place)?;
-        Ok(place.ty)
+        Ok(place)
     }
 
     fn emit_scalar_ref(&mut self, expr: &'a Expr<'a>) -> Result<Type, Diagnostic> {
@@ -4991,6 +5371,347 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         }
         self.push_value_ref(&place)?;
         Ok(place.ty)
+    }
+
+    // ---- rings (spec 0003, "Rings") ------------------------------------
+
+    /// Resolves a `core.ring_*` receiver: a designator of a ring type, and
+    /// writable storage when the operation mutates the header (`push`/`pop`).
+    ///
+    /// A `value` parameter is an ordinary writable copy everywhere in the
+    /// language, so pushing/popping through one mutates the callee's copy only,
+    /// exactly like a `value` record or array parameter. A `const` parameter is
+    /// read-only.
+    fn ring_receiver(
+        &mut self,
+        expr: &'a Expr<'a>,
+        what: &str,
+        mutate: bool,
+    ) -> Result<(Place<'a>, RingDef), Diagnostic> {
+        let Some(designator) = Self::designator(expr) else {
+            return Err(self.err_at(
+                expr,
+                format_args!("`{what}` expects a ring variable as its first argument"),
+            ));
+        };
+        let place = self.place(designator.base, designator.path, expr.line, expr.column)?;
+        let Some(ring) = ring_of(self.rings.as_slice(), place.ty) else {
+            let found = self.type_name(place.ty);
+            return Err(self.err_at(
+                expr,
+                format_args!("`{what}` expects a `ring[T, N]` first argument, found `{found}`"),
+            ));
+        };
+        if mutate && !place.writable {
+            return Err(self.err_at(
+                expr,
+                format_args!(
+                    "cannot mutate `const` parameter `{}`; declare the ring parameter `var`",
+                    designator.base
+                ),
+            ));
+        }
+        Ok((place, ring))
+    }
+
+    /// Pushes the `u64` header word at `off` of a ring (`head` or `count`).
+    fn push_ring_header(&mut self, place: &Place<'a>, off: u32) -> Result<(), Diagnostic> {
+        self.push_value_ref(place)?;
+        self.one(opcodes::REF_OFFSET, off)?;
+        self.simple(opcodes::LOAD_REF)?;
+        Ok(())
+    }
+
+    /// Pushes a reference to the element at `(head + count) % N` (the next
+    /// push slot) or at `head` (the oldest element).
+    fn push_ring_element(
+        &mut self,
+        place: &Place<'a>,
+        ring: &RingDef,
+        at_head: bool,
+    ) -> Result<(), Diagnostic> {
+        self.push_value_ref(place)?;
+        if at_head {
+            self.push_ring_header(place, ring.head_off)?;
+        } else {
+            self.push_ring_header(place, ring.head_off)?;
+            self.push_ring_header(place, ring.count_off)?;
+            self.simple(opcodes::ADD_U)?;
+            self.pop(1)?;
+            self.const_i64(ring.count as i64)?;
+            self.simple(opcodes::MOD_U)?;
+            self.pop(1)?;
+        }
+        self.word(opcodes::REF_ELEMENT, 0, 0, 0)?;
+        self.imm32(ring.stride)?;
+        self.imm32(ring.count)?;
+        self.pop(1)?;
+        Ok(())
+    }
+
+    /// Writes the next push slot: scalars and enums store one slot, every
+    /// other element is a byte copy of `stride` bytes; a buffer element is
+    /// rebuilt with `clear`/`append`, which is the same `[len][data]` image
+    /// and needs no padding when the source is shorter.
+    fn write_ring_element(
+        &mut self,
+        place: &Place<'a>,
+        ring: &RingDef,
+        value: &'a Expr<'a>,
+    ) -> Result<(), Diagnostic> {
+        let elem = ring.elem;
+        if elem.is_buffer() {
+            return self.write_ring_buffer_element(place, ring, value);
+        }
+        self.push_ring_element(place, ring, false)?;
+        if elem.is_scalar() {
+            let found = self.expr_scalar(value)?;
+            if found != elem {
+                let expected = self.type_name(elem);
+                let found = self.type_name(found);
+                return Err(self.err_at(
+                    value,
+                    format_args!("`core.ring_push` expects `{expected}`, found `{found}`"),
+                ));
+            }
+            self.simple(opcodes::STORE_REF)?;
+            self.pop(2)?;
+        } else {
+            let source = self.emit_aggregate_ref(value, false, "a ring element")?;
+            if source != elem {
+                let expected = self.type_name(elem);
+                let found = self.type_name(source);
+                return Err(self.err_at(
+                    value,
+                    format_args!("`core.ring_push` expects `{expected}`, found `{found}`"),
+                ));
+            }
+            self.const_i64(ring.stride as i64)?;
+            self.simple(opcodes::COPY_REFS)?;
+            self.pop(3)?;
+        }
+        Ok(())
+    }
+
+    /// Writes a buffer element: `clear` then `append`, exactly like a whole
+    /// buffer assignment, so a shorter source never over-reads.
+    fn write_ring_buffer_element(
+        &mut self,
+        place: &Place<'a>,
+        ring: &RingDef,
+        value: &'a Expr<'a>,
+    ) -> Result<(), Diagnostic> {
+        let elem = ring.elem;
+        let mut literal: Option<u32> = None;
+        match value.kind {
+            ExprKind::Str(bytes) => {
+                if bytes.len() as u64 > elem.cap as u64 {
+                    return Err(self.err_at(
+                        value,
+                        format_args!(
+                            "string literal ({} bytes) does not fit `{}`",
+                            bytes.len(),
+                            self.type_name(elem)
+                        ),
+                    ));
+                }
+                if elem.kind == Kind::String && core::str::from_utf8(bytes).is_err() {
+                    return Err(self.err_at(
+                        value,
+                        format_args!(
+                            "string literal is not valid UTF-8; use a `bytes` element for raw data"
+                        ),
+                    ));
+                }
+                let offset = match self.pool.intern(bytes) {
+                    Ok(offset) => offset,
+                    Err(_) => return Err(self.arena_error(value.line, value.column)),
+                };
+                literal = Some(offset);
+            }
+            ExprKind::Designator(designator) => {
+                let source =
+                    self.place(designator.base, designator.path, value.line, value.column)?;
+                if !source.ty.is_buffer() {
+                    let found = self.type_name(source.ty);
+                    return Err(self.err_at(
+                        value,
+                        format_args!(
+                            "`core.ring_push` expects `{}`, found `{found}`",
+                            self.type_name(elem)
+                        ),
+                    ));
+                }
+                if source.ty.kind != elem.kind {
+                    let found = self.type_name(source.ty);
+                    return Err(self.err_at(
+                        value,
+                        format_args!(
+                            "cannot use `{found}` in a `{}` element",
+                            self.type_name(elem)
+                        ),
+                    ));
+                }
+                // A call-scoped buffer parameter's declared capacity is only a
+                // lower bound, so that copy is runtime-checked; an inline
+                // buffer must match exactly (spec 0003, D11).
+                let is_ref = designator.path.is_empty()
+                    && matches!(source.base, Base::Local { is_ref: true, .. });
+                if !is_ref && source.ty.cap != elem.cap {
+                    return Err(self.err_at(
+                        value,
+                        format_args!(
+                            "capacity mismatch: `{}` cannot be pushed into a `{}` element",
+                            self.type_name(source.ty),
+                            self.type_name(elem)
+                        ),
+                    ));
+                }
+            }
+            _ => {
+                return Err(self.err_at(
+                    value,
+                    format_args!(
+                    "`core.ring_push` accepts a literal or a buffer variable for a buffer element"
+                ),
+                ))
+            }
+        }
+
+        // Clear the destination, then append the source data (the element
+        // reference points at the `[len][data]` image, so +8 is its data).
+        self.push_ring_element(place, ring, false)?;
+        self.one(opcodes::REF_OFFSET, 8)?;
+        self.simple(opcodes::CLEAR)?;
+        self.pop(1)?;
+        match literal {
+            Some(offset) => {
+                if let ExprKind::Str(bytes) = value.kind {
+                    if bytes.is_empty() {
+                        return Ok(());
+                    }
+                }
+                self.push_ring_element(place, ring, false)?;
+                self.one(opcodes::REF_OFFSET, 8)?;
+                self.one(opcodes::REF_CONST, offset)?;
+                self.push();
+            }
+            None => {
+                self.push_ring_element(place, ring, false)?;
+                self.one(opcodes::REF_OFFSET, 8)?;
+                let ExprKind::Designator(designator) = value.kind else {
+                    return Err(self.internal("ring buffer source is not a designator"));
+                };
+                let source =
+                    self.place(designator.base, designator.path, value.line, value.column)?;
+                self.push_buffer_data_ref(&source)?;
+            }
+        }
+        self.one(opcodes::APPEND, elem.cap)?;
+        self.pop(2)?;
+        Ok(())
+    }
+
+    /// Copies the oldest element into a caller-owned `var` out-parameter. The
+    /// caller has already proved the ring non-empty, so a failure leaves the
+    /// out-parameter untouched.
+    fn read_ring_element_into(
+        &mut self,
+        place: &Place<'a>,
+        ring: &RingDef,
+        value: &'a Expr<'a>,
+        what: &str,
+    ) -> Result<(), Diagnostic> {
+        let elem = ring.elem;
+        let Some(designator) = Self::designator(value) else {
+            let expected = self.type_name(elem);
+            return Err(self.err_at(
+                value,
+                format_args!("`{what}` expects `var value: {expected}` as its second argument"),
+            ));
+        };
+        let destination = self.place(designator.base, designator.path, value.line, value.column)?;
+        if destination.ty != elem {
+            let expected = self.type_name(elem);
+            let found = self.type_name(destination.ty);
+            return Err(self.err_at(
+                value,
+                format_args!("`{what}` expects `var value: {expected}`, found `{found}`"),
+            ));
+        }
+        if !destination.writable {
+            return Err(self.err_at(
+                value,
+                format_args!(
+                    "cannot pass `const` parameter `{}` as `var`",
+                    designator.base
+                ),
+            ));
+        }
+        if elem.is_buffer() {
+            self.push_buffer_dest_ref(BufferDest::Place(destination))?;
+            self.simple(opcodes::CLEAR)?;
+            self.pop(1)?;
+            self.push_buffer_dest_ref(BufferDest::Place(destination))?;
+            self.push_ring_element(place, ring, true)?;
+            self.one(opcodes::REF_OFFSET, 8)?;
+            self.one(opcodes::APPEND, elem.cap)?;
+            self.pop(2)?;
+            return Ok(());
+        }
+        if elem.is_scalar() {
+            self.push_value_ref(&destination)?;
+            self.push_ring_element(place, ring, true)?;
+            self.simple(opcodes::LOAD_REF)?;
+            self.simple(opcodes::STORE_REF)?;
+            self.pop(2)?;
+            return Ok(());
+        }
+        self.push_value_ref(&destination)?;
+        self.push_ring_element(place, ring, true)?;
+        self.const_i64(ring.stride as i64)?;
+        self.simple(opcodes::COPY_REFS)?;
+        self.pop(3)?;
+        Ok(())
+    }
+
+    /// `head := (head + 1) % N`, after a `pop` removed the oldest element.
+    fn advance_ring_head(&mut self, place: &Place<'a>, ring: &RingDef) -> Result<(), Diagnostic> {
+        self.push_value_ref(place)?;
+        self.one(opcodes::REF_OFFSET, ring.head_off)?;
+        self.push_ring_header(place, ring.head_off)?;
+        self.const_i64(1)?;
+        self.simple(opcodes::ADD_U)?;
+        self.pop(1)?;
+        self.const_i64(ring.count as i64)?;
+        self.simple(opcodes::MOD_U)?;
+        self.pop(1)?;
+        self.simple(opcodes::STORE_REF)?;
+        self.pop(2)?;
+        Ok(())
+    }
+
+    /// `count := count ± 1` after a successful `push`/`pop`.
+    fn adjust_ring_count(
+        &mut self,
+        place: &Place<'a>,
+        ring: &RingDef,
+        delta: i64,
+    ) -> Result<(), Diagnostic> {
+        self.push_value_ref(place)?;
+        self.one(opcodes::REF_OFFSET, ring.count_off)?;
+        self.push_ring_header(place, ring.count_off)?;
+        if delta > 0 {
+            self.const_i64(delta)?;
+            self.simple(opcodes::ADD_U)?;
+        } else {
+            self.const_i64(-delta)?;
+            self.simple(opcodes::SUB_U)?;
+        }
+        self.pop(1)?;
+        self.simple(opcodes::STORE_REF)?;
+        self.pop(2)?;
+        Ok(())
     }
 }
 

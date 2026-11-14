@@ -182,10 +182,20 @@ These are no longer open; they were recorded in specs and ADRs:
   Arrays may be state, locals, parameters, record fields and sum payloads. One structural
   array table is shared by the application and `stdlib`, so arrays cross the unit
   boundary; `stdlib.split_all` fills an `array[string[64], 8]`.
-- **Still missing for a complete stdlib:** `ring`/`map` (language support and helpers),
-  UTF-8 helpers (`utf8_decode_into`, code-point iteration), moving `substr_into` from
-  `core` to `stdlib`, `f64` formatting/parsing, typed stream views, and a shared
-  cross-unit type table so library signatures can use records, sums and user enums.
+- **Still missing for a complete stdlib:** `map` (language support and helpers), UTF-8
+  helpers (`utf8_decode_into`, code-point iteration), moving `substr_into` from `core` to
+  `stdlib`, `f64` formatting/parsing, typed stream views, and a shared cross-unit type
+  table so library signatures can use records, sums and user enums.
+- **Rings (2026-11-14).** `ring[T, N]` is a fixed-capacity FIFO, nominal in element type
+  and count, with the `N` elements first and `head: u64`/`count: u64` after them. The
+  built-in `core.ring_push`/`pop`/`peek`/`full`/`empty` are compiler-recognised
+  procedures lowered with the existing instruction set (`ref_offset`, `ref_element`,
+  `copy_refs`, `add_u`/`mod_u`, `eq`+`jz`), so the ABI v1 opcode table is unchanged. `push` returns
+  `Full` on a full ring and writes nothing; `pop`/`peek` return `NotFound` on an empty
+  ring and leave the out-parameter untouched; `push`/`pop` require a writable place,
+  so `const` is rejected and a `value` copy is writable but private to the callee. The structural ring table is shared with `stdlib`, whose `drain_into` takes
+  a `ring[int, 8]`. Next on this track: `map`, which reuses the hash/probe design already
+  fixed in Q4.
 
 ## Suggested next step
 
@@ -274,3 +284,11 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
     the app and `stdlib`; `stdlib.split_all` fills `array[string[64], 8]`.
     `samples/lang/array.ig` and `array_bounds.ig` cover the slice. Next on this track:
     `ring` and `map`, which reuse the element-reference and copy machinery.
+20. ~~Fixed-capacity rings~~ — done: `ring[T, N]` (positive const N) in state, locals,
+    records, sum payloads, arrays and `value`/`const`/`var` parameters, nominal in element
+    and count; layout is the `N` elements at `align8(element size)` followed by `head` and
+    `count`; whole-ring copies include the header. `core.ring_push`/`pop`/`peek`/`full`/
+    `empty` lower to `ref_offset`/`ref_element`/`copy_refs`/`clear`+`append` plus
+    `add_u`/`mod_u` and `eq`+`jz`, adding no opcode (the opcode table is unchanged). `samples/lang/
+    ring.ig` covers FIFO order, peek, full/empty transitions, wrap-around, copies, every
+    element kind and the stdlib `drain_into` helper. Next: `map`, then UTF-8 helpers.

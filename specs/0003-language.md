@@ -250,7 +250,8 @@ Rules:
 - **Enums (implemented):** `type Status = (Ok, WouldBlock, Closed, NotFound, Invalid, Full, CapacityExceeded, IoError);`
 - **Arrays (implemented):** `array[T, N]` — fixed, index `0..N-1`, value semantics. See
   "Arrays" below for the layout, index and copy rules.
-- **Rings:** `ring[T, N]` — fixed-capacity FIFO with `push`/`pop`/`full`/`empty`.
+- **Rings (implemented):** `ring[T, N]` — fixed-capacity FIFO with `push`/`pop`/`peek`/
+  `full`/`empty`. See "Rings" below for the layout, operations and statuses.
 - **Maps:** `map[K, V, N]` — at most N entries, open addressing, no growth. `K` is
   restricted to `int`, `bytes[N]` or `string[N]`.
 - **Stream endpoints:** `in_stream[N]` (receive only) and `out_stream[N]` (send only),
@@ -417,6 +418,59 @@ var
 - Arrays may be `state` variables, locals, procedure parameters (`value`, `const`,
   `var`), record fields and sum payloads. Comparison is not defined for arrays.
 
+#### Rings (implemented)
+
+```text
+var
+  queue: ring[int, 4];
+  words: ring[string[8], 2];
+  grid: ring[ring[int, 2], 3];
+```
+
+- `ring[T, N]` is a fixed-capacity FIFO of exactly `N` slots with no growth. `T` is any
+  fixed-size type already supported (scalar, enum, record, sum, buffer, array or another
+  ring) and `N` is a positive constant expression; `N = 0` and a negative `N` are compile
+  errors. `N` need not be a power of two.
+- **Nominal identity:** rings are identified by element type and count, so `ring[int, 4]`,
+  `ring[int, 8]` and `ring[byte, 4]` are all distinct. Assignment, whole-ring copies and
+  parameters require the exact same type; the at-least-N rule does not apply. Comparison
+  is not defined for rings.
+- **Layout:** `stride = align8(size_of(T))`, storage `N * stride` bytes at offset 0, then
+  `head: u64` at `N * stride` and `count: u64` at `N * stride + 8`; the total is
+  `align8(N * stride + 16)`. Storage comes first, so an element reference uses the ring
+  base directly. Invariants: `head < N`, `count <= N`; the logical index `i` (`0` is the
+  oldest) maps to physical `(head + i) % N`, and the next push goes to physical
+  `(head + count) % N`.
+- **Operations** are built-in procedures in the `core` namespace, resolved and lowered by
+  the compiler. `r` is the ring; `value` is the element payload.
+  - `core.ring_push(r, value) -> Status`, `r` a writable ring. `Ok`, or `Full` when the
+    ring is full; a failed push writes nothing and leaves `head`/`count` unchanged.
+  - `core.ring_pop(r, var value) -> Status`, `r` a writable ring. Writes the oldest
+    element through `value` and returns `Ok`, or returns `NotFound` on an empty ring and
+    leaves `value` untouched.
+  - `core.ring_peek(r, var value) -> Status` is `pop` without removal, with the same
+    statuses and the same untouched-on-failure rule.
+  - `core.ring_full(r) -> bool` and `core.ring_empty(r) -> bool` read `count`.
+  The receiver must be a `ring[T, N]` designator. `push`/`pop` need a writable place: a
+  `const` parameter is read-only and is a compile error. A `value` parameter is an
+  ordinary writable copy (like a `value` record or array), so a push/pop through it
+  affects the callee's copy only and never the caller's ring. `peek`/`full`/`empty` accept
+  any of the three modes. A `core.ring_*` call on a non-ring first argument or with the
+  wrong argument count is a compile error.
+- **Element values:** scalars and enums use one 8-byte slot; records, sums, arrays and
+  nested rings are copied whole (`stride` bytes); a buffer element is written as its
+  `[len][data]` image (literal or a same-kind buffer, capacities exactly matching unless
+  the source is a call-scoped parameter).
+- **Copies and parameters:** `dst := src` copies the whole `align8(N * stride + 16)`
+  image, header included, so `head` and `count` travel with the storage. A `value`
+  parameter is a by-value copy; `const`/`var` parameters are call-scoped references.
+- Rings may be `state` variables, locals, procedure parameters, record fields, sum
+  payloads and array elements. A library signature may carry a ring: the structural ring
+  table is shared by the application and `stdlib`.
+- No opcode is added: the operations lower to `ref_offset`/`ref_element`/`load_ref`/
+  `store_ref`/`copy_refs`, the buffer opcodes for a buffer element, `eq` for the checks,
+  `mod` for the wrap and ordinary branches (spec 0008, "Rings").
+
 #### Predeclared records and sum type
 
 `Diagnostic` and `ExitReason` exist in every unit, with the fixed layout below
@@ -457,7 +511,8 @@ compiler knows their layout and operations. Generic algorithms are either built-
 ### Capacity compatibility
 
 Capacities are part of the type: `string[128]` and `string[256]` are distinct (D11), and
-so are `array[int, 4]` and `array[int, 8]`. Two rules make this bearable:
+so are `array[int, 4]` and `array[int, 8]`, and `ring[int, 4]` and `ring[int, 8]`. Two
+rules make this bearable:
 
 - **Variables and fields:** exact type. Assignment between two variables of different
   capacities, element types or array counts is a compile error.
@@ -847,20 +902,25 @@ declared capacities and the at-least-N rule applies to callers.
 | `function stdlib.parse_int_into(src: const string[0]; value: var int): Status` | Optional leading `-`, then decimal digits only. `Invalid` for empty text, a bare `-`, a `+` sign or any non-digit; `CapacityExceeded` when the magnitude does not fit an `int`; `-9223372036854775808` is accepted. Writes nothing on failure and never faults. |
 | `function stdlib.starts_with(src: const string[0]; prefix: const string[0]): bool` | Byte-wise prefix test (not a code-point test). |
 | `function stdlib.contains_byte(src: const string[0]; value: byte): bool` | True when `core.find` finds the byte. |
+| `function stdlib.drain_into(dst: var array[int, 8]; count: var int; src: var ring[int, 8]): Status` | Moves up to eight integers out of `src`, oldest first, and writes the moved count. `NotFound` (nothing written) when `src` is empty. The first helper whose signature carries a `ring`. |
 
-Still missing for a complete standard library: `array`/`ring`/`map` (language support and
-helpers), UTF-8 helpers (code-point iteration, checked `utf8_decode_into`), the move of
-`substr_into` from `core`, `f64` formatting/parsing, and typed stream views.
+Still missing for a complete standard library: `map` (language support and helpers), UTF-8
+helpers (code-point iteration, checked `utf8_decode_into`), the move of `substr_into` from
+`core`, `f64` formatting/parsing, and typed stream views.
 
 ## Failure modes
 
 | Situation | Behaviour |
 |-----------|-----------|
-| Index outside `array`/`ring` | `fault(OutOfBounds)`; recover once or terminate |
+| Index outside `array` | `fault(OutOfBounds)`; recover once or terminate |
 | Buffer read at or past the runtime length | `fault(OutOfBounds)` |
 | Buffer write at or past the declared capacity | `fault(CapacityExceeded)`; never a partial write |
 | Buffer index expression that is not `int`/`uint`/`byte` | Compile error |
 | `string[i] := expr` | Compile error (`string` is read-only by index) |
+| `core.ring_push` on a full ring | `Status.Full`; value and ring unchanged |
+| `core.ring_pop`/`peek` on an empty ring | `Status.NotFound`; out-parameter untouched |
+| `core.ring_push`/`pop` on a `const` ring parameter | Compile error |
+| `core.ring_push`/`pop` on a `value` ring parameter | Mutates the callee's private copy; the caller's ring is unchanged |
 | Buffers of different kinds compared (`string` = `bytes`) | Compile error |
 | `string`/`bytes` write past capacity | `fault(CapacityExceeded)`; no truncation, no growth |
 | `ring` push on full, `map` put on full | `Status.Full` (non-fatal) or explicit failure, never growth |
@@ -939,3 +999,4 @@ helpers), UTF-8 helpers (code-point iteration, checked `utf8_decode_into`), the 
 | 2026-11-14 | Sum types and pattern matching implemented: `type Name = Variant | Variant(payload: T);` is an 8-byte tag at offset 0 plus the largest payload at offset 8, nominal, with destination-driven construction (`dst := Variant(payload)`) and no global variant constants. `case value of Variant: ... Variant(binding): ... end;` is exhaustive (one arm per variant, no `else`), has no fallthrough, and binds a payload by value to an arm-local copy; unknown, duplicate and missing arms, payload mismatches and cross-sum variants are compile errors. `ExitReason` becomes the real sum type `Ok | Killed | Faulted(code: FaultCode)` at the same 16-byte layout, and `FaultCode` is predeclared as an enum whose variants are qualified (`FaultCode.DivideByZero`) because two names collide with `Status`. `Diagnostic` stays a record; `spawn` is unchanged. Q43 narrows to `core.run` and the async compile-diagnostic path. |
 | 2026-11-14 | `core.run(path, args, var diag, var reason) -> Status` implemented (spawn + wait, with the pending id held in the machine). The request-completion diagnostic path also landed: a compile/load failure after `spawn` returned fills `diag` for `run` callers while `wait` still observes `Faulted(IoError)`. Q43 narrows to a distinct `TaskId` type. |
 | 2026-11-14 | `function Name(...): T;` with `return value;` implemented for scalar results; a function must end in a `return` on every path, and a procedure may `return;`. Implemented the first `stdlib` slice in real source: `trim_into`, `split_once`, `parse_int_into`, `starts_with` and `contains_byte`, compiled into the application package, qualified as `stdlib.*`, with no new opcodes. |
+| 2026-11-14 | Fixed-capacity rings implemented: `ring[T, N]` is nominal in element and count, layout is `N` elements at `align8(element size)` followed by `head: u64` and `count: u64`, and the built-in `core.ring_push`/`pop`/`peek`/`full`/`empty` lower to the existing reference/copy/branch instructions (no opcode). `push` returns `Full` on a full ring; `pop`/`peek` return `NotFound` and leave the out-parameter untouched on an empty one; `push`/`pop` require a writable place, so a `const` receiver is rejected while a `value` copy is writable and private to the callee. Rings may be state, locals, parameters, record fields, sum payloads and array elements; the structural ring table is shared with `stdlib`, whose `drain_into` takes a ring. |

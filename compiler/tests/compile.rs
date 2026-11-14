@@ -2488,8 +2488,8 @@ fn the_embedded_stdlib_compiles_on_its_own() {
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(manifest_unit(&package), "stdlib");
     assert_eq!(
-        header.function_count, 6,
-        "trim_into, split_once, parse_int_into, starts_with, contains_byte, split_all"
+        header.function_count, 7,
+        "trim_into, split_once, parse_int_into, starts_with, contains_byte, split_all, drain_into"
     );
     assert_eq!(header.entry, 0);
     assert_eq!(header.state_size, 0, "the stdlib declares no state");
@@ -2879,4 +2879,597 @@ end;
 fn the_array_sample_compiles() {
     let source = include_bytes!("../../samples/lang/array.ig");
     compile(source, "array.ig").expect("the array sample compiles");
+}
+
+#[test]
+fn rings_of_every_element_kind_compile() {
+    let source = br#"
+unit t;
+
+type
+  Point = record x: int; end;
+  Sum = A | B(value: int);
+  Color = (Red, Green);
+
+var
+  ints: ring[int, 2];
+  floats: ring[f64, 2];
+  raws: ring[bytes[4], 2];
+  words: ring[string[4], 2];
+  colors: ring[Color, 2];
+  points: ring[Point, 2];
+  sums: ring[Sum, 2];
+  arrays: ring[array[int, 2], 2];
+  nested: ring[ring[int, 2], 2];
+  st: Status;
+  i: int;
+  f: f64;
+  raw: bytes[4];
+  word: string[4];
+  c: Color;
+  p: Point;
+  s: Sum;
+  a: array[int, 2];
+  r: ring[int, 2];
+  b: byte;
+
+procedure main(args: const string[1024]);
+begin
+  st := core.ring_push(ints, 1);
+  st := core.ring_pop(ints, i);
+  st := core.ring_push(floats, 1.5);
+  st := core.ring_pop(floats, f);
+  st := core.ring_push(raws, "ab");
+  st := core.ring_pop(raws, raw);
+  st := core.ring_push(words, "cd");
+  st := core.ring_pop(words, word);
+  c := Red;
+  st := core.ring_push(colors, c);
+  st := core.ring_pop(colors, c);
+  p.x := 3;
+  st := core.ring_push(points, p);
+  st := core.ring_peek(points, p);
+  s := A;
+  st := core.ring_push(sums, s);
+  st := core.ring_pop(sums, s);
+  a[0] := 1;
+  st := core.ring_push(arrays, a);
+  st := core.ring_pop(arrays, a);
+  st := core.ring_push(nested, r);
+  st := core.ring_pop(nested, r);
+  b := raw[0];
+end;
+"#;
+    let package = compile(source, "t.ig").expect("rings compile");
+    let ops = opcodes_of(&package);
+    assert!(
+        ops.contains(&abi::opcodes::REF_ELEMENT),
+        "no ref_element in {ops:?}"
+    );
+    assert!(ops.contains(&abi::opcodes::COPY_REFS));
+    assert!(ops.contains(&abi::opcodes::MOD_U));
+}
+
+#[test]
+fn a_ring_count_comes_from_a_positive_constant() {
+    let good = br#"
+unit t;
+
+const
+  Capacity = 1 + 1;
+
+var
+  cells: ring[int, Capacity];
+
+procedure main(args: const string[1024]);
+var
+  value: int;
+begin
+  if core.ring_push(cells, 7) = Ok then
+    if core.ring_pop(cells, value) = Ok then
+      core.write("ok\n");
+end;
+"#;
+    compile(good, "t.ig").expect("a const expression sizes a ring");
+
+    for count in ["0", "-1"] {
+        let source = format!(
+            r#"
+unit t;
+
+var
+  cells: ring[int, {count}];
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#
+        );
+        let error = compile(source.as_bytes(), "t.ig").expect_err("count must be positive");
+        assert!(
+            error.message.contains("positive constant"),
+            "{}",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn ring_types_are_nominal_in_element_and_count() {
+    let source = br#"
+unit t;
+
+var
+  a: ring[int, 2];
+  b: ring[int, 3];
+
+procedure main(args: const string[1024]);
+begin
+  a := b;
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("counts differ");
+    assert!(
+        error
+            .message
+            .contains("type mismatch: expected `ring[int, 2]`, found `ring[int, 3]`"),
+        "{}",
+        error.message
+    );
+
+    let source = br#"
+unit t;
+
+var
+  a: ring[int, 2];
+  b: ring[byte, 2];
+
+procedure main(args: const string[1024]);
+begin
+  a := b;
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("elements differ");
+    assert!(
+        error
+            .message
+            .contains("expected `ring[int, 2]`, found `ring[byte, 2]`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn ring_positions_and_parameters_work() {
+    let source = br#"
+unit t;
+
+type
+  Row = record queue: ring[int, 2]; end;
+  Box = Empty | Holds(value: ring[int, 2]);
+
+var
+  row: Row;
+  box: Box;
+  rows: array[ring[int, 2], 2];
+
+procedure fill(dst: var ring[int, 2]);
+begin
+  if core.ring_push(dst, 1) <> Ok then
+    core.write("full\n");
+end;
+
+procedure read(src: const ring[int, 2]; total: var int);
+var
+  value: int;
+begin
+  total := -1;
+  if core.ring_peek(src, value) = Ok then
+    total := value;
+end;
+
+function first(items: ring[int, 2]): int;
+var
+  value: int;
+begin
+  value := -1;
+  if core.ring_peek(items, value) = Ok then
+    return value;
+  return -1;
+end;
+
+procedure main(args: const string[1024]);
+var
+  local: ring[int, 2];
+  total: int;
+  value: int;
+begin
+  fill(local);
+  read(local, total);
+  total := total + first(local);
+  row.queue := local;
+  rows[0] := local;
+  box := Holds(local);
+  case box of
+    Empty:
+      value := 0;
+    Holds(inner):
+      if core.ring_pop(inner, value) <> Ok then
+        value := -1;
+  end;
+end;
+"#;
+    compile(source, "t.ig").expect("rings in every position compile");
+}
+
+#[test]
+fn a_ring_call_on_a_non_ring_is_reported() {
+    let source = br#"
+unit t;
+
+var
+  value: int;
+
+procedure main(args: const string[1024]);
+begin
+  if core.ring_push(value, 1) = Ok then
+    core.write("ok\n");
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("an int is not a ring");
+    assert!(
+        error
+            .message
+            .contains("expects a `ring[T, N]` first argument, found `int`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn mutating_a_const_ring_parameter_is_rejected() {
+    let source = br#"
+unit t;
+
+procedure touch(src: const ring[int, 2]);
+begin
+  if core.ring_push(src, 1) = Ok then
+    core.write("ok\n");
+end;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("const rings are read-only");
+    assert!(
+        error.message.contains("cannot mutate `const` parameter"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_value_ring_parameter_is_an_ordinary_writable_copy() {
+    // A `value` parameter is a writable local copy everywhere in the language,
+    // so push/pop through one compile; the callee mutates its own image.
+    let source = br#"
+unit t;
+
+procedure touch(src: ring[int, 2]; total: var int);
+var
+  value: int;
+begin
+  if core.ring_push(src, 1) <> Ok then
+    total := -1;
+  if core.ring_pop(src, value) = Ok then
+    total := value;
+end;
+
+procedure main(args: const string[1024]);
+var
+  queue: ring[int, 2];
+  total: int;
+begin
+  touch(queue, total);
+end;
+"#;
+    compile(source, "t.ig").expect("a value ring parameter is a writable copy");
+}
+
+#[test]
+fn a_ring_field_of_a_value_record_parameter_is_writable() {
+    // The copy rule follows the whole value, not just the designator base: a
+    // ring reached through a `value` record parameter is writable too.
+    let source = br#"
+unit t;
+
+type
+  Box = record queue: ring[int, 2]; end;
+
+procedure fill(box: Box; seen: var int);
+var
+  value: int;
+begin
+  seen := -1;
+  if core.ring_push(box.queue, 7) = Ok then
+    if core.ring_pop(box.queue, value) = Ok then
+      seen := value;
+end;
+
+procedure main(args: const string[1024]);
+var
+  box: Box;
+  seen: int;
+begin
+  fill(box, seen);
+end;
+"#;
+    compile(source, "t.ig").expect("a ring field of a value record is writable");
+}
+
+#[test]
+fn ring_operations_check_their_argument_count_and_value_types() {
+    let cases: [(&[u8], &str); 5] = [
+        (
+            br#"
+unit t;
+var r: ring[int, 2];
+procedure main(args: const string[1024]);
+begin
+  if core.ring_push(r) = Ok then core.write("x\n");
+end;
+"#,
+            "`core.ring_push` expects 2 arguments, got 1",
+        ),
+        (
+            br#"
+unit t;
+var r: ring[int, 2];
+var a, b: int;
+procedure main(args: const string[1024]);
+begin
+  if core.ring_pop(r, a, b) = Ok then core.write("x\n");
+end;
+"#,
+            "`core.ring_pop` expects 2 arguments, got 3",
+        ),
+        (
+            br#"
+unit t;
+var r: ring[byte, 2];
+procedure main(args: const string[1024]);
+begin
+  if core.ring_push(r, 1) = Ok then core.write("x\n");
+end;
+"#,
+            "`core.ring_push` expects `byte`, found `int`",
+        ),
+        (
+            br#"
+unit t;
+var r: ring[string[4], 2];
+var value: int;
+procedure main(args: const string[1024]);
+begin
+  if core.ring_pop(r, value) = Ok then core.write("x\n");
+end;
+"#,
+            "`core.ring_pop` expects `var value: string[4]`, found `int`",
+        ),
+        (
+            br#"
+unit t;
+var r: ring[int, 2];
+procedure main(args: const string[1024]);
+begin
+  if core.ring_full(r, r) then core.write("x\n");
+end;
+"#,
+            "`core.ring_full` expects 1 argument, got 2",
+        ),
+    ];
+    for (source, expected) in cases {
+        let error = compile(source, "t.ig").expect_err("the call is invalid");
+        assert!(
+            error.message.contains(expected),
+            "expected `{expected}` in: {}",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn a_ring_is_not_a_scalar_value_or_comparable() {
+    let source = br#"
+unit t;
+
+var
+  a: ring[int, 2];
+  b: ring[int, 2];
+
+procedure main(args: const string[1024]);
+begin
+  if a = b then
+    core.write("same\n");
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("rings do not compare");
+    assert!(error.message.contains("ring"), "{}", error.message);
+    assert!(error.message.contains("scalar"), "{}", error.message);
+}
+
+#[test]
+fn ring_calls_emit_no_builtin_opcode() {
+    let source = br#"
+unit t;
+
+type
+  Point = record x: int; end;
+
+var
+  r: ring[int, 2];
+  points: ring[Point, 2];
+  point: Point;
+
+procedure main(args: const string[1024]);
+var
+  value: int;
+begin
+  if core.ring_push(r, 1) = Ok then
+    value := 0;
+  if core.ring_pop(r, value) = Ok then
+    value := value + 1;
+  if core.ring_peek(r, value) = Ok then
+    value := value + 1;
+  if core.ring_full(r) then
+    value := value + 1;
+  if core.ring_empty(r) then
+    value := value + 1;
+  point.x := 3;
+  if core.ring_push(points, point) = Ok then
+    point := point;
+  if core.ring_pop(points, point) = Ok then
+    value := point.x;
+end;
+"#;
+    let package = compile(source, "t.ig").expect("ring operations compile");
+    let ops = opcodes_of(&package);
+    assert!(
+        !ops.contains(&abi::opcodes::BUILTIN),
+        "ring calls must not use the BUILTIN opcode: {ops:?}"
+    );
+    for required in [
+        abi::opcodes::REF_ELEMENT,
+        abi::opcodes::COPY_REFS,
+        abi::opcodes::MOD_U,
+        abi::opcodes::JNZ,
+    ] {
+        assert!(ops.contains(&required), "missing opcode {required:#x}");
+    }
+}
+
+#[test]
+fn the_ring_sample_compiles() {
+    let source = include_bytes!("../../samples/lang/ring.ig");
+    compile(source, "ring.ig").expect("the ring sample compiles");
+}
+
+#[test]
+fn compile_cost_of_a_ring_is_bounded_and_reported() {
+    // The same application with and without one ring isolates the cost of the
+    // type and its operations.
+    let without = br#"
+unit cost;
+uses core;
+procedure main(args: const string[1024]);
+begin
+  core.write("ring\n");
+end;
+"#;
+    let with = br#"
+unit cost;
+uses core;
+var
+  r: ring[int, 4];
+procedure main(args: const string[1024]);
+var
+  value: int;
+begin
+  if core.ring_push(r, 1) = Ok then
+    value := 0;
+  if core.ring_pop(r, value) = Ok then
+    core.write("ring\n");
+end;
+"#;
+    let plain = compile(without, "cost.ig").expect("compiles");
+    let ring = compile(with, "cost.ig").expect("compiles");
+
+    // Smallest arena each build accepts, found by bisection. This is the real
+    // scratch cost because `compile_into` caps the arena to its slice length.
+    let minimum_arena = |source: &[u8]| -> usize {
+        let mut low = 4 * 1024usize;
+        let mut high = compiler::MAX_ARENA_BYTES;
+        while low < high {
+            let mid = (low + high) / 2;
+            let mut arena = vec![0u8; mid];
+            let mut code = vec![0u8; compiler::MAX_CODE_BYTES];
+            let mut manifest = vec![0u8; compiler::MAX_MANIFEST_BYTES];
+            match compiler::compile_into(source, "cost.ig", &mut arena, &mut code, &mut manifest) {
+                Ok(_) => high = mid,
+                Err(error) if error.status == abi::Status::CapacityExceeded => low = mid + 1,
+                Err(error) => panic!("unexpected diagnostic: {error}"),
+            }
+        }
+        low
+    };
+    let plain_arena = minimum_arena(without);
+    let ring_arena = minimum_arena(with);
+    let ring_header = CodeHeader::from_bytes(&ring.code[..abi::CODE_HEADER_SIZE]).expect("header");
+    println!(
+        "ring cost: code {} B (app alone {} B), state {} B, stack {} B, arena {} B (app alone {} B)",
+        ring.code.len(),
+        plain.code.len(),
+        ring_header.state_size,
+        ring_header.stack_size,
+        ring_arena,
+        plain_arena,
+    );
+    assert!(
+        ring_arena <= compiler::MAX_ARENA_BYTES,
+        "the ring app fits the published arena cap"
+    );
+    assert!(ring.code.len() > plain.code.len());
+    assert_eq!(ring_header.state_size, 48, "ring[int, 4] is 4*8 + 16");
+}
+
+#[test]
+fn a_ring_element_type_must_be_known_and_at_least_one() {
+    let source = br#"
+unit t;
+
+var
+  cells: ring[Nope, 2];
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("Nope is not a type");
+    assert!(
+        error.message.contains("unknown type `Nope`"),
+        "{}",
+        error.message
+    );
+
+    let source = br#"
+unit t;
+
+var
+  cells: ring[int, 0];
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("N = 0 is rejected");
+    assert!(
+        error
+            .message
+            .contains("ring count must be a positive constant, found 0"),
+        "{}",
+        error.message
+    );
+
+    let source = br#"
+unit t;
+
+type ring = (A, B);
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("a built-in type name cannot be shadowed");
+    assert!(error.message.contains("built-in type"), "{}", error.message);
 }

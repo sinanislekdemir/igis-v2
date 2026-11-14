@@ -4,7 +4,7 @@
 //! slice: `unit`/`uses`, top-level `const`/`var`/`procedure`/`function`, a `var`
 //! section inside a subprogram, `begin`/`end`, `if`/`else`, `while`, `case`,
 //! assignment, calls, `return` and expressions. Records, enums, sum types,
-//! fixed-size arrays and functions are implemented; rings, maps, streams and
+//! fixed-size arrays, rings and functions are implemented; maps, streams and
 //! handlers are rejected by syntax, which is what "not implemented" should
 //! look like.
 //!
@@ -503,14 +503,21 @@ impl<'a, 'b> Parser<'a, 'b> {
         result
     }
 
-    /// The body of [`Self::type_ref`]; array element types recurse through the
-    /// bounded wrapper, so a deeply nested `array[array[...]]` is a diagnostic
-    /// rather than a stack fault.
+    /// The body of [`Self::type_ref`]; array and ring element types recurse
+    /// through the bounded wrapper, so a deeply nested `array[array[...]]` or
+    /// `ring[ring[...]]` is a diagnostic rather than a stack fault.
     fn type_ref_inner(&mut self) -> Result<TypeRef<'a>, Diagnostic> {
         let token = self.peek();
         let name = self.ident("a type name")?;
-        let (cap, elem, count) = if name == "array" {
-            self.expect(&TokenKind::LBracket, "`[` after `array`")?;
+        let (cap, elem, count) = if matches!(name, "array" | "ring") {
+            self.expect(
+                &TokenKind::LBracket,
+                if name == "array" {
+                    "`[` after `array`"
+                } else {
+                    "`[` after `ring`"
+                },
+            )?;
             let elem = self.type_ref()?;
             let elem = self
                 .bump
@@ -518,7 +525,11 @@ impl<'a, 'b> Parser<'a, 'b> {
                 .map_err(|_| self.arena_error(token.line, token.column))?;
             self.expect(
                 &TokenKind::Comma,
-                "`,` between an array's element type and count",
+                if name == "array" {
+                    "`,` between an array's element type and count"
+                } else {
+                    "`,` between a ring's element type and count"
+                },
             )?;
             let count = self.expression()?;
             self.expect(&TokenKind::RBracket, "`]`")?;

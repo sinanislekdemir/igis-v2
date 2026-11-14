@@ -134,7 +134,7 @@ particular core count or quantum size.
 | enum | 8-byte ordinal, nominally typed (spec 0003) |
 | record | fields in declaration order, each aligned to 8; size rounded to 8 (spec 0003) |
 | sum type | 8-byte tag at offset 0, then the largest variant payload at offset 8; size rounded to 8 (spec 0003) |
-| `ring[T,N]` | array layout plus head and count words |
+| `ring[T,N]` | `N` elements at `stride = align8(size_of(T))`, then `head: u64` and `count: u64`; size `align8(N*stride + 16)` (spec 0003) |
 | `map[K,V,N]` | table of `2^ceil(log2(2N))` entries, FNV-1a hashing (spec 0003) |
 | endpoint | 8-byte handle, direction checked by the type checker |
 | `TaskId` | 8-byte integer; zero is invalid |
@@ -175,6 +175,19 @@ size. Nested access (`a[i][j]`, `a[i].field`) is a chain of `ref_element` and
 `ref_offset` steps. The compiler interns `(element type, count)` structurally in one
 table shared by the application and `stdlib`, so the same written array type has one id
 on both sides of a call.
+
+Rings add **no opcode**. `core.ring_push`/`pop`/`peek`/`full`/`empty` are compiler-lowered
+over the ring layout (`N` elements, then `head` and `count`): the header is read with
+`ref_offset` + `load_ref`, the physical index is `(head + count) % N` or `head` with
+`add_u`/`mod_u`, the element reference is `ref_element` with the ring's stride and `N`,
+and the value moves through `load_ref`/`store_ref` (scalars and enums), `copy_refs`
+(records, sums, arrays, nested rings) or `clear`/`append` (buffers). The statuses are the
+`Status` ordinals pushed with `const` (0 `Ok`, 3 `NotFound`, 5 `Full`), and `eq` + `jz`
+select the failure branch before anything is written, so a failed `push`/`pop`/`peek`
+leaves the ring and the out-parameter untouched. A whole-ring assignment and a `value`
+ring parameter are `copy_refs` with the compile-time image size, header included. The
+compiler interns `(element type, count)` in one structural ring table shared by the
+application and `stdlib`, so a ring crosses the unit boundary with one id.
 
 ### Frames
 
@@ -225,7 +238,7 @@ artifact:
 | Comparisons | `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `cmp_buffers` for buffers |
 | Conversions | `i2f`, `f2i` (truncate and range-check), `trunc8`, `sext`, `zext` |
 | Control flow | `jmp`, `jz`, `jnz`, `call`, `ret` |
-| Buffers and aggregates | `append` (capacity-checked), `load_u8`/`store_u8` (length- and capacity-checked), `find` (byte scan), `substr` (checked slice), `format_int` (decimal/hex formatting), `enum_cast` (range-checked ordinal → enum), `ref_offset` (field reference), `ref_element` (array element reference, index-checked), `copy_refs` (record, sum, array and `case` payload copies), `ring_push/pop`, `map_get/put/has/remove` |
+| Buffers and aggregates | `append` (capacity-checked), `load_u8`/`store_u8` (length- and capacity-checked), `find` (byte scan), `substr` (checked slice), `format_int` (decimal/hex formatting), `enum_cast` (range-checked ordinal → enum), `ref_offset` (field reference), `ref_element` (array element reference, index-checked), `copy_refs` (record, sum, array, ring and `case` payload copies) |
 | Builtins | `call_builtin n` — host-interface and `core` primitives |
 | System | `safe` (explicit poll), `trap` (compiler-inserted fault) |
 
@@ -372,3 +385,4 @@ pub fn run(task: &mut Task);
 | 2026-11-14 | Records: `ref_offset` (pop a reference, add an 8-byte-aligned immediate field offset, bounds-check, push) and `copy_refs` (pop a count and a source/destination reference, bounds-check both, overlap-safe move into a writable region) grow ABI v1 from 61 to 63 opcodes. Record layout and field offsets stay a compiler concern; the interpreter sees only byte offsets. `Diagnostic`/`ExitReason` are predeclared records at the fixed `abi::layout` offsets, and the `spawn`/`wait` builtins pop a record reference (`SPAWN` grows from 3 to 4 operands with `diag`; `WAIT` writes the 16-byte `ExitReason`). |
 | 2026-11-14 | Sum types need no new opcodes: construction is `const` + `store_ref` for the tag plus the payload type's ordinary instructions, `case` is `load_ref`/`eq`/`jz` over the tag, and a whole-sum copy or `case` binding is `copy_refs` with the compile-time size. ABI v1 stays at 63 opcodes. `ExitReason` becomes the real sum type at the same 16-byte layout (`TAG_OFFSET` 0, `PAYLOAD_OFFSET` 8); `WAIT` writes the tag and the `FaultCode` payload unchanged. |
 | 2026-11-14 | Multi-unit packages: an application with `uses stdlib;` compiles the embedded `stdlib/stdlib.ig` into the same package. Library functions come first in one function table (entry is the application's `main`), the constant pool and instruction section are shared, and line-table entries carry a unit id (0 application, 1 stdlib; verifier accepts `0..=1`). The manifest keeps the application's unit name; compile diagnostics name the failing unit. Type ids stay per-unit, so records, sums and user enums may not cross the boundary yet. |
+| 2026-11-14 | Rings need no new opcodes: `core.ring_push`/`pop`/`peek`/`full`/`empty` are compiler-lowered with `ref_offset`/`load_ref` for the header, `add_u`/`mod_u` for the wrap, `ref_element` for the element, `load_ref`/`store_ref` or `copy_refs`/`clear`+`append` for the value, and `eq`+`jz` for the status branches. The ABI v1 opcode table is unchanged. The ring value is `N` elements followed by `head` and `count`, and the structural ring table is shared with `stdlib`. |

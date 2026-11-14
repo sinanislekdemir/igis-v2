@@ -51,6 +51,10 @@ pub enum Kind {
     /// count live in the compiler's array table; [`Type::cap`] carries the
     /// aligned size in bytes (spec 0003, "Arrays").
     Array(u16),
+    /// A fixed-capacity FIFO, by compiler-local ring id. The element type and
+    /// count live in the compiler's ring table; [`Type::cap`] carries the
+    /// aligned size in bytes, header included (spec 0003, "Rings").
+    Ring(u16),
 }
 
 impl Kind {
@@ -68,6 +72,7 @@ impl Kind {
             Kind::Record(_) => "record",
             Kind::Sum(_) => "sum",
             Kind::Array(_) => "array",
+            Kind::Ring(_) => "ring",
         }
     }
 
@@ -89,6 +94,11 @@ impl Kind {
     /// Returns true for a fixed-size array type.
     pub const fn is_array(self) -> bool {
         matches!(self, Kind::Array(_))
+    }
+
+    /// Returns true for a fixed-capacity ring type.
+    pub const fn is_ring(self) -> bool {
+        matches!(self, Kind::Ring(_))
     }
 }
 
@@ -144,6 +154,14 @@ impl Type {
         }
     }
 
+    /// A fixed-capacity ring, with its aligned size in bytes (header included).
+    pub const fn ring(id: u16, size: u32) -> Self {
+        Type {
+            kind: Kind::Ring(id),
+            cap: size,
+        }
+    }
+
     /// True for `string`/`bytes`.
     pub const fn is_buffer(self) -> bool {
         self.kind.is_buffer()
@@ -164,12 +182,18 @@ impl Type {
         self.kind.is_array()
     }
 
-    /// True for every scalar kind (not a buffer, record, sum or array).
+    /// True for a fixed-capacity ring.
+    pub const fn is_ring(self) -> bool {
+        self.kind.is_ring()
+    }
+
+    /// True for every scalar kind (not a buffer, record, sum, array or ring).
     pub const fn is_scalar(self) -> bool {
         !self.kind.is_buffer()
             && !self.kind.is_record()
             && !self.kind.is_sum()
             && !self.kind.is_array()
+            && !self.kind.is_ring()
     }
 
     /// Number of bytes this type occupies in `state` or in a frame, including
@@ -177,9 +201,9 @@ impl Type {
     pub const fn size(self) -> u32 {
         match self.kind {
             Kind::String | Kind::Bytes => align8(8 + self.cap),
-            // A record's, sum's or array's `cap` already holds its aligned
-            // size.
-            Kind::Record(_) | Kind::Sum(_) | Kind::Array(_) => self.cap,
+            // A record's, sum's, array's or ring's `cap` already holds its
+            // aligned size.
+            Kind::Record(_) | Kind::Sum(_) | Kind::Array(_) | Kind::Ring(_) => self.cap,
             _ => 8,
         }
     }
@@ -198,7 +222,8 @@ impl Type {
             | Kind::Enum(_)
             | Kind::Record(_)
             | Kind::Sum(_)
-            | Kind::Array(_) => None,
+            | Kind::Array(_)
+            | Kind::Ring(_) => None,
         }
     }
 }
@@ -210,9 +235,11 @@ impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.kind {
             Kind::String | Kind::Bytes => write!(f, "{}[{}]", self.kind.name(), self.cap),
-            // A record, sum or array renders as its kind; codegen resolves the
-            // name or element type.
-            Kind::Record(_) | Kind::Sum(_) | Kind::Array(_) => f.write_str(self.kind.name()),
+            // A record, sum, array or ring renders as its kind; codegen
+            // resolves the name or element type.
+            Kind::Record(_) | Kind::Sum(_) | Kind::Array(_) | Kind::Ring(_) => {
+                f.write_str(self.kind.name())
+            }
             _ => f.write_str(self.kind.name()),
         }
     }

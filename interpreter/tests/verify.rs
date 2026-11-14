@@ -1650,3 +1650,346 @@ fn the_verifier_rejects_a_bad_element_stride_or_count() {
         );
     }
 }
+
+// ---- rings ----------------------------------------------------------------
+//
+// A ring is not an opcode: the compiler lowers `push`/`pop`/`peek` to the same
+// `ref_offset`/`ref_element`/`copy_refs`/branch instructions an array uses.
+// These tests hand-assemble that lowering over a known layout (storage first,
+// then `head` and `count`) and prove its semantics in the machine itself.
+//
+// Layout used here: element stride 8, storage `N * 8` at state offset `base`,
+// `head` at `base + N*8`, `count` at `base + N*8 + 8`.
+
+struct Asm {
+    code: Vec<u8>,
+    labels: Vec<Option<usize>>,
+    pending: Vec<(usize, usize)>,
+}
+
+impl Asm {
+    fn new() -> Self {
+        Asm {
+            code: Vec::new(),
+            labels: Vec::new(),
+            pending: Vec::new(),
+        }
+    }
+
+    fn word(&mut self, opcode: u8) {
+        self.code.extend_from_slice(&[opcode, 0, 0, 0]);
+    }
+
+    fn word_imm(&mut self, opcode: u8, immediate: u32) {
+        self.word(opcode);
+        self.code.extend_from_slice(&immediate.to_le_bytes());
+    }
+
+    fn const_i64(&mut self, value: i64) {
+        self.word(opcodes::CONST);
+        self.code.extend_from_slice(&(value as u32).to_le_bytes());
+        self.code
+            .extend_from_slice(&((value >> 32) as u32).to_le_bytes());
+    }
+
+    fn label(&mut self) -> usize {
+        self.labels.push(None);
+        self.labels.len() - 1
+    }
+
+    fn bind(&mut self, label: usize) {
+        self.labels[label] = Some(self.code.len());
+    }
+
+    fn jump(&mut self, opcode: u8, label: usize) {
+        self.word(opcode);
+        let imm_pos = self.code.len();
+        self.code.extend_from_slice(&0i32.to_le_bytes());
+        self.pending.push((imm_pos, label));
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        for (imm_pos, label) in self.pending.clone() {
+            let target = self.labels[label].expect("bound label");
+            let next = imm_pos + 4;
+            let delta = (target as i64 - next as i64) / 4;
+            self.code[imm_pos..next].copy_from_slice(&(delta as i32).to_le_bytes());
+        }
+        self.word(opcodes::RET);
+        self.code
+    }
+
+    /// Pushes the `head` or `count` header word.
+    fn header(&mut self, base: u32, off: u32) {
+        self.word_imm(opcodes::REF_STATE, base);
+        self.word_imm(opcodes::REF_OFFSET, off);
+        self.word(opcodes::LOAD_REF);
+    }
+
+    /// Pushes a reference to the next push slot or the oldest element.
+    fn element(&mut self, base: u32, count: u32, off: u32, at_head: bool) {
+        self.word_imm(opcodes::REF_STATE, base);
+        if at_head {
+            self.header(base, off);
+        } else {
+            self.header(base, off);
+            self.header(base, off + 8);
+            self.word(opcodes::ADD_U);
+            self.const_i64(count as i64);
+            self.word(opcodes::MOD_U);
+        }
+        self.word(opcodes::REF_ELEMENT);
+        self.code.extend_from_slice(&8u32.to_le_bytes());
+        self.code.extend_from_slice(&count.to_le_bytes());
+    }
+
+    fn adjust_count(&mut self, base: u32, off: u32, delta: i64) {
+        self.word_imm(opcodes::REF_STATE, base);
+        self.word_imm(opcodes::REF_OFFSET, off + 8);
+        self.header(base, off + 8);
+        self.const_i64(delta.abs());
+        if delta > 0 {
+            self.word(opcodes::ADD_U);
+        } else {
+            self.word(opcodes::SUB_U);
+        }
+        self.word(opcodes::STORE_REF);
+    }
+
+    fn advance_head(&mut self, base: u32, count: u32, off: u32) {
+        self.word_imm(opcodes::REF_STATE, base);
+        self.word_imm(opcodes::REF_OFFSET, off);
+        self.header(base, off);
+        self.const_i64(1);
+        self.word(opcodes::ADD_U);
+        self.const_i64(count as i64);
+        self.word(opcodes::MOD_U);
+        self.word(opcodes::STORE_REF);
+    }
+
+    /// `core.ring_push`: leaves the `Status` operand on the stack.
+    fn push(&mut self, base: u32, count: u32, off: u32, value: i64) {
+        let full = self.label();
+        let end = self.label();
+        self.header(base, off + 8);
+        self.const_i64(count as i64);
+        self.word(opcodes::EQ);
+        self.jump(opcodes::JNZ, full);
+        self.element(base, count, off, false);
+        self.const_i64(value);
+        self.word(opcodes::STORE_REF);
+        self.adjust_count(base, off, 1);
+        self.const_i64(0);
+        self.jump(opcodes::JMP, end);
+        self.bind(full);
+        self.const_i64(5);
+        self.bind(end);
+    }
+
+    /// `core.ring_pop` (or `peek` when `remove` is false): copies the oldest
+    /// element into `out` and leaves the `Status` operand on the stack.
+    fn pop(&mut self, base: u32, count: u32, off: u32, out: u32, remove: bool) {
+        let empty = self.label();
+        let end = self.label();
+        self.header(base, off + 8);
+        self.const_i64(0);
+        self.word(opcodes::EQ);
+        self.jump(opcodes::JNZ, empty);
+        self.word_imm(opcodes::REF_STATE, out);
+        self.element(base, count, off, true);
+        self.word(opcodes::LOAD_REF);
+        self.word(opcodes::STORE_REF);
+        if remove {
+            self.advance_head(base, count, off);
+            self.adjust_count(base, off, -1);
+        }
+        self.const_i64(0);
+        self.jump(opcodes::JMP, end);
+        self.bind(empty);
+        self.const_i64(3);
+        self.bind(end);
+    }
+}
+
+/// Runs a hand-assembled body against a fresh state and returns the state and
+/// the outcome.
+fn run_ring(code: &[u8], state: &mut [u8]) -> (Outcome, Vec<u8>) {
+    let spec = FnSpec {
+        frame_size: 128,
+        ..MAIN
+    };
+    let package = build(&[spec], code, &[], state.len() as u32, 128, 0);
+    let mut scratch = scratch_for(&package);
+    let program = Program::parse(&package, &mut scratch).expect("verifies");
+    let mut stack = vec![0u8; 128];
+    let args = vec![0u8; 8 + 1024];
+    let mut machine = Machine::new();
+    let mut host = Recorder { output: Vec::new() };
+    let outcome = machine.run(&program, &mut host, state, &mut stack, &args, 10_000);
+    (outcome, stack)
+}
+
+#[test]
+fn a_lowered_ring_push_and_pop_are_fifo() {
+    // ring[int, 3] at state 0: storage 0..24, head 24, count 32; out 40..64.
+    let (base, count, head_off, out) = (0u32, 3u32, 24u32, 40u32);
+    let mut asm = Asm::new();
+    for value in [10, 20, 30] {
+        asm.push(base, count, head_off, value);
+        asm.word(opcodes::DROP);
+    }
+    for slot in [out, out + 8, out + 16] {
+        asm.pop(base, count, head_off, slot, true);
+        asm.word(opcodes::DROP);
+    }
+    let code = asm.finish();
+    let mut state = vec![0u8; 64];
+    let (outcome, _) = run_ring(&code, &mut state);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(state_u64(&state, out as usize), 10);
+    assert_eq!(state_u64(&state, out as usize + 8), 20);
+    assert_eq!(state_u64(&state, out as usize + 16), 30, "FIFO order");
+    assert_eq!(state_u64(&state, head_off as usize + 8), 0, "empty again");
+}
+
+#[test]
+fn a_lowered_ring_peek_does_not_remove() {
+    // ring[int, 2] at 0: storage 0..16, head 16, count 24, size 32.
+    let (base, count, head_off, out) = (0u32, 2u32, 16u32, 32u32);
+    let mut asm = Asm::new();
+    asm.push(base, count, head_off, 7);
+    asm.word(opcodes::DROP);
+    asm.pop(base, count, head_off, out, false);
+    asm.word(opcodes::DROP);
+    asm.pop(base, count, head_off, out + 8, false);
+    asm.word(opcodes::DROP);
+    let code = asm.finish();
+    let mut state = vec![0u8; 48];
+    let (outcome, _) = run_ring(&code, &mut state);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(state_u64(&state, out as usize), 7);
+    assert_eq!(state_u64(&state, out as usize + 8), 7, "peek is repeatable");
+    assert_eq!(
+        state_u64(&state, head_off as usize + 8),
+        1,
+        "count is unchanged"
+    );
+}
+
+#[test]
+fn a_lowered_push_on_a_full_ring_changes_nothing() {
+    let (base, count, head_off) = (0u32, 2u32, 16u32);
+    let mut asm = Asm::new();
+    asm.push(base, count, head_off, 1);
+    asm.word(opcodes::DROP);
+    asm.push(base, count, head_off, 2);
+    asm.word(opcodes::DROP);
+    asm.push(base, count, head_off, 3); // Full: writes nothing
+    asm.word_imm(opcodes::STORE_STATE, 40);
+    let code = asm.finish();
+    let mut state = vec![0u8; 48];
+    let (outcome, _) = run_ring(&code, &mut state);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(state_u64(&state, 40), 5, "Status.Full");
+    assert_eq!(state_u64(&state, 0), 1, "the oldest element is untouched");
+    assert_eq!(state_u64(&state, 8), 2);
+    assert_eq!(state_u64(&state, head_off as usize + 8), 2, "count is 2");
+    assert_eq!(
+        state_u64(&state, 16),
+        0,
+        "the failed push wrote no element at the next slot"
+    );
+}
+
+#[test]
+fn a_lowered_pop_or_peek_on_an_empty_ring_leaves_the_out_parameter() {
+    let (base, count, head_off, out) = (0u32, 2u32, 16u32, 32u32);
+    for remove in [true, false] {
+        let mut asm = Asm::new();
+        asm.pop(base, count, head_off, out, remove);
+        asm.word_imm(opcodes::STORE_STATE, 40);
+        let code = asm.finish();
+        let mut state = vec![0u8; 48];
+        state[out as usize..out as usize + 8].copy_from_slice(&99u64.to_le_bytes());
+        let (outcome, _) = run_ring(&code, &mut state);
+        assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+        assert_eq!(state_u64(&state, 40), 3, "Status.NotFound");
+        assert_eq!(state_u64(&state, out as usize), 99, "untouched");
+        assert_eq!(state_u64(&state, head_off as usize + 8), 0, "still empty");
+    }
+}
+
+#[test]
+fn a_whole_ring_copy_duplicates_head_and_count() {
+    // ring[int, 2] at 0 (size 32); a second copy at 32; out slots at 64, 72.
+    let (count, head_off) = (2u32, 16u32);
+    let mut asm = Asm::new();
+    asm.push(0, count, head_off, 1);
+    asm.word(opcodes::DROP);
+    asm.push(0, count, head_off, 2);
+    asm.word(opcodes::DROP);
+    // Remove the oldest: head becomes 1, count 1.
+    asm.pop(0, count, head_off, 64, true);
+    asm.word(opcodes::DROP);
+    // copy := small: 32 bytes, header included.
+    asm.word_imm(opcodes::REF_STATE, 32);
+    asm.word_imm(opcodes::REF_STATE, 0);
+    asm.const_i64(32);
+    asm.word(opcodes::COPY_REFS);
+    // The copy's oldest element is still 2, from its own head/count; peeking
+    // it leaves both rings untouched.
+    asm.pop(32, count, head_off, 72, false);
+    asm.word(opcodes::DROP);
+    let code = asm.finish();
+    let mut state = vec![0u8; 88];
+    let (outcome, _) = run_ring(&code, &mut state);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(state_u64(&state, 64), 1);
+    assert_eq!(state_u64(&state, 72), 2, "the copy carries head/count");
+    assert_eq!(state_u64(&state, 16), 1, "head of the original");
+    assert_eq!(state_u64(&state, 24), 1, "count of the original");
+    assert_eq!(state_u64(&state, 48), 1, "head of the copy");
+    assert_eq!(state_u64(&state, 56), 1, "count of the copy");
+    assert_eq!(
+        &state[0..16],
+        &state[32..48],
+        "the storage is copied byte for byte"
+    );
+}
+
+#[test]
+fn a_lowered_ring_wraps_around_several_times() {
+    let (base, count, head_off) = (0u32, 3u32, 24u32);
+    let mut asm = Asm::new();
+    for value in [1, 2, 3] {
+        asm.push(base, count, head_off, value);
+        asm.word(opcodes::DROP);
+    }
+    asm.push(base, count, head_off, 4); // full: returns Full, writes nothing
+    asm.word_imm(opcodes::STORE_STATE, 80);
+    asm.pop(base, count, head_off, 40, true); // 1
+    asm.word(opcodes::DROP);
+    asm.push(base, count, head_off, 4); // wraps to physical 0
+    asm.word(opcodes::DROP);
+    asm.pop(base, count, head_off, 48, true); // 2
+    asm.word(opcodes::DROP);
+    asm.push(base, count, head_off, 5); // wraps to physical 1
+    asm.word(opcodes::DROP);
+    asm.pop(base, count, head_off, 56, true); // 3
+    asm.word(opcodes::DROP);
+    asm.pop(base, count, head_off, 64, true); // 4
+    asm.word(opcodes::DROP);
+    asm.pop(base, count, head_off, 72, true); // 5
+    asm.word(opcodes::DROP);
+    let code = asm.finish();
+    let mut state = vec![0u8; 88];
+    let (outcome, _) = run_ring(&code, &mut state);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(state_u64(&state, 80), 5, "the full push reported Full");
+    assert_eq!(state_u64(&state, 40), 1);
+    assert_eq!(state_u64(&state, 48), 2);
+    assert_eq!(state_u64(&state, 56), 3);
+    assert_eq!(state_u64(&state, 64), 4, "pushed across the wrap");
+    assert_eq!(state_u64(&state, 72), 5);
+    assert_eq!(state_u64(&state, head_off as usize + 8), 0, "empty");
+}

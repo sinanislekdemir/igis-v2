@@ -669,3 +669,24 @@ fn an_array_index_out_of_range_faults() {
     assert_eq!(result.output, b"".to_vec(), "nothing after the fault runs");
     assert_eq!(result.reason, ExitReason::Faulted(FaultCode::OutOfBounds));
 }
+
+#[test]
+fn fixed_capacity_rings_push_pop_peek_and_wrap() {
+    let result = run_sample("ring.ig", b"");
+    assert_eq!(
+        result.output,
+        b"10\n20\n30\n40\n40\n1\n0\n3\n99\n1\n5\n1\n1\n2\n3\n4\n5\n8\n8\n0\n0\n100\n100\n100\nalpha\nbeta\n3\nkeep\n7\n11\n1\n2\n62\n1\n".to_vec()
+    );
+    assert_eq!(result.reason, ExitReason::Ok);
+}
+
+#[test]
+fn a_value_ring_parameter_is_a_private_writable_copy() {
+    let result = run_sample("ring_value.ig", b"");
+    assert_eq!(
+        result.output,
+        b"10\n10\n10\n20\n3\n7\n1\n".to_vec(),
+        "the callee mutates its copy; the caller is unchanged, including through a value record"
+    );
+    assert_eq!(result.reason, ExitReason::Ok);
+}
