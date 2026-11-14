@@ -601,3 +601,54 @@ end;
     assert_eq!(result.reason, ExitReason::Ok);
     assert_eq!(result.output, b"run failed: No such application\n");
 }
+
+#[test]
+fn stdlib_helpers_trim_split_parse_and_match() {
+    let result = run_sample("stdlib.ig", b"");
+    assert_eq!(
+        result.output,
+        b"trim=[hi there] len=8\n\
+split=1 head=[left] tail=[right]\n\
+nosplit=0 head=[no-sep] tail=[]\n\
+parse=-42 ok value=-42\n\
+parse=min ok value=-9223372036854775808\n\
+parse=-x invalid\n\
+parse=overflow capacity exceeded\n\
+prefix=yes\n\
+long-prefix=no\n\
+contains=yes\n\
+missing=no\n"
+            .to_vec()
+    );
+    assert_eq!(result.reason, ExitReason::Ok);
+}
+
+#[test]
+fn a_kernel_sample_uses_the_stdlib_on_its_argument() {
+    let path = format!("{}/../samples/apps/text", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "text").expect("compiles");
+    let result =
+        langhost::run(&package.code, b"42 hi", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(
+        result.output,
+        b"text: trimmed=[42 hi] len=5\n\
+text: split=1 head=[42] tail=[hi]\n\
+text: tail is not an integer (Invalid)\n\
+text: head starts with 4\n\
+text: trimmed has a space\n"
+            .to_vec()
+    );
+    assert_eq!(result.reason, ExitReason::Ok);
+
+    let result = langhost::run(&package.code, b"7 42", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(
+        result.output,
+        b"text: trimmed=[7 42] len=4\n\
+text: split=1 head=[7] tail=[42]\n\
+text: tail is 42\n\
+text: head does not start with 4\n\
+text: trimmed has a space\n"
+            .to_vec()
+    );
+}

@@ -1,6 +1,8 @@
 //! Compiler-level tests: packages, determinism and diagnostics.
 
-use abi::{CodeHeader, ABI_VERSION, CODE_MAGIC, PROFILE_X86_64_LE};
+use abi::{
+    CodeHeader, ManifestHeader, ABI_VERSION, CODE_MAGIC, LINE_ENTRY_SIZE, PROFILE_X86_64_LE,
+};
 
 const HELLO: &[u8] = include_bytes!("../../samples/lang/hello.ig");
 const LOOP: &[u8] = include_bytes!("../../samples/lang/loop.ig");
@@ -142,14 +144,18 @@ fn unknown_unit_in_uses_is_reported() {
     let source = br#"
 unit t;
 
-uses stdlib;
+uses nosuchunit;
 
 procedure main(args: const string[1024]);
 begin
 end;
 "#;
     let error = compile(source, "t.ig").expect_err("must not compile");
-    assert!(error.message.contains("unknown unit `stdlib`"));
+    assert!(
+        error.message.contains("unknown unit `nosuchunit`"),
+        "{}",
+        error.message
+    );
 }
 
 #[test]
@@ -2428,4 +2434,221 @@ begin
 end;
 "#;
     compile(source, "t.ig").expect("buffer fields work");
+}
+
+// ---- multi-unit compilation and the embedded stdlib ----------------------
+
+/// Compiles a unit with the "library only" entry point, which does not require
+/// `main`.
+#[allow(clippy::result_large_err)]
+fn compile_library(source: &[u8], path: &str) -> Result<Owned, compiler::Diagnostic> {
+    let mut arena = vec![0u8; compiler::MAX_ARENA_BYTES];
+    let mut code = vec![0u8; compiler::MAX_CODE_BYTES];
+    let mut manifest = vec![0u8; compiler::MAX_MANIFEST_BYTES];
+    let package =
+        compiler::compile_library_into(source, path, &mut arena, &mut code, &mut manifest)?;
+    Ok(Owned {
+        manifest: package.manifest.to_vec(),
+        code: package.code.to_vec(),
+    })
+}
+
+/// Every line-table unit id in a package.
+fn line_units(code: &[u8]) -> Vec<u32> {
+    let header = CodeHeader::from_bytes(&code[..abi::CODE_HEADER_SIZE]).expect("header");
+    let mut offset = abi::CODE_HEADER_SIZE + header.function_count as usize * abi::FUNCTION_SIZE;
+    offset = offset.next_multiple_of(8);
+    offset += header.code_len as usize;
+    offset = offset.next_multiple_of(8);
+    offset += header.const_len as usize;
+    offset = offset.next_multiple_of(8);
+    let count = header.line_len as usize / LINE_ENTRY_SIZE;
+    (0..count)
+        .map(|index| {
+            let at = offset + index * LINE_ENTRY_SIZE + 4;
+            u32::from_le_bytes([code[at], code[at + 1], code[at + 2], code[at + 3]])
+        })
+        .collect()
+}
+
+fn manifest_unit(package: &Owned) -> String {
+    let header = ManifestHeader::from_bytes(&package.manifest[..abi::MANIFEST_HEADER_SIZE])
+        .expect("manifest header");
+    let start = abi::MANIFEST_HEADER_SIZE;
+    let end = start + header.unit_name_len as usize;
+    String::from_utf8(package.manifest[start..end].to_vec()).expect("unit name")
+}
+
+const STDAPP: &[u8] = include_bytes!("../../samples/lang/stdlib.ig");
+
+#[test]
+fn the_embedded_stdlib_compiles_on_its_own() {
+    let package = compile_library(compiler::STDLIB_SOURCE.as_bytes(), compiler::STDLIB_PATH)
+        .expect("the stdlib source is valid on its own");
+    let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
+    assert_eq!(manifest_unit(&package), "stdlib");
+    assert_eq!(
+        header.function_count, 5,
+        "trim_into, split_once, parse_int_into, starts_with, contains_byte"
+    );
+    assert_eq!(header.entry, 0);
+    assert_eq!(header.state_size, 0, "the stdlib declares no state");
+}
+
+#[test]
+fn a_broken_library_is_a_normal_diagnostic_naming_stdlib() {
+    let broken = br#"
+unit stdlib;
+uses core;
+
+function oops(src: const string[0]): int;
+begin
+  return src[0];
+end;
+"#;
+    let error = compile_library(broken, compiler::STDLIB_PATH).expect_err("must fail");
+    assert_eq!(error.unit, "stdlib");
+    assert_eq!(error.path, compiler::STDLIB_PATH);
+    assert!(
+        error.message.contains("returns `int`, found `byte`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn an_application_importing_stdlib_shares_one_package() {
+    let package = compile(STDAPP, "stdlib.ig").expect("compiles");
+    let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
+    assert!(
+        header.function_count >= 5 + 3,
+        "library and application functions"
+    );
+    assert!(header.entry >= 5, "entry is the application's main");
+    let units = line_units(&package.code);
+    assert!(units.contains(&0), "application lines");
+    assert!(units.contains(&1), "stdlib lines");
+    assert_eq!(manifest_unit(&package), "stdlib_demo");
+}
+
+#[test]
+fn calling_stdlib_without_importing_it_is_rejected() {
+    let source = br#"
+unit t;
+
+var
+  s: string[16];
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := stdlib.trim_into(s, args);
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("stdlib is not imported");
+    assert_eq!(error.unit, "t");
+    assert!(
+        error.message.contains("`stdlib` is not imported"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn an_unknown_stdlib_name_is_rejected() {
+    let source = br#"
+unit t;
+uses stdlib;
+
+procedure main(args: const string[1024]);
+begin
+  stdlib.no_such_helper();
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("unknown helper");
+    assert!(
+        error
+            .message
+            .contains("undefined procedure `stdlib.no_such_helper`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn compile_cost_of_the_stdlib_is_bounded_and_reported() {
+    // The same application with and without `uses stdlib` isolates the
+    // library's code and scratch cost.
+    let without = br#"
+unit cost;
+uses core;
+procedure main(args: const string[1024]);
+begin
+  core.write("cost\n");
+end;
+"#;
+    let with = br#"
+unit cost;
+uses core, stdlib;
+var
+  s: string[256];
+  n: int;
+procedure main(args: const string[1024]);
+begin
+  n := stdlib.trim_into(s, args);
+  core.write(s);
+end;
+"#;
+    let plain = compile(without, "cost.ig").expect("compiles");
+    let rich = compile(with, "cost.ig").expect("compiles");
+    let library = compile_library(compiler::STDLIB_SOURCE.as_bytes(), compiler::STDLIB_PATH)
+        .expect("compiles");
+
+    // Smallest arena each build accepts, found by bisection. This is the real
+    // scratch cost because `compile_into` caps the arena to its slice length.
+    let minimum_arena = |source: &[u8]| -> usize {
+        let mut low = 4 * 1024usize;
+        let mut high = compiler::MAX_ARENA_BYTES;
+        while low < high {
+            let mid = (low + high) / 2;
+            let mut arena = vec![0u8; mid];
+            let mut code = vec![0u8; compiler::MAX_CODE_BYTES];
+            let mut manifest = vec![0u8; compiler::MAX_MANIFEST_BYTES];
+            match compiler::compile_into(source, "cost.ig", &mut arena, &mut code, &mut manifest) {
+                Ok(_) => high = mid,
+                Err(error) if error.status == abi::Status::CapacityExceeded => low = mid + 1,
+                Err(error) => panic!("unexpected diagnostic: {error}"),
+            }
+        }
+        low
+    };
+    let plain_arena = minimum_arena(without);
+    let rich_arena = minimum_arena(with);
+    let library_header =
+        CodeHeader::from_bytes(&library.code[..abi::CODE_HEADER_SIZE]).expect("library header");
+    let rich_header = CodeHeader::from_bytes(&rich.code[..abi::CODE_HEADER_SIZE]).expect("header");
+    println!(
+        "stdlib cost: source {} B, code {} B (package {} B), stack {} B, state {} B, arena {} B; app alone code {} B, arena {} B; pair stack {} B",
+        compiler::STDLIB_SOURCE.len(),
+        library.code.len(),
+        rich.code.len(),
+        library_header.stack_size,
+        library_header.state_size,
+        rich_arena,
+        plain.code.len(),
+        plain_arena,
+        rich_header.stack_size,
+    );
+    assert!(
+        rich_arena <= compiler::MAX_ARENA_BYTES,
+        "the pair fits the published arena cap"
+    );
+    assert!(rich.code.len() > plain.code.len());
+    assert!(header_function_count(&rich) > header_function_count(&plain));
+}
+
+fn header_function_count(package: &Owned) -> u32 {
+    CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE])
+        .expect("header")
+        .function_count
 }

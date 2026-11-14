@@ -473,6 +473,34 @@ Locals live in the current frame on the task's declared stack, including large b
 The compiler computes the worst-case frame size; the manifest declares the stack that must
 hold it. Recursion is bounded by the stack (S7) and a guard page catches overflow.
 
+### Functions
+
+A subprogram is either a `procedure` or a `function`:
+
+```text
+function trim(dst: var string[64]; src: const string[0]): int;
+var
+  n: int;
+begin
+  n := ...;
+  return n;
+end;
+```
+
+- A `function` declares one result type after the parameter list. The implemented slice
+  accepts **scalar** results only (including enums such as `Status`); a buffer, record or
+  sum result is a compile error for now.
+- `return value;` leaves the subprogram and delivers the value to the caller. A `procedure`
+  may use `return;` to leave early.
+- A function must return on every path: the compiler requires the body's last statement to
+  be a `return`, a block whose last statement is one, or an `if`/`else` whose branches both
+  are. A fall-through is a compile error.
+- A function call is an ordinary expression with the declared result type; using it as a
+  statement drops the value. The call syntax is the same as a procedure call.
+- Implementation (spec 0008): the caller pushes a destination reference before the
+  arguments, and the callee writes the result there on `return`. The interpreter's
+  `dest_ref` frame slot and `Function.has_destination` carry it; no opcode is added.
+
 ## Text and bytes
 
 `bytes` and `string` are not two representations; they are one representation with two
@@ -762,6 +790,29 @@ block/DMA access.
 A function moves from `stdlib` to `core` only when measurement justifies it; the namespace
 is the signal.
 
+### Implemented first slice
+
+The compiler embeds `stdlib/stdlib.ig` (`include_str!`) and compiles it into the
+application's package when the application says `uses stdlib;` (source-only, ADR 0019; spec
+0008, "Multi-unit compilation"). The library imports only `core`, declares no `state`, and
+uses no new opcodes. Its top-level names are **qualified** from the application
+(`stdlib.trim_into`) and unqualified inside the unit.
+
+Capacities are concrete because the language has no generics; the numbers below are the
+declared capacities and the at-least-N rule applies to callers.
+
+| Helper | Semantics |
+|--------|-----------|
+| `function stdlib.trim_into(dst: var string[256]; src: const string[0]): int` | Copies `src` without leading or trailing space, tab, CR or LF. Returns the copied length, or `-6` (`Status.CapacityExceeded`) without writing when the trimmed result exceeds the destination capacity. |
+| `function stdlib.split_once(dst_head: var string[128]; dst_tail: var string[256]; src: const string[0]; sep: byte): int` | Splits at the first `sep`: returns `1` with both parts, or `0` with the whole source in `dst_head` and an empty `dst_tail`. A part that does not fit returns `-6` without a partial tail write. Uses `core.find` and `core.substr_into`. |
+| `function stdlib.parse_int_into(src: const string[0]; value: var int): Status` | Optional leading `-`, then decimal digits only. `Invalid` for empty text, a bare `-`, a `+` sign or any non-digit; `CapacityExceeded` when the magnitude does not fit an `int`; `-9223372036854775808` is accepted. Writes nothing on failure and never faults. |
+| `function stdlib.starts_with(src: const string[0]; prefix: const string[0]): bool` | Byte-wise prefix test (not a code-point test). |
+| `function stdlib.contains_byte(src: const string[0]; value: byte): bool` | True when `core.find` finds the byte. |
+
+Still missing for a complete standard library: `array`/`ring`/`map` (language support and
+helpers), UTF-8 helpers (code-point iteration, checked `utf8_decode_into`), the move of
+`substr_into` from `core`, `f64` formatting/parsing, and typed stream views.
+
 ## Failure modes
 
 | Situation | Behaviour |
@@ -848,3 +899,4 @@ is the signal.
 | 2026-11-14 | Records implemented: `type Name = record field: T; ... end;` (grouped or one-per-line fields), nominal type identity, declaration-before-use, nested records, buffer fields, whole-record copy, `value`/`const`/`var` record parameters and aligned declaration-order layout. `Diagnostic` and `ExitReason` are predeclared at the fixed `abi::layout` offsets and cannot be redefined; `spawn`/`wait` use them (`var diag`, `var reason`). Record equality, sum types and `core.run` remain future work (Q43). |
 | 2026-11-14 | Sum types and pattern matching implemented: `type Name = Variant | Variant(payload: T);` is an 8-byte tag at offset 0 plus the largest payload at offset 8, nominal, with destination-driven construction (`dst := Variant(payload)`) and no global variant constants. `case value of Variant: ... Variant(binding): ... end;` is exhaustive (one arm per variant, no `else`), has no fallthrough, and binds a payload by value to an arm-local copy; unknown, duplicate and missing arms, payload mismatches and cross-sum variants are compile errors. `ExitReason` becomes the real sum type `Ok | Killed | Faulted(code: FaultCode)` at the same 16-byte layout, and `FaultCode` is predeclared as an enum whose variants are qualified (`FaultCode.DivideByZero`) because two names collide with `Status`. `Diagnostic` stays a record; `spawn` is unchanged. Q43 narrows to `core.run` and the async compile-diagnostic path. |
 | 2026-11-14 | `core.run(path, args, var diag, var reason) -> Status` implemented (spawn + wait, with the pending id held in the machine). The request-completion diagnostic path also landed: a compile/load failure after `spawn` returned fills `diag` for `run` callers while `wait` still observes `Faulted(IoError)`. Q43 narrows to a distinct `TaskId` type. |
+| 2026-11-14 | `function Name(...): T;` with `return value;` implemented for scalar results; a function must end in a `return` on every path, and a procedure may `return;`. Implemented the first `stdlib` slice in real source: `trim_into`, `split_once`, `parse_int_into`, `starts_with` and `contains_byte`, compiled into the application package, qualified as `stdlib.*`, with no new opcodes. |

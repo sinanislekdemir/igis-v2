@@ -232,6 +232,8 @@ struct Param<'a> {
 struct Sig<'a> {
     name: &'a str,
     params: &'a [Param<'a>],
+    /// `Some` for a function: the scalar result type. `None` for a procedure.
+    ret: Option<Type>,
     line: u32,
     column: u32,
 }
@@ -242,6 +244,7 @@ struct CompiledFn<'a> {
     frame_size: u32,
     operand_off: u32,
     param_count: u8,
+    has_destination: bool,
     lines: &'a [LineEntry],
 }
 
@@ -411,28 +414,56 @@ fn is_builtin_type_name(name: &str) -> bool {
     )
 }
 
-/// Compiles one parsed unit into a package.
-pub(crate) fn compile_unit<'a>(
-    unit: &Unit<'a>,
-    path: &'a str,
-    bump: &Bump<'a>,
-    code: &'a mut [u8],
-    manifest: &'a mut [u8],
-) -> Result<Package<'a>, Diagnostic> {
+/// Builds one unit's symbol tables: constants, enums, records, sums, state and
+/// signatures. Type ids are local to the unit, so two units can be compiled
+/// side by side without a shared declaration namespace.
+struct UnitTables<'a> {
+    name: &'a str,
+    consts: &'a [Const<'a>],
+    enums: &'a [EnumDef<'a>],
+    records: &'a [RecordDef<'a>],
+    sums: &'a [SumDef<'a>],
+    state_vars: &'a [StateVar<'a>],
+    state_size: u32,
+    sigs: &'a [Sig<'a>],
+}
+
+/// Rejects a `uses` name the unit's role does not provide.
+fn check_uses<'a>(unit: &Unit<'a>, path: &'a str, is_application: bool) -> Result<(), Diagnostic> {
     let name = unit.name;
-    if name.is_empty() {
-        return Err(diag(path, "", 1, 1, format_args!("unit has no name")));
-    }
     for used in unit.uses {
-        if *used != "core" && *used != "syslib" {
+        let known = match *used {
+            "core" | "syslib" => true,
+            // Only an application may import the library; the library may not
+            // import the application or itself (no cycles, spec 0003 M4).
+            "stdlib" => is_application,
+            _ => false,
+        };
+        if !known {
             return Err(diag(
                 path,
                 name,
                 1,
                 1,
-                format_args!("unknown unit `{used}`; this slice provides only `core` and `syslib`"),
+                format_args!(
+                    "unknown unit `{used}`; this slice provides `core` and `syslib`{}",
+                    if is_application { " and `stdlib`" } else { "" }
+                ),
             ));
         }
+    }
+    Ok(())
+}
+
+/// Builds one parsed unit's tables.
+fn build_tables<'a>(
+    unit: &Unit<'a>,
+    path: &'a str,
+    bump: &Bump<'a>,
+) -> Result<UnitTables<'a>, Diagnostic> {
+    let name = unit.name;
+    if name.is_empty() {
+        return Err(diag(path, "", 1, 1, format_args!("unit has no name")));
     }
 
     // Constants come first: they may size a record field's buffer, and their
@@ -932,58 +963,89 @@ pub(crate) fn compile_unit<'a>(
                 .map_err(|_| arena_full(path, name, param.line, param.column))?;
         }
         let params = params.into_slice();
+        let ret = match &proc.ret {
+            Some(ty) => {
+                let resolved = resolve_type(
+                    ty,
+                    consts.as_slice(),
+                    enums.as_slice(),
+                    records.as_slice(),
+                    sums.as_slice(),
+                    path,
+                    name,
+                )?;
+                if !resolved.is_scalar() {
+                    return Err(diag(
+                        path,
+                        name,
+                        ty.line,
+                        ty.column,
+                        format_args!(
+                            "function `{}` must return a scalar type; buffer, record and sum results are not implemented",
+                            proc.name
+                        ),
+                    ));
+                }
+                Some(resolved)
+            }
+            None => None,
+        };
         sigs.push(Sig {
             name: proc.name,
             params,
+            ret,
             line: proc.line,
             column: proc.column,
         })
         .map_err(|_| arena_full(path, name, proc.line, proc.column))?;
     }
 
-    let main_index = match find_sig(sigs.as_slice(), "main") {
-        Some(index) => index,
-        None => {
-            return Err(diag(
-                path,
-                name,
-                1,
-                1,
-                format_args!(
-                    "missing `main` procedure; an application needs `procedure main(args: const string[1024]);`"
-                ),
-            ))
-        }
-    };
-    let main_sig = sigs.as_slice()[main_index];
-    let main_ok = main_sig.params.len() == 1
-        && main_sig.params[0].mode == ParamMode::Const
-        && main_sig.params[0].ty == Type::buffer(Kind::String, 1024);
-    if !main_ok {
-        return Err(diag(
-            path,
-            name,
-            main_sig.line,
-            main_sig.column,
-            format_args!("main must be declared as `procedure main(args: const string[1024]);`"),
-        ));
-    }
+    Ok(UnitTables {
+        name,
+        consts: consts.into_slice(),
+        enums: enums.into_slice(),
+        records: records.into_slice(),
+        sums: sums.into_slice(),
+        state_vars: state_vars.into_slice(),
+        state_size,
+        sigs: sigs.into_slice(),
+    })
+}
 
-    let mut pool = ConstantPool::new(path, name, bump)?;
+/// Compiles every procedure of one unit, returning the function images in
+/// declaration order. `call_base` is the unit's first index in the shared
+/// function table; `library_sigs` is `Some` only for the application, whose
+/// qualified `stdlib.<name>` calls resolve there.
+#[allow(clippy::too_many_arguments)]
+fn compile_procs<'a, 'b>(
+    unit: &Unit<'a>,
+    tables: &UnitTables<'a>,
+    path: &'a str,
+    call_base: u32,
+    library_sigs: Option<&'a [Sig<'a>]>,
+    state_vars: &'a [StateVar<'a>],
+    unit_id: u32,
+    pool: &mut ConstantPool<'a, 'b>,
+    bump: &'b Bump<'a>,
+) -> Result<&'a [CompiledFn<'a>], Diagnostic> {
+    let name = tables.name;
     let mut compiled =
         SliceVec::<CompiledFn<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
     for (index, proc) in unit.procs.iter().enumerate() {
-        let current = sigs.as_slice()[index];
+        let current = tables.sigs[index];
         let mut compiler = FnCompiler::new(
             path,
             name,
-            sigs.as_slice(),
-            consts.as_slice(),
-            state_vars.as_slice(),
-            enums.as_slice(),
-            records.as_slice(),
-            sums.as_slice(),
-            &mut pool,
+            tables.sigs,
+            tables.consts,
+            state_vars,
+            tables.enums,
+            tables.records,
+            tables.sums,
+            call_base,
+            library_sigs,
+            unit_id,
+            pool,
             current,
             bump,
         )?;
@@ -993,88 +1055,300 @@ pub(crate) fn compile_unit<'a>(
             .push(function)
             .map_err(|_| arena_full(path, name, proc.line, proc.column))?;
     }
+    Ok(compiled.into_slice())
+}
 
-    // Lay the functions out in declaration order and rebase their line tables.
-    let mut instructions = SliceVec::<u8>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
-    let mut functions =
-        SliceVec::<abi::Function>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
-    let mut lines = SliceVec::<LineEntry>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
-    let mut stack_size = STACK_MARGIN;
-    for (index, function) in compiled.as_slice().iter().enumerate() {
-        let proc = unit.procs[index];
-        let code_off = u32::try_from(instructions.len()).map_err(|_| {
-            diag(
-                path,
-                name,
-                proc.line,
-                proc.column,
-                format_args!("instruction section exceeds 4 GiB"),
-            )
-        })?;
-        let line_base = u32::try_from(lines.len()).map_err(|_| {
-            diag(
-                path,
-                name,
-                proc.line,
-                proc.column,
-                format_args!("line table is too large"),
-            )
-        })?;
-        for entry in function.lines {
-            lines
-                .push(LineEntry {
-                    off: entry.off + code_off,
-                    line: entry.line,
-                    column: entry.column,
-                })
-                .map_err(|_| arena_full(path, name, proc.line, proc.column))?;
-        }
-        functions
-            .push(abi::Function {
-                code_off,
-                frame_size: function.frame_size,
-                operand_off: function.operand_off,
-                line_base,
-                name_off: abi::NO_NAME,
-                param_count: function.param_count,
-                has_destination: false,
-                _reserved: [0, 0],
+/// Appends one compiled function to the shared instruction, function and line
+/// tables, rebasing its code offsets and line positions.
+#[allow(clippy::too_many_arguments)]
+fn append_function<'a>(
+    function: &CompiledFn<'a>,
+    path: &'a str,
+    unit_name: &'a str,
+    line: u32,
+    column: u32,
+    instructions: &mut SliceVec<'a, '_, u8>,
+    functions: &mut SliceVec<'a, '_, abi::Function>,
+    lines: &mut SliceVec<'a, '_, LineEntry>,
+    stack_size: &mut u32,
+) -> Result<(), Diagnostic> {
+    let code_off = u32::try_from(instructions.len()).map_err(|_| {
+        diag(
+            path,
+            unit_name,
+            line,
+            column,
+            format_args!("instruction section exceeds 4 GiB"),
+        )
+    })?;
+    let line_base = u32::try_from(lines.len()).map_err(|_| {
+        diag(
+            path,
+            unit_name,
+            line,
+            column,
+            format_args!("line table is too large"),
+        )
+    })?;
+    for entry in function.lines {
+        lines
+            .push(LineEntry {
+                off: entry.off + code_off,
+                unit: entry.unit,
+                line: entry.line,
+                column: entry.column,
             })
-            .map_err(|_| arena_full(path, name, proc.line, proc.column))?;
-        instructions
-            .extend_from_slice(function.code)
-            .map_err(|_| arena_full(path, name, proc.line, proc.column))?;
-        stack_size = stack_size.checked_add(function.frame_size).ok_or_else(|| {
-            diag(
-                path,
-                name,
+            .map_err(|_| arena_full(path, unit_name, line, column))?;
+    }
+    functions
+        .push(abi::Function {
+            code_off,
+            frame_size: function.frame_size,
+            operand_off: function.operand_off,
+            line_base,
+            name_off: abi::NO_NAME,
+            param_count: function.param_count,
+            has_destination: function.has_destination,
+            _reserved: [0, 0],
+        })
+        .map_err(|_| arena_full(path, unit_name, line, column))?;
+    instructions
+        .extend_from_slice(function.code)
+        .map_err(|_| arena_full(path, unit_name, line, column))?;
+    *stack_size = stack_size.checked_add(function.frame_size).ok_or_else(|| {
+        diag(
+            path,
+            unit_name,
+            line,
+            column,
+            format_args!("stack size overflows"),
+        )
+    })?;
+    Ok(())
+}
+
+/// Compiles the application unit and, when it imports `stdlib`, the embedded
+/// library unit into one package (spec 0008, "One artifact per application").
+///
+/// Function table order is library first, then application, so an application
+/// call and an intra-library call resolve to one index space. The application's
+/// `main` is the entry point; the manifest keeps the application's unit name.
+/// A `library` of `None` is how the host checks the library source in
+/// isolation: the unit then needs no `main` and its first function is the
+/// entry.
+pub(crate) fn compile_units<'a>(
+    application: &Unit<'a>,
+    application_path: &'a str,
+    library: Option<&Unit<'a>>,
+    library_path: &'a str,
+    bump: &Bump<'a>,
+    code: &'a mut [u8],
+    manifest: &'a mut [u8],
+) -> Result<Package<'a>, Diagnostic> {
+    assemble_units(
+        application,
+        application_path,
+        library,
+        library_path,
+        true,
+        bump,
+        code,
+        manifest,
+    )
+}
+
+/// Compiles one unit on its own without requiring `main`. This is the
+/// host-side self-check for the embedded `stdlib` source (spec 0008, B13).
+pub(crate) fn compile_library<'a>(
+    unit: &Unit<'a>,
+    path: &'a str,
+    bump: &Bump<'a>,
+    code: &'a mut [u8],
+    manifest: &'a mut [u8],
+) -> Result<Package<'a>, Diagnostic> {
+    assemble_units(unit, path, None, path, false, bump, code, manifest)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_units<'a>(
+    application: &Unit<'a>,
+    application_path: &'a str,
+    library: Option<&Unit<'a>>,
+    library_path: &'a str,
+    is_application: bool,
+    bump: &Bump<'a>,
+    code: &'a mut [u8],
+    manifest: &'a mut [u8],
+) -> Result<Package<'a>, Diagnostic> {
+    check_uses(application, application_path, is_application)?;
+    let app = build_tables(application, application_path, bump)?;
+    let lib = match library {
+        Some(unit) => {
+            check_uses(unit, library_path, false)?;
+            Some(build_tables(unit, library_path, bump)?)
+        }
+        None => None,
+    };
+
+    let entry = if is_application {
+        match find_sig(app.sigs, "main") {
+            Some(index) => {
+                let main_sig = app.sigs[index];
+                let main_ok = main_sig.ret.is_none()
+                    && main_sig.params.len() == 1
+                    && main_sig.params[0].mode == ParamMode::Const
+                    && main_sig.params[0].ty == Type::buffer(Kind::String, 1024);
+                if !main_ok {
+                    return Err(diag(
+                        application_path,
+                        app.name,
+                        main_sig.line,
+                        main_sig.column,
+                        format_args!(
+                            "main must be declared as `procedure main(args: const string[1024]);`"
+                        ),
+                    ));
+                }
+                index
+            }
+            None => {
+                return Err(diag(
+                    application_path,
+                    app.name,
+                    1,
+                    1,
+                    format_args!(
+                        "missing `main` procedure; an application needs `procedure main(args: const string[1024]);`"
+                    ),
+                ))
+            }
+        }
+    } else {
+        0
+    };
+    let library_len = lib.as_ref().map_or(0, |tables| tables.sigs.len());
+    let entry = u32::try_from(library_len + entry).map_err(|_| {
+        diag(
+            application_path,
+            app.name,
+            1,
+            1,
+            format_args!("function table is too large"),
+        )
+    })?;
+
+    // One constant pool and one instruction section serve both units.
+    let mut pool = ConstantPool::new(application_path, app.name, bump)?;
+    let library_compiled = match &lib {
+        Some(tables) => {
+            // The library's `state` follows the application's in one region.
+            let mut rebased = SliceVec::<StateVar<'a>>::new(bump)
+                .map_err(|_| arena_full(library_path, tables.name, 1, 1))?;
+            for var in tables.state_vars {
+                rebased
+                    .push(StateVar {
+                        name: var.name,
+                        ty: var.ty,
+                        off: var.off + app.state_size,
+                    })
+                    .map_err(|_| arena_full(library_path, tables.name, 1, 1))?;
+            }
+            let rebased: &'a [StateVar<'a>] = rebased.into_slice();
+            Some(compile_procs(
+                library.expect("library tables imply a unit"),
+                tables,
+                library_path,
+                0,
+                None,
+                rebased,
+                1,
+                &mut pool,
+                bump,
+            )?)
+        }
+        None => None,
+    };
+    let library_sigs = lib.as_ref().map(|tables| tables.sigs);
+    let app_compiled = compile_procs(
+        application,
+        &app,
+        application_path,
+        u32::try_from(library_len).unwrap_or(u32::MAX),
+        library_sigs,
+        app.state_vars,
+        0,
+        &mut pool,
+        bump,
+    )?;
+
+    let mut instructions =
+        SliceVec::<u8>::new(bump).map_err(|_| arena_full(application_path, app.name, 1, 1))?;
+    let mut functions = SliceVec::<abi::Function>::new(bump)
+        .map_err(|_| arena_full(application_path, app.name, 1, 1))?;
+    let mut lines = SliceVec::<LineEntry>::new(bump)
+        .map_err(|_| arena_full(application_path, app.name, 1, 1))?;
+    let mut stack_size = STACK_MARGIN;
+    if let (Some(tables), Some(compiled)) = (&lib, library_compiled) {
+        for (index, function) in compiled.iter().enumerate() {
+            let proc = library.expect("library tables imply a unit").procs[index];
+            append_function(
+                function,
+                library_path,
+                tables.name,
                 proc.line,
                 proc.column,
-                format_args!("stack size overflows"),
-            )
-        })?;
+                &mut instructions,
+                &mut functions,
+                &mut lines,
+                &mut stack_size,
+            )?;
+        }
+    }
+    for (index, function) in app_compiled.iter().enumerate() {
+        let proc = application.procs[index];
+        append_function(
+            function,
+            application_path,
+            app.name,
+            proc.line,
+            proc.column,
+            &mut instructions,
+            &mut functions,
+            &mut lines,
+            &mut stack_size,
+        )?;
     }
     stack_size = align8(stack_size);
     if stack_size > MAX_CAPACITY {
         return Err(diag(
-            path,
-            name,
+            application_path,
+            app.name,
             1,
             1,
             format_args!("stack size {stack_size} exceeds the {MAX_CAPACITY}-byte cap"),
         ));
     }
+    let state_size = app.state_size + lib.as_ref().map_or(0, |tables| tables.state_size);
+    if state_size > MAX_CAPACITY {
+        return Err(diag(
+            application_path,
+            app.name,
+            1,
+            1,
+            format_args!("state size {state_size} exceeds the {MAX_CAPACITY}-byte cap"),
+        ));
+    }
 
     package::assemble(
-        path,
-        name,
+        application_path,
+        app.name,
         functions.as_slice(),
         instructions.as_slice(),
         pool.data.as_slice(),
         lines.as_slice(),
         state_size,
         stack_size,
-        main_index as u32,
+        entry,
         code,
         manifest,
     )
@@ -1333,6 +1607,14 @@ struct FnCompiler<'a, 'b, 'p> {
     enums: &'b [EnumDef<'a>],
     records: &'b [RecordDef<'a>],
     sums: &'b [SumDef<'a>],
+    /// Index of this unit's first function in the shared function table.
+    call_base: u32,
+    /// Top-level procedures of the imported `stdlib` unit, reachable only as
+    /// `stdlib.<name>` from the application. `None` inside the stdlib itself,
+    /// which resolves its own names unqualified.
+    library_sigs: Option<&'b [Sig<'a>]>,
+    /// Line-table unit id (0 application, 1 stdlib).
+    unit_id: u32,
     pool: &'p mut ConstantPool<'a, 'b>,
     current: Sig<'a>,
     bump: &'b Bump<'a>,
@@ -1420,6 +1702,9 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         enums: &'b [EnumDef<'a>],
         records: &'b [RecordDef<'a>],
         sums: &'b [SumDef<'a>],
+        call_base: u32,
+        library_sigs: Option<&'b [Sig<'a>]>,
+        unit_id: u32,
         pool: &'p mut ConstantPool<'a, 'b>,
         current: Sig<'a>,
         bump: &'b Bump<'a>,
@@ -1440,6 +1725,9 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             enums,
             records,
             sums,
+            call_base,
+            library_sigs,
+            unit_id,
             pool,
             current,
             bump,
@@ -1618,12 +1906,37 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         for stmt in proc.body {
             self.stmt(stmt)?;
         }
+        if self.current.ret.is_some() && !proc.body.last().is_some_and(Self::closes) {
+            return Err(self.err(
+                self.current.line,
+                self.current.column,
+                format_args!(
+                    "function `{}` must end with `return value;` on every path",
+                    self.current.name
+                ),
+            ));
+        }
         if self.depth != 0 {
             return Err(self.internal("operand stack is not empty at the end of a procedure"));
         }
         self.simple(opcodes::RET)?;
         self.finish_jumps()?;
         Ok(())
+    }
+
+    /// True when a statement always leaves the enclosing subprogram, which is
+    /// what a `function` needs at the end of its body.
+    fn closes(stmt: &Stmt<'_>) -> bool {
+        match stmt {
+            Stmt::Return { .. } => true,
+            Stmt::Block(body) => body.last().is_some_and(Self::closes),
+            Stmt::If {
+                then_branch,
+                else_branch: Some(else_branch),
+                ..
+            } => Self::closes(then_branch) && Self::closes(else_branch),
+            _ => false,
+        }
     }
 
     fn finish(self) -> Result<CompiledFn<'a>, Diagnostic> {
@@ -1657,6 +1970,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             frame_size,
             operand_off,
             param_count,
+            has_destination: self.current.ret.is_some(),
             lines: self.lines.into_slice(),
         })
     }
@@ -1708,7 +2022,12 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
     fn mark(&mut self, line: u32, column: u32) -> Result<(), Diagnostic> {
         let off = self.code.len() as u32;
         if self.lines.last().is_none_or(|entry| entry.off != off) {
-            let entry = LineEntry { off, line, column };
+            let entry = LineEntry {
+                off,
+                unit: self.unit_id,
+                line,
+                column,
+            };
             let at_line = self.current.line;
             let at_column = self.current.column;
             self.lines
@@ -1863,6 +2182,50 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             Stmt::Case { value, arms } => {
                 self.mark(value.line, value.column)?;
                 self.case_stmt(value, arms)
+            }
+            Stmt::Return {
+                value,
+                line,
+                column,
+            } => {
+                self.mark(line, column)?;
+                match (self.current.ret, value) {
+                    (Some(expected), Some(expr)) => {
+                        let found = self.expr_scalar(expr)?;
+                        if found != expected {
+                            let expected = self.type_name(expected);
+                            let found = self.type_name(found);
+                            return Err(self.err_at(
+                                expr,
+                                format_args!(
+                                    "function `{}` returns `{expected}`, found `{found}`",
+                                    self.current.name
+                                ),
+                            ));
+                        }
+                    }
+                    (Some(_), None) => {
+                        return Err(self.err(
+                            line,
+                            column,
+                            format_args!("function `{}` must return a value", self.current.name),
+                        ))
+                    }
+                    (None, Some(_)) => {
+                        return Err(self.err(
+                            line,
+                            column,
+                            format_args!("`return` with a value is only allowed in a function"),
+                        ))
+                    }
+                    (None, None) => {}
+                }
+                self.simple(opcodes::RET)?;
+                // The interpreter restores the caller's operand top; dead
+                // statements after this point still compile with an empty
+                // operand stack.
+                self.depth = 0;
+                Ok(())
             }
             Stmt::Block(stmts) => {
                 for stmt in stmts {
@@ -3987,17 +4350,71 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 Ok(Some(Type::enumeration(STATUS_ENUM)))
             }
             target => {
-                if target.contains('.') {
-                    return Err(self.err(
-                        line,
-                        column,
-                        format_args!("undefined procedure `{target}`"),
-                    ));
+                let (signature, function_index) = if let Some(name) = target.strip_prefix("stdlib.")
+                {
+                    // Qualified library names (`stdlib.trim_into`) resolve in
+                    // the embedded unit; the application cannot see the
+                    // library's names unqualified (spec 0003, M3).
+                    let Some(sigs) = self.library_sigs else {
+                        return Err(self.err(
+                            line,
+                            column,
+                            format_args!(
+                                "`stdlib` is not imported; add `uses stdlib;` to the `uses` clause"
+                            ),
+                        ));
+                    };
+                    let index = find_sig(sigs, name).ok_or_else(|| {
+                        self.err(
+                            line,
+                            column,
+                            format_args!("undefined procedure `{target}` in `stdlib`"),
+                        )
+                    })?;
+                    (sigs[index], u32::try_from(index).unwrap_or(u32::MAX))
+                } else {
+                    if target.contains('.') {
+                        return Err(self.err(
+                            line,
+                            column,
+                            format_args!("undefined procedure `{target}`"),
+                        ));
+                    }
+                    let index = find_sig(self.sigs, target).ok_or_else(|| {
+                        self.err(line, column, format_args!("undefined procedure `{target}`"))
+                    })?;
+                    (
+                        self.sigs[index],
+                        self.call_base
+                            .checked_add(u32::try_from(index).unwrap_or(u32::MAX))
+                            .ok_or_else(|| self.internal("function index overflows"))?,
+                    )
+                };
+                // Types are compiler-local per unit, so a cross-unit
+                // parameter or result that names a record, sum or user enum
+                // has no shared identity yet. Scalars, buffers and the two
+                // predeclared enums (`Status`, `FaultCode`) are safe.
+                if target.starts_with("stdlib.") {
+                    let incompatible = signature.params.iter().any(|param| {
+                        param.ty.is_record()
+                            || param.ty.is_sum()
+                            || matches!(param.ty.kind, Kind::Enum(id) if id > FAULT_CODE_ENUM)
+                    }) || signature.ret.is_some_and(|ty| {
+                        ty.is_record()
+                            || ty.is_sum()
+                            || matches!(ty.kind, Kind::Enum(id) if id > FAULT_CODE_ENUM)
+                    });
+                    if incompatible {
+                        return Err(self.err(
+                            line,
+                            column,
+                            format_args!(
+                                "`{target}` uses a record, sum or user enum across units; cross-unit aggregate types are not implemented"
+                            ),
+                        ));
+                    }
                 }
-                let index = find_sig(self.sigs, target).ok_or_else(|| {
-                    self.err(line, column, format_args!("undefined procedure `{target}`"))
-                })?;
-                let params = self.sigs[index].params;
+                let params = signature.params;
                 if args.len() != params.len() {
                     return Err(self.err(
                         line,
@@ -4009,13 +4426,47 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                         ),
                     ));
                 }
+                // A function result arrives through a destination reference
+                // pushed before the arguments: `[dest][arg...] CALL`.
+                let destination = match signature.ret {
+                    Some(ty) => {
+                        let slot = self.next_local;
+                        self.next_local = slot
+                            .checked_add(8)
+                            .ok_or_else(|| self.internal("frame size overflows"))?;
+                        if self.next_local > MAX_CAPACITY {
+                            return Err(self.err(
+                                line,
+                                column,
+                                format_args!(
+                                    "procedure `{target}` needs more than {MAX_CAPACITY} bytes of locals"
+                                ),
+                            ));
+                        }
+                        self.one(opcodes::REF_LOCAL, slot)?;
+                        self.push();
+                        Some((slot, ty))
+                    }
+                    None => None,
+                };
                 for (position, (arg, param)) in args.iter().zip(params.iter()).enumerate() {
                     self.argument(arg, param, position + 1)?;
                 }
                 self.word(opcodes::CALL, 0, 0, 1)?;
-                self.imm32(index as u32)?;
+                self.imm32(function_index)?;
                 self.pop(params.len() as i32)?;
-                Ok(None)
+                match destination {
+                    Some((slot, ty)) => {
+                        // The destination reference is still below the callee's
+                        // arguments; drop it, then load the result.
+                        self.simple(opcodes::DROP)?;
+                        self.pop(1)?;
+                        self.one(opcodes::LOAD_LOCAL, slot)?;
+                        self.push();
+                        Ok(Some(ty))
+                    }
+                    None => Ok(None),
+                }
             }
         }
     }

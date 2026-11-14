@@ -21,10 +21,12 @@ use crate::{diag, out_of_space, Diagnostic, Package, Resource};
 /// never produces a package the interpreter would refuse.
 const MAX_SECTION: usize = 1 << 20;
 
-/// One line-table entry.
+/// One line-table entry: a code offset, its unit id (0 application, 1 the
+/// embedded stdlib) and a 1-based source position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LineEntry {
     pub off: u32,
+    pub unit: u32,
     pub line: u32,
     pub column: u32,
 }
@@ -154,7 +156,8 @@ pub(crate) fn assemble<'a>(
     code.pad_to_8().map_err(|_| full_code())?;
     for line in lines {
         code.put(&line.off.to_le_bytes()).map_err(|_| full_code())?;
-        code.put(&0u32.to_le_bytes()).map_err(|_| full_code())?; // unit index; ABI v1 has one unit
+        code.put(&line.unit.to_le_bytes())
+            .map_err(|_| full_code())?;
         code.put(&line.line.to_le_bytes())
             .map_err(|_| full_code())?;
         code.put(&line.column.to_le_bytes())

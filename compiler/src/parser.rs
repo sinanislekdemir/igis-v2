@@ -1,10 +1,11 @@
 //! Recursive-descent parser.
 //!
 //! The grammar is the subset of spec 0003 implemented by the first vertical
-//! slice: one unit, top-level `const`/`var`/`procedure`, a `var` section inside
-//! a procedure, `begin`/`end`, `if`/`else`, `while`, assignment, calls and
-//! expressions. `function`, records, arrays, streams and handlers are rejected
-//! by syntax, which is what "not implemented" should look like.
+//! slice: `unit`/`uses`, top-level `const`/`var`/`procedure`/`function`, a `var`
+//! section inside a subprogram, `begin`/`end`, `if`/`else`, `while`, `case`,
+//! assignment, calls, `return` and expressions. Records, enums, sum types and
+//! functions are implemented; arrays, streams and handlers are rejected by
+//! syntax, which is what "not implemented" should look like.
 //!
 //! Nodes and sibling lists are allocated in the caller's arena and borrow the
 //! token stream; the parser owns nothing.
@@ -245,8 +246,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                 TokenKind::Type => self.type_section(&mut types)?,
                 TokenKind::Const => self.const_section(&mut consts)?,
                 TokenKind::Var => self.var_section(&mut vars)?,
-                TokenKind::Procedure => {
-                    let proc = self.procedure()?;
+                TokenKind::Procedure | TokenKind::Function => {
+                    let proc = self.subprogram()?;
                     self.push(&mut procs, proc, token.line, token.column)?;
                 }
                 TokenKind::Eof => break,
@@ -256,7 +257,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 }
                 other => {
                     return Err(self.here(format_args!(
-                        "expected `type`, `const`, `var`, `procedure` or end of file, found {other}"
+                        "expected `type`, `const`, `var`, `procedure`, `function` or end of file, found {other}"
                     )))
                 }
             }
@@ -512,9 +513,16 @@ impl<'a, 'b> Parser<'a, 'b> {
         })
     }
 
-    fn procedure(&mut self) -> Result<ProcDecl<'a>, Diagnostic> {
+    /// Parses `procedure Name(params);` or `function Name(params): T;`,
+    /// followed by the optional locals and the body.
+    fn subprogram(&mut self) -> Result<ProcDecl<'a>, Diagnostic> {
         let token = self.peek();
-        self.expect(&TokenKind::Procedure, "`procedure`")?;
+        let is_function = if self.eat(&TokenKind::Function) {
+            true
+        } else {
+            self.expect(&TokenKind::Procedure, "`procedure` or `function`")?;
+            false
+        };
         let name = self.ident("a procedure name")?;
 
         self.expect(&TokenKind::LParen, "`(`")?;
@@ -552,6 +560,12 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
         }
         self.expect(&TokenKind::RParen, "`)`")?;
+        let ret = if is_function {
+            self.expect(&TokenKind::Colon, "`:` and a result type after a function")?;
+            Some(self.type_ref()?)
+        } else {
+            None
+        };
         self.expect(&TokenKind::Semi, "`;`")?;
 
         let mut locals = self.list::<VarDecl<'a>>(token.line, token.column)?;
@@ -567,6 +581,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         Ok(ProcDecl {
             name,
             params: params.into_slice(),
+            ret,
             locals: locals.into_slice(),
             body,
             line: token.line,
@@ -642,6 +657,24 @@ impl<'a, 'b> Parser<'a, 'b> {
                 let arms = self.case_arms()?;
                 self.expect(&TokenKind::End, "`end` after the `case` arms")?;
                 self.alloc_stmt(Stmt::Case { value, arms }, token.line, token.column)
+            }
+            TokenKind::Return => {
+                self.advance();
+                let value = if self.check(&TokenKind::Semi) {
+                    None
+                } else {
+                    Some(self.expression()?)
+                };
+                self.expect(&TokenKind::Semi, "`;` after `return`")?;
+                self.alloc_stmt(
+                    Stmt::Return {
+                        value,
+                        line: token.line,
+                        column: token.column,
+                    },
+                    token.line,
+                    token.column,
+                )
             }
             TokenKind::Ident(_) => {
                 let (target, line, column) = self.name_path()?;

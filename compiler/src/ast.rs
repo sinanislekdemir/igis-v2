@@ -147,13 +147,16 @@ pub struct ParamDecl<'a> {
     pub column: u32,
 }
 
-/// `procedure Name(...); <declarations> begin ... end;`
+/// `procedure Name(...); <declarations> begin ... end;` or
+/// `function Name(...): T; <declarations> begin ... end;`
 #[derive(Debug, Clone, Copy)]
 pub struct ProcDecl<'a> {
-    /// Procedure name.
+    /// Procedure or function name.
     pub name: &'a str,
     /// Parameters, in order.
     pub params: &'a [ParamDecl<'a>],
+    /// Result type: `Some` for a `function`, `None` for a `procedure`.
+    pub ret: Option<TypeRef<'a>>,
     /// Procedure-local variables.
     pub locals: &'a [VarDecl<'a>],
     /// Body statements.
@@ -202,6 +205,15 @@ pub enum Stmt<'a> {
         value: &'a Expr<'a>,
         /// Arms in source order; exhaustive over the sum type's variants.
         arms: &'a [CaseArm<'a>],
+    },
+    /// `return value;` (a function) or `return;` (a procedure).
+    Return {
+        /// Result expression, absent in a procedure.
+        value: Option<&'a Expr<'a>>,
+        /// 1-based source line.
+        line: u32,
+        /// 1-based source column.
+        column: u32,
     },
     /// `begin ... end`
     Block(&'a [Stmt<'a>]),

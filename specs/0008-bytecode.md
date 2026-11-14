@@ -92,6 +92,31 @@ that is the only way a package ever comes into existence. It has the lifetime of
 no part of it is written back, cached for a later start, or stored in the image (ADR 0019).
 A second start of the same application compiles its source again.
 
+### Multi-unit compilation (`stdlib`)
+
+An application that says `uses stdlib;` is compiled together with the embedded library unit
+(`stdlib/stdlib.ig`, included with `include_str!`) into **one package**:
+
+- **Name resolution.** The application's top-level names stay unqualified; the library's
+  are reachable only as `stdlib.<name>`. Inside the library its own names are unqualified,
+  and it may import only `core` — it cannot reference the application (no cycle, M4).
+  A `stdlib.*` reference without the import, or an unknown `stdlib.*` name, is a compile
+  error.
+- **Function table.** Library procedures occupy the first indices (`0..L`), application
+  procedures follow (`L..L+A`); cross-unit calls resolve to those indices. The entry is the
+  application's `main`.
+- **One instruction section, one constant blob.** Both units share the constant pool in
+  first-use order, so deterministic output and one artifact hold.
+- **Line table.** Each entry carries a unit id: `0` application, `1` embedded `stdlib`.
+  The verifier accepts unit ids `0..=1`. Compile diagnostics name the failing unit and path
+  (`stdlib/stdlib.ig:line:col: ...`), so a broken library is an ordinary `Diagnostic`.
+- **Manifest.** It keeps the application's unit name and entry point.
+- **Types.** Type ids are compiler-local per unit. A library signature may use scalars,
+  buffers, `Status` and `FaultCode`; a record, sum or user enum crossing the unit boundary
+  is a compile error until a shared type table exists.
+- **Cost.** The library is recompiled from source for every application instance that
+  imports it (ADR 0019); nothing precompiled is ever shipped.
+
 ### Target profile
 
 x86_64, little-endian, 8-byte words, SSE2 doubles. The artifact records the profile; a
@@ -228,8 +253,9 @@ the bump arena, isolated in `compiler/src/arena.rs`.
 - The loader runs a bounded linear verifier (B7). It does not re-typecheck the program; the
   compiler is trusted, the verifier protects the kernel from a corrupt image. A structural
   error refuses the package with `Status.Invalid` and a `Diagnostic`.
-- The line table is sorted by code offset; a fault binary-searches it and fills
-  `Diagnostic.unit_name`, `line` and `column`. The compiler reserves one hidden
+- The line table is sorted by code offset and names a unit id (0 application, 1 embedded
+  `stdlib`); a fault binary-searches it for `line` and `column`, and the unit id names the
+  source unit. The compiler reserves one hidden
   `Diagnostic` slot in `state` for the interpreter to fill before invoking `fault`/`exit`.
 - Compile errors are reported through the same `Diagnostic` into the caller's buffer
   (spec 0005); compilation never writes to an application-visible region.
@@ -334,3 +360,4 @@ pub fn run(task: &mut Task);
 | 2026-11-14 | Enums: `enum_cast` (immediate `count`, pop an `int` ordinal, fault `Overflow` outside `0..count`, push the same slot typed as the enum) grows ABI v1 from 60 to 61 opcodes; enums are an 8-byte ordinal at run time and need no other instruction. Builtins `spawn`/`wait`/`kill` switch to the `Status`-returning ABI: `spawn` pops `(path, args, id_ref)`, `wait` pops `(id, reason_ref)` and writes the staged reason int, `kill` pops `id`; each pushes the `Status` ordinal (spec 0005). |
 | 2026-11-14 | Records: `ref_offset` (pop a reference, add an 8-byte-aligned immediate field offset, bounds-check, push) and `copy_refs` (pop a count and a source/destination reference, bounds-check both, overlap-safe move into a writable region) grow ABI v1 from 61 to 63 opcodes. Record layout and field offsets stay a compiler concern; the interpreter sees only byte offsets. `Diagnostic`/`ExitReason` are predeclared records at the fixed `abi::layout` offsets, and the `spawn`/`wait` builtins pop a record reference (`SPAWN` grows from 3 to 4 operands with `diag`; `WAIT` writes the 16-byte `ExitReason`). |
 | 2026-11-14 | Sum types need no new opcodes: construction is `const` + `store_ref` for the tag plus the payload type's ordinary instructions, `case` is `load_ref`/`eq`/`jz` over the tag, and a whole-sum copy or `case` binding is `copy_refs` with the compile-time size. ABI v1 stays at 63 opcodes. `ExitReason` becomes the real sum type at the same 16-byte layout (`TAG_OFFSET` 0, `PAYLOAD_OFFSET` 8); `WAIT` writes the tag and the `FaultCode` payload unchanged. |
+| 2026-11-14 | Multi-unit packages: an application with `uses stdlib;` compiles the embedded `stdlib/stdlib.ig` into the same package. Library functions come first in one function table (entry is the application's `main`), the constant pool and instruction section are shared, and line-table entries carry a unit id (0 application, 1 stdlib; verifier accepts `0..=1`). The manifest keeps the application's unit name; compile diagnostics name the failing unit. Type ids stay per-unit, so records, sums and user enums may not cross the boundary yet. |

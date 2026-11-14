@@ -1,0 +1,68 @@
+unit text;
+
+// Kernel sample for the standard library: `run text 42 hi` gives the library a
+// real `main(args)` string. It trims the argument, splits it at the first
+// space, parses the tail as an `int`, and prints one fixed line per result.
+
+uses core, stdlib;
+
+var
+  trimmed: string[256];
+  head: string[128];
+  tail: string[256];
+  number: int;
+  st: Status;
+  split: int;
+  count: int;
+  digits: string[32];
+
+procedure say(text: const string[0]);
+begin
+  core.write(text);
+end;
+
+procedure show(value: int);
+begin
+  count := core.format_int_into(digits, value, uint(10), uint(0));
+  core.write(digits);
+end;
+
+procedure main(args: const string[1024]);
+begin
+  count := stdlib.trim_into(trimmed, args);
+  say("text: trimmed=[");
+  say(trimmed);
+  say("] len=");
+  show(count);
+  say("\n");
+
+  split := stdlib.split_once(head, tail, trimmed, byte(32));
+  say("text: split=");
+  show(split);
+  say(" head=[");
+  say(head);
+  say("] tail=[");
+  say(tail);
+  say("]\n");
+
+  st := stdlib.parse_int_into(tail, number);
+  if st = Ok then
+  begin
+    say("text: tail is ");
+    show(number);
+    say("\n");
+  end
+  else if st = Invalid then
+    say("text: tail is not an integer (Invalid)\n")
+  else
+    say("text: tail is out of range (CapacityExceeded)\n");
+
+  if stdlib.starts_with(head, "4") then
+    say("text: head starts with 4\n")
+  else
+    say("text: head does not start with 4\n");
+  if stdlib.contains_byte(trimmed, byte(32)) then
+    say("text: trimmed has a space\n")
+  else
+    say("text: trimmed has no space\n");
+end;

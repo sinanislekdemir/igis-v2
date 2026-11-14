@@ -25,6 +25,10 @@ const MAX_SECTION: u32 = 1 << 20;
 /// Maximum number of functions in one package.
 const MAX_FUNCTIONS: u32 = 1 << 16;
 
+/// Maximum line-table unit id. ABI v1 packages name at most two units: the
+/// application (0) and the embedded `stdlib` (1). The compiler assigns them.
+const MAX_UNITS: u32 = 1;
+
 /// A package that failed verification, or a verifier whose scratch buffer was
 /// too small.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -585,10 +589,10 @@ fn verify_lines(code: &[u8], header: &CodeHeader, sections: &Sections) -> Result
                 "line-table code offset is out of range",
             ));
         }
-        if unit != 0 {
+        if unit > MAX_UNITS {
             return Err(invalid(
                 sections.lines + index * LINE_ENTRY_SIZE + 4,
-                "ABI v1 line tables name exactly one unit",
+                "line-table unit id is out of range",
             ));
         }
         if let Some(previous) = previous {

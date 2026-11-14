@@ -32,13 +32,26 @@ use abi::Status;
 
 pub use arena::FixedBuf;
 
-/// Maximum accepted source size. Spec 0008 caps a unit at 64 KiB and an
-/// application at 256 KiB; ABI v1 has one unit per application, so the unit cap
-/// is the effective one.
+/// Maximum accepted source size for one unit. Spec 0008 caps a unit at 64 KiB
+/// and an application at 256 KiB; the kernel's source buffer holds one unit, so
+/// this is the effective per-unit cap.
 pub const MAX_SOURCE_BYTES: usize = 64 * 1024;
 
-/// Scratch arena the compiler needs for one unit (provisional tuning value,
-/// spec 0008 "Compile memory"). Tokens, AST nodes, name tables, the instruction
+/// Maximum combined source size for an application and the embedded `stdlib`
+/// unit. It matches the 256 KiB per-application cap in spec 0008.
+pub const MAX_APPLICATION_SOURCE_BYTES: usize = 256 * 1024;
+
+/// Source of the embedded standard library unit (ADR 0019: source only, never a
+/// precompiled artifact). It is compiled together with an application that has
+/// `uses stdlib;`.
+pub const STDLIB_SOURCE: &str = include_str!("../../stdlib/stdlib.ig");
+
+/// Path used in diagnostics for the embedded standard library.
+pub const STDLIB_PATH: &str = "stdlib/stdlib.ig";
+
+/// Scratch arena the compiler needs for one compilation: the application and,
+/// when it imports `stdlib`, the library unit (provisional tuning value, spec
+/// 0008 "Compile memory"). Tokens, AST nodes, name tables, the instruction
 /// and line-table images and the constant pool all live here; a caller with a
 /// larger buffer still only gets this much, so the bound is real.
 pub const MAX_ARENA_BYTES: usize = 1024 * 1024;
@@ -215,14 +228,103 @@ pub(crate) fn out_of_space(
 /// Compiles one unit of source text into a package.
 ///
 /// `path` is only used in diagnostics. `source` must be UTF-8 and no larger than
-/// [`MAX_SOURCE_BYTES`]. `arena` is the scratch memory for tokens, the AST and
-/// all name tables ([`MAX_ARENA_BYTES`]); `code` and `manifest` receive the
-/// artifact ([`MAX_CODE_BYTES`], [`MAX_MANIFEST_BYTES`]). The returned package
-/// borrows `code` and `manifest`.
+/// [`MAX_SOURCE_BYTES`]. When the unit declares `uses stdlib;`, the embedded
+/// [`STDLIB_SOURCE`] unit is compiled with it into the same package
+/// (`stdlib.<name>` is then callable). `arena` is the scratch memory for both
+/// units ([`MAX_ARENA_BYTES`]); `code` and `manifest` receive the artifact
+/// ([`MAX_CODE_BYTES`], [`MAX_MANIFEST_BYTES`]). The returned package borrows
+/// `code` and `manifest`.
 ///
 /// Running out of scratch, code or manifest space is a diagnostic with
 /// [`Status::CapacityExceeded`], never an allocation or a partial package.
 pub fn compile_into<'a>(
+    source: &'a [u8],
+    path: &'a str,
+    arena: &'a mut [u8],
+    code: &'a mut [u8],
+    manifest: &'a mut [u8],
+) -> Result<Package<'a>, Diagnostic> {
+    if source.len() > MAX_SOURCE_BYTES {
+        return Err(diag(
+            path,
+            "",
+            1,
+            1,
+            format_args!(
+                "source is {} bytes, over the {}-byte cap",
+                source.len(),
+                MAX_SOURCE_BYTES
+            ),
+        ));
+    }
+    if STDLIB_SOURCE.len() > MAX_SOURCE_BYTES {
+        return Err(diag(
+            STDLIB_PATH,
+            "stdlib",
+            1,
+            1,
+            format_args!(
+                "embedded stdlib source is {} bytes, over the {}-byte cap",
+                STDLIB_SOURCE.len(),
+                MAX_SOURCE_BYTES
+            ),
+        ));
+    }
+    if source.len() + STDLIB_SOURCE.len() > MAX_APPLICATION_SOURCE_BYTES {
+        return Err(diag(
+            path,
+            "",
+            1,
+            1,
+            format_args!(
+                "application and stdlib sources total {} bytes, over the {}-byte cap",
+                source.len() + STDLIB_SOURCE.len(),
+                MAX_APPLICATION_SOURCE_BYTES
+            ),
+        ));
+    }
+    if core::str::from_utf8(source).is_err() {
+        return Err(diag(
+            path,
+            "",
+            1,
+            1,
+            format_args!("source is not valid UTF-8"),
+        ));
+    }
+
+    let arena_len = arena.len().min(MAX_ARENA_BYTES);
+    let code_len = code.len().min(MAX_CODE_BYTES);
+    let manifest_len = manifest.len().min(MAX_MANIFEST_BYTES);
+    let arena = &mut arena[..arena_len];
+    let code = &mut code[..code_len];
+    let manifest = &mut manifest[..manifest_len];
+
+    let bump = arena::Bump::new(arena);
+    let tokens = lexer::lex(source, path, &bump)?;
+    let unit = parser::parse(tokens, path, &bump)?;
+    let library = if unit.uses.contains(&"stdlib") {
+        let stdlib = STDLIB_SOURCE.as_bytes();
+        let tokens = lexer::lex(stdlib, STDLIB_PATH, &bump)?;
+        Some(parser::parse(tokens, STDLIB_PATH, &bump)?)
+    } else {
+        None
+    };
+    codegen::compile_units(
+        &unit,
+        path,
+        library.as_ref(),
+        STDLIB_PATH,
+        &bump,
+        code,
+        manifest,
+    )
+}
+
+/// Compiles one unit by itself, without requiring `main`. This is how the
+/// compiler's own test suite proves the embedded `stdlib` source is valid on
+/// its own; it is not an application entry point.
+pub fn compile_library_into<'a>(
     source: &'a [u8],
     path: &'a str,
     arena: &'a mut [u8],
@@ -251,7 +353,6 @@ pub fn compile_into<'a>(
             format_args!("source is not valid UTF-8"),
         ));
     }
-
     let arena_len = arena.len().min(MAX_ARENA_BYTES);
     let code_len = code.len().min(MAX_CODE_BYTES);
     let manifest_len = manifest.len().min(MAX_MANIFEST_BYTES);
@@ -262,5 +363,5 @@ pub fn compile_into<'a>(
     let bump = arena::Bump::new(arena);
     let tokens = lexer::lex(source, path, &bump)?;
     let unit = parser::parse(tokens, path, &bump)?;
-    codegen::compile_unit(&unit, path, &bump, code, manifest)
+    codegen::compile_library(&unit, path, &bump, code, manifest)
 }

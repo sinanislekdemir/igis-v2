@@ -27,8 +27,8 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | Q8 | Debug/introspection primitive | shape open (task listing, counters, trace); none in M1 | after the shell exists |
 | Q9 | DMA and block primitives | handle model fixed; no primitive in M1 | first real block device |
 | Q39 | Console/stream multiplexing (`poll`/`select`) | none in M1; a task blocks on one source at a time | when an application must serve two input sources |
-| Q43 | Distinct `TaskId` type | `core.run`, `spawn`, `wait` and `kill` are implemented; task ids are still `int` (0 invalid). Introduce a nominal `TaskId` when `stdlib` exposes these primitives, so an id cannot be confused with another integer (spec 0003, "Task ids") | before `stdlib` exposes `run` |
-| Q44 | Staged kernel line discipline (`core.read_line`) | the kernel polls COM1/PS-2, echoes, assembles and stores lines in a 4-line ring; `core.read_line(var buf)` blocks until a line exists and truncates to the buffer. Replace with application-side editing when string length/truncate/insert operations exist: indexing alone reads and writes single bytes but cannot delete one (spec 0005, "Staged line discipline") | when `stdlib` string editing exists |
+| Q43 | Distinct `TaskId` type | `core.run`, `spawn`, `wait` and `kill` are implemented; task ids are still `int` (0 invalid). Introduce a nominal `TaskId` when `stdlib` exposes these primitives, so an id cannot be confused with another integer (spec 0003, "Task ids"). The `stdlib` has started (text helpers only) and still exposes no task primitives | before `stdlib` exposes `run` |
+| Q44 | Staged kernel line discipline (`core.read_line`) | the kernel polls COM1/PS-2, echoes, assembles and stores lines in a 4-line ring; `core.read_line(var buf)` blocks until a line exists and truncates to the buffer. Replace with application-side editing when string length/truncate/insert operations exist: indexing alone reads and writes single bytes but cannot delete one (spec 0005, "Staged line discipline"). The first `stdlib` slice has no editing operations yet | when `stdlib` string editing exists |
 | Q45 | Staged `syslib` handles | `syslib.port_in8`/`port_out8` are implemented with `Port` as a plain scalar `uint` (low 16 bits used); there are no opaque `Port`/`MmioRegion` types, MMIO mapping, or DMA/block primitives yet. Replace with the handle model when MMIO or DMA lands (specs 0003, 0005) | first MMIO or DMA device |
 
 ## C. Streams
@@ -155,6 +155,32 @@ These are no longer open; they were recorded in specs and ADRs:
   alignment, build-parameter capacities (spec 0004).
 - Streams: byte FIFO, copied, atomic sends, immediate discard on peer death (spec 0006).
 
+## Decided in the 2026-11-14 stdlib session
+
+- **The stdlib is real source compiled with the application.** `stdlib/stdlib.ig` is
+  embedded with `include_str!` (never precompiled, ADR 0019). An application with
+  `uses stdlib;` compiles both units into one package: library functions first in the
+  function table (entry is the app's `main`), one constant pool and instruction section,
+  line-table unit ids 0 (app) / 1 (stdlib), and the manifest keeps the app's unit name.
+  Names are unit-scoped: the app sees `stdlib.<name>` only; the library sees its own names
+  unqualified and may import only `core`. Type ids stay per-unit, so records, sums and
+  user enums may not cross the boundary yet (spec 0008).
+- **Functions.** `function Name(...): T;` with `return value;` is implemented for scalar
+  results; a function must end in a `return` on every path, and a procedure may `return;`.
+  The caller pushes a destination reference before the arguments and the callee writes the
+  result there, using the interpreter's existing `dest_ref`/`has_destination` support (no
+  new opcode; spec 0003, spec 0008).
+- **First helpers.** `trim_into` (destination `string[256]`), `split_once` (128/256),
+  `parse_int_into` (`Status`, overflow-checked, never faults), `starts_with` and
+  `contains_byte`. Concrete capacities replace generics; callers satisfy the at-least-N
+  rule. The library adds no `state`, ~5.3 KiB of source and ~4.1 KiB of code blob, and
+  ~154 KiB of compile scratch is enough for the sample app plus the library.
+- **Still missing for a complete stdlib:** `array`/`ring`/`map` (language support and
+  helpers), UTF-8 helpers (`utf8_decode_into`, code-point iteration), moving
+  `substr_into` from `core` to `stdlib`, `f64` formatting/parsing, typed stream views, and
+  a shared cross-unit type table so library signatures can use records, sums and user
+  enums.
+
 ## Suggested next step
 
 Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Next:
@@ -225,3 +251,12 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
     the shell matches `ExitReason` with an exhaustive `case` and reports `Faulted`'s
     `FaultCode` payload. Q43 is now `core.run`, `TaskId` and the request-completion
     diagnostic path.
+18. ~~`stdlib` start and multi-unit compilation~~ — done: `stdlib/stdlib.ig` is embedded
+    source compiled into the application package (`uses stdlib;`), with library-first
+    function indices, a shared constant pool, line-table unit ids (0 app, 1 stdlib) and
+    unit-named diagnostics. `function ... : T` with `return` landed, and the first helpers
+    are `trim_into`, `split_once`, `parse_int_into`, `starts_with` and `contains_byte`.
+    `samples/lang/stdlib.ig` runs on the host and `run text 42 hi` runs in the kernel.
+    Next on the language/stdlib track: arrays/rings/maps and UTF-8 helpers, then the
+    `substr_into` move and cross-unit aggregate types. After that: APs, the realtime class
+    and streams.

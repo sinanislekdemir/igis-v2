@@ -79,8 +79,15 @@ constraints learned there.
   var diag, var reason)` now composes spawn + wait with the pending id in the machine, and
   the request-completion path carries the compiler's `Diagnostic` in the exit ring, so a
   compile error the service finds after `spawn` returned reaches `run`'s `diag` (`wait`
-  still sees `Faulted(IoError)`). The next pieces are `stdlib` text helpers, then APs,
-  the realtime class and streams.
+  still sees `Faulted(IoError)`). The `stdlib` is now real source: `stdlib/stdlib.ig` is
+  embedded with `include_str!` and compiled into the same package as any application that
+  says `uses stdlib;`, with library functions first in one function table, a shared
+  constant pool, and line-table unit ids (0 app, 1 stdlib) so a broken library is a normal
+  diagnostic naming `stdlib`. `function Name(...): T;` with `return` works for scalar
+  results. The first helpers are `trim_into`, `split_once`, `parse_int_into`,
+  `starts_with` and `contains_byte`; `samples/apps/text` exercises them on `main(args)`.
+  The next pieces are arrays/rings/maps and UTF-8 helpers, then APs, the realtime class
+  and streams.
 
 ## Ground rules
 
@@ -109,6 +116,7 @@ constraints learned there.
 ├── interpreter/       # package verifier, machine, Host trait
 ├── langhost/          # host runner: compile, verify, run
 ├── kernel/            # entry, multiboot2, console, frame allocator, clock, ext2, REPL
+├── stdlib/            # standard library source, embedded into the compiler
 ├── samples/lang/      # example programs
 ├── samples/apps/      # source applications staged into the ext2 image
 ├── xtask/             # build, image and QEMU orchestration
@@ -223,6 +231,8 @@ host tools are unaffected.
 | Compiler nesting limit 32; post-boot kernel stack is 256 KiB with a guard frame | Q42, spec 0002, `arch/x86_64/src/stack.rs` |
 | Records: nominal, declaration-order layout with every field aligned to 8; `Diagnostic` predeclared at fixed `abi::layout` offsets | spec 0003, spec 0008 |
 | Sum types: nominal, 8-byte tag at 0 plus the largest payload at 8 (rounded); destination-driven construction; exhaustive `case` with by-value arm-local payload bindings; `ExitReason` is `Ok | Killed | Faulted(code: FaultCode)`; `FaultCode` variants are qualified | spec 0003, spec 0008 |
+| `stdlib` is embedded source (`stdlib/stdlib.ig`), compiled into the application's package; `stdlib.*` is qualified, the function table is library-first, line-table unit ids are 0 (app) / 1 (stdlib) | spec 0003, spec 0008 |
+| Functions: `function Name(...): T;` with `return value;`, scalar results only, `return` on every path | spec 0003, spec 0008 |
 
 ## Open questions
 
@@ -275,3 +285,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-14 | Records and the record-based REPL ABI: `type Name = record field: T; ... end;` with nominal types, declaration-order 8-byte-aligned layout, nested records, buffer fields, whole-record copies (`copy_refs`), field references (`ref_offset`) and `value`/`const`/`var` record parameters. `Diagnostic` and `ExitReason` are predeclared at the fixed `abi::layout` offsets; `core.spawn(path, args, var diag, var id)` fills `diag` from the kernel compiler on a synchronous failure and clears it otherwise, and `core.wait(id, var reason)` writes `kind`/`code`. `run missing` prints `spawn failed: No such application` from `diag.message`, `run faulty` reports `child: faulted` from `reason.kind`, and the staged reason `int` is gone (Q43 narrowed to sum types and `core.run`). |
 | 2026-11-14 | Sum types, `case` and the real `ExitReason`: `type Name = Variant | Variant(payload: T);` is nominal, an 8-byte tag at offset 0 plus the largest payload at offset 8, constructed into a destination (`dst := Variant(payload)`; variant names are scoped to the sum, so `Ok` is `Status.Ok` or `ExitReason.Ok` by destination). `case value of Variant: ... Variant(binding): ... end;` is exhaustive (one arm per variant, no `else`), has no fallthrough, and copies a payload by value into an arm-local binding; missing, duplicate and unknown arms, payload mismatches and cross-sum variants are compile errors. No new opcodes: construction is `store_ref`/`clear`/`append`/`copy_refs`, `case` is `load_ref`/`eq`/`jz`. `ExitReason` becomes `Ok | Killed | Faulted(code: FaultCode)` at the same 16-byte layout; `FaultCode` is a predeclared enum with qualified variant names (`FaultCode.DivideByZero`) because two names collide with `Status`. The shell's `report` is an exhaustive `case`; `run faulty` prints `child: faulted DivideByZero`, `run child world` prints `child: ok`, `run missing` keeps its `diag.message`, and the kernel run ends `task 1: exit Ok`. Q43 narrows to `core.run`, `TaskId` and the request-completion diagnostic path. |
 | 2026-11-14 | `core.run` and the request-completion diagnostic: `core.run(path, args, var diag, var reason)` is spawn + wait in the interpreter, with the pending child id in the `Machine`, so a blocked retry waits without spawning twice (builtin id 9, `(4, 1)`). The exit ring now carries a 192-byte `Diagnostic` image for a load failure the service discovers after `spawn` returned; `Host::diagnostic_for` (default `false`) lets `run` copy it into its caller-owned `diag`, while `core.wait` keeps its signature and observes only `Faulted(IoError)`. The shell's `run` command uses `core.run`; the boot child still uses spawn + wait. `run broken` prints the compiler's `unknown identifier` message, `run ../shell` prints the path rule. Q43 is now only the distinct `TaskId` type. |
+| 2026-11-14 | Multi-unit `stdlib`: `stdlib/stdlib.ig` is real source embedded with `include_str!`; an application with `uses stdlib;` compiles it into the same package (library functions first, shared constant pool, line-table unit ids 0 app / 1 stdlib, manifest keeps the app unit name, diagnostics name the failing unit). `function ... : T` with `return` (scalar results) and the first helpers `trim_into`, `split_once`, `parse_int_into`, `starts_with`, `contains_byte` landed; `samples/apps/text` runs `run text 42 hi` in the kernel. The stdlib adds ~5.3 KiB of source, ~4.1 KiB of code blob and ~154 KiB of compile scratch to the sample app. |

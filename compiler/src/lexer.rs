@@ -49,6 +49,10 @@ pub enum TokenKind<'a> {
     Record,
     /// `procedure`
     Procedure,
+    /// `function`
+    Function,
+    /// `return`
+    Return,
     /// `begin`
     Begin,
     /// `end`
@@ -135,6 +139,8 @@ impl TokenKind<'_> {
             TokenKind::Type => "type",
             TokenKind::Record => "record",
             TokenKind::Procedure => "procedure",
+            TokenKind::Function => "function",
+            TokenKind::Return => "return",
             TokenKind::Begin => "begin",
             TokenKind::End => "end",
             TokenKind::If => "if",
@@ -365,6 +371,8 @@ impl<'a, 'b> Lexer<'a, 'b> {
             "type" => TokenKind::Type,
             "record" => TokenKind::Record,
             "procedure" => TokenKind::Procedure,
+            "function" => TokenKind::Function,
+            "return" => TokenKind::Return,
             "begin" => TokenKind::Begin,
             "end" => TokenKind::End,
             "if" => TokenKind::If,
