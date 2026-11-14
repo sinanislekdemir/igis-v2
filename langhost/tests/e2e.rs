@@ -191,7 +191,7 @@ fn host_trait_implementation_sees_application_bytes() {
 
 #[test]
 fn stage_app_samples_compile_with_the_spawn_builtins() {
-    for name in ["shell", "child"] {
+    for name in ["shell", "child", "clock"] {
         let path = format!("{}/../samples/apps/{name}", env!("CARGO_MANIFEST_DIR"));
         let source = std::fs::read(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
         let package = langhost::compile(&source, name).unwrap_or_else(|error| {
@@ -199,6 +199,19 @@ fn stage_app_samples_compile_with_the_spawn_builtins() {
         });
         assert!(!package.code.is_empty(), "{name} produced no code");
     }
+}
+
+#[test]
+fn clock_app_prints_zeroed_time_with_the_mock_ports() {
+    let path = format!("{}/../samples/apps/clock", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
+    let package = langhost::compile(&source, "clock").expect("clock compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(
+        result.output, b"00:00:00\n",
+        "the host mock reads zero from every port"
+    );
 }
 
 #[test]

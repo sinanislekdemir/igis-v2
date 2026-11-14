@@ -223,6 +223,23 @@ Rules:
   It scans `0..len` only and serves both kinds; a `string` is searched byte-wise, not by
   code point.
 
+### Integer formatting (staged)
+
+- **`core.format_int_into(dst: var string[N], value: int, base: uint, width: uint) -> int`**
+  writes a signed integer as text and returns the byte count. `dst` is a writable
+  `string` or `bytes` buffer (the output is ASCII). `base` must be 10 (decimal) or 16
+  (lowercase hexadecimal); any other base returns `-4` (`Status.Invalid`) and writes
+  nothing.
+- A negative value gets a leading `-`, then the magnitude. A non-zero `width` zero-pads
+  the digits to at least that many characters; the sign is additional. A value with more
+  digits than `width` keeps all of them.
+- The result must fit `N`. If it does not, nothing is written, the destination length is
+  left untouched, and the result is `-6` (`Status.CapacityExceeded`). Otherwise the
+  runtime length becomes the number of bytes written.
+- This is a pure buffer operation in the interpreter, not a host call. It is a staged
+  `core` primitive because `stdlib` formatting does not exist yet; the semantics do not
+  change when it moves (spec 0008, `format_int`).
+
 ### Compound and parametric types
 
 - **Records:** `type Point = record x, y: int; end;`
@@ -441,6 +458,20 @@ procedure syslib.mmio_write32(region: MmioRegion; offset: uint; value: uint);
 - **H4 (MUST):** There is no capability check. Every application may call every `syslib`
   function (vision R14).
 
+**Staged port handle (Q45).** The first `syslib` slice implements only 8-bit port I/O and
+stages `Port` as a plain `uint`, not an opaque handle:
+
+```text
+syslib.port_in8(port: uint) -> uint;
+syslib.port_out8(port: uint, value: uint) -> int;
+```
+
+`port_in8` returns the byte as a `uint`; the low 16 bits of `port` are the x86 port number.
+`port_out8` returns `0`, or `-4` (`Status.Invalid`) without touching the port when
+`value > 255`. `Port`, `MmioRegion` and the `mmio_*`/DMA primitives above remain the target
+design; `syslib.*` names other than these two are compile errors for now. There is still no
+capability check (H4).
+
 ## Constants and manifests
 
 `const` declarations are compile-time expressions over literals, other constants, and the
@@ -616,3 +647,4 @@ is the signal.
 | 2026-11-13 | `ExitReason` gained `Killed`; `kill` cancels a queued request and runs `exit(Killed)` on a live task; request paths are validated as relative with no `..` and must name regular files. |
 | 2026-11-13 | Buffer indexing, comparison and length: `buf[i]` yields a `byte` (raw for `string`, T4); writes are `bytes`-only and extend the length to `index + 1`, zero-filling the gap; reads check the runtime length and writes the declared capacity; `=`/`<>` compare buffers of the same kind across capacities; `core.len(buf) -> uint`. |
 | 2026-11-14 | Staged slicing and search: `core.substr_into(dst, src, start, len) -> int` (same kind, negative → `-4`, past-end → 0, clamped copy, UTF-8 boundary check for `string`) and `core.find(buf, byte) -> int` (first index or `-1`, `0..len`, both kinds). Both are `core` opcodes until `stdlib.substr_into` exists (T4 staging). |
+| 2026-11-14 | Staged integer formatting: `core.format_int_into(dst, value, base, width) -> int` (decimal/hex, negative sign, zero padding, exact capacity or `-6`, bad base `-4`). First `syslib` slice: `port_in8`/`port_out8` with `Port` staged as a scalar `uint` (Q45); MMIO/DMA handles remain the target design. |

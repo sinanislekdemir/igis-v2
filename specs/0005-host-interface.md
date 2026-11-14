@@ -5,7 +5,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0001, 0011, 0014, 0015
-- **Updated:** 2026-11-13
+- **Updated:** 2026-11-14
 
 ## Context
 
@@ -193,6 +193,23 @@ the scalar `spawn` ABI:
 - DMA and block access are specified when a device needs them; they follow the same
   handle model (`0004-memory-model.md`).
 
+#### Staged syslib: ports as scalars (Q45)
+
+The first `syslib` slice implements only 8-bit port I/O, and `Port` is staged as a plain
+`uint` instead of an opaque handle (spec 0003, "Staged port handle"):
+
+| Primitive | Staged signature | Result |
+|-----------|------------------|--------|
+| `syslib.port_in8` | `(port: uint) -> uint` | the byte read, zero-extended; the low 16 bits of `port` are used |
+| `syslib.port_out8` | `(port: uint, value: uint) -> int` | `0` on success, `-4` (`Status.Invalid`) when `value > 255` (the port is not touched) |
+
+The interpreter routes these through `Host::port_in8(u16) -> u8` and
+`Host::port_out8(u16, u8)`. Both have defaults (zero and a no-op) so the host mock and
+tests need no hardware; the kernel implements them over `arch_x86_64::port` (`inb`/`outb`).
+This is a staging shape, not the ABI: the target API has opaque `Port`/`MmioRegion`
+handles, `mmio_map/read/write` bounds-checked by the interface, and the DMA model above.
+`syslib` is still a distinct namespace with no capability check (H4).
+
 ### Host implementation
 
 The language track links the runtime against a host implementation that provides console
@@ -310,3 +327,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-13 | Path validation settled (question 13): relative, no leading/trailing `/`, no empty or `..` component, regular files only; malformed is `Invalid`, absent is `NotFound`. `kill` semantics: queued requests are cancelled with `Killed`, live tasks terminate at the next safe point. |
 | 2026-11-13 | Staged scalar `spawn`/`wait`/`kill` ABI added for the first milestone (`int` task id, negated `Status`, `0`/`1`/`2 + fault_code` wait results); the record-based `Diagnostic`/`Status`/`ExitReason` form remains the target API (see "Staged ABI"). |
 | 2026-11-13 | Staged `core.read_line` line discipline added: polled COM1/PS-2 bytes, kernel echo and a four-line ring, blocking on an unfinished line. Temporary until indexing exists (Q44). |
+| 2026-11-14 | First `syslib` slice: `port_in8`/`port_out8` as `uint` scalars through `Host::port_in8`/`port_out8` defaults, kernel implementation over `arch_x86_64::port`; opaque `Port`/MMIO/DMA remain the target (Q45). |

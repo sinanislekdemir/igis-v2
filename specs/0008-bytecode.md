@@ -168,7 +168,7 @@ artifact:
 | Comparisons | `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `cmp_buffers` for buffers |
 | Conversions | `i2f`, `f2i` (truncate and range-check), `trunc8`, `sext`, `zext` |
 | Control flow | `jmp`, `jz`, `jnz`, `call`, `ret` |
-| Buffers and aggregates | `append` (capacity-checked), `load_u8`/`store_u8` (length- and capacity-checked), `find` (byte scan), `substr` (checked slice), `array_load/store`, `ring_push/pop`, `map_get/put/has/remove` |
+| Buffers and aggregates | `append` (capacity-checked), `load_u8`/`store_u8` (length- and capacity-checked), `find` (byte scan), `substr` (checked slice), `format_int` (decimal/hex formatting), `array_load/store`, `ring_push/pop`, `map_get/put/has/remove` |
 | Builtins | `call_builtin n` — host-interface and `core` primitives |
 | System | `safe` (explicit poll), `trap` (compiler-inserted fault) |
 
@@ -290,7 +290,7 @@ pub fn run(task: &mut Task);
 
 | # | Question | Trigger / owner |
 |---|----------|-----------------|
-| 1 | ~~Exact opcode table and operand encodings~~ | **Resolved** — ABI v1 is `abi::opcodes`: 59 opcodes, one 4-byte opcode word plus up to two immediate words, `i32` jump offsets in instruction words, 8-byte operand slots. The interpreter implements it. |
+| 1 | ~~Exact opcode table and operand encodings~~ | **Resolved** — ABI v1 is `abi::opcodes`: 60 opcodes, one 4-byte opcode word plus up to two immediate words, `i32` jump offsets in instruction words, 8-byte operand slots. The interpreter implements it. |
 | 2 | Stack machine vs a small register machine | Performance measurement after the first loops run. |
 | 3 | ~~Verifier depth: structural only, or limited control-flow and stack-depth checks~~ | **Resolved for v1** — structural checks plus one instruction-boundary bit per word for jump targets; operand-stack depth is enforced at run time against the frame's operand area, not by dataflow analysis. |
 | 4 | Line-table encoding and compaction | When packages grow past the first few units. |
@@ -308,3 +308,4 @@ pub fn run(task: &mut Task);
 | 2026-11-13 | Added the `read_line` buffer opcode (capacity immediate, copied length pushed) for the staged `core.read_line` line discipline (spec 0005, Q44). |
 | 2026-11-13 | Buffer indexing, comparison and length: `load_u8` (index vs runtime length, `OutOfBounds`) and `store_u8` (index vs the capacity immediate, `CapacityExceeded`, extends the length and zero-fills the gap), `cmp_buffers` (length then bytes, `bool`), and the `core.len` builtin (id 6, one reference in, `uint` out). ABI v1 grows from 54 to 57 opcodes. |
 | 2026-11-14 | Slicing and search: `find` (one reference and one `byte` in, first index or `-1`, `0..len`) and `substr` (`a` is the buffer kind, a capacity immediate, destination/source/start/length on the stack; copies a clamped slice and pushes the length, or `-4` on a negative offset or a `string` code-point split). ABI v1 grows from 57 to 59 opcodes. |
+| 2026-11-14 | Integer formatting and ports: `format_int` (`a` is the buffer kind, a capacity immediate; destination/value/base/width on the stack; decimal/hex, sign and zero padding, pushes the byte count or `-4`/`-6`) grows ABI v1 from 59 to 60 opcodes; builtins `port_in8` (7) and `port_out8` (8) route `syslib` through the host with defaults. |

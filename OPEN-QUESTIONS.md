@@ -19,7 +19,7 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 |---|----------|--------------------------|---------|
 | Q3 | Handler emergency budget | 1 ms or 10 000 steps for `fault`/`exit` | fault/exit implementation |
 | Q4 | Realtime heartbeat interval | 1 s default; configurable per task? | realtime implementation |
-| Q42 | Kernel stack bound for in-kernel compilation | the recursive compiler runs on the boot stack (now 64 KiB); needs a guard page or a bounded recursion depth before untrusted source is accepted | before the REPL takes `run` requests |
+| Q42 | Kernel stack bound for in-kernel compilation | the recursive compiler runs on the boot stack, now 128 KiB after two overflows into the boot page tables (64 KiB at the first vertical slice, 128 KiB when `format_int`/`syslib` grew the code paths). It needs a guard page or a bounded recursion depth; `spawn` already compiles application-supplied source | before the REPL accepts untrusted source; now a standing risk |
 
 ## B. Host interface and I/O
 
@@ -30,6 +30,7 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | Q39 | Console/stream multiplexing (`poll`/`select`) | none in M1; a task blocks on one source at a time | when an application must serve two input sources |
 | Q43 | Staged scalar `spawn`/`wait`/`kill` ABI | `int` task ids, negated `Status`, `0`/`1`/`2 + fault_code` wait results; replace with `Status`/`Diagnostic`/`ExitReason` records when the language has enums/records (spec 0005, "Staged ABI") | before `stdlib` exposes `run`, and before console input builds a shell on top of it |
 | Q44 | Staged kernel line discipline (`core.read_line`) | the kernel polls COM1/PS-2, echoes, assembles and stores lines in a 4-line ring; `core.read_line(var buf)` blocks until a line exists and truncates to the buffer. Replace with application-side editing when string length/truncate/insert operations exist: indexing alone reads and writes single bytes but cannot delete one (spec 0005, "Staged line discipline") | when `stdlib` string editing exists |
+| Q45 | Staged `syslib` handles | `syslib.port_in8`/`port_out8` are implemented with `Port` as a plain scalar `uint` (low 16 bits used); there are no opaque `Port`/`MmioRegion` types, MMIO mapping, or DMA/block primitives yet. Replace with the handle model when MMIO or DMA lands (specs 0003, 0005) | first MMIO or DMA device |
 
 ## C. Streams
 
@@ -116,7 +117,7 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
   Q29 (ADR 0017 addendum), Q34 (children continue), Q35 (64-entry exit ring).
 - Q5, Q6, Q7, Q11–Q13 and Q15–Q38 are resolved and removed from the table; Q1 and Q2 are
   now closed provisionally, so only the handler budget and heartbeat (Q3/Q4), the deferred
-  debug/DMA/streams items and the two float follow-ups remain.
+  debug/DMA/streams items, the staged port handles (Q45) and the two float follow-ups remain.
 
 ## Decided in the 2026-11-12 session
 
@@ -175,6 +176,12 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
     `child` prints the received `main(args)`. The host `read_line` stub scripts
     `help`, `run child world`, `echo hi there`, `exit`. Q44 still stands: the kernel keeps
     the staged 4-line ring until `stdlib` string editing (length/truncate/insert) exists.
-    Next: `stdlib` text helpers, records/enums and the record-based `spawn` ABI (`Status`,
-    `Diagnostic`, `ExitReason` instead of the staged scalars, Q43); then APs, the realtime
-    class and streams (Q3/Q4 when their features land).
+14. ~~Integer formatting and the first `syslib` ports~~ — done: `core.format_int_into`
+    (`format_int`, 59 → 60; decimal/hex, sign, zero-padding, exact fit or `-6`, bad base
+    `-4`) and `syslib.port_in8`/`port_out8` (builtin ids 7/8, `Host` defaults, kernel over
+    `arch_x86_64::port`). `samples/apps/clock` polls the CMOS RTC update flag, reads
+    seconds/minutes/hours as BCD and prints `HH:MM:SS`; the host mock prints `00:00:00`.
+    `Port` is staged as a scalar `uint` (Q45). Next for `syslib`: opaque `Port`/`MmioRegion`
+    types, MMIO mapping and bounds checks, then DMA and block access. On the language side:
+    `stdlib` text helpers, records/enums and the record-based `spawn` ABI (Q43); then APs,
+    the realtime class and streams (Q3/Q4 when their features land).

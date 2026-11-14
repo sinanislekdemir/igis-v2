@@ -873,3 +873,244 @@ end;
     let error = compile(constant, "t.ig").expect_err("const is not writable");
     assert!(error.message.contains("const"), "{}", error.message);
 }
+
+/// Returns `(kind, capacity)` for every `format_int` instruction in order.
+fn format_int_encodings(package: &Owned) -> Vec<(u8, u32)> {
+    use abi::opcodes;
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+    let mut seen = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        if op == opcodes::FORMAT_INT {
+            let kind = instructions[pc + 1];
+            let capacity = u32::from_le_bytes(instructions[pc + 4..pc + 8].try_into().unwrap());
+            seen.push((kind, capacity));
+        }
+        pc += words * 4;
+    }
+    seen
+}
+
+#[test]
+fn format_int_into_checks_types_and_encodes_the_destination() {
+    let source = br#"
+unit t;
+
+uses core;
+
+var
+  text: string[8];
+  raw: bytes[8];
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := core.format_int_into(text, -42, uint(10), uint(4));
+  n := core.format_int_into(raw, 255, uint(16), uint(0));
+end;
+"#;
+    let package = compile(source, "t.ig").expect("compiles");
+    assert_eq!(
+        format_int_encodings(&package),
+        vec![
+            (abi::opcodes::buffer_kind::STRING, 8),
+            (abi::opcodes::buffer_kind::BYTES, 8)
+        ]
+    );
+
+    let wrong_value = br#"
+unit t;
+
+uses core;
+
+var
+  text: string[8];
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := core.format_int_into(text, uint(1), uint(10), uint(2));
+end;
+"#;
+    let error = compile(wrong_value, "t.ig").expect_err("the value is an int");
+    assert!(error.message.contains("`int` value"), "{}", error.message);
+
+    let wrong_base = br#"
+unit t;
+
+uses core;
+
+var
+  text: string[8];
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := core.format_int_into(text, 1, 10, uint(2));
+end;
+"#;
+    let error = compile(wrong_base, "t.ig").expect_err("the base is a uint");
+    assert!(error.message.contains("`uint` base"), "{}", error.message);
+
+    let wrong_width = br#"
+unit t;
+
+uses core;
+
+var
+  text: string[8];
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := core.format_int_into(text, 1, uint(10), 2);
+end;
+"#;
+    let error = compile(wrong_width, "t.ig").expect_err("the width is a uint");
+    assert!(error.message.contains("`uint` width"), "{}", error.message);
+
+    let wrong_destination = br#"
+unit t;
+
+uses core;
+
+var
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := core.format_int_into("abc", 1, uint(10), uint(2));
+end;
+"#;
+    let error = compile(wrong_destination, "t.ig").expect_err("the destination is var");
+    assert!(
+        error.message.contains("must be a variable or parameter"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn syslib_ports_are_accepted_and_emit_their_builtins() {
+    use abi::opcodes::{self, builtin};
+
+    let source = br#"
+unit t;
+
+uses core, syslib;
+
+var
+  byte_in: uint;
+  status: int;
+
+procedure main(args: const string[1024]);
+begin
+  syslib.port_out8(uint(0x70), uint(0x0A));
+  byte_in := syslib.port_in8(uint(0x71));
+  status := syslib.port_out8(uint(0x70), uint(1));
+end;
+"#;
+    let package = compile(source, "t.ig").expect("syslib is a known unit");
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+    let mut seen = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        if op == opcodes::BUILTIN {
+            seen.push(u32::from_le_bytes(
+                instructions[pc + 4..pc + 8].try_into().unwrap(),
+            ));
+        }
+        pc += words * 4;
+    }
+    assert_eq!(
+        seen,
+        vec![builtin::PORT_OUT8, builtin::PORT_IN8, builtin::PORT_OUT8]
+    );
+}
+
+#[test]
+fn port_namespaces_and_types_are_checked() {
+    let core_port = br#"
+unit t;
+
+uses core;
+
+var
+  b: uint;
+
+procedure main(args: const string[1024]);
+begin
+  b := core.port_in8(uint(0x71));
+end;
+"#;
+    let error = compile(core_port, "t.ig").expect_err("ports live in syslib");
+    assert!(
+        error
+            .message
+            .contains("undefined procedure `core.port_in8`"),
+        "{}",
+        error.message
+    );
+
+    let syslib_len = br#"
+unit t;
+
+uses core, syslib;
+
+var
+  text: string[8];
+  n: uint;
+
+procedure main(args: const string[1024]);
+begin
+  text := "a";
+  n := syslib.len(text);
+end;
+"#;
+    let error = compile(syslib_len, "t.ig").expect_err("len lives in core");
+    assert!(
+        error.message.contains("undefined procedure `syslib.len`"),
+        "{}",
+        error.message
+    );
+
+    let wrong_port = br#"
+unit t;
+
+uses core, syslib;
+
+var
+  b: uint;
+
+procedure main(args: const string[1024]);
+begin
+  b := syslib.port_in8(0x71);
+end;
+"#;
+    let error = compile(wrong_port, "t.ig").expect_err("a port is a uint");
+    assert!(error.message.contains("`uint` port"), "{}", error.message);
+
+    let wrong_value = br#"
+unit t;
+
+uses core, syslib;
+
+var
+  r: int;
+
+procedure main(args: const string[1024]);
+begin
+  r := syslib.port_out8(uint(0x70), 300);
+end;
+"#;
+    let error = compile(wrong_value, "t.ig").expect_err("a port value is a uint");
+    assert!(error.message.contains("`uint` value"), "{}", error.message);
+}

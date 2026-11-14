@@ -98,6 +98,24 @@ impl Host for KernelHost<'_> {
         clock::now_ns()
     }
 
+    // The first `syslib` primitives (spec 0003, "Hardware access"): x86 port
+    // I/O over the existing `arch_x86_64::port` helpers. `Port` is staged as a
+    // `uint` (Q45); the interpreter already narrowed it to 16 bits, and the
+    // caller of `syslib` is responsible for using a port that is safe to touch
+    // (no capability model, H4).
+    fn port_in8(&mut self, port: u16) -> u8 {
+        // SAFETY: the application named a port through `syslib`; reading a port
+        // has no memory side effects, and there is no capability check by
+        // design (spec 0003, H4).
+        unsafe { arch_x86_64::port::inb(port) }
+    }
+
+    fn port_out8(&mut self, port: u16, value: u8) {
+        // SAFETY: as above; the caller chose the port. The kernel does not
+        // arbitrate device ownership in the first milestone.
+        unsafe { arch_x86_64::port::outb(port, value) }
+    }
+
     fn spawn(&mut self, path: &[u8], args: &[u8]) -> Result<u64, Status> {
         repl::request_spawn(self.image, self.current, path, args)
     }

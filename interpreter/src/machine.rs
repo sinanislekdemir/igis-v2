@@ -62,6 +62,20 @@ pub trait Host {
     /// Monotonic nanoseconds since boot (or since the host process started).
     fn clock(&mut self) -> u64;
 
+    /// Reads one byte from the x86 port space (`syslib.port_in8`).
+    ///
+    /// `Port` is staged as a scalar `uint` for now (Q45); the machine passes the
+    /// low 16 bits to this method. The default returns zero, so a host mock or a
+    /// test with no hardware sees deterministic zeroes.
+    fn port_in8(&mut self, _port: u16) -> u8 {
+        0
+    }
+
+    /// Writes one byte to the x86 port space (`syslib.port_out8`).
+    ///
+    /// The default is a no-op; a test host overrides it to record writes.
+    fn port_out8(&mut self, _port: u16, _value: u8) {}
+
     /// Requests a new application instance (`core.spawn`).
     ///
     /// `path` and `args` are the bytes of the two `string` buffers. A
@@ -636,6 +650,11 @@ impl Machine {
                 let capacity = read_u32(code, pc + 4)? as usize;
                 self.substr(kind, capacity, state, stack, constants, args)?;
             }
+            opcodes::FORMAT_INT => {
+                let kind = a;
+                let capacity = read_u32(code, pc + 4)? as usize;
+                self.format_int(kind, capacity, state, stack, constants, args)?;
+            }
             opcodes::BUILTIN => {
                 let id = read_u32(code, pc + 4)?;
                 match id {
@@ -748,6 +767,23 @@ impl Machine {
                             return Err(FaultCode::OutOfBounds);
                         }
                         self.push(stack, length as u64)?;
+                    }
+                    builtin::PORT_IN8 => {
+                        let port = self.pop(stack)?;
+                        let value = host.port_in8(port as u16);
+                        self.push(stack, u64::from(value))?;
+                    }
+                    builtin::PORT_OUT8 => {
+                        let value = self.pop(stack)?;
+                        let port = self.pop(stack)?;
+                        if value > u8::MAX as u64 {
+                            // `value > 255` is `Status::Invalid`; the port is
+                            // not touched.
+                            self.push(stack, status_code(Status::Invalid))?;
+                        } else {
+                            host.port_out8(port as u16, value as u8);
+                            self.push(stack, 0)?;
+                        }
                     }
                     _ => return Err(FaultCode::IllegalOperation),
                 }
@@ -1337,6 +1373,114 @@ impl Machine {
             _ => return Err(FaultCode::IllegalOperation),
         }
         self.push(stack, copied as u64)
+    }
+
+    /// `format_int`: write a signed integer as decimal or lowercase hex
+    /// (`core.format_int_into`, spec 0003, "Standard library").
+    ///
+    /// `kind` is [`opcodes::buffer_kind`]; both kinds accept the ASCII output.
+    /// `base` must be 10 or 16. A negative value gets a leading `-`, then the
+    /// magnitude; `width` zero-pads the digits (the sign is extra). A result
+    /// that does not fit `capacity` pushes `-6` (`Status::CapacityExceeded`)
+    /// and leaves the destination length untouched; an unsupported base pushes
+    /// `-4` (`Status::Invalid`) and also writes nothing.
+    fn format_int(
+        &mut self,
+        kind: u8,
+        capacity: usize,
+        state: &mut [u8],
+        stack: &mut [u8],
+        code: &[u8],
+        args: &[u8],
+    ) -> Result<(), FaultCode> {
+        if kind != opcodes::buffer_kind::STRING && kind != opcodes::buffer_kind::BYTES {
+            return Err(FaultCode::IllegalOperation);
+        }
+        let width = self.pop(stack)?;
+        let base = self.pop(stack)?;
+        let value = self.pop(stack)? as i64;
+        let destination_bits = self.pop(stack)?;
+
+        let (destination_region, destination) =
+            self.resolve(destination_bits, state, stack, code, args)?;
+        if destination_region != refs::REGION_STATE && destination_region != refs::REGION_STACK {
+            return Err(FaultCode::IllegalOperation);
+        }
+        if destination < 8 {
+            return Err(FaultCode::OutOfBounds);
+        }
+        let destination_end = destination
+            .checked_add(capacity)
+            .ok_or(FaultCode::OutOfBounds)?;
+        if destination_end
+            > region_len(destination_region, state, stack, code, args)
+                .ok_or(FaultCode::OutOfBounds)?
+        {
+            return Err(FaultCode::OutOfBounds);
+        }
+        if base != 10 && base != 16 {
+            self.push(stack, status_code(Status::Invalid))?;
+            return Ok(());
+        }
+
+        // Digits are produced least-significant first into a fixed array: a
+        // `u64` needs at most 20 decimal digits, and the sign is separate. The
+        // width is applied after the fact so a huge width costs no loop.
+        let negative = value < 0;
+        let mut rest = value.unsigned_abs();
+        let mut digits = [0u8; 20];
+        let mut cursor = digits.len();
+        loop {
+            cursor -= 1;
+            let digit = (rest % base) as u8;
+            digits[cursor] = if digit < 10 {
+                b'0' + digit
+            } else {
+                b'a' + (digit - 10)
+            };
+            rest /= base;
+            if rest == 0 {
+                break;
+            }
+        }
+        let written = digits.len() - cursor;
+        let padded = (written as u64).max(width);
+        let total = match padded.checked_add(u64::from(negative)) {
+            Some(total) => total,
+            None => {
+                self.push(stack, status_code(Status::CapacityExceeded))?;
+                return Ok(());
+            }
+        };
+        if total > capacity as u64 {
+            self.push(stack, status_code(Status::CapacityExceeded))?;
+            return Ok(());
+        }
+        let total = total as usize;
+
+        {
+            let out = match destination_region {
+                refs::REGION_STATE => &mut state[destination..destination + total],
+                refs::REGION_STACK => &mut stack[destination..destination + total],
+                _ => return Err(FaultCode::IllegalOperation),
+            };
+            let mut at = 0;
+            if negative {
+                out[at] = b'-';
+                at += 1;
+            }
+            let pad = width.saturating_sub(written as u64) as usize;
+            out[at..at + pad].fill(b'0');
+            at += pad;
+            out[at..at + written].copy_from_slice(&digits[cursor..]);
+        }
+
+        match destination_region {
+            refs::REGION_STATE => write_u64(state, destination - 8, total as u64)?,
+            refs::REGION_STACK => write_u64(stack, destination - 8, total as u64)?,
+            _ => return Err(FaultCode::IllegalOperation),
+        }
+        self.push(stack, total as u64)
     }
 }
 

@@ -372,6 +372,10 @@ fn verify_instructions(
                 if a > opcodes::buffer_kind::BYTES || b != 0 || c != 0 {
                     return Err(invalid(base + pc, "substr kind is out of range"));
                 }
+            } else if op == opcodes::FORMAT_INT {
+                if a > opcodes::buffer_kind::BYTES || b != 0 || c != 0 {
+                    return Err(invalid(base + pc, "format_int kind is out of range"));
+                }
             } else if matches!(
                 op,
                 opcodes::JMP | opcodes::JZ | opcodes::JNZ | opcodes::CALL
@@ -445,6 +449,13 @@ fn verify_instructions(
                     }
                 }
                 opcodes::SUBSTR => {
+                    let capacity = read_u32(instructions, pc + 4)
+                        .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;
+                    if capacity > MAX_SECTION {
+                        return Err(invalid(base + pc + 4, "buffer capacity is out of range"));
+                    }
+                }
+                opcodes::FORMAT_INT => {
                     let capacity = read_u32(instructions, pc + 4)
                         .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;
                     if capacity > MAX_SECTION {

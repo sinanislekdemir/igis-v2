@@ -54,8 +54,13 @@ constraints learned there.
   locates the first space, `core.substr_into` splits the line and the `run` tail, and the
   child prints the argument it received, so `run child world` proves argument carriage. The
   host `core.read_line` stub scripts those four commands so `langhost` runs the same shell
-  deterministically. The next pieces are `stdlib` text helpers, records/enums and the
-  record-based spawn ABI, then APs, the realtime class and streams.
+  deterministically. Integer formatting now exists as the staged `core.format_int_into`
+  (decimal/hex, sign, zero padding, exact-fit `-6`), and the first `syslib` primitives —
+  `port_in8`/`port_out8` with `Port` staged as a scalar `uint` — let an application drive
+  hardware: `samples/apps/clock` polls the CMOS RTC update flag, reads seconds/minutes/hours
+  and prints `HH:MM:SS` (`run clock` in the shell). The next pieces are `stdlib` text
+  helpers, records/enums and the record-based spawn ABI, then APs, the realtime class and
+  streams.
 
 ## Ground rules
 
@@ -191,6 +196,7 @@ host tools are unaffected.
 | Bytecode: one package per application, 4-byte-word stack VM, split `compiler`/`interpreter` crates over `abi`, structural verification | spec 0008 (Draft) |
 | Scheduler: slot table of 64 tasks, claim takes the value under a per-slot spin lock, 10 000-step quantum, 10 s / 200M-step budget | spec 0007, ADR 0011 |
 | Delivery is source-only, permanently: the image never carries bytecode and packages live only in memory | ADR 0019 (Accepted) |
+| Integer formatting is a staged `core` opcode; `syslib` ports are staged as scalar `uint`s | specs 0003, 0008; Q45 |
 
 ## Open questions
 
@@ -237,3 +243,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-13 | Console input: COM1 and the PS/2 keyboard are polled in the service opportunity into one static FIFO, a staged line ring echoes/edits/completes lines, and `core.read_line` blocks the shell (`Blocked(Console)`) until a line exists; `shell` reads three lines and exits. Temporary until indexing lands (Q44). |
 | 2026-11-13 | Buffer indexing, comparison and length: `buf[i]` is a raw `byte` checked against the runtime length; `bytes[i] := b` is checked against the capacity and extends the length (zero-filling the gap), `string` stays read-only by index; `=`/`<>` compare buffers of the same kind across capacities; `core.len` returns `uint`. New ABI v1 opcodes `load_u8`, `store_u8`, `cmp_buffers` (54 → 57) and builtin id 6. The shell is a real `help`/`hello`/`exit` loop; the host `read_line` stub scripts those lines. |
 | 2026-11-14 | String search and slicing: `core.find` (first index of a `byte` or `-1`) and `core.substr_into` (same-kind checked slice, negative → `-4`, past-end → 0, clamped copy, UTF-8 boundary check for `string`) as ABI v1 opcodes `find`/`substr` (57 → 59). The shell splits `cmd`/`rest` and the `run` tail into path/args; `child` prints its `main(args)`, `echo` writes the tail, and `run missing` exercises the `-3` spawn failure. |
+| 2026-11-14 | Integer formatting and the first `syslib` primitives: `core.format_int_into` (opcode `format_int`, 59 → 60; decimal/hex, sign, zero padding, exact fit or `-6`, bad base `-4`) and `syslib.port_in8`/`port_out8` (builtin ids 7/8 through `Host::port_in8`/`port_out8`, kernel over `arch_x86_64::port`). `Port` is staged as a scalar `uint` (Q45). `samples/apps/clock` polls the CMOS RTC and prints a real `HH:MM:SS`; the host mock prints `00:00:00`. The boot stack grew 64 → 128 KiB because the added compiler paths tipped the in-kernel compile of the shell's child over the old limit and corrupted the boot page tables. |

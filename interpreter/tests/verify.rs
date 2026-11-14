@@ -356,6 +356,9 @@ struct MockHost {
     read_lines: Vec<Option<Vec<u8>>>,
     read_calls: usize,
     killed: Vec<u64>,
+    port_value: u8,
+    port_reads: Vec<u16>,
+    port_writes: Vec<(u16, u8)>,
 }
 
 impl Host for MockHost {
@@ -378,6 +381,15 @@ impl Host for MockHost {
 
     fn clock(&mut self) -> u64 {
         42
+    }
+
+    fn port_in8(&mut self, port: u16) -> u8 {
+        self.port_reads.push(port);
+        self.port_value
+    }
+
+    fn port_out8(&mut self, port: u16, value: u8) {
+        self.port_writes.push((port, value));
     }
 
     fn spawn(&mut self, path: &[u8], args: &[u8]) -> Result<u64, Status> {
@@ -920,4 +932,206 @@ fn find_returns_the_first_byte_index_or_minus_one() {
     assert_eq!(run_find(b'l', 2, b"hello"), -1);
     // `string` is scanned byte-wise, not by code point.
     assert_eq!(run_find(0xA9, 2, b"\xC3\xA9"), 1);
+}
+
+// ---- integer formatting ---------------------------------------------------
+//
+// `state[0..8]` is the scalar result, `state[8..16]` the destination length and
+// `state[16..24]` eight bytes of destination data, as in the byte tests above.
+
+fn format_package(kind: u8, capacity: u32, value: i64, base: u64, width: u64) -> Vec<u8> {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 16);
+    op_const(&mut instructions, value);
+    op_const(&mut instructions, base as i64);
+    op_const(&mut instructions, width as i64);
+    op_word(&mut instructions, opcodes::FORMAT_INT, kind, 0, 0);
+    instructions.extend_from_slice(&capacity.to_le_bytes());
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op(&mut instructions, opcodes::RET);
+    let frame = FnSpec {
+        frame_size: 80,
+        ..BYTE_FRAME
+    };
+    build(&[frame], &instructions, &[], 24, 96, 0)
+}
+
+/// Runs one `format_int` and returns `(result, bytes, length)`. The destination
+/// starts with `initial`, so an untouched buffer is observable.
+fn run_format(
+    kind: u8,
+    capacity: u32,
+    value: i64,
+    base: u64,
+    width: u64,
+    initial: &[u8],
+) -> (i64, Vec<u8>, u64) {
+    let code = format_package(kind, capacity, value, base, width);
+    let mut host = MockHost::default();
+    let mut state = vec![0u8; 24];
+    state[8..16].copy_from_slice(&(initial.len() as u64).to_le_bytes());
+    state[16..16 + initial.len()].copy_from_slice(initial);
+    let mut stack = vec![0u8; 96];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    let result = i64::from_le_bytes(state[0..8].try_into().unwrap());
+    let length = u64::from_le_bytes(state[8..16].try_into().unwrap());
+    let bytes = state[16..16 + length as usize].to_vec();
+    (result, bytes, length)
+}
+
+#[test]
+fn format_int_is_decimal_or_lowercase_hex() {
+    assert_eq!(
+        run_format(opcodes::buffer_kind::STRING, 8, 42, 10, 0, b""),
+        (2, b"42".to_vec(), 2)
+    );
+    assert_eq!(
+        run_format(opcodes::buffer_kind::STRING, 8, 0xBEEF, 16, 0, b""),
+        (4, b"beef".to_vec(), 4)
+    );
+    assert_eq!(
+        run_format(opcodes::buffer_kind::BYTES, 8, 0xDEAD, 16, 0, b""),
+        (4, b"dead".to_vec(), 4)
+    );
+}
+
+#[test]
+fn format_int_handles_negatives_and_zero_padding() {
+    assert_eq!(
+        run_format(opcodes::buffer_kind::STRING, 8, -42, 10, 0, b""),
+        (3, b"-42".to_vec(), 3)
+    );
+    assert_eq!(
+        run_format(opcodes::buffer_kind::STRING, 8, 7, 10, 4, b""),
+        (4, b"0007".to_vec(), 4)
+    );
+    assert_eq!(
+        run_format(opcodes::buffer_kind::STRING, 8, 0, 10, 2, b""),
+        (2, b"00".to_vec(), 2)
+    );
+    // The sign is additional: width 4 pads the digits, not the `-`.
+    assert_eq!(
+        run_format(opcodes::buffer_kind::STRING, 8, -5, 10, 4, b""),
+        (5, b"-0005".to_vec(), 5)
+    );
+    // A value that needs more digits than the width keeps all of them.
+    assert_eq!(
+        run_format(opcodes::buffer_kind::STRING, 8, 12345, 10, 2, b""),
+        (5, b"12345".to_vec(), 5)
+    );
+}
+
+#[test]
+fn format_int_fits_exactly_or_reports_capacity() {
+    assert_eq!(
+        run_format(opcodes::buffer_kind::STRING, 2, 42, 10, 0, b"XYZ"),
+        (2, b"42".to_vec(), 2)
+    );
+    assert_eq!(
+        run_format(opcodes::buffer_kind::STRING, 3, -42, 10, 0, b"XYZ"),
+        (3, b"-42".to_vec(), 3)
+    );
+    // One byte short: `-6`, nothing written, length untouched.
+    assert_eq!(
+        run_format(opcodes::buffer_kind::STRING, 1, 42, 10, 0, b"XYZ"),
+        (-6, b"XYZ".to_vec(), 3)
+    );
+    assert_eq!(
+        run_format(opcodes::buffer_kind::STRING, 2, -42, 10, 0, b"XYZ"),
+        (-6, b"XYZ".to_vec(), 3)
+    );
+    // Padding counts against the capacity too.
+    assert_eq!(
+        run_format(opcodes::buffer_kind::STRING, 3, 7, 10, 4, b"XYZ"),
+        (-6, b"XYZ".to_vec(), 3)
+    );
+    // A width so large that the total overflows `u64` is also a capacity error.
+    assert_eq!(
+        run_format(opcodes::buffer_kind::STRING, 8, 7, 10, u64::MAX, b"XYZ"),
+        (-6, b"XYZ".to_vec(), 3)
+    );
+}
+
+#[test]
+fn format_int_rejects_unsupported_bases() {
+    for base in [0u64, 2, 8, 36] {
+        assert_eq!(
+            run_format(opcodes::buffer_kind::STRING, 8, 42, base, 0, b"XYZ"),
+            (-4, b"XYZ".to_vec(), 3),
+            "base {base}"
+        );
+    }
+}
+
+// ---- syslib port builtins -------------------------------------------------
+
+#[test]
+fn port_in8_reads_through_the_host_and_uses_the_low_16_bits() {
+    let mut instructions = Vec::new();
+    op_const(&mut instructions, 0x1_0071);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::PORT_IN8,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op(&mut instructions, opcodes::RET);
+    let spec = FnSpec {
+        frame_size: 48,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &[], 8, 64, 0);
+    let mut host = MockHost {
+        port_value: 0x42,
+        ..Default::default()
+    };
+    let mut state = vec![0u8; 8];
+    let mut stack = vec![0u8; 64];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(u64::from_le_bytes(state[..8].try_into().unwrap()), 0x42);
+    assert_eq!(host.port_reads, vec![0x0071]);
+}
+
+#[test]
+fn port_out8_writes_and_rejects_values_over_255() {
+    let mut valid = Vec::new();
+    op_const(&mut valid, 0x70);
+    op_const(&mut valid, 0xAB);
+    op_imm(&mut valid, opcodes::BUILTIN, opcodes::builtin::PORT_OUT8);
+    op_imm(&mut valid, opcodes::STORE_STATE, 0);
+    op(&mut valid, opcodes::RET);
+    let spec = FnSpec {
+        frame_size: 64,
+        operand_off: 48,
+        ..MAIN
+    };
+    let code = build(&[spec], &valid, &[], 8, 64, 0);
+    let mut host = MockHost::default();
+    let mut state = vec![0u8; 8];
+    let mut stack = vec![0u8; 64];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(u64::from_le_bytes(state[..8].try_into().unwrap()), 0);
+    assert_eq!(host.port_writes, vec![(0x70, 0xAB)]);
+
+    let mut invalid = Vec::new();
+    op_const(&mut invalid, 0x70);
+    op_const(&mut invalid, 300);
+    op_imm(&mut invalid, opcodes::BUILTIN, opcodes::builtin::PORT_OUT8);
+    op_imm(&mut invalid, opcodes::STORE_STATE, 0);
+    op(&mut invalid, opcodes::RET);
+    let code = build(&[spec], &invalid, &[], 8, 64, 0);
+    let mut host = MockHost::default();
+    let mut state = vec![0u8; 8];
+    let mut stack = vec![0u8; 64];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(
+        i64::from_le_bytes(state[..8].try_into().unwrap()),
+        -4,
+        "a value over 255 is Status::Invalid"
+    );
+    assert!(host.port_writes.is_empty(), "the port is not touched");
 }

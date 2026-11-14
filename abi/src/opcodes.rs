@@ -143,6 +143,18 @@ pub const FIND: u8 = 0x43;
 /// `start` past the source length copies nothing and clears the destination.
 /// The copied length is `min(len, src_len - start, capacity)`.
 pub const SUBSTR: u8 = 0x44;
+/// Pop a width, a base, a value and a destination reference, format the signed
+/// integer and push the byte count (`core.format_int_into`).
+///
+/// `a` is the destination's buffer kind ([`buffer_kind`]); both kinds are
+/// accepted because the output is ASCII. Immediate: `capacity: u32`, the
+/// destination's declared capacity. `base` is `u64` and must be 10 (decimal) or
+/// 16 (lowercase hexadecimal); any other base pushes `-4` (`Status::Invalid`)
+/// and writes nothing. A negative value gets a leading `-`, then the magnitude;
+/// a non-zero `width` zero-pads the digits to at least that many characters
+/// (the sign is additional). A result that does not fit the capacity pushes
+/// `-6` (`Status::CapacityExceeded`) and leaves the destination length alone.
+pub const FORMAT_INT: u8 = 0x45;
 
 /// Invoke a host builtin. Immediate: `builtin: u32` (see [`builtin`]).
 pub const BUILTIN: u8 = 0x50;
@@ -216,6 +228,14 @@ pub mod builtin {
     /// runtime length as a `uint`. One builtin serves both kinds; the length is
     /// read from the buffer header, so nothing is allocated or copied.
     pub const LEN: u32 = 6;
+    /// `syslib.port_in8(port)`: pop a staged `uint` port number, push the byte
+    /// read from the x86 port space as a `uint`. The low 16 bits of the port
+    /// number are used; `Port` is staged as a scalar (Q45).
+    pub const PORT_IN8: u32 = 7;
+    /// `syslib.port_out8(port, value)`: pop a value and a port number, write
+    /// one byte and push `0`, or push `-4` (`Status::Invalid`) without writing
+    /// when `value > 255`. The low 16 bits of the port number are used.
+    pub const PORT_OUT8: u32 = 8;
 
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
@@ -225,6 +245,8 @@ pub mod builtin {
             SPAWN => Some((2, 1)),
             WAIT | KILL => Some((1, 1)),
             LEN => Some((1, 1)),
+            PORT_IN8 => Some((1, 1)),
+            PORT_OUT8 => Some((2, 1)),
             _ => None,
         }
     }
@@ -240,7 +262,9 @@ pub const fn instruction_words(op: u8) -> Option<u32> {
         | LT | LE | GT | GE | LT_U | LE_U | GT_U | GE_U | LOAD_U8 | CMP_BUFFERS | FIND => Some(1),
         CONST => Some(3),
         JMP | JZ | JNZ | CALL | LOAD_LOCAL | STORE_LOCAL | REF_LOCAL | LOAD_STATE | STORE_STATE
-        | REF_STATE | REF_CONST | APPEND | READ_LINE | STORE_U8 | BUILTIN | SUBSTR => Some(2),
+        | REF_STATE | REF_CONST | APPEND | READ_LINE | STORE_U8 | BUILTIN | SUBSTR | FORMAT_INT => {
+            Some(2)
+        }
         _ => None,
     }
 }
@@ -294,6 +318,7 @@ pub const fn mnemonic(op: u8) -> Option<&'static str> {
         READ_LINE => Some("read_line"),
         FIND => Some("find"),
         SUBSTR => Some("substr"),
+        FORMAT_INT => Some("format_int"),
         BUILTIN => Some("builtin"),
         FADD => Some("fadd"),
         FSUB => Some("fsub"),

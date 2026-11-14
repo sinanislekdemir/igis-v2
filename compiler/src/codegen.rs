@@ -155,13 +155,13 @@ pub(crate) fn compile_unit<'a>(
         return Err(diag(path, "", 1, 1, format_args!("unit has no name")));
     }
     for used in unit.uses {
-        if *used != "core" {
+        if *used != "core" && *used != "syslib" {
             return Err(diag(
                 path,
                 name,
                 1,
                 1,
-                format_args!("unknown unit `{used}`; this slice provides only `core`"),
+                format_args!("unknown unit `{used}`; this slice provides only `core` and `syslib`"),
             ));
         }
     }
@@ -1960,6 +1960,111 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.one(opcodes::BUILTIN, builtin::CLOCK)?;
                 self.push();
                 Ok(Some(Type::scalar(Kind::Uint)))
+            }
+            // Staged formatting primitive (spec 0003, "Standard library"):
+            // integer formatting ultimately lives in `core`/`stdlib`, and the
+            // opcode keeps it a pure buffer operation with no host call. Both
+            // buffer kinds accept the ASCII output.
+            "core.format_int_into" => {
+                if args.len() != 4 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`core.format_int_into` expects 4 arguments, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                let destination = self.emit_var_buffer_ref(args[0])?;
+                let value = self.expr_scalar(args[1])?;
+                if value.kind != Kind::Int {
+                    return Err(self.err_at(
+                        args[1],
+                        format_args!(
+                            "`core.format_int_into` expects an `int` value, found `{value}`"
+                        ),
+                    ));
+                }
+                let base = self.expr_scalar(args[2])?;
+                if base.kind != Kind::Uint {
+                    return Err(self.err_at(
+                        args[2],
+                        format_args!(
+                            "`core.format_int_into` expects a `uint` base, found `{base}`"
+                        ),
+                    ));
+                }
+                let width = self.expr_scalar(args[3])?;
+                if width.kind != Kind::Uint {
+                    return Err(self.err_at(
+                        args[3],
+                        format_args!(
+                            "`core.format_int_into` expects a `uint` width, found `{width}`"
+                        ),
+                    ));
+                }
+                let kind = match destination.kind {
+                    Kind::String => opcodes::buffer_kind::STRING,
+                    Kind::Bytes => opcodes::buffer_kind::BYTES,
+                    _ => unreachable!("the destination is a buffer"),
+                };
+                self.word(opcodes::FORMAT_INT, kind, 0, 0)?;
+                self.imm32(destination.cap)?;
+                self.pop(4)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Int)))
+            }
+            // First `syslib` primitives: x86 port I/O (spec 0003, "Hardware
+            // access"). `Port` is staged as a plain `uint` (Q45); the namespace
+            // is still separate from `core`, so a hardware access stays
+            // visible as such. MMIO and DMA are not implemented.
+            "syslib.port_in8" => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`syslib.port_in8` expects 1 argument, got {}", args.len()),
+                    ));
+                }
+                let port = self.expr_scalar(args[0])?;
+                if port.kind != Kind::Uint {
+                    return Err(self.err_at(
+                        args[0],
+                        format_args!("`syslib.port_in8` expects a `uint` port, found `{port}`"),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::PORT_IN8)?;
+                self.pop(1)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Uint)))
+            }
+            "syslib.port_out8" => {
+                if args.len() != 2 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`syslib.port_out8` expects 2 arguments, got {}", args.len()),
+                    ));
+                }
+                let port = self.expr_scalar(args[0])?;
+                if port.kind != Kind::Uint {
+                    return Err(self.err_at(
+                        args[0],
+                        format_args!("`syslib.port_out8` expects a `uint` port, found `{port}`"),
+                    ));
+                }
+                let value = self.expr_scalar(args[1])?;
+                if value.kind != Kind::Uint {
+                    return Err(self.err_at(
+                        args[1],
+                        format_args!("`syslib.port_out8` expects a `uint` value, found `{value}`"),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::PORT_OUT8)?;
+                self.pop(2)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Int)))
             }
             // Staged scalar ABI (spec 0005, "Staged ABI"): `Status`,
             // `ExitReason` and `Diagnostic` are not language types yet, so the
