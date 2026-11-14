@@ -1869,6 +1869,86 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::scalar(Kind::Uint)))
             }
+            // `core.find(buf, value: byte) -> int`: first index of the byte, or
+            // -1. Both buffer kinds share the byte scan (spec 0003).
+            "core.find" => {
+                if args.len() != 2 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.find` expects 2 arguments, got {}", args.len()),
+                    ));
+                }
+                self.emit_ref(args[0], None)?;
+                let value = self.expr_scalar(args[1])?;
+                if value.kind != Kind::Byte {
+                    return Err(self.err_at(
+                        args[1],
+                        format_args!(
+                            "`core.find` expects a `byte` value, found `{value}`; convert with `byte(x)`"
+                        ),
+                    ));
+                }
+                self.simple(opcodes::FIND)?;
+                self.pop(2)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Int)))
+            }
+            // `core.substr_into(dst, src, start: int, len: int) -> int`. Staged:
+            // spec 0003 T4 targets `stdlib.substr_into`; until `stdlib` exists
+            // the primitive is a `core` opcode. Same kind only; a `string`
+            // rejects boundaries that split a code point at run time.
+            "core.substr_into" => {
+                if args.len() != 4 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.substr_into` expects 4 arguments, got {}", args.len()),
+                    ));
+                }
+                let destination = self.emit_var_buffer_ref(args[0])?;
+                // A literal takes its kind from the destination (spec 0003,
+                // T1); a named source must match exactly.
+                if !matches!(args[1].kind, ExprKind::Str(_)) {
+                    if let Some(source) = self.probe_buffer(args[1]) {
+                        if source.kind != destination.kind {
+                            return Err(self.err_at(
+                                args[1],
+                                format_args!(
+                                    "`core.substr_into` needs `src` and `dst` of the same kind; `{destination}` and `{source}` differ"
+                                ),
+                            ));
+                        }
+                    }
+                }
+                self.emit_ref(args[1], Some(destination.kind))?;
+                let start = self.expr_scalar(args[2])?;
+                if start.kind != Kind::Int {
+                    return Err(self.err_at(
+                        args[2],
+                        format_args!("`core.substr_into` expects an `int` start, found `{start}`"),
+                    ));
+                }
+                let length = self.expr_scalar(args[3])?;
+                if length.kind != Kind::Int {
+                    return Err(self.err_at(
+                        args[3],
+                        format_args!(
+                            "`core.substr_into` expects an `int` length, found `{length}`"
+                        ),
+                    ));
+                }
+                let kind = match destination.kind {
+                    Kind::String => opcodes::buffer_kind::STRING,
+                    Kind::Bytes => opcodes::buffer_kind::BYTES,
+                    _ => unreachable!("the destination is a buffer"),
+                };
+                self.word(opcodes::SUBSTR, kind, 0, 0)?;
+                self.imm32(destination.cap)?;
+                self.pop(4)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Int)))
+            }
             "core.clock" => {
                 if !args.is_empty() {
                     return Err(self.err(

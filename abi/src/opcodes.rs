@@ -128,6 +128,21 @@ pub const APPEND: u8 = 0x41;
 /// `WaitKind::Console` when no line is complete. The copied length is at most
 /// the capacity; a longer line is truncated and the rest discarded.
 pub const READ_LINE: u8 = 0x42;
+/// Pop a value, pop a buffer reference, push the first index of that `byte`
+/// (`core.find`). Scans `0..length` only; pushes `-1` when the byte is absent.
+/// Works for both `string` and `bytes`; a `string` is searched byte-wise, not by
+/// code point.
+pub const FIND: u8 = 0x43;
+/// Pop a length, pop a start, pop a source reference, pop a destination
+/// reference, copy the slice and push the copied length (`core.substr_into`).
+///
+/// `a` is the buffer kind ([`buffer_kind`]): `STRING` additionally requires
+/// both slice boundaries to fall on UTF-8 code-point boundaries in the source.
+/// Immediate: `capacity: u32`, the destination's declared capacity. Negative
+/// `start` or `len` pushes `-4` (`Status::Invalid`) and writes nothing; a
+/// `start` past the source length copies nothing and clears the destination.
+/// The copied length is `min(len, src_len - start, capacity)`.
+pub const SUBSTR: u8 = 0x44;
 
 /// Invoke a host builtin. Immediate: `builtin: u32` (see [`builtin`]).
 pub const BUILTIN: u8 = 0x50;
@@ -172,6 +187,14 @@ pub mod value_kind {
     pub const F64: u8 = 3;
 }
 
+/// Buffer kinds used by [`SUBSTR`].
+pub mod buffer_kind {
+    /// Valid UTF-8 text; slice boundaries are code-point checked.
+    pub const STRING: u8 = 0;
+    /// Raw bytes; no UTF-8 check.
+    pub const BYTES: u8 = 1;
+}
+
 /// Host builtin identifiers used by [`BUILTIN`].
 pub mod builtin {
     /// `core.write(bytes)`: pop a buffer reference and write its bytes to the
@@ -214,10 +237,10 @@ pub const fn instruction_words(op: u8) -> Option<u32> {
         DROP | RET | LOAD_REF | STORE_REF | NOT | CLEAR | CONVERT | FADD | FSUB | FMUL | FDIV
         | FNEG | FEQ | FNE | FLT | FLE | FGT | FGE => Some(1),
         ADD | SUB | MUL | DIV | MOD | NEG | ADD_U | SUB_U | MUL_U | DIV_U | MOD_U | EQ | NE
-        | LT | LE | GT | GE | LT_U | LE_U | GT_U | GE_U | LOAD_U8 | CMP_BUFFERS => Some(1),
+        | LT | LE | GT | GE | LT_U | LE_U | GT_U | GE_U | LOAD_U8 | CMP_BUFFERS | FIND => Some(1),
         CONST => Some(3),
         JMP | JZ | JNZ | CALL | LOAD_LOCAL | STORE_LOCAL | REF_LOCAL | LOAD_STATE | STORE_STATE
-        | REF_STATE | REF_CONST | APPEND | READ_LINE | STORE_U8 | BUILTIN => Some(2),
+        | REF_STATE | REF_CONST | APPEND | READ_LINE | STORE_U8 | BUILTIN | SUBSTR => Some(2),
         _ => None,
     }
 }
@@ -269,6 +292,8 @@ pub const fn mnemonic(op: u8) -> Option<&'static str> {
         CLEAR => Some("clear"),
         APPEND => Some("append"),
         READ_LINE => Some("read_line"),
+        FIND => Some("find"),
+        SUBSTR => Some("substr"),
         BUILTIN => Some("builtin"),
         FADD => Some("fadd"),
         FSUB => Some("fsub"),

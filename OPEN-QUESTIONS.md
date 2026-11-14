@@ -4,7 +4,7 @@ Parked decisions for igis-v2. This is the working register; each spec's own
 "Open questions" section remains authoritative for that document. When an item is
 resolved, record the answer in the relevant spec or in a new ADR, then remove it here.
 
-**Status:** implementation phase. Last updated: 2026-11-13.
+**Status:** implementation phase. Last updated: 2026-11-14.
 **Snapshot:** specs 0001–0008, ADRs 0001–0019.
 
 ## How to use
@@ -168,9 +168,13 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
     against the runtime length, `bytes[i] := b` writes one byte checked against the capacity
     (extending the length and zero-filling the gap), `string` is read-only by index, `=`/`<>`
     compare buffers of the same kind across capacities, and `core.len` returns `uint`
-    (`load_u8`, `store_u8`, `cmp_buffers`; spec 0003, spec 0008). The shell parses `help`,
-    `hello` and `exit` and the host `read_line` stub scripts them. Next: string slicing and
-    `stdlib` text helpers so the kernel can keep its own line editor instead of the staged
-    ring (Q44 still stands until length/truncate/insert operations exist), command
-    arguments, then the record-based spawn ABI; then APs, the realtime class and streams
-    (Q3/Q4 when their features land).
+    (`load_u8`, `store_u8`, `cmp_buffers`; spec 0003, spec 0008).
+13. ~~String search, slicing and command arguments~~ — done: `core.find` and the staged
+    `core.substr_into` (`find`/`substr` opcodes, 57 → 59 in ABI v1) give the shell `cmd`/`rest`
+    splitting and `echo <text>`; `run <app> [args]` separates the tail at its first space and
+    `child` prints the received `main(args)`. The host `read_line` stub scripts
+    `help`, `run child world`, `echo hi there`, `exit`. Q44 still stands: the kernel keeps
+    the staged 4-line ring until `stdlib` string editing (length/truncate/insert) exists.
+    Next: `stdlib` text helpers, records/enums and the record-based `spawn` ABI (`Status`,
+    `Diagnostic`, `ExitReason` instead of the staged scalars, Q43); then APs, the realtime
+    class and streams (Q3/Q4 when their features land).

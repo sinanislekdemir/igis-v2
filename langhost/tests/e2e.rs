@@ -212,31 +212,35 @@ fn shell_spawns_and_waits_for_the_child_on_the_host() {
     for line in [
         "shell: spawning child\n",
         "shell: child task id assigned\n",
-        "child: hello\n",
+        "child: args hello\n",
         "child: bye\n",
         "child: ok\n",
+        "shell: help, echo <text>, run <app> [args], exit\n",
+        "child: args world\n",
+        "started\n",
+        "hi there\n",
     ] {
         assert!(text.contains(line), "missing {line:?} in {text:?}");
     }
-    // The host `read_line` stub scripts `help`, `hello`, `exit`, so the same
-    // command loop the kernel runs prints these three responses in order.
+    // The host `read_line` stub scripts `help`, `run child world`,
+    // `echo hi there`, `exit`, so the same command loop the kernel runs prints
+    // four prompts and exits without an unknown command.
     assert_eq!(
         text.matches("shell> ").count(),
-        3,
+        4,
         "the shell prompts once per scripted line: {text:?}"
     );
-    let help = text.find("shell> shell: help, hello, exit\n");
-    let hello = text.find("shell> hello from igis-v2\n");
-    let bye = text.find("shell> bye\n");
     assert!(
-        help.is_some() && hello.is_some() && bye.is_some(),
+        text.contains("shell> shell: help, echo <text>, run <app> [args], exit\n"),
         "{text:?}"
     );
+    assert!(text.contains("shell> hi there\n"), "{text:?}");
     assert!(
-        help < hello && hello < bye,
-        "responses are out of order: {text:?}"
+        text.ends_with("shell> bye\n"),
+        "the shell exits after the scripted `exit`: {text:?}"
     );
     assert!(!text.contains("unknown"), "{text:?}");
+    assert!(!text.contains("spawn failed"), "{text:?}");
 }
 
 #[test]
@@ -245,6 +249,17 @@ fn indexing_length_and_buffer_equality_work_end_to_end() {
     assert_eq!(
         result.output,
         b"extend ok\nlen ok\nzero ok\nwrite ok\nneq ok\neq ok\nbyte ok\n".to_vec()
+    );
+    assert_eq!(result.reason, ExitReason::Ok);
+}
+
+#[test]
+fn find_and_substr_work_end_to_end() {
+    let result = run_sample("slice.ig", b"");
+    assert_eq!(
+        result.output,
+        b"find hit ok\nfind miss ok\nsubstr ok\nclear ok\npast end ok\nutf8 ok\nutf8 slice ok\nbytes ok\n"
+            .to_vec()
     );
     assert_eq!(result.reason, ExitReason::Ok);
 }

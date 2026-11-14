@@ -5,7 +5,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0002, 0004, 0005, 0007, 0010, 0011, 0016, 0018
-- **Updated:** 2026-11-13
+- **Updated:** 2026-11-14
 
 ## Context
 
@@ -204,6 +204,25 @@ Rules:
 - **Length.** `core.len(buf) -> uint` returns the runtime length for either kind. One
   builtin serves both because the length word is part of the shared representation.
 
+### Slicing and search (staged)
+
+- **T4 staging.** `core.substr_into(dst, src, start: int, len: int) -> int` is the checked
+  slice from T4, temporarily in `core` because `stdlib` does not exist yet. It moves to
+  `stdlib.substr_into` once the language can express it; the semantics do not change.
+- `dst` must be a writable (`var`) buffer and `src` any buffer, including a literal. Both
+  must have the same kind: `string` from `string`, `bytes` from `bytes`; mixing is a
+  compile error.
+- Negative `start` or `len` returns `-4` (`Status.Invalid`) and writes nothing.
+  `start > len(src)` returns 0 and clears the destination. Otherwise the copied length is
+  `min(len, len(src) - start, capacity(dst))`, the destination's runtime length becomes
+  that value, and the result is the copied length.
+- For `string`, both `start` and `start + copied` must fall on UTF-8 code-point boundaries
+  in `src`; otherwise the result is `-4` and nothing is written. `bytes` copies raw data
+  and needs no check.
+- **`core.find(buf, value: byte) -> int`** returns the first index of `value`, or `-1`.
+  It scans `0..len` only and serves both kinds; a `string` is searched byte-wise, not by
+  code point.
+
 ### Compound and parametric types
 
 - **Records:** `type Point = record x, y: int; end;`
@@ -295,6 +314,8 @@ point where the value is created, instead of at every call site.
 - Console, streams and files are byte-oriented; text applications convert explicitly.
 - Shared byte operations (`len`, compare, find) are defined on both.
 - UTF-8-specific operations (`codepoints`, `chars`, `substr_into`) exist only on `string`.
+  The staged `core.substr_into` also accepts a `bytes` destination so raw slices have a
+  checked copy before `stdlib` exists; only the `string` form checks boundaries.
 - Comparison is byte-wise (`bytes`) or code-point-wise (`string`), both lexicographic.
   In this slice equality compares bytes, which is the same relation for valid UTF-8.
 
@@ -594,3 +615,4 @@ is the signal.
 | 2026-11-13 | Floating point added to the first milestone: `f64` only, IEEE-754, per-task 512-byte FXSAVE region (ADR 0018); explicit `T(x)` casts, IEEE float semantics; every top-level declaration is public with no visibility modifiers; FNV-1a maps with linear probing; comparisons bind tighter than `and`/`or` and bitwise operations are `core` functions; `Diagnostic` only, no stack trace; stream names are `string[32]` and capacities are `1..=65536`; `run`/`spawn` paths are limited to 256 bytes. |
 | 2026-11-13 | `ExitReason` gained `Killed`; `kill` cancels a queued request and runs `exit(Killed)` on a live task; request paths are validated as relative with no `..` and must name regular files. |
 | 2026-11-13 | Buffer indexing, comparison and length: `buf[i]` yields a `byte` (raw for `string`, T4); writes are `bytes`-only and extend the length to `index + 1`, zero-filling the gap; reads check the runtime length and writes the declared capacity; `=`/`<>` compare buffers of the same kind across capacities; `core.len(buf) -> uint`. |
+| 2026-11-14 | Staged slicing and search: `core.substr_into(dst, src, start, len) -> int` (same kind, negative → `-4`, past-end → 0, clamped copy, UTF-8 boundary check for `string`) and `core.find(buf, byte) -> int` (first index or `-1`, `0..len`, both kinds). Both are `core` opcodes until `stdlib.substr_into` exists (T4 staging). |

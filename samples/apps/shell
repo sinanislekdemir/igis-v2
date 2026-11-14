@@ -5,8 +5,14 @@ uses core;
 var
   banner: string[32];
   line: string[256];
+  cmd: string[64];
+  rest: string[256];
+  path: string[256];
+  argv: string[256];
   id: int;
   code: int;
+  space: int;
+  split: int;
   done: bool;
 
 procedure say(text: const string[0]);
@@ -44,8 +50,9 @@ begin
 
   // Command loop. Staged line discipline (spec 0005, Q44): the kernel echoes
   // the typed bytes and completes one line; `core.read_line` blocks until it
-  // is ready. Buffer equality compares the runtime length and then the bytes,
-  // so `line = "help"` works even though the capacities differ.
+  // is ready. `core.find` locates the first space, and `core.substr_into`
+  // splits the line into the command and its tail. With no space the whole
+  // line is the command and a zero-length slice clears the tail.
   //
   // There is no `return` yet, so `main` ends by leaving the loop with `done`.
   done := false;
@@ -53,11 +60,64 @@ begin
   begin
     say("shell> ");
     code := core.read_line(line);
-    if line = "help" then
-      say("shell: help, hello, exit\n")
-    else if line = "hello" then
-      say("hello from igis-v2\n")
-    else if line = "exit" then
+    space := core.find(line, byte(32));
+    if space < 0 then
+    begin
+      split := core.substr_into(cmd, line, 0, int(core.len(line)));
+      split := core.substr_into(rest, line, int(core.len(line)), 0);
+    end
+    else
+    begin
+      split := core.substr_into(cmd, line, 0, space);
+      split := core.substr_into(rest, line, space + 1, int(core.len(line)) - space - 1);
+    end;
+
+    if cmd = "help" then
+      say("shell: help, echo <text>, run <app> [args], exit\n")
+    else if cmd = "echo" then
+    begin
+      say(rest);
+      say("\n");
+    end
+    else if cmd = "run" then
+    begin
+      // `rest` is `<app> [args]`; split its tail at the first space so the
+      // kernel receives an unparsed application path and argument string.
+      split := core.find(rest, byte(32));
+      if split < 0 then
+      begin
+        split := core.substr_into(path, rest, 0, int(core.len(rest)));
+        split := core.substr_into(argv, rest, int(core.len(rest)), 0);
+      end
+      else
+      begin
+        split := core.substr_into(path, rest, 0, split);
+        split := core.substr_into(argv, rest, split + 1, int(core.len(rest)) - split - 1);
+      end;
+
+      if core.len(path) = uint(0) then
+        say("usage: run <app> [args]\n")
+      else
+      begin
+        id := core.spawn(path, argv);
+        if id > 0 then
+        begin
+          say("started\n");
+          code := core.wait(id);
+          if code = 0 then
+            say("child: ok\n")
+          else if code = 1 then
+            say("child: killed\n")
+          else if code >= 2 then
+            say("child: faulted\n")
+          else
+            say("wait failed\n");
+        end
+        else
+          say("spawn failed\n");
+      end;
+    end
+    else if cmd = "exit" then
       done := true
     else
       say("unknown\n");

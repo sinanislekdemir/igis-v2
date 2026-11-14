@@ -690,3 +690,186 @@ end;
     let error = compile(bad, "t.ig").expect_err("uint is not int");
     assert!(error.message.contains("type mismatch"), "{}", error.message);
 }
+
+/// Returns `(kind, capacity)` for every `substr` instruction in order.
+fn substr_encodings(package: &Owned) -> Vec<(u8, u32)> {
+    use abi::opcodes;
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+    let mut seen = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        if op == opcodes::SUBSTR {
+            let kind = instructions[pc + 1];
+            let capacity = u32::from_le_bytes(instructions[pc + 4..pc + 8].try_into().unwrap());
+            seen.push((kind, capacity));
+        }
+        pc += words * 4;
+    }
+    seen
+}
+
+#[test]
+fn find_emits_the_byte_scan_and_returns_int() {
+    let source = br#"
+unit t;
+
+uses core;
+
+var
+  text: string[16];
+  at: int;
+
+procedure main(args: const string[1024]);
+begin
+  text := "hello";
+  at := core.find(text, byte(108));
+end;
+"#;
+    let package = compile(source, "t.ig").expect("compiles");
+    let ops = opcodes_of(&package);
+    assert!(ops.contains(&abi::opcodes::FIND), "no find in {ops:?}");
+
+    let returned = br#"
+unit t;
+
+uses core;
+
+var
+  text: string[16];
+  n: uint;
+
+procedure main(args: const string[1024]);
+begin
+  text := "hello";
+  n := core.find(text, byte(108));
+end;
+"#;
+    let error = compile(returned, "t.ig").expect_err("find returns int");
+    assert!(error.message.contains("type mismatch"), "{}", error.message);
+
+    let wrong_value = br#"
+unit t;
+
+uses core;
+
+var
+  text: string[16];
+  at: int;
+
+procedure main(args: const string[1024]);
+begin
+  text := "hello";
+  at := core.find(text, 108);
+end;
+"#;
+    let error = compile(wrong_value, "t.ig").expect_err("the needle is a byte");
+    assert!(
+        error.message.contains("expects a `byte` value"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn substr_encodes_kind_and_destination_capacity() {
+    let source = br#"
+unit t;
+
+uses core;
+
+var
+  text: string[16];
+  part: string[8];
+  raw: bytes[16];
+  piece: bytes[4];
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  text := "hello";
+  raw := "abcdef";
+  n := core.substr_into(part, text, 0, 2);
+  n := core.substr_into(piece, raw, 1, 2);
+end;
+"#;
+    let package = compile(source, "t.ig").expect("compiles");
+    assert_eq!(
+        substr_encodings(&package),
+        vec![
+            (abi::opcodes::buffer_kind::STRING, 8),
+            (abi::opcodes::buffer_kind::BYTES, 4)
+        ]
+    );
+}
+
+#[test]
+fn substr_rejects_mixed_kinds() {
+    let source = br#"
+unit t;
+
+uses core;
+
+var
+  part: string[8];
+  raw: bytes[8];
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  raw := "ab";
+  n := core.substr_into(part, raw, 0, 1);
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("string and bytes are distinct");
+    assert!(error.message.contains("same kind"), "{}", error.message);
+    assert!(error.message.contains("differ"), "{}", error.message);
+}
+
+#[test]
+fn substr_needs_a_writable_destination() {
+    let literal = br#"
+unit t;
+
+uses core;
+
+var
+  text: string[8];
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  text := "abc";
+  n := core.substr_into("abc", text, 0, 1);
+end;
+"#;
+    let error = compile(literal, "t.ig").expect_err("the destination must be var");
+    assert!(
+        error.message.contains("must be a variable or parameter"),
+        "{}",
+        error.message
+    );
+
+    let constant = br#"
+unit t;
+
+uses core;
+
+procedure poke(dst: const string[8]);
+begin
+  core.substr_into(dst, "abc", 0, 1);
+end;
+
+procedure main(args: const string[1024]);
+var
+  text: string[8];
+begin
+  poke(text);
+end;
+"#;
+    let error = compile(constant, "t.ig").expect_err("const is not writable");
+    assert!(error.message.contains("const"), "{}", error.message);
+}

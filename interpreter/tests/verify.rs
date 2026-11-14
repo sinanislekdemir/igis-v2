@@ -774,3 +774,150 @@ fn len_builtin_pushes_the_runtime_length() {
     assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
     assert_eq!(u64::from_le_bytes(state[0..8].try_into().unwrap()), 5);
 }
+
+// ---- find and substr ------------------------------------------------------
+//
+// These packages lay `state` out by hand:
+//
+//   state[0..8]    a scalar result slot
+//   state[8..16]   the destination buffer's runtime length
+//   state[16..24]  eight bytes of destination data
+//   state[24..32]  the source buffer's runtime length
+//   state[32..40]  eight bytes of source data
+//
+// `substr` copies into state[16..] and `find` scans the source at state[16..].
+
+fn op_word(out: &mut Vec<u8>, opcode: u8, a: u8, b: u8, c: u8) {
+    out.extend_from_slice(&[opcode, a, b, c]);
+}
+
+fn substr_package(kind: u8, capacity: u32, start: i64, length: i64) -> Vec<u8> {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 16);
+    op_imm(&mut instructions, opcodes::REF_STATE, 32);
+    op_const(&mut instructions, start);
+    op_const(&mut instructions, length);
+    op_word(&mut instructions, opcodes::SUBSTR, kind, 0, 0);
+    instructions.extend_from_slice(&capacity.to_le_bytes());
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op(&mut instructions, opcodes::RET);
+    let frame = FnSpec {
+        frame_size: 96,
+        ..BYTE_FRAME
+    };
+    build(&[frame], &instructions, &[], 40, 128, 0)
+}
+
+fn run_substr(
+    kind: u8,
+    capacity: u32,
+    start: i64,
+    length: i64,
+    destination: &[u8],
+    source: &[u8],
+) -> (i64, Vec<u8>) {
+    let code = substr_package(kind, capacity, start, length);
+    let mut host = MockHost::default();
+    let mut state = vec![0u8; 40];
+    state[8..16].copy_from_slice(&(destination.len() as u64).to_le_bytes());
+    state[16..16 + destination.len()].copy_from_slice(destination);
+    state[24..32].copy_from_slice(&(source.len() as u64).to_le_bytes());
+    state[32..32 + source.len()].copy_from_slice(source);
+    let mut stack = vec![0u8; 128];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    let result = i64::from_le_bytes(state[0..8].try_into().unwrap());
+    let length = u64::from_le_bytes(state[8..16].try_into().unwrap()) as usize;
+    (result, state[16..16 + length].to_vec())
+}
+
+#[test]
+fn substr_copies_and_clamps_to_the_source_tail() {
+    let (result, copied) = run_substr(opcodes::buffer_kind::BYTES, 8, 2, 99, b"XYZ", b"abcdef");
+    assert_eq!(result, 4);
+    assert_eq!(copied, b"cdef");
+}
+
+#[test]
+fn substr_clamps_to_the_destination_capacity() {
+    let (result, copied) = run_substr(opcodes::buffer_kind::BYTES, 3, 0, 99, b"XYZ", b"abcdef");
+    assert_eq!(result, 3);
+    assert_eq!(copied, b"abc");
+}
+
+#[test]
+fn substr_past_the_end_copies_nothing() {
+    let (result, copied) = run_substr(opcodes::buffer_kind::BYTES, 8, 9, 2, b"XYZ", b"abc");
+    assert_eq!(result, 0);
+    assert_eq!(copied, b"");
+}
+
+#[test]
+fn substr_zero_length_clears_the_destination() {
+    let (result, copied) = run_substr(opcodes::buffer_kind::BYTES, 8, 1, 0, b"XYZ", b"abc");
+    assert_eq!(result, 0);
+    assert_eq!(copied, b"");
+}
+
+#[test]
+fn substr_negative_arguments_are_invalid_and_write_nothing() {
+    for (start, length) in [(-1i64, 2i64), (0, -1)] {
+        let (result, copied) = run_substr(
+            opcodes::buffer_kind::BYTES,
+            8,
+            start,
+            length,
+            b"XYZ",
+            b"abc",
+        );
+        assert_eq!(result, -4, "start={start} length={length}");
+        assert_eq!(copied, b"XYZ", "the destination is untouched");
+    }
+}
+
+#[test]
+fn substr_string_rejects_a_split_code_point() {
+    // "é" is two bytes (0xC3 0xA9); starting at 1 splits it.
+    let (result, copied) = run_substr(opcodes::buffer_kind::STRING, 8, 1, 1, b"XYZ", b"\xC3\xA9");
+    assert_eq!(result, -4);
+    assert_eq!(copied, b"XYZ", "the destination is untouched");
+}
+
+#[test]
+fn substr_string_accepts_code_point_boundaries() {
+    let (result, copied) = run_substr(opcodes::buffer_kind::STRING, 8, 1, 2, b"", b"a\xC3\xA9");
+    assert_eq!(result, 2);
+    assert_eq!(copied, b"\xC3\xA9");
+}
+
+fn find_package(needle: u8) -> Vec<u8> {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 16);
+    op_const(&mut instructions, i64::from(needle));
+    op(&mut instructions, opcodes::FIND);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op(&mut instructions, opcodes::RET);
+    build(&[BYTE_FRAME], &instructions, &[], 24, 64, 0)
+}
+
+fn run_find(needle: u8, length: u64, data: &[u8]) -> i64 {
+    let code = find_package(needle);
+    let mut host = MockHost::default();
+    let mut state = vec![0u8; 24];
+    state[8..16].copy_from_slice(&length.to_le_bytes());
+    state[16..16 + data.len()].copy_from_slice(data);
+    let mut stack = vec![0u8; 64];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    i64::from_le_bytes(state[0..8].try_into().unwrap())
+}
+
+#[test]
+fn find_returns_the_first_byte_index_or_minus_one() {
+    assert_eq!(run_find(b'l', 5, b"hello"), 2);
+    assert_eq!(run_find(b'z', 5, b"hello"), -1);
+    // Only `0..length` is scanned; the rest of the region is invisible.
+    assert_eq!(run_find(b'l', 2, b"hello"), -1);
+    // `string` is scanned byte-wise, not by code point.
+    assert_eq!(run_find(0xA9, 2, b"\xC3\xA9"), 1);
+}

@@ -607,6 +607,35 @@ impl Machine {
                 }
                 self.push(stack, copied as u64)?;
             }
+            opcodes::FIND => {
+                let value = self.pop(stack)?;
+                let bits = self.pop(stack)?;
+                if value > u8::MAX as u64 {
+                    return Err(FaultCode::Overflow);
+                }
+                let (region, offset) = self.resolve(bits, state, stack, constants, args)?;
+                let length = self.buffer_len(region, offset, state, stack, constants, args)?;
+                let end = offset.checked_add(length).ok_or(FaultCode::OutOfBounds)?;
+                if end
+                    > region_len(region, state, stack, constants, args)
+                        .ok_or(FaultCode::OutOfBounds)?
+                {
+                    return Err(FaultCode::OutOfBounds);
+                }
+                // A byte scan over `0..length`; `string` is not special here
+                // (spec 0003: `find` is a shared byte operation).
+                let bytes = buffer_slice(region, offset, length, state, stack, constants, args)?;
+                let found = match bytes.iter().position(|byte| *byte == value as u8) {
+                    Some(index) => index as u64,
+                    None => (-1i64) as u64,
+                };
+                self.push(stack, found)?;
+            }
+            opcodes::SUBSTR => {
+                let kind = a;
+                let capacity = read_u32(code, pc + 4)? as usize;
+                self.substr(kind, capacity, state, stack, constants, args)?;
+            }
             opcodes::BUILTIN => {
                 let id = read_u32(code, pc + 4)?;
                 match id {
@@ -1165,6 +1194,161 @@ impl Machine {
             _ => return Err(FaultCode::IllegalOperation),
         }
         Ok(())
+    }
+
+    /// `substr`: copy a slice of `source` into `destination` (`core.substr_into`).
+    ///
+    /// `kind` is [`opcodes::buffer_kind`]; for `STRING` both slice boundaries
+    /// must fall on UTF-8 code-point boundaries in the source (spec 0003, T4).
+    /// Negative offsets push `-4` (`Status::Invalid`). A start past the source
+    /// length copies nothing. Nothing is written when the call is rejected.
+    fn substr(
+        &mut self,
+        kind: u8,
+        capacity: usize,
+        state: &mut [u8],
+        stack: &mut [u8],
+        code: &[u8],
+        args: &[u8],
+    ) -> Result<(), FaultCode> {
+        if kind != opcodes::buffer_kind::STRING && kind != opcodes::buffer_kind::BYTES {
+            return Err(FaultCode::IllegalOperation);
+        }
+        let length = self.pop(stack)? as i64;
+        let start = self.pop(stack)? as i64;
+        let source_bits = self.pop(stack)?;
+        let destination_bits = self.pop(stack)?;
+
+        let (destination_region, destination) =
+            self.resolve(destination_bits, state, stack, code, args)?;
+        let (source_region, source) = self.resolve(source_bits, state, stack, code, args)?;
+        if destination_region != refs::REGION_STATE && destination_region != refs::REGION_STACK {
+            return Err(FaultCode::IllegalOperation);
+        }
+        if destination < 8 || source < 8 {
+            return Err(FaultCode::OutOfBounds);
+        }
+        let destination_len =
+            self.buffer_len(destination_region, destination, state, stack, code, args)?;
+        let source_len = self.buffer_len(source_region, source, state, stack, code, args)?;
+
+        // The declared destination capacity is the bound the compiler proved.
+        let destination_end = destination
+            .checked_add(capacity)
+            .ok_or(FaultCode::OutOfBounds)?;
+        if destination_end
+            > region_len(destination_region, state, stack, code, args)
+                .ok_or(FaultCode::OutOfBounds)?
+        {
+            return Err(FaultCode::OutOfBounds);
+        }
+        let source_end = source
+            .checked_add(source_len)
+            .ok_or(FaultCode::OutOfBounds)?;
+        if source_end
+            > region_len(source_region, state, stack, code, args).ok_or(FaultCode::OutOfBounds)?
+        {
+            return Err(FaultCode::OutOfBounds);
+        }
+        if destination_len > capacity {
+            return Err(FaultCode::CapacityExceeded);
+        }
+
+        if start < 0 || length < 0 {
+            self.push(stack, status_code(Status::Invalid))?;
+            return Ok(());
+        }
+        let start = start as u64;
+        let length = length as u64;
+        let in_range = start <= source_len as u64;
+        // `start > src_len` copies nothing; otherwise clamp to the source tail
+        // and the destination capacity.
+        let copied = if in_range {
+            let available = source_len as u64 - start;
+            usize::try_from(length.min(available).min(capacity as u64))
+                .map_err(|_| FaultCode::OutOfBounds)?
+        } else {
+            0
+        };
+
+        if kind == opcodes::buffer_kind::STRING && in_range {
+            let bytes = buffer_slice(source_region, source, source_len, state, stack, code, args)?;
+            let start = start as usize;
+            if !utf8_boundary(bytes, start) || !utf8_boundary(bytes, start + copied) {
+                // A slice that would split a code point is not a `string`
+                // (spec 0003, T4): reject it and leave the destination alone.
+                self.push(stack, status_code(Status::Invalid))?;
+                return Ok(());
+            }
+        }
+
+        if copied > 0 {
+            let start = start as usize;
+            let source_start = source.checked_add(start).ok_or(FaultCode::OutOfBounds)?;
+            let source_end = source_start
+                .checked_add(copied)
+                .ok_or(FaultCode::OutOfBounds)?;
+            if destination_region == source_region {
+                match destination_region {
+                    refs::REGION_STATE => state.copy_within(source_start..source_end, destination),
+                    refs::REGION_STACK => stack.copy_within(source_start..source_end, destination),
+                    _ => return Err(FaultCode::IllegalOperation),
+                }
+            } else {
+                match destination_region {
+                    refs::REGION_STATE => match source_region {
+                        refs::REGION_STACK => {
+                            state[destination..destination + copied]
+                                .copy_from_slice(&stack[source_start..source_end]);
+                        }
+                        refs::REGION_CODE => {
+                            state[destination..destination + copied]
+                                .copy_from_slice(&code[source_start..source_end]);
+                        }
+                        refs::REGION_ARGS => {
+                            state[destination..destination + copied]
+                                .copy_from_slice(&args[source_start..source_end]);
+                        }
+                        _ => return Err(FaultCode::OutOfBounds),
+                    },
+                    refs::REGION_STACK => match source_region {
+                        refs::REGION_STATE => {
+                            stack[destination..destination + copied]
+                                .copy_from_slice(&state[source_start..source_end]);
+                        }
+                        refs::REGION_CODE => {
+                            stack[destination..destination + copied]
+                                .copy_from_slice(&code[source_start..source_end]);
+                        }
+                        refs::REGION_ARGS => {
+                            stack[destination..destination + copied]
+                                .copy_from_slice(&args[source_start..source_end]);
+                        }
+                        _ => return Err(FaultCode::OutOfBounds),
+                    },
+                    _ => return Err(FaultCode::IllegalOperation),
+                }
+            }
+        }
+
+        match destination_region {
+            refs::REGION_STATE => write_u64(state, destination - 8, copied as u64)?,
+            refs::REGION_STACK => write_u64(stack, destination - 8, copied as u64)?,
+            _ => return Err(FaultCode::IllegalOperation),
+        }
+        self.push(stack, copied as u64)
+    }
+}
+
+/// True when `index` is a UTF-8 code-point boundary in `bytes`.
+///
+/// The source `string` invariant makes a boundary check sufficient: a
+/// continuation byte (`10xxxxxx`) at the index means the slice would split a
+/// sequence. `bytes.len()` is the end boundary.
+fn utf8_boundary(bytes: &[u8], index: usize) -> bool {
+    match bytes.get(index) {
+        None => index == bytes.len(),
+        Some(byte) => byte & 0xC0 != 0x80,
     }
 }
 

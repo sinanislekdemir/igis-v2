@@ -3,7 +3,7 @@
 Operational guide for humans and coding agents working in this repository.
 Keep this file short and current. It points at documents; it does not duplicate them.
 
-**Last updated:** 2026-11-13
+**Last updated:** 2026-11-14
 
 ## What this is
 
@@ -50,10 +50,12 @@ constraints learned there.
   against the runtime length), `bytes[i] := b` writes one byte (checked against the
   capacity, extending the length and zero-filling the gap), `=`/`<>` compare two buffers
   of the same kind across capacities, and `core.len` returns the runtime length. The shell
-  is now a real command loop (`help`, `hello`, `exit`), and the host `core.read_line` stub
-  scripts those three lines so `langhost` runs the same shell deterministically. The next
-  pieces are string slicing/`stdlib` text helpers and command arguments, the record-based
-  spawn ABI, then APs, the realtime class and streams.
+  is now a real command loop (`help`, `echo <text>`, `run <app> [args]`, `exit`): `core.find`
+  locates the first space, `core.substr_into` splits the line and the `run` tail, and the
+  child prints the argument it received, so `run child world` proves argument carriage. The
+  host `core.read_line` stub scripts those four commands so `langhost` runs the same shell
+  deterministically. The next pieces are `stdlib` text helpers, records/enums and the
+  record-based spawn ABI, then APs, the realtime class and streams.
 
 ## Ground rules
 
@@ -234,3 +236,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-13 | REPL request service: `core.spawn`/`wait`/`kill` with a staged scalar `int` ABI, a 1024-slot static request queue serviced before every claim, a 64-entry exit ring, `Blocked(task exit)` with wake-on-termination, and a `shell` → `child` sample that blocks, wakes and reports `child: ok`. A load failure prints the diagnostic and records `Faulted(IoError)` under the reserved id. |
 | 2026-11-13 | Console input: COM1 and the PS/2 keyboard are polled in the service opportunity into one static FIFO, a staged line ring echoes/edits/completes lines, and `core.read_line` blocks the shell (`Blocked(Console)`) until a line exists; `shell` reads three lines and exits. Temporary until indexing lands (Q44). |
 | 2026-11-13 | Buffer indexing, comparison and length: `buf[i]` is a raw `byte` checked against the runtime length; `bytes[i] := b` is checked against the capacity and extends the length (zero-filling the gap), `string` stays read-only by index; `=`/`<>` compare buffers of the same kind across capacities; `core.len` returns `uint`. New ABI v1 opcodes `load_u8`, `store_u8`, `cmp_buffers` (54 → 57) and builtin id 6. The shell is a real `help`/`hello`/`exit` loop; the host `read_line` stub scripts those lines. |
+| 2026-11-14 | String search and slicing: `core.find` (first index of a `byte` or `-1`) and `core.substr_into` (same-kind checked slice, negative → `-4`, past-end → 0, clamped copy, UTF-8 boundary check for `string`) as ABI v1 opcodes `find`/`substr` (57 → 59). The shell splits `cmd`/`rest` and the `run` tail into path/args; `child` prints its `main(args)`, `echo` writes the tail, and `run missing` exercises the `-3` spawn failure. |

@@ -368,6 +368,10 @@ fn verify_instructions(
                 if a > opcodes::value_kind::F64 || b > opcodes::value_kind::F64 || c != 0 {
                     return Err(invalid(base + pc, "conversion kinds are out of range"));
                 }
+            } else if op == opcodes::SUBSTR {
+                if a > opcodes::buffer_kind::BYTES || b != 0 || c != 0 {
+                    return Err(invalid(base + pc, "substr kind is out of range"));
+                }
             } else if matches!(
                 op,
                 opcodes::JMP | opcodes::JZ | opcodes::JNZ | opcodes::CALL
@@ -434,6 +438,13 @@ fn verify_instructions(
                     }
                 }
                 opcodes::STORE_U8 => {
+                    let capacity = read_u32(instructions, pc + 4)
+                        .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;
+                    if capacity > MAX_SECTION {
+                        return Err(invalid(base + pc + 4, "buffer capacity is out of range"));
+                    }
+                }
+                opcodes::SUBSTR => {
                     let capacity = read_u32(instructions, pc + 4)
                         .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;
                     if capacity > MAX_SECTION {

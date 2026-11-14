@@ -85,7 +85,7 @@ pub struct RunResult {
 /// kernel's, deterministically, without ever blocking. A program that keeps
 /// reading after the script is exhausted sees empty lines and either exits or
 /// is stopped by the budget watchdog.
-const HOST_LINES: [&[u8]; 3] = [b"help", b"hello", b"exit"];
+const HOST_LINES: [&[u8]; 4] = [b"help", b"run child world", b"echo hi there", b"exit"];
 
 struct ConsoleHost {
     output: Vec<u8>,
