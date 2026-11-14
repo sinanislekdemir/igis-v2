@@ -536,8 +536,8 @@ fn wait_blocks_without_advancing_and_retries_the_same_instruction() {
     assert_eq!(state_u64(&state, 0), Status::Ok as u64);
     assert_eq!(
         state_u64(&state, 8),
-        abi::layout::exit_kind::FAULTED as u64,
-        "the reason record's kind is Faulted"
+        abi::layout::exit_tag::FAULTED as u64,
+        "the reason's tag is Faulted"
     );
     assert_eq!(
         state_u64(&state, 16),

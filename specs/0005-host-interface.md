@@ -132,16 +132,17 @@ The interface is split into two namespaces:
 - `receive` copies what is available, up to the destination length; a byte stream has no
   message boundaries. Framing is a `stdlib` concern.
 
-#### Implemented ABI: `spawn`/`wait`/`kill` return `Status` and use records
+#### Implemented ABI: `spawn`/`wait`/`kill` return `Status`
 
-`Status` is a predeclared enum and `Diagnostic`/`ExitReason` are predeclared records
-(spec 0003), so all three primitives now use the target shapes: the return is a real
-`Status`, and the out-parameters are records at the fixed `abi::layout` offset.
+`Status` is a predeclared enum, `Diagnostic` is a predeclared record and `ExitReason` is
+the predeclared sum type `Ok | Killed | Faulted(code: FaultCode)` (spec 0003), so all three
+primitives use the target shapes: the return is a real `Status`, and the out-parameters are
+a record and a sum value at the fixed `abi::layout` offsets.
 
 | Primitive | Implemented signature | Result |
 |-----------|-----------------------|--------|
 | `core.spawn` | `(path: const string[0], args: const string[0], var diag: Diagnostic, var id: int) -> Status` | `Ok` with the reserved global id written through `id` and `diag` cleared; `NotFound`, `Invalid`, `Full` or `CapacityExceeded` with `id` untouched, `diag` filled and no task created |
-| `core.wait` | `(id: int, var reason: ExitReason) -> Status` | `Ok` with `reason.kind`/`reason.code` written; `NotFound` for an unknown or evicted id; `Invalid` for id zero or the caller itself |
+| `core.wait` | `(id: int, var reason: ExitReason) -> Status` | `Ok` with `reason`'s tag/payload written (`Ok`, `Killed` or `Faulted(FaultCode)`); `NotFound` for an unknown or evicted id; `Invalid` for id zero or the caller itself |
 | `core.kill` | `(id: int) -> Status` | `Ok`, `NotFound` (unknown or finished), or `Invalid` (id zero or the caller itself) |
 
 - `Host::spawn(path, args, diag: &mut [u8])` receives a slice shaped like the record
@@ -151,19 +152,20 @@ The interface is split into two namespaces:
   success the host clears the slice; on failure it fills it. The kernel writes unit,
   message, line and column from the compiler's `Diagnostic`; the host toolchain does the
   same for a compile error it discovers synchronously.
-- `Host::wait`'s `Exited(reason)` maps to the record: `kind` is `0` Ok, `1` Killed or
-  `2` Faulted, and `code` is the `FaultCode` ordinal (`0` otherwise). `WaitOutcome::Status(s)`
-  pushes `s` and leaves `reason` untouched; `Blocked` keeps both operands on the stack and
-  retries the instruction after a wake-up. `Host::kill` pushes its returned `Status`.
-  `abi::Status` and the language `Status` share ordinals, so neither side translates.
+- `Host::wait`'s `Exited(reason)` maps to the sum layout: the tag is `0` Ok, `1` Killed or
+  `2` Faulted, and `Faulted`'s payload is the `FaultCode` ordinal (`0` otherwise).
+  `WaitOutcome::Status(s)` pushes `s` and leaves `reason` untouched; `Blocked` keeps both
+  operands on the stack and retries the instruction after a wake-up. `Host::kill` pushes
+  its returned `Status`. `abi::Status` and the language `Status` share ordinals, so neither
+  side translates.
 - `Diagnostic` is cleared as empty text, `0` line/column/task id and `-1` for
   `handle`/`offset`/`length`.
 - `TaskId` is an `int` (`0` is invalid) until a distinct type exists.
 - **Still staged:** a failure the service discovers *after* `spawn` returned (a compile
   error, a read failure) is printed to the kernel console and recorded as
-  `Faulted(IoError)`; the parent's `wait` observes `kind = 2`, `code = 11`. Reporting it
-  through `diag` needs a request-completion path and is out of scope. `core.run` is not
-  exposed until `stdlib` exists (Q43).
+  `Faulted(IoError)`; the parent's `wait` observes `Faulted` with payload `IoError`.
+  Reporting it through `diag` needs a request-completion path and is out of scope.
+  `core.run` is not exposed until `stdlib` exists (Q43).
 
 #### Staged line discipline: `core.read_line`
 
@@ -346,3 +348,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-14 | First `syslib` slice: `port_in8`/`port_out8` as `uint` scalars through `Host::port_in8`/`port_out8` defaults, kernel implementation over `arch_x86_64::port`; opaque `Port`/MMIO/DMA remain the target (Q45). |
 | 2026-11-14 | REPL ABI now uses the predeclared `Status` enum: `core.spawn(path, args, var id)`, `core.wait(id, var reason)` and `core.kill(id)` return `Status`; only the `Diagnostic` and `ExitReason` records remain staged (Q43 narrowed). `Host` is unchanged (`Result<u64, Status>`, `WaitOutcome`, `Status`); the kernel maps `abi::Status` directly. |
 | 2026-11-14 | Record-based REPL ABI: `core.spawn(path, args, var diag: Diagnostic, var id: int)` and `core.wait(id, var reason: ExitReason)` replace the staged out-parameters. `Host::spawn` gains a record-shaped `&mut [u8]` `diag` slice (filled on a synchronous failure, cleared on success); `wait` writes `kind`/`code` through the record. A compile failure the service discovers after `spawn` returned still prints to the kernel console and records `Faulted(IoError)`; `TaskId` stays an `int` and `core.run` is not exposed (Q43 narrowed to sum types and `core.run`). |
+| 2026-11-14 | `ExitReason` is now the predeclared sum type `Ok | Killed | Faulted(code: FaultCode)`, so `core.wait` writes a tag (0/1/2) at offset 0 and the `FaultCode` ordinal at offset 8, exactly the previous 16-byte image under new names (`TAG_OFFSET`/`PAYLOAD_OFFSET`). Applications match the reason with an exhaustive `case`; `reason.kind`/`reason.code` no longer exist. `FaultCode` is a predeclared enum with qualified variant names. Q43 is now `core.run`, `TaskId` and the request-completion diagnostic path. |

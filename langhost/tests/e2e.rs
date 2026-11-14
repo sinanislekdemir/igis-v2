@@ -431,7 +431,99 @@ end;
 }
 
 #[test]
-fn a_faulted_child_reports_kind_and_code_through_the_reason_record() {
+fn sum_types_and_case_work_end_to_end() {
+    let result = run_sample("case.ig", b"");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(
+        result.output,
+        b"number 42\nnumber 42\nident igis\neof\nident keep\nident keep\nnested number 7\nh: number 3\nvar: eof\nnumber 7\n"
+            .to_vec()
+    );
+}
+
+#[test]
+fn an_exit_reason_is_constructed_and_matched_with_case() {
+    let source = br#"
+unit reasoncase;
+
+uses core;
+
+var
+  reason: ExitReason;
+  st: Status;
+
+procedure main(args: const string[1024]);
+begin
+  reason := Ok;
+  case reason of
+    Ok: core.write("ok\n")
+    Killed: core.write("wrong\n")
+    Faulted(code): core.write("wrong\n")
+  end;
+
+  st := Ok;
+  if st = Ok then core.write("status still ok\n");
+
+  reason := Killed;
+  case reason of
+    Ok: core.write("wrong\n")
+    Killed: core.write("killed\n")
+    Faulted(code): core.write("wrong\n")
+  end;
+
+  reason := Faulted(FaultCode.Overflow);
+  case reason of
+    Ok: core.write("wrong\n")
+    Killed: core.write("wrong\n")
+    Faulted(code):
+    begin
+      if code = FaultCode.Overflow then
+        core.write("faulted overflow\n")
+      else
+        core.write("wrong code\n");
+    end
+  end;
+end;
+"#;
+    let package = langhost::compile(source, "reasoncase").expect("ExitReason compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(
+        result.output,
+        b"ok\nstatus still ok\nkilled\nfaulted overflow\n".to_vec()
+    );
+}
+
+#[test]
+fn a_non_exhaustive_case_is_a_compile_error_with_a_position() {
+    let source = br#"
+unit t;
+
+type Token = A | B;
+
+var
+  t: Token;
+
+procedure main(args: const string[1024]);
+begin
+  t := A;
+  case t of
+    A: t := B
+  end;
+end;
+"#;
+    let error = langhost::compile(source, "t").expect_err("must not compile");
+    assert!(
+        error.message.contains("non-exhaustive `case`"),
+        "{}",
+        error.message
+    );
+    assert_eq!(error.line, 12);
+    assert_eq!(error.column, 8);
+}
+
+#[test]
+fn a_faulted_child_reports_the_faulted_variant_and_code() {
     let source = br#"
 unit faultreport;
 
@@ -453,24 +545,29 @@ begin
     st := core.wait(id, reason);
     if st <> Ok then
       core.write("wait failed\n")
-    else if reason.kind = 2 then
-      core.write("kind faulted\n")
     else
-      core.write("kind wrong\n");
-    if reason.code = 4 then
-      core.write("code divide by zero\n")
-    else
-      core.write("code wrong\n");
+      case reason of
+        Ok: core.write("reason ok\n")
+        Killed: core.write("reason killed\n")
+        Faulted(code):
+        begin
+          core.write("reason faulted\n");
+          if code = FaultCode.DivideByZero then
+            core.write("code divide by zero\n")
+          else
+            core.write("code wrong\n");
+        end
+      end;
   end;
 end;
 "#;
     let package = langhost::compile(source, "faultreport").expect("compiles");
     let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
     assert_eq!(result.reason, ExitReason::Ok);
-    // `faulty` prints one line before dividing by zero; the parent then sees
-    // `ExitReason.kind = 2` and `code = 4` (`DivideByZero`).
+    // `faulty` prints one line before dividing by zero; the parent then matches
+    // `ExitReason.Faulted` and binds `code = FaultCode.DivideByZero`.
     let text = String::from_utf8(result.output).expect("UTF-8");
     assert!(text.contains("faulty: about to divide\n"), "{text:?}");
-    assert!(text.contains("kind faulted\n"), "{text:?}");
+    assert!(text.contains("reason faulted\n"), "{text:?}");
     assert!(text.contains("code divide by zero\n"), "{text:?}");
 }

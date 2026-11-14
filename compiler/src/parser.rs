@@ -23,8 +23,9 @@ struct Parser<'a, 'b> {
     unit: &'a str,
     bump: &'b Bump<'a>,
     /// Every type name declared in a `type` section anywhere in the unit, plus
-    /// the predeclared `Status`. Collected before parsing so a cast in a
-    /// procedure that precedes its `type` section still parses as a cast.
+    /// the predeclared `Status`, `FaultCode`, `Diagnostic` and `ExitReason`.
+    /// Collected before parsing so a cast in a procedure that precedes its
+    /// `type` section still parses as a cast.
     type_names: SliceVec<'a, 'b, &'a str>,
     /// Nesting levels currently on the recursive-descent stack. Per
     /// compilation, incremented by `expression`, `statement` and recursive
@@ -271,9 +272,10 @@ impl<'a, 'b> Parser<'a, 'b> {
         })
     }
 
-    /// Parses a `type` section. Two declaration forms are accepted:
-    /// `type Name = (Variant, ...);` (enum) and
-    /// `type Name = record field: T; ... end;` (record).
+    /// Parses a `type` section. Three declaration forms are accepted:
+    /// `type Name = (Variant, ...);` (enum),
+    /// `type Name = record field: T; ... end;` (record) and
+    /// `type Name = Variant | Variant(payload: T);` (sum type).
     fn type_section(
         &mut self,
         decls: &mut SliceVec<'a, 'b, TypeDecl<'a>>,
@@ -295,8 +297,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                     ));
                 }
                 TypeKind::Record(fields)
-            } else {
-                self.expect(&TokenKind::LParen, "`(` or `record` after `=`")?;
+            } else if self.check(&TokenKind::LParen) {
+                self.advance();
                 let mut variants = self.list::<&'a str>(token.line, token.column)?;
                 if !self.check(&TokenKind::RParen) {
                     loop {
@@ -320,6 +322,14 @@ impl<'a, 'b> Parser<'a, 'b> {
                     ));
                 }
                 TypeKind::Enum(variants.into_slice())
+            } else if matches!(self.peek().kind, TokenKind::Ident(_)) {
+                let variants = self.sum_variants()?;
+                TypeKind::Sum(variants)
+            } else {
+                let found = self.peek().kind;
+                return Err(self.here(format_args!(
+                    "expected `(`, `record` or a sum variant after `=`, found {found}"
+                )));
             };
             self.expect(&TokenKind::Semi, "`;`")?;
             let decl = TypeDecl {
@@ -339,6 +349,37 @@ impl<'a, 'b> Parser<'a, 'b> {
             ));
         }
         Ok(())
+    }
+
+    /// Parses sum variants: `Variant` or `Variant(field: type)`, separated by
+    /// `|`.
+    fn sum_variants(&mut self) -> Result<&'a [SumVariantDecl<'a>], Diagnostic> {
+        let start = self.peek();
+        let mut variants = self.list::<SumVariantDecl<'a>>(start.line, start.column)?;
+        loop {
+            let token = self.peek();
+            let name = self.ident("a variant name")?;
+            let payload = if self.eat(&TokenKind::LParen) {
+                let field = self.ident("a payload name")?;
+                self.expect(&TokenKind::Colon, "`:` after a payload name")?;
+                let ty = self.type_ref()?;
+                self.expect(&TokenKind::RParen, "`)`")?;
+                Some((field, ty))
+            } else {
+                None
+            };
+            let decl = SumVariantDecl {
+                name,
+                payload,
+                line: token.line,
+                column: token.column,
+            };
+            self.push(&mut variants, decl, token.line, token.column)?;
+            if !self.eat(&TokenKind::Pipe) {
+                break;
+            }
+        }
+        Ok(variants.into_slice())
     }
 
     /// Parses `field[, field]* : type;` lines up to `end`.
@@ -594,6 +635,14 @@ impl<'a, 'b> Parser<'a, 'b> {
                 let body = self.statement()?;
                 self.alloc_stmt(Stmt::While { cond, body }, token.line, token.column)
             }
+            TokenKind::Case => {
+                self.advance();
+                let value = self.expression()?;
+                self.expect(&TokenKind::Of, "`of` after the `case` value")?;
+                let arms = self.case_arms()?;
+                self.expect(&TokenKind::End, "`end` after the `case` arms")?;
+                self.alloc_stmt(Stmt::Case { value, arms }, token.line, token.column)
+            }
             TokenKind::Ident(_) => {
                 let (target, line, column) = self.name_path()?;
                 if self.check(&TokenKind::LBracket) {
@@ -660,6 +709,90 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             other => Err(self.here(format_args!("expected a statement, found {other}"))),
         }
+    }
+
+    /// True when the next tokens begin a `case` arm: `Ident:` or
+    /// `Ident(Ident):`. An arm body is otherwise a statement sequence, so this
+    /// lookahead is what separates one arm from the next.
+    fn case_arm_start(&self) -> bool {
+        let kind_at = |index: usize| self.tokens.get(index).map(|token| token.kind);
+        if !matches!(kind_at(self.pos), Some(TokenKind::Ident(_))) {
+            return false;
+        }
+        if matches!(kind_at(self.pos + 1), Some(TokenKind::LParen)) {
+            if !matches!(kind_at(self.pos + 2), Some(TokenKind::Ident(_))) {
+                return false;
+            }
+            if !matches!(kind_at(self.pos + 3), Some(TokenKind::RParen)) {
+                return false;
+            }
+            return matches!(kind_at(self.pos + 4), Some(TokenKind::Colon));
+        }
+        matches!(kind_at(self.pos + 1), Some(TokenKind::Colon))
+    }
+
+    /// Parses `case` arms up to (but not including) `end`.
+    fn case_arms(&mut self) -> Result<&'a [CaseArm<'a>], Diagnostic> {
+        let start = self.peek();
+        let mut arms = self.list::<CaseArm<'a>>(start.line, start.column)?;
+        loop {
+            if self.check(&TokenKind::End) {
+                break;
+            }
+            if self.check(&TokenKind::Eof) {
+                return Err(self.here(format_args!("`case` is missing `end`")));
+            }
+            if self.eat(&TokenKind::Semi) {
+                continue;
+            }
+            if !self.case_arm_start() {
+                let found = self.peek().kind;
+                return Err(self.here(format_args!(
+                    "expected a `case` arm (`Variant:` or `Variant(name):`), found {found}"
+                )));
+            }
+            let token = self.peek();
+            let variant = self.ident("a variant name")?;
+            let binding = if self.eat(&TokenKind::LParen) {
+                let binding = self.ident("a payload binding name")?;
+                self.expect(&TokenKind::RParen, "`)`")?;
+                Some(binding)
+            } else {
+                None
+            };
+            self.expect(&TokenKind::Colon, "`:` after a `case` arm")?;
+            let mut body = self.list::<Stmt<'a>>(token.line, token.column)?;
+            loop {
+                if self.check(&TokenKind::End)
+                    || self.check(&TokenKind::Eof)
+                    || self.case_arm_start()
+                {
+                    break;
+                }
+                if self.eat(&TokenKind::Semi) {
+                    continue;
+                }
+                let at = self.peek();
+                let stmt = self.statement()?;
+                self.push(&mut body, *stmt, at.line, at.column)?;
+            }
+            let arm = CaseArm {
+                variant,
+                binding,
+                body: body.into_slice(),
+                line: token.line,
+                column: token.column,
+            };
+            self.push(&mut arms, arm, token.line, token.column)?;
+        }
+        if arms.len() == 0 {
+            return Err(self.error(
+                start.line,
+                start.column,
+                format_args!("`case` needs at least one arm"),
+            ));
+        }
+        Ok(arms.into_slice())
     }
 
     fn name_path(&mut self) -> Result<(&'a str, u32, u32), Diagnostic> {
@@ -917,8 +1050,17 @@ impl<'a, 'b> Parser<'a, 'b> {
                 let (name, line, column) = self.name_path()?;
                 if self.check(&TokenKind::LParen) {
                     let is_cast = !name.contains('.')
-                        && (matches!(name, "int" | "uint" | "byte" | "f64" | "Status")
-                            || self.type_names.as_slice().contains(&name));
+                        && (matches!(
+                            name,
+                            "int"
+                                | "uint"
+                                | "byte"
+                                | "f64"
+                                | "Status"
+                                | "FaultCode"
+                                | "Diagnostic"
+                                | "ExitReason"
+                        ) || self.type_names.as_slice().contains(&name));
                     if is_cast {
                         self.advance();
                         let inner = self.expression()?;

@@ -65,15 +65,19 @@ constraints learned there.
   page is split to 4 KiB PTEs; `#PF` uses its own IST). A stack overflow now faults cleanly
   at the guard instead of writing into the boot page tables (Q42). Enums are implemented
   (`type Name = (Variant, ...)`, nominal, one 8-byte ordinal, checked `EnumName(int)`);
-  `Status` is predeclared; records are implemented (`type Name = record field: T; ... end;`:
-  nominal, declaration-order 8-byte-aligned layout, nested records, buffer fields,
-  whole-record copies, `value`/`const`/`var` record parameters). `Diagnostic` and
-  `ExitReason` are predeclared at the fixed `abi::layout` offsets:
-  `core.spawn(path, args, var diag, var id)` fills `diag` on a synchronous failure,
-  `core.wait(id, var reason)` writes `kind`/`code`, and the shell prints `diag.message`
-  and reports `reason.kind`. The next pieces are sum types/pattern matching (`ExitReason`
-  in its final form, `core.run`) and `stdlib` text helpers, then APs, the realtime class
-  and streams.
+  `Status` and `FaultCode` are predeclared; records are implemented
+  (`type Name = record field: T; ... end;`: nominal, declaration-order 8-byte-aligned
+  layout, nested records, buffer fields, whole-record copies, `value`/`const`/`var` record
+  parameters). Sum types and pattern matching are implemented
+  (`type Name = Variant | Variant(payload: T);`: nominal, 8-byte tag at 0 plus the largest
+  payload at 8, destination-driven construction, exhaustive `case` with an arm-local
+  by-value payload binding). `Diagnostic` is a predeclared record and `ExitReason` is the
+  predeclared sum type `Ok | Killed | Faulted(code: FaultCode)` at the fixed `abi::layout`
+  offsets: `core.spawn(path, args, var diag, var id)` fills `diag` on a synchronous
+  failure, `core.wait(id, var reason)` writes the reason's tag/payload, and the shell
+  prints `diag.message` and reports the reason with a `case`. The next pieces are
+  `core.run`, `stdlib` text helpers and the async compile-diagnostic path, then APs, the
+  realtime class and streams.
 
 ## Ground rules
 
@@ -213,7 +217,8 @@ host tools are unaffected.
 | Enums: nominal `type Name = (Variant, ...)`, variants are global ordinal constants in one 8-byte slot; `Status` predeclared; `EnumName(int)` faults `Overflow` out of range | spec 0003, spec 0008 (`enum_cast`) |
 | `core.spawn`/`wait`/`kill` return `Status`; `spawn` takes `var diag: Diagnostic` and `wait` takes `var reason: ExitReason` | spec 0005, Q43 |
 | Compiler nesting limit 32; post-boot kernel stack is 256 KiB with a guard frame | Q42, spec 0002, `arch/x86_64/src/stack.rs` |
-| Records: nominal, declaration-order layout with every field aligned to 8, predeclared `Diagnostic`/`ExitReason` at fixed `abi::layout` offsets | spec 0003, spec 0008 |
+| Records: nominal, declaration-order layout with every field aligned to 8; `Diagnostic` predeclared at fixed `abi::layout` offsets | spec 0003, spec 0008 |
+| Sum types: nominal, 8-byte tag at 0 plus the largest payload at 8 (rounded); destination-driven construction; exhaustive `case` with by-value arm-local payload bindings; `ExitReason` is `Ok | Killed | Faulted(code: FaultCode)`; `FaultCode` variants are qualified | spec 0003, spec 0008 |
 
 ## Open questions
 
@@ -264,3 +269,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-14 | Q42 closed: the compiler has a fixed 32-level nesting limit (parser expression/statement/unary recursion and independent codegen walks; a `Diagnostic` beyond it), and everything after early boot runs on a 256 KiB kernel stack with a not-present guard frame. The guard's 2 MiB identity page is split into 4 KiB PTEs in a static `.bss` table, CR3 is reloaded and the higher-half alias is shared. `#PF` got its own IST so an exhausted stack still reports a clean fault; the `.boot` stack is early-boot only. Deep-source test: clean `#PF` with CR2 in the guard frame. Per-task stack guards remain future work. |
 | 2026-11-14 | Enums and the `Status` ABI: `type Name = (Variant, ...)` declares a nominal enum whose variants are global ordinal constants (`0..n-1`) in one 8-byte slot; assignment/comparison only within the same enum (ordering by ordinal), `int(enum)` yields the ordinal, `EnumName(int)` is range-checked and faults `Overflow` (opcode `enum_cast`, 60 → 61). `Status` is predeclared with `Ok` = 0; a user `type Status` and a duplicate type/variant are compile errors. `core.spawn(path, args, var id)`, `core.wait(id, var reason)` and `core.kill(id)` now return `Status`; the reason stays a staged `int` and `Diagnostic`/`ExitReason` records remain missing (Q43 narrowed). The shell checks each `Status` and prints `spawn failed`/`wait failed` plus ok/killed/faulted. |
 | 2026-11-14 | Records and the record-based REPL ABI: `type Name = record field: T; ... end;` with nominal types, declaration-order 8-byte-aligned layout, nested records, buffer fields, whole-record copies (`copy_refs`), field references (`ref_offset`) and `value`/`const`/`var` record parameters. `Diagnostic` and `ExitReason` are predeclared at the fixed `abi::layout` offsets; `core.spawn(path, args, var diag, var id)` fills `diag` from the kernel compiler on a synchronous failure and clears it otherwise, and `core.wait(id, var reason)` writes `kind`/`code`. `run missing` prints `spawn failed: No such application` from `diag.message`, `run faulty` reports `child: faulted` from `reason.kind`, and the staged reason `int` is gone (Q43 narrowed to sum types and `core.run`). |
+| 2026-11-14 | Sum types, `case` and the real `ExitReason`: `type Name = Variant | Variant(payload: T);` is nominal, an 8-byte tag at offset 0 plus the largest payload at offset 8, constructed into a destination (`dst := Variant(payload)`; variant names are scoped to the sum, so `Ok` is `Status.Ok` or `ExitReason.Ok` by destination). `case value of Variant: ... Variant(binding): ... end;` is exhaustive (one arm per variant, no `else`), has no fallthrough, and copies a payload by value into an arm-local binding; missing, duplicate and unknown arms, payload mismatches and cross-sum variants are compile errors. No new opcodes: construction is `store_ref`/`clear`/`append`/`copy_refs`, `case` is `load_ref`/`eq`/`jz`. `ExitReason` becomes `Ok | Killed | Faulted(code: FaultCode)` at the same 16-byte layout; `FaultCode` is a predeclared enum with qualified variant names (`FaultCode.DivideByZero`) because two names collide with `Status`. The shell's `report` is an exhaustive `case`; `run faulty` prints `child: faulted DivideByZero`, `run child world` prints `child: ok`, `run missing` keeps its `diag.message`, and the kernel run ends `task 1: exit Ok`. Q43 narrows to `core.run`, `TaskId` and the request-completion diagnostic path. |

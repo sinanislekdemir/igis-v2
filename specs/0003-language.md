@@ -244,8 +244,9 @@ Rules:
 
 - **Records (implemented):** `type Point = record x, y: int; end;` (also accepted as
   `field: T;` lines). See "Records" below for the layout and access rules.
-- **Sum types:** `type Token = Ident(name: string[32]) | Number(value: int) | Eof;`
-  Sized by the largest variant; no boxing, no indirect variant.
+- **Sum types (implemented):** `type Token = Ident(name: string[32]) | Number(value: int) | Eof;`
+  Sized by the largest variant; no boxing, no indirect variant. See "Sum types" below
+  for the layout, construction and `case` rules.
 - **Enums (implemented):** `type Status = (Ok, WouldBlock, Closed, NotFound, Invalid, Full, CapacityExceeded, IoError);`
 - **Arrays:** `array[T, N]` — fixed, index `0..N-1`, value semantics.
 - **Rings:** `ring[T, N]` — fixed-capacity FIFO with `push`/`pop`/`full`/`empty`.
@@ -268,9 +269,10 @@ type Color = (Red, Green, Blue);
 ```
 
 - A `type` section sits with `const` and `var` at unit level and may appear in any
-  order; one declaration is either `Name = (Variant, Variant, ...);` or
-  `Name = record field: T; ... end;`. A unit may have several `type` sections.
-  Records and sum types are documented below; sum types are still future work.
+  order; one declaration is either `Name = (Variant, Variant, ...);`,
+  `Name = record field: T; ... end;` or `Name = Variant | Variant(payload: T);`.
+  A unit may have several `type` sections. Records, enums and sum types are all
+  implemented; their rules follow.
 - Enum types are **nominal**: `Color` and another enum with identical variants are
   distinct types. An enum name and its variant names share the one top-level namespace
   with constants, variables, procedures and other enum names. A duplicate type name, a
@@ -305,8 +307,8 @@ end;
 ```
 
 - Fields may be scalars (`int`, `uint`, `byte`, `bool`, `f64`), enums, buffers
-  (`string[N]`, `bytes[N]`) and other records. Grouped names (`x, y: int;`) and one
-  `name: type;` per line are both accepted. Every field type must be declared before
+  (`string[N]`, `bytes[N]`), sum types and other records. Grouped names (`x, y: int;`) and
+  one `name: type;` per line are both accepted. Every field type must be declared before
   the record; there are no forward references.
 - Records are **nominal**: `Point` and another record with identical fields are distinct
   types. Assignment, parameters and comparisons require the same record type.
@@ -322,12 +324,67 @@ end;
   parameter is a copy, `const`/`var` parameters are call-scoped references.
 - **Layout:** fields in declaration order, each aligned to 8 bytes: a scalar or enum is
   8; a buffer field is its `[len: u64][data: N]` image (`8 + N`, rounded to 8); a nested
-  record is its own aligned size. The record size is rounded to 8.
-- **Predeclared records:** `Diagnostic` and `ExitReason` exist in every unit, with the
-  fixed layout below (`abi::layout` is the shared source of truth); declaring either name
-  is a compile error. `ExitReason` is the staged record form of the spec's sum type:
-  `kind` is `0` Ok, `1` Killed, `2` Faulted, and `code` is the `FaultCode` ordinal (zero
-  unless faulted). It becomes a real sum type when the language has one.
+  record or sum is its own aligned size. The record size is rounded to 8.
+
+#### Sum types (implemented)
+
+```text
+type Token = Ident(name: string[32]) | Number(value: int) | Eof;
+```
+
+- A `type` declaration whose body begins with a variant name is a sum type. Variants are
+  separated by `|`. Each variant carries **at most one payload**, written
+  `Variant(name: T)`; a payload-less variant is just `Variant`.
+- Sum types are **nominal**: `Token` and another sum with identical variants are distinct
+  types. Assignment, parameters and copies require the same sum type. Comparison is not
+  defined; `case` is the only way to inspect a value.
+- **Layout:** an 8-byte tag at offset 0 holding the variant ordinal `0..n-1` in
+  declaration order, then the **payload area** at offset 8. The payload area is the size
+  of the largest variant payload, rounded to 8; a sum with no payloads is 8 bytes. A
+  buffer payload's `[len][data]` image therefore starts at offset 8 (its data at 16).
+- A payload may be a scalar, enum, buffer, record or another sum. Every payload type must
+  be declared before the sum; there are no forward references and a sum cannot contain
+  itself.
+- **Construction is destination-driven** and writes into the destination, never a
+  temporary: `token := Number(42)`, `token := Eof`. The destination names the sum type,
+  so `Ok` is `Status.Ok` when the destination is `Status` and `ExitReason.Ok` when it is
+  `ExitReason`; sum variant names are not global value constants. The payload must match
+  the declared type exactly (no implicit conversion). A buffer payload is a construction
+  like any buffer assignment (literals, same-kind buffers, `+`); a record or sum payload
+  is copied from a value of that exact type (inline construction of a nested sum is not
+  supported); a scalar or enum payload is an ordinary expression.
+- `dst := src` copies the whole value (tag and payload bytes). A sum may be a state
+  variable, a local, a `value`/`const`/`var` parameter, or a record field. A `value`
+  parameter is a copy; `const`/`var` parameters are call-scoped references. A sum
+  argument must be a variable or field, because there is no temporary to hold a fresh
+  construction at the call site.
+- **Pattern matching** is a Pascal-like statement:
+
+  ```text
+  case value of
+    Ident(name): statements
+    Number(value): statements
+    Eof: statements
+  end;
+  ```
+
+  The subject is a variable or field of a sum type. Every variant must have exactly one
+  arm; a missing, duplicate or unknown variant is a compile error, and there is no `else`
+  in this slice. An arm's body is a statement sequence (use `begin ... end` for several
+  statements; `end` closes the `case`). There is no fallthrough. A payload variant binds
+  its payload to a **new local of the payload type for that arm only**; the binding is by
+  value for every payload kind (a buffer binding is a whole `[len][data]` copy), so
+  assigning to it does not change the subject. A payload-less variant takes no binding.
+  The binding name shares the local namespace, so it may not repeat an existing local or
+  parameter name; it is not visible outside its arm. `case` statements nest.
+
+#### Predeclared records and sum type
+
+`Diagnostic` and `ExitReason` exist in every unit, with the fixed layout below
+(`abi::layout` is the shared source of truth); declaring either name is a compile error
+(and the same holds for `FaultCode` below). `Diagnostic` is a record. `ExitReason` is a
+real sum type: tag `0` Ok, `1` Killed, `2` Faulted, with the `FaultCode` ordinal in the
+payload area.
 
 ```text
 type Diagnostic = record          // offsets, size 192
@@ -341,11 +398,18 @@ type Diagnostic = record          // offsets, size 192
   task_id: int;                   // 184
 end;
 
-type ExitReason = record          // size 16 (staged sum type)
-  kind: int;                      // 0
-  code: int;                      // 8
-end;
+type ExitReason = Ok | Killed | Faulted(code: FaultCode);   // size 16:
+                                                            // tag at 0, payload at 8
 ```
+
+`FaultCode` is also predeclared, as an enum with the `abi::FaultCode` ordinals in order:
+`GenericFault`, `OutOfBounds`, `CapacityExceeded`, `Overflow`, `DivideByZero`,
+`StackOverflow`, `BudgetExceeded`, `WatchdogTimeout`, `IllegalOperation`, `StreamError`,
+`IoError`, `ExitFault`. Because `CapacityExceeded` and `IoError` collide with `Status`
+variants, `FaultCode` names its variants **qualified**, `FaultCode.DivideByZero`; it
+contributes no global constants. Every other enum's variants are global constants (spec
+0003, "Enums"), and a sum type's variants are reachable only through construction and
+`case`.
 
 There are **no user-defined generics**. The parametric types above are built in; the
 compiler knows their layout and operations. Generic algorithms are either built-ins
@@ -483,10 +547,11 @@ core.wait(id: int, var reason: ExitReason) -> Status
 core.kill(id: int) -> Status
 ```
 
-`Diagnostic` and `ExitReason` are predeclared records (above), so both out-parameters are
-real records: `spawn` fills `diag` on a synchronous failure and clears it on success;
-`wait` writes the child's `kind`/`code`. `core.run` is not exposed yet and `TaskId` is an
-`int` (spec 0005, "Implemented ABI").
+`Diagnostic` and `ExitReason` are predeclared (above), so both out-parameters are real
+language values: `spawn` fills `diag` on a synchronous failure and clears it on success;
+`wait` writes the child's `ExitReason` tag and payload, which the caller matches with
+`case`. `core.run` is not exposed yet and `TaskId` is an `int` (spec 0005,
+"Implemented ABI").
 
 ## Modules
 
@@ -537,9 +602,9 @@ real records: `spawn` fills `diag` on a synchronous failure and clears it on suc
   `Killed`; on a live task it requests termination at the next safe point; on an unknown or
   finished id it returns `Status.NotFound`.
   **Implemented slice:** `spawn`/`wait`/`kill` return `Status` and take the predeclared
-  `Diagnostic`/`ExitReason` records; a synchronous spawn failure fills `diag`, success
-  clears it, and `wait` writes `reason.kind`/`reason.code`. `run` is not exposed yet and
-  `TaskId` is still an `int` (spec 0005).
+  `Diagnostic` record and `ExitReason` sum type; a synchronous spawn failure fills `diag`,
+  success clears it, and `wait` writes the reason's tag/payload. `run` is not exposed yet
+  and `TaskId` is still an `int` (spec 0005).
 - **C8 (MUST):** A spawned child is a separate application instance with its own regions.
   It shares no memory with the parent; communication is through streams.
 - **C9 (MUST):** The argument passed to `run`/`spawn` is a fixed `string[1024]`, delivered
@@ -715,12 +780,18 @@ is the signal.
 | `f64` used as a map key | Compile error |
 | Shift count outside `0..63` | `fault(IllegalOperation)` |
 | Duplicate or malformed stream name | Compile error |
-| Duplicate enum type, duplicate variant, or a variant colliding with another top-level name | Compile error |
-| `type Status = ...`, `type Diagnostic = ...`, `type ExitReason = ...` (predeclared) | Compile error |
+| Duplicate enum or sum type, duplicate variant, or a variant colliding with another top-level name | Compile error |
+| `type Status = ...`, `type FaultCode = ...`, `type Diagnostic = ...`, `type ExitReason = ...` (predeclared) | Compile error |
 | Duplicate record field, unknown field, or a field of a non-record | Compile error |
-| Record assigned, passed or compared with a different record type | Compile error |
+| Record or sum assigned, passed or compared with a different type of the same kind | Compile error |
 | Assignment to a field of a `const` parameter or record | Compile error |
 | Comparing two records for equality | Compile error (field-wise comparison is not implemented) |
+| Comparing two sums, or using a sum as a scalar | Compile error (`case` is the only way to inspect a sum) |
+| `case` subject is not a sum type | Compile error |
+| `case` missing a variant, repeating one, or naming an unknown variant | Compile error (exhaustive, no `else`) |
+| A variant constructed with a payload it does not declare, or without its payload | Compile error |
+| A payload expression whose type differs from the declared payload type | Compile error |
+| A variant name from another sum type | Compile error |
 | Enum compared or assigned to a different enum, or to an integer, without a cast | Compile error |
 | Arithmetic on an enum | Compile error |
 | `EnumName(x)` with `x` outside `0..variant_count` | `fault(Overflow)`; no invalid enum value can exist |
@@ -773,3 +844,4 @@ is the signal.
 | 2026-11-14 | Staged integer formatting: `core.format_int_into(dst, value, base, width) -> int` (decimal/hex, negative sign, zero padding, exact capacity or `-6`, bad base `-4`). First `syslib` slice: `port_in8`/`port_out8` with `Port` staged as a scalar `uint` (Q45); MMIO/DMA handles remain the target design. |
 | 2026-11-14 | Enums implemented: `type Name = (Variant, ...);` with nominal types, ordinals `0..n-1`, variants as global constants in the top-level namespace, one 8-byte slot, same-enum assignment/comparison plus ordinal ordering, `int(enum)` and range-checked `EnumName(int)` (`fault(Overflow)`). `Status` is predeclared with the spec's eight variants (`Ok` = 0); a user declaration is an error. `spawn`/`wait`/`kill` return `Status` with `var id`/`var reason` out-parameters (Q43 narrowed; spec 0005, spec 0008 `enum_cast`). |
 | 2026-11-14 | Records implemented: `type Name = record field: T; ... end;` (grouped or one-per-line fields), nominal type identity, declaration-before-use, nested records, buffer fields, whole-record copy, `value`/`const`/`var` record parameters and aligned declaration-order layout. `Diagnostic` and `ExitReason` are predeclared at the fixed `abi::layout` offsets and cannot be redefined; `spawn`/`wait` use them (`var diag`, `var reason`). Record equality, sum types and `core.run` remain future work (Q43). |
+| 2026-11-14 | Sum types and pattern matching implemented: `type Name = Variant | Variant(payload: T);` is an 8-byte tag at offset 0 plus the largest payload at offset 8, nominal, with destination-driven construction (`dst := Variant(payload)`) and no global variant constants. `case value of Variant: ... Variant(binding): ... end;` is exhaustive (one arm per variant, no `else`), has no fallthrough, and binds a payload by value to an arm-local copy; unknown, duplicate and missing arms, payload mismatches and cross-sum variants are compile errors. `ExitReason` becomes the real sum type `Ok | Killed | Faulted(code: FaultCode)` at the same 16-byte layout, and `FaultCode` is predeclared as an enum whose variants are qualified (`FaultCode.DivideByZero`) because two names collide with `Status`. `Diagnostic` stays a record; `spawn` is unchanged. Q43 narrows to `core.run` and the async compile-diagnostic path. |

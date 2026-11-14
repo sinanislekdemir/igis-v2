@@ -1,19 +1,17 @@
 //! Fixed record layouts shared by the compiler, the interpreter and the kernel.
 //!
-//! The language declares two records before user code (`Diagnostic` and
-//! `ExitReason`), and the kernel writes their fields directly. The offsets here
-//! are the single source of truth on both sides of the boundary: the compiler
-//! uses them when it builds the predeclared record table, the interpreter uses
-//! them when it stores a wait result, and the kernel uses them when it fills a
-//! spawn diagnostic.
+//! Both are predeclared before user code. `Diagnostic` is a record; the kernel
+//! writes its fields directly. `ExitReason` is the language's first sum type
+//! (`Ok | Killed | Faulted(code: FaultCode)`), and the kernel writes its tag
+//! and payload directly.
 //!
-//! Both records follow the language layout rule (spec 0003, "Records"): fields
+//! `Diagnostic` follows the language layout rule (spec 0003, "Records"): fields
 //! in declaration order, each aligned to 8 bytes, a buffer field occupying
 //! `[len: u64][data: cap]`, and the record size rounded to 8.
 //!
-//! `ExitReason` is the staged record form of the spec's sum type: `kind` is
-//! `0` Ok, `1` Killed, `2` Faulted, and `code` is the `FaultCode` ordinal
-//! (zero unless faulted). It becomes a real sum type when the language has one.
+//! `ExitReason` follows the sum layout rule (spec 0003, "Sum types"): an 8-byte
+//! tag at offset 0 and the payload area at offset 8. The tag is `0` Ok, `1`
+//! Killed, `2` Faulted; `Faulted`'s payload is the `FaultCode` ordinal.
 
 /// `Diagnostic`: the caller-owned compile/load error record (spec 0003).
 pub mod diagnostic {
@@ -87,47 +85,49 @@ pub mod diagnostic {
     }
 }
 
-/// `ExitReason`: the staged record form of the exit reason.
+/// `ExitReason`: the predeclared sum type `Ok | Killed | Faulted(code)`.
 pub mod exit_reason {
     use super::write_i64;
     use crate::ExitReason;
 
-    /// Record size in bytes.
+    /// Size in bytes: an 8-byte tag plus the largest payload (`Faulted`'s
+    /// `FaultCode`, one 8-byte slot).
     pub const SIZE: u32 = 16;
 
-    /// Record alignment in bytes.
+    /// Alignment in bytes.
     pub const ALIGN: u32 = 8;
 
-    /// Offset of `kind` (see [`super::exit_kind`]).
-    pub const KIND_OFFSET: u32 = 0;
+    /// Offset of the variant tag (see [`super::exit_tag`]).
+    pub const TAG_OFFSET: u32 = 0;
 
-    /// Offset of `code` (a `FaultCode` ordinal, zero unless faulted).
-    pub const CODE_OFFSET: u32 = 8;
+    /// Offset of the payload area. `Faulted` stores the `FaultCode` ordinal
+    /// here; the other variants have no payload.
+    pub const PAYLOAD_OFFSET: u32 = 8;
 
-    /// Writes `kind` and `code` into a record-sized slice.
+    /// Writes the tag and payload into a sum-sized slice.
     ///
     /// A slice shorter than [`SIZE`] is left untouched.
     pub fn write(dst: &mut [u8], reason: ExitReason) {
         let Some(dst) = dst.get_mut(..SIZE as usize) else {
             return;
         };
-        let (kind, code) = match reason {
-            ExitReason::Ok => (super::exit_kind::OK, 0),
-            ExitReason::Killed => (super::exit_kind::KILLED, 0),
-            ExitReason::Faulted(code) => (super::exit_kind::FAULTED, code as i64),
+        let (tag, payload) = match reason {
+            ExitReason::Ok => (super::exit_tag::OK, 0),
+            ExitReason::Killed => (super::exit_tag::KILLED, 0),
+            ExitReason::Faulted(code) => (super::exit_tag::FAULTED, code as i64),
         };
-        write_i64(dst, KIND_OFFSET, kind);
-        write_i64(dst, CODE_OFFSET, code);
+        write_i64(dst, TAG_OFFSET, tag);
+        write_i64(dst, PAYLOAD_OFFSET, payload);
     }
 }
 
-/// `ExitReason.kind` values.
-pub mod exit_kind {
+/// `ExitReason` variant tags.
+pub mod exit_tag {
     /// `main` returned normally.
     pub const OK: i64 = 0;
     /// The kernel or REPL ended the task.
     pub const KILLED: i64 = 1;
-    /// The task faulted; `code` holds the `FaultCode` ordinal.
+    /// The task faulted; the payload holds the `FaultCode` ordinal.
     pub const FAULTED: i64 = 2;
 }
 
@@ -173,8 +173,8 @@ mod tests {
         assert_eq!(diagnostic::LENGTH_OFFSET, 176);
         assert_eq!(diagnostic::TASK_ID_OFFSET, 184);
         assert_eq!(diagnostic::SIZE, 192);
-        assert_eq!(exit_reason::KIND_OFFSET, 0);
-        assert_eq!(exit_reason::CODE_OFFSET, 8);
+        assert_eq!(exit_reason::TAG_OFFSET, 0);
+        assert_eq!(exit_reason::PAYLOAD_OFFSET, 8);
         assert_eq!(exit_reason::SIZE, 16);
     }
 
@@ -202,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn exit_reason_maps_the_staged_kinds() {
+    fn exit_reason_maps_the_sum_variants() {
         let mut bytes = [0u8; exit_reason::SIZE as usize];
         exit_reason::write(&mut bytes, ExitReason::Ok);
         assert_eq!(bytes, [0u8; 16]);

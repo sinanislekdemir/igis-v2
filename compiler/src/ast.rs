@@ -26,15 +26,15 @@ pub struct Unit<'a> {
     pub procs: &'a [ProcDecl<'a>],
 }
 
-/// `type Name = (Variant, ...);` or `type Name = record field: T; end;`
+/// `type Name = (Variant, ...);`, `type Name = record field: T; end;` or
+/// `type Name = Variant | Variant(payload: T);`
 ///
-/// A `type` declaration is either an enum or a record. Sum types remain future
-/// work.
+/// A `type` declaration is an enum, a record or a sum type.
 #[derive(Debug, Clone, Copy)]
 pub struct TypeDecl<'a> {
     /// Type name.
     pub name: &'a str,
-    /// Enum variants or record fields.
+    /// Enum variants, record fields or sum variants.
     pub kind: TypeKind<'a>,
     /// 1-based source line.
     pub line: u32,
@@ -50,6 +50,22 @@ pub enum TypeKind<'a> {
     Enum(&'a [&'a str]),
     /// `record field: T; other: T; end;`: fields in declaration order.
     Record(&'a [FieldDecl<'a>]),
+    /// `Variant | Variant(payload: T) | ...`: variants in declaration order,
+    /// tags `0..n-1` (spec 0003, "Sum types").
+    Sum(&'a [SumVariantDecl<'a>]),
+}
+
+/// One sum-type variant: `Name` or `Name(field: T)`.
+#[derive(Debug, Clone, Copy)]
+pub struct SumVariantDecl<'a> {
+    /// Variant name.
+    pub name: &'a str,
+    /// Optional single payload: field name and declared type.
+    pub payload: Option<(&'a str, TypeRef<'a>)>,
+    /// 1-based source line.
+    pub line: u32,
+    /// 1-based source column.
+    pub column: u32,
 }
 
 /// One record field: `name: type;`. A grouped declaration `x, y: int;` becomes
@@ -180,8 +196,30 @@ pub enum Stmt<'a> {
         /// Loop body.
         body: &'a Stmt<'a>,
     },
+    /// `case value of Variant: ... Variant(binding): ... end`
+    Case {
+        /// Scrutinee: a variable or field of a sum type.
+        value: &'a Expr<'a>,
+        /// Arms in source order; exhaustive over the sum type's variants.
+        arms: &'a [CaseArm<'a>],
+    },
     /// `begin ... end`
     Block(&'a [Stmt<'a>]),
+}
+
+/// One `case` arm: `Variant: statements` or `Variant(binding): statements`.
+#[derive(Debug, Clone, Copy)]
+pub struct CaseArm<'a> {
+    /// Variant name, resolved against the scrutinee's sum type.
+    pub variant: &'a str,
+    /// Name the payload is bound to inside the arm, if the variant carries one.
+    pub binding: Option<&'a str>,
+    /// Statements of the arm; no fallthrough.
+    pub body: &'a [Stmt<'a>],
+    /// 1-based source line.
+    pub line: u32,
+    /// 1-based source column.
+    pub column: u32,
 }
 
 /// An assignment destination.

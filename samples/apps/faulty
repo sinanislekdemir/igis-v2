@@ -1,7 +1,7 @@
 unit faulty;
 
-// Faults at run time so a parent can observe `ExitReason.kind = 2` (Faulted)
-// and `code = DivideByZero` through `core.wait`.
+// Faults at run time so a parent can observe `ExitReason.Faulted(code)` with
+// `code = FaultCode.DivideByZero` through `core.wait`.
 uses core;
 
 var

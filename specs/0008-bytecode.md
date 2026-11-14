@@ -108,7 +108,7 @@ particular core count or quantum size.
 | `array[T,N]` | `N` elements, compiler-aligned |
 | enum | 8-byte ordinal, nominally typed (spec 0003) |
 | record | fields in declaration order, each aligned to 8; size rounded to 8 (spec 0003) |
-| sum type | 8-byte tag, then the largest variant |
+| sum type | 8-byte tag at offset 0, then the largest variant payload at offset 8; size rounded to 8 (spec 0003) |
 | `ring[T,N]` | array layout plus head and count words |
 | `map[K,V,N]` | table of `2^ceil(log2(2N))` entries, FNV-1a hashing (spec 0003) |
 | endpoint | 8-byte handle, direction checked by the type checker |
@@ -127,6 +127,18 @@ its first byte; a buffer field is referenced at its data (`field_offset + 8`), w
 the length word at `field_offset` for the ordinary buffer opcodes. A whole-record
 assignment (`dst := src`) and a `value` record parameter copy are `copy_refs` with the
 compile-time record size, which is an overlap-safe move inside one region.
+
+Sum types add **no opcodes**. Construction writes the tag with `const` + `store_ref` at the
+sum's first byte and the payload through the same instructions a value of the payload type
+uses: a scalar/enum payload is `store_ref` at `+8`, a buffer payload is `clear`/`append`
+against `sum + 16` (the data area, leaving the length word at `+8`), and a record or nested
+sum payload is a whole-image `copy_refs` from `+8`. A whole-sum assignment and a `value`
+sum parameter are `copy_refs` with the compile-time sum size. `case` reads the tag with
+`load_ref` at the sum's first byte, compares it with `eq` against each variant ordinal, and
+branches with `jz`; an arm's payload binding is a `copy_refs` of the payload size from
+`sum + 8` into a fresh local, so the binding is a writable by-value copy. The compiler
+proves exhaustiveness, so the final arm needs no run-time fallback; a tag that no arm
+matches cannot be produced by a compiled package.
 
 ### Frames
 
@@ -177,7 +189,7 @@ artifact:
 | Comparisons | `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `cmp_buffers` for buffers |
 | Conversions | `i2f`, `f2i` (truncate and range-check), `trunc8`, `sext`, `zext` |
 | Control flow | `jmp`, `jz`, `jnz`, `call`, `ret` |
-| Buffers and aggregates | `append` (capacity-checked), `load_u8`/`store_u8` (length- and capacity-checked), `find` (byte scan), `substr` (checked slice), `format_int` (decimal/hex formatting), `enum_cast` (range-checked ordinal → enum), `ref_offset` (field reference), `copy_refs` (record copy), `array_load/store`, `ring_push/pop`, `map_get/put/has/remove` |
+| Buffers and aggregates | `append` (capacity-checked), `load_u8`/`store_u8` (length- and capacity-checked), `find` (byte scan), `substr` (checked slice), `format_int` (decimal/hex formatting), `enum_cast` (range-checked ordinal → enum), `ref_offset` (field reference), `copy_refs` (record, sum value and `case` payload copies), `array_load/store`, `ring_push/pop`, `map_get/put/has/remove` |
 | Builtins | `call_builtin n` — host-interface and `core` primitives |
 | System | `safe` (explicit poll), `trap` (compiler-inserted fault) |
 
@@ -321,3 +333,4 @@ pub fn run(task: &mut Task);
 | 2026-11-14 | Integer formatting and ports: `format_int` (`a` is the buffer kind, a capacity immediate; destination/value/base/width on the stack; decimal/hex, sign and zero padding, pushes the byte count or `-4`/`-6`) grows ABI v1 from 59 to 60 opcodes; builtins `port_in8` (7) and `port_out8` (8) route `syslib` through the host with defaults. |
 | 2026-11-14 | Enums: `enum_cast` (immediate `count`, pop an `int` ordinal, fault `Overflow` outside `0..count`, push the same slot typed as the enum) grows ABI v1 from 60 to 61 opcodes; enums are an 8-byte ordinal at run time and need no other instruction. Builtins `spawn`/`wait`/`kill` switch to the `Status`-returning ABI: `spawn` pops `(path, args, id_ref)`, `wait` pops `(id, reason_ref)` and writes the staged reason int, `kill` pops `id`; each pushes the `Status` ordinal (spec 0005). |
 | 2026-11-14 | Records: `ref_offset` (pop a reference, add an 8-byte-aligned immediate field offset, bounds-check, push) and `copy_refs` (pop a count and a source/destination reference, bounds-check both, overlap-safe move into a writable region) grow ABI v1 from 61 to 63 opcodes. Record layout and field offsets stay a compiler concern; the interpreter sees only byte offsets. `Diagnostic`/`ExitReason` are predeclared records at the fixed `abi::layout` offsets, and the `spawn`/`wait` builtins pop a record reference (`SPAWN` grows from 3 to 4 operands with `diag`; `WAIT` writes the 16-byte `ExitReason`). |
+| 2026-11-14 | Sum types need no new opcodes: construction is `const` + `store_ref` for the tag plus the payload type's ordinary instructions, `case` is `load_ref`/`eq`/`jz` over the tag, and a whole-sum copy or `case` binding is `copy_refs` with the compile-time size. ABI v1 stays at 63 opcodes. `ExitReason` becomes the real sum type at the same 16-byte layout (`TAG_OFFSET` 0, `PAYLOAD_OFFSET` 8); `WAIT` writes the tag and the `FaultCode` payload unchanged. |

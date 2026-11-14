@@ -23,19 +23,31 @@ begin
   core.write(text);
 end;
 
-// Reports the child's `ExitReason` record. The record is the staged form of
-// the spec's sum type: `kind` is 0 Ok, 1 Killed, 2 Faulted, and `code` holds
-// the fault code (spec 0003, spec 0005).
+// Reports the child's `ExitReason` sum value (spec 0003, "Sum types"). `case`
+// is exhaustive over the three variants and binds `Faulted`'s payload to a
+// `FaultCode` local; `FaultCode`'s variant names are qualified because some of
+// them collide with `Status` (spec 0003, "Predeclared types").
 procedure report(why: const ExitReason);
 begin
-  if why.kind = 0 then
-    say("child: ok\n")
-  else if why.kind = 1 then
-    say("child: killed\n")
-  else if why.kind = 2 then
-    say("child: faulted\n")
-  else
-    say("child: bad reason\n");
+  case why of
+    Ok: say("child: ok\n")
+    Killed: say("child: killed\n")
+    Faulted(code):
+    begin
+      say("child: faulted ");
+      if code = FaultCode.DivideByZero then
+        say("DivideByZero")
+      else if code = FaultCode.Overflow then
+        say("Overflow")
+      else if code = FaultCode.CapacityExceeded then
+        say("CapacityExceeded")
+      else if code = FaultCode.IoError then
+        say("IoError")
+      else
+        say("other");
+      say("\n");
+    end;
+  end;
 end;
 
 procedure main(args: const string[1024]);

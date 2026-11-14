@@ -27,7 +27,7 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | Q8 | Debug/introspection primitive | shape open (task listing, counters, trace); none in M1 | after the shell exists |
 | Q9 | DMA and block primitives | handle model fixed; no primitive in M1 | first real block device |
 | Q39 | Console/stream multiplexing (`poll`/`select`) | none in M1; a task blocks on one source at a time | when an application must serve two input sources |
-| Q43 | Sum types for `ExitReason` and `core.run` | records are implemented (`Diagnostic` and `ExitReason` are predeclared, and `core.spawn(path, args, var diag, var id)` / `core.wait(id, var reason)` use them), so the staged reason `int` and the missing `var diag` are gone. What remains is the sum-type form of `ExitReason` (`Ok`/`Killed`/`Faulted(code)` with pattern matching), a distinct `TaskId` type, and `core.run` (spawn + wait) once `stdlib` exists (spec 0005, "Implemented ABI") | before `stdlib` exposes `run` |
+| Q43 | `core.run`, `TaskId` and the async compile-diagnostic path | sum types are implemented, so `ExitReason` is the real `Ok | Killed | Faulted(code: FaultCode)` and `core.wait` writes it for an exhaustive `case`. What remains is a distinct `TaskId` type, `core.run` (spawn + wait) once `stdlib` exists, and reporting a compile failure the service discovers *after* `spawn` returned through `diag` instead of `Faulted(IoError)` (spec 0005, "Implemented ABI") | before `stdlib` exposes `run` |
 | Q44 | Staged kernel line discipline (`core.read_line`) | the kernel polls COM1/PS-2, echoes, assembles and stores lines in a 4-line ring; `core.read_line(var buf)` blocks until a line exists and truncates to the buffer. Replace with application-side editing when string length/truncate/insert operations exist: indexing alone reads and writes single bytes but cannot delete one (spec 0005, "Staged line discipline") | when `stdlib` string editing exists |
 | Q45 | Staged `syslib` handles | `syslib.port_in8`/`port_out8` are implemented with `Port` as a plain scalar `uint` (low 16 bits used); there are no opaque `Port`/`MmioRegion` types, MMIO mapping, or DMA/block primitives yet. Replace with the handle model when MMIO or DMA lands (specs 0003, 0005) | first MMIO or DMA device |
 
@@ -179,8 +179,9 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
 10. ~~REPL request service and blocking~~ — done: `core.spawn`/`wait`/`kill`, a 1024-slot
     request queue serviced before every claim, a 64-entry exit ring, blocked tasks skipped
     by `claim` and woken on child termination; the `shell` → `child` sample proves the
-    path. The primitives return `Status` and fill the caller's records: `Diagnostic`
-    on `spawn` and `ExitReason` on `wait` (Q43 is now sum types and `core.run`).
+    path. The primitives return `Status` and fill the caller's `Diagnostic` on `spawn`
+    and the `ExitReason` sum type on `wait` (Q43 is now `core.run`, `TaskId` and the
+    request-completion diagnostic path).
 11. ~~Console input~~ — done: COM1 and the PS/2 keyboard are polled in the service
     opportunity, a kernel-staged line ring echoes/edits, and `core.read_line` blocks the
     shell until a line exists (Q44; spec 0005).
@@ -220,5 +221,7 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
     `value`/`const`/`var` record parameters. `Diagnostic` and `ExitReason` are predeclared
     at the fixed `abi::layout` offsets; `core.spawn(path, args, var diag, var id)` fills
     `diag` on a synchronous failure and clears it on success, and `core.wait(id, var reason)`
-    writes `kind`/`code`. The shell prints `diag.message` on a failed spawn and reports
-    `reason.kind`. Q43 is now sum types, `TaskId` and `core.run`.
+    writes the reason's tag/payload. Sum types and `case` landed in the same session, so
+    the shell matches `ExitReason` with an exhaustive `case` and reports `Faulted`'s
+    `FaultCode` payload. Q43 is now `core.run`, `TaskId` and the request-completion
+    diagnostic path.

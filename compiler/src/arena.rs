@@ -205,6 +205,13 @@ impl<'a, 'b, T: Copy> SliceVec<'a, 'b, T> {
         self.slots[index].write(value);
     }
 
+    /// Drops everything past `len`. Used to end the scope of `case` payload
+    /// bindings, which exist only inside one arm.
+    pub fn truncate(&mut self, len: usize) {
+        debug_assert!(len <= self.len);
+        self.len = len;
+    }
+
     /// Consumes the vector, returning the live prefix.
     pub fn into_slice(self) -> &'a [T] {
         let len = self.len;

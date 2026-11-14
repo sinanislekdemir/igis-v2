@@ -43,6 +43,10 @@ pub enum Kind {
     /// carries the size in bytes so frame and state layout need no extra
     /// table lookup.
     Record(u16),
+    /// A nominal sum type, by compiler-local sum id. The layout (variant
+    /// payloads and size) lives in the compiler's sum table; [`Type::cap`]
+    /// carries the size in bytes.
+    Sum(u16),
 }
 
 impl Kind {
@@ -58,6 +62,7 @@ impl Kind {
             Kind::Bytes => "bytes",
             Kind::Enum(_) => "enum",
             Kind::Record(_) => "record",
+            Kind::Sum(_) => "sum",
         }
     }
 
@@ -69,6 +74,11 @@ impl Kind {
     /// Returns true for a nominal record type.
     pub const fn is_record(self) -> bool {
         matches!(self, Kind::Record(_))
+    }
+
+    /// Returns true for a nominal sum type.
+    pub const fn is_sum(self) -> bool {
+        matches!(self, Kind::Sum(_))
     }
 }
 
@@ -108,6 +118,14 @@ impl Type {
         }
     }
 
+    /// A nominal sum type, with its layout size in bytes.
+    pub const fn sum(id: u16, size: u32) -> Self {
+        Type {
+            kind: Kind::Sum(id),
+            cap: size,
+        }
+    }
+
     /// True for `string`/`bytes`.
     pub const fn is_buffer(self) -> bool {
         self.kind.is_buffer()
@@ -118,9 +136,14 @@ impl Type {
         self.kind.is_record()
     }
 
-    /// True for every scalar kind (not a buffer and not a record).
+    /// True for a nominal sum type.
+    pub const fn is_sum(self) -> bool {
+        self.kind.is_sum()
+    }
+
+    /// True for every scalar kind (not a buffer, record or sum).
     pub const fn is_scalar(self) -> bool {
-        !self.kind.is_buffer() && !self.kind.is_record()
+        !self.kind.is_buffer() && !self.kind.is_record() && !self.kind.is_sum()
     }
 
     /// Number of bytes this type occupies in `state` or in a frame, including
@@ -128,8 +151,8 @@ impl Type {
     pub const fn size(self) -> u32 {
         match self.kind {
             Kind::String | Kind::Bytes => align8(8 + self.cap),
-            // A record's `cap` already holds its aligned size.
-            Kind::Record(_) => self.cap,
+            // A record's or sum's `cap` already holds its aligned size.
+            Kind::Record(_) | Kind::Sum(_) => self.cap,
             _ => 8,
         }
     }
@@ -142,7 +165,12 @@ impl Type {
             Kind::Uint => Some(value_kind::UINT),
             Kind::Byte => Some(value_kind::BYTE),
             Kind::Float => Some(value_kind::F64),
-            Kind::Bool | Kind::String | Kind::Bytes | Kind::Enum(_) | Kind::Record(_) => None,
+            Kind::Bool
+            | Kind::String
+            | Kind::Bytes
+            | Kind::Enum(_)
+            | Kind::Record(_)
+            | Kind::Sum(_) => None,
         }
     }
 }
@@ -154,8 +182,8 @@ impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.kind {
             Kind::String | Kind::Bytes => write!(f, "{}[{}]", self.kind.name(), self.cap),
-            // A record renders as `record`; codegen resolves the name.
-            Kind::Record(_) => f.write_str(self.kind.name()),
+            // A record or sum renders as its kind; codegen resolves the name.
+            Kind::Record(_) | Kind::Sum(_) => f.write_str(self.kind.name()),
             _ => f.write_str(self.kind.name()),
         }
     }

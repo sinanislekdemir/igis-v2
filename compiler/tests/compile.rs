@@ -1142,6 +1142,445 @@ end;
     assert!(error.message.contains("`uint` value"), "{}", error.message);
 }
 
+/// Builds a minimal unit that constructs `ExitReason` and matches it with
+/// `case`, proving the predeclared sum type is usable like any other.
+const EXIT_REASON_CASE: &[u8] = br#"
+unit t;
+
+var
+  reason: ExitReason;
+  st: Status;
+  ordinal: FaultCode;
+
+procedure main(args: const string[1024]);
+begin
+  st := Ok;
+  reason := Ok;
+  ordinal := FaultCode(4);
+  if ordinal = FaultCode.DivideByZero then
+    st := Ok;
+  reason := Faulted(ordinal);
+  case reason of
+    Ok: st := Ok
+    Killed: st := NotFound
+    Faulted(code):
+    begin
+      if code = FaultCode.DivideByZero then
+        st := Ok
+      else
+        st := Invalid;
+    end
+  end;
+  reason := Killed;
+end;
+"#;
+
+#[test]
+fn sums_construct_copy_and_match() {
+    let source = br#"
+unit t;
+
+uses core;
+
+type Token = Ident(name: string[8]) | Number(value: int) | Eof;
+
+var
+  token: Token;
+  copy: Token;
+
+procedure show(t: const Token);
+begin
+  case t of
+    Ident(name):
+    begin
+      core.write(name);
+      core.write("\n");
+    end
+    Number(value): core.write("number\n")
+    Eof: core.write("eof\n")
+  end;
+end;
+
+procedure main(args: const string[1024]);
+begin
+  token := Number(7);
+  copy := token;
+  token := Ident("x" + "y");
+  show(copy);
+  show(token);
+  token := Eof;
+  show(token);
+end;
+"#;
+    let package = compile(source, "t.ig").expect("sum types compile");
+    let ops = opcodes_of(&package);
+    for (op, name) in [
+        (abi::opcodes::CONST, "const"),
+        (abi::opcodes::STORE_REF, "store_ref"),
+        (abi::opcodes::REF_OFFSET, "ref_offset"),
+        (abi::opcodes::COPY_REFS, "copy_refs"),
+        (abi::opcodes::LOAD_REF, "load_ref"),
+        (abi::opcodes::EQ, "eq"),
+        (abi::opcodes::JZ, "jz"),
+        (abi::opcodes::JMP, "jmp"),
+    ] {
+        assert!(ops.contains(&op), "no {name} in {ops:?}");
+    }
+}
+
+#[test]
+fn predeclared_exit_reason_is_a_usable_sum_type() {
+    let package = compile(EXIT_REASON_CASE, "t.ig").expect("ExitReason compiles");
+    let ops = opcodes_of(&package);
+    // A foreign `FaultCode` variant is a plain ordinal constant.
+    assert!(ops.contains(&abi::opcodes::EQ), "no tag/payload comparison");
+}
+
+#[test]
+fn case_must_be_exhaustive() {
+    let source = br#"
+unit t;
+
+type Token = A | B;
+
+var
+  t: Token;
+
+procedure main(args: const string[1024]);
+begin
+  t := A;
+  case t of
+    A: t := B
+  end;
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("a missing arm must not compile");
+    assert!(
+        error.message.contains("non-exhaustive `case`") && error.message.contains("`B`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_duplicate_case_arm_is_rejected() {
+    let source = br#"
+unit t;
+
+type Token = A | B;
+
+var
+  t: Token;
+
+procedure main(args: const string[1024]);
+begin
+  t := A;
+  case t of
+    A: t := A
+    A: t := B
+    B: t := A
+  end;
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("a duplicate arm must not compile");
+    assert!(
+        error.message.contains("duplicate arm for variant `A`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn an_unknown_case_variant_is_rejected() {
+    let source = br#"
+unit t;
+
+type Token = A | B;
+
+var
+  t: Token;
+
+procedure main(args: const string[1024]);
+begin
+  t := A;
+  case t of
+    A: t := A
+    B: t := B
+    Missing: t := A
+  end;
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("an unknown variant must not compile");
+    assert!(
+        error.message.contains("has no variant `Missing`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_payload_type_mismatch_is_rejected() {
+    let source = br#"
+unit t;
+
+type Token = Ident(name: string[8]) | Number(value: int) | Eof;
+
+var
+  token: Token;
+
+procedure main(args: const string[1024]);
+begin
+  token := Number(true);
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("the payload must match exactly");
+    assert!(
+        error.message.contains("expected `int`, found `bool`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_nullary_variant_with_a_payload_is_rejected() {
+    let source = br#"
+unit t;
+
+type Token = A | B;
+
+var
+  token: Token;
+
+procedure main(args: const string[1024]);
+begin
+  token := A(1);
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("A takes no payload");
+    assert!(
+        error.message.contains("carries no payload"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_payload_variant_without_a_payload_is_rejected() {
+    let source = br#"
+unit t;
+
+type Token = Ident(name: string[8]) | Eof;
+
+var
+  token: Token;
+
+procedure main(args: const string[1024]);
+begin
+  token := Ident;
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("Ident needs a payload");
+    assert!(
+        error.message.contains("carries a payload"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_variant_of_another_sum_type_is_rejected() {
+    let source = br#"
+unit t;
+
+type Token = Ident(name: string[8]) | Eof;
+type Expr = Literal(value: int) | Empty;
+
+var
+  token: Token;
+
+procedure main(args: const string[1024]);
+begin
+  token := Literal(1);
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("Literal belongs to Expr");
+    assert!(
+        error
+            .message
+            .contains("`Literal` is a variant of `Expr`, not of `Token`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_sum_value_cannot_be_copied_between_sum_types() {
+    let source = br#"
+unit t;
+
+type Token = Ident(name: string[8]) | Eof;
+type Expr = Literal(value: int) | Empty;
+
+var
+  token: Token;
+  expr: Expr;
+
+procedure main(args: const string[1024]);
+begin
+  token := Ident("x");
+  expr := Literal(1);
+  token := expr;
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("sum types are nominal");
+    assert!(
+        error
+            .message
+            .contains("type mismatch: expected `Token`, found `Expr`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_sum_value_is_not_a_scalar() {
+    let source = br#"
+unit t;
+
+type Token = A | B;
+
+var
+  token: Token;
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  token := A;
+  n := token;
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("a sum is not a scalar");
+    assert!(
+        error.message.contains("cannot be used as a scalar value")
+            && error.message.contains("match it with `case`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn case_needs_a_sum_subject() {
+    let source = br#"
+unit t;
+
+var
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := 1;
+  case n of
+    A: n := 2
+  end;
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("`case` needs a sum");
+    assert!(
+        error.message.contains("`case` needs a sum value"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn sum_variants_share_one_namespace() {
+    let source = br#"
+unit t;
+
+type One = Foo | Bar;
+type Two = Foo | Baz;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("variants are globally unique");
+    assert!(
+        error.message.contains("duplicate variant `Foo`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_payloadless_arm_needs_no_binding() {
+    let source = br#"
+unit t;
+
+type Token = A | B(value: int);
+
+var
+  token: Token;
+
+procedure main(args: const string[1024]);
+begin
+  token := A;
+  case token of
+    A(x): token := A
+    B(value): token := B(value)
+  end;
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("A has no payload to bind");
+    assert!(
+        error.message.contains("carries no payload"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_payload_arm_must_bind_its_payload() {
+    let source = br#"
+unit t;
+
+type Token = A | B(value: int);
+
+var
+  token: Token;
+
+procedure main(args: const string[1024]);
+begin
+  token := A;
+  case token of
+    A: token := A
+    B: token := A
+  end;
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("B carries a payload");
+    assert!(
+        error.message.contains("carries a payload"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn predeclared_sum_and_enum_names_cannot_be_declared() {
+    for source in [
+        b"unit t;\n\ntype ExitReason = A | B;\n\nprocedure main(args: const string[1024]);\nbegin\nend;\n" as &[u8],
+        b"unit t;\n\ntype FaultCode = (A, B);\n\nprocedure main(args: const string[1024]);\nbegin\nend;\n",
+    ] {
+        let error = compile(source, "t.ig").expect_err("predeclared names are reserved");
+        assert!(
+            error.message.contains("is predeclared by the language"),
+            "{}",
+            error.message
+        );
+    }
+}
+
 /// The exact diagnostic text expected when the nesting limit is reached.
 fn nesting_message() -> String {
     format!("nesting too deep (limit {})", compiler::MAX_NESTING)

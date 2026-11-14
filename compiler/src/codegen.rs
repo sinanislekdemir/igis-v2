@@ -21,6 +21,11 @@
 //! A buffer local occupies `[len: u64][data: cap]`; `ref_local`/`ref_state`
 //! point at `data`, and every buffer instruction reads `len` at `data - 8`.
 //!
+//! A sum value is an 8-byte tag at offset 0 and the payload area at offset 8.
+//! Sum types add no opcode: construction stores the tag with `store_ref` and
+//! the payload with the payload type's ordinary instructions, and `case`
+//! compares the tag and copies the payload into an arm-local slot.
+//!
 //! Name resolution is table-driven, not hash-driven: a unit is small, so
 //! constants, state variables, procedures and locals are looked up by a linear
 //! scan of an arena-backed slice. That keeps declaration order observable and
@@ -55,13 +60,17 @@ struct Const<'a> {
     value: i64,
 }
 
-/// One enum type known to this compilation: the predeclared `Status` first,
-/// then every `type` declaration in source order. The index in this table is
-/// the compiler-local enum id carried by [`Kind::Enum`].
+/// One enum type known to this compilation: the predeclared `Status` and
+/// `FaultCode` first, then every `type` declaration in source order. The index
+/// in this table is the compiler-local enum id carried by [`Kind::Enum`].
 #[derive(Debug, Clone, Copy)]
 struct EnumDef<'a> {
     name: &'a str,
     variants: &'a [&'a str],
+    /// True when the variants are global constants (`Status` and every user
+    /// enum). `FaultCode` sets this false because several of its names collide
+    /// with `Status`; it is named qualified (`FaultCode.IoError`).
+    global_variants: bool,
 }
 
 /// One record field after layout: name, resolved type and byte offset from the
@@ -83,11 +92,34 @@ struct RecordDef<'a> {
     size: u32,
 }
 
+/// One sum-type variant after checking: its name and optional payload type.
+#[derive(Debug, Clone, Copy)]
+struct SumVariantDef<'a> {
+    name: &'a str,
+    payload: Option<Type>,
+}
+
+/// One nominal sum type known to this compilation. The index in this table is
+/// the compiler-local sum id carried by [`Kind::Sum`].
+///
+/// Layout (spec 0003, "Sum types"): an 8-byte tag at offset 0 and the payload
+/// area at offset 8, sized by the largest variant payload and rounded to 8.
+#[derive(Debug, Clone, Copy)]
+struct SumDef<'a> {
+    name: &'a str,
+    variants: &'a [SumVariantDef<'a>],
+    /// Size in bytes, already rounded to 8.
+    size: u32,
+}
+
 /// Compiler-local id of the predeclared `Diagnostic` record.
 const DIAGNOSTIC_RECORD: u16 = 0;
 
-/// Compiler-local id of the predeclared `ExitReason` record.
-const EXIT_REASON_RECORD: u16 = 1;
+/// Compiler-local id of the predeclared `ExitReason` sum type.
+const EXIT_REASON_SUM: u16 = 0;
+
+/// Compiler-local id of the predeclared `FaultCode` enum. It follows `Status`.
+const FAULT_CODE_ENUM: u16 = 1;
 
 /// Fields of the predeclared `Diagnostic` record, at the offsets `abi::layout`
 /// fixes. The kernel writes the same fields directly.
@@ -134,18 +166,38 @@ const DIAGNOSTIC_FIELDS: [RecordField<'static>; 8] = [
     },
 ];
 
-/// Fields of the predeclared `ExitReason` record: the staged record form of
-/// the spec's `Ok | Killed | Faulted(code)` sum type.
-const EXIT_REASON_FIELDS: [RecordField<'static>; 2] = [
-    RecordField {
-        name: "kind",
-        ty: Type::scalar(Kind::Int),
-        off: layout::exit_reason::KIND_OFFSET,
+/// Variants of the predeclared `FaultCode` enum, in the order `abi::FaultCode`
+/// fixes. They are not global constants: `FaultCode` names them qualified
+/// (`FaultCode.DivideByZero`) because several collide with `Status` variants.
+const FAULT_CODE_VARIANTS: [&str; 12] = [
+    "GenericFault",
+    "OutOfBounds",
+    "CapacityExceeded",
+    "Overflow",
+    "DivideByZero",
+    "StackOverflow",
+    "BudgetExceeded",
+    "WatchdogTimeout",
+    "IllegalOperation",
+    "StreamError",
+    "IoError",
+    "ExitFault",
+];
+
+/// Variants of the predeclared `ExitReason` sum type, in the order
+/// `abi::layout::exit_tag` fixes. `Faulted` carries the `FaultCode` enum.
+const EXIT_REASON_VARIANTS: [SumVariantDef<'static>; 3] = [
+    SumVariantDef {
+        name: "Ok",
+        payload: None,
     },
-    RecordField {
-        name: "code",
-        ty: Type::scalar(Kind::Int),
-        off: layout::exit_reason::CODE_OFFSET,
+    SumVariantDef {
+        name: "Killed",
+        payload: None,
+    },
+    SumVariantDef {
+        name: "Faulted",
+        payload: Some(Type::enumeration(FAULT_CODE_ENUM)),
     },
 ];
 
@@ -266,6 +318,35 @@ fn find_record(records: &[RecordDef<'_>], name: &str) -> Option<u16> {
         .and_then(|index| u16::try_from(index).ok())
 }
 
+/// Finds a sum type by name.
+fn find_sum(sums: &[SumDef<'_>], name: &str) -> Option<u16> {
+    sums.iter()
+        .position(|sum| sum.name == name)
+        .and_then(|index| u16::try_from(index).ok())
+}
+
+/// Returns the sum definition a type names, if it is a sum type.
+fn sum_of<'a>(sums: &[SumDef<'a>], ty: Type) -> Option<SumDef<'a>> {
+    match ty.kind {
+        Kind::Sum(id) => sums.get(id as usize).copied(),
+        _ => None,
+    }
+}
+
+/// Returns a variant of a sum type by name.
+fn variant_of<'a>(sum: &SumDef<'a>, name: &str) -> Option<SumVariantDef<'a>> {
+    sum.variants
+        .iter()
+        .find(|variant| variant.name == name)
+        .copied()
+}
+
+/// True when any sum type already uses `name` as a variant.
+fn has_sum_variant(sums: &[SumDef<'_>], name: &str) -> bool {
+    sums.iter()
+        .any(|sum| sum.variants.iter().any(|variant| variant.name == name))
+}
+
 /// Returns the record definition a type names, if it is a record.
 fn record_of<'a>(records: &[RecordDef<'a>], ty: Type) -> Option<RecordDef<'a>> {
     match ty.kind {
@@ -284,8 +365,14 @@ fn field_of<'a>(records: &[RecordDef<'a>], ty: Type, name: &str) -> Option<Recor
 }
 
 /// Finds a variant in any enum, returning its enum id and ordinal.
+///
+/// Only enums whose variants are global constants take part; `FaultCode` is
+/// named qualified because its variant names overlap `Status`.
 fn find_variant(enums: &[EnumDef<'_>], name: &str) -> Option<(u16, u32)> {
     for (index, enumeration) in enums.iter().enumerate() {
+        if !enumeration.global_variants {
+            continue;
+        }
         if let Some(ordinal) = enumeration
             .variants
             .iter()
@@ -295,6 +382,20 @@ fn find_variant(enums: &[EnumDef<'_>], name: &str) -> Option<(u16, u32)> {
         }
     }
     None
+}
+
+/// Finds a qualified enum variant, `TypeName.Variant`.
+fn find_qualified_variant(
+    enums: &[EnumDef<'_>],
+    type_name: &str,
+    name: &str,
+) -> Option<(u16, u32)> {
+    let id = find_enum(enums, type_name)?;
+    let ordinal = enums[id as usize]
+        .variants
+        .iter()
+        .position(|variant| *variant == name)?;
+    Some((id, ordinal as u32))
 }
 
 /// True when any enum already uses `name` as a variant.
@@ -358,19 +459,28 @@ pub(crate) fn compile_unit<'a>(
     }
 
     // The predeclared `Status` comes first, so its id is `STATUS_ENUM` and its
-    // ordinals match `abi::Status`. User `type` declarations follow in source
-    // order; the index in this table is the compiler-local enum id.
+    // ordinals match `abi::Status`. `FaultCode` follows, with the ordinals of
+    // `abi::FaultCode`; its variant names are qualified because some collide
+    // with `Status`. User `type` declarations follow in source order; the index
+    // in this table is the compiler-local enum id.
     let mut enums = SliceVec::<EnumDef<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
     enums
         .push(EnumDef {
             name: "Status",
             variants: &STATUS_VARIANTS,
+            global_variants: true,
+        })
+        .map_err(|_| arena_full(path, name, 1, 1))?;
+    enums
+        .push(EnumDef {
+            name: "FaultCode",
+            variants: &FAULT_CODE_VARIANTS,
+            global_variants: false,
         })
         .map_err(|_| arena_full(path, name, 1, 1))?;
 
-    // The predeclared records are the first two entries: `Diagnostic` and
-    // `ExitReason`. Their layouts are fixed by `abi::layout`, so the kernel and
-    // the compiler cannot disagree.
+    // The predeclared `Diagnostic` is the first record entry; its layout is
+    // fixed by `abi::layout`, so the kernel and the compiler cannot disagree.
     let mut records =
         SliceVec::<RecordDef<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
     records
@@ -380,25 +490,23 @@ pub(crate) fn compile_unit<'a>(
             size: layout::diagnostic::SIZE,
         })
         .map_err(|_| arena_full(path, name, 1, 1))?;
-    records
-        .push(RecordDef {
-            name: "ExitReason",
-            fields: &EXIT_REASON_FIELDS,
-            size: layout::exit_reason::SIZE,
-        })
-        .map_err(|_| arena_full(path, name, 1, 1))?;
+
+    // The predeclared `ExitReason` is the first sum type
+    // (`Ok | Killed | Faulted(code: FaultCode)`); its tag/payload layout is
+    // `abi::layout::exit_reason`.
+    let mut sums = SliceVec::<SumDef<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
+    sums.push(SumDef {
+        name: "ExitReason",
+        variants: &EXIT_REASON_VARIANTS,
+        size: layout::exit_reason::SIZE,
+    })
+    .map_err(|_| arena_full(path, name, 1, 1))?;
 
     for decl in unit.types {
-        if decl.name == "Status" {
-            return Err(diag(
-                path,
-                name,
-                decl.line,
-                decl.column,
-                format_args!("`Status` is predeclared by the language and cannot be declared"),
-            ));
-        }
-        if decl.name == "Diagnostic" || decl.name == "ExitReason" {
+        if matches!(
+            decl.name,
+            "Status" | "FaultCode" | "Diagnostic" | "ExitReason"
+        ) {
             return Err(diag(
                 path,
                 name,
@@ -424,6 +532,7 @@ pub(crate) fn compile_unit<'a>(
         }
         if find_enum(enums.as_slice(), decl.name).is_some()
             || find_record(records.as_slice(), decl.name).is_some()
+            || find_sum(sums.as_slice(), decl.name).is_some()
             || find_const(consts.as_slice(), decl.name).is_some()
         {
             return Err(diag(
@@ -440,6 +549,7 @@ pub(crate) fn compile_unit<'a>(
                     if has_variant(enums.as_slice(), variant)
                         || variants[..index].contains(variant)
                         || find_const(consts.as_slice(), variant).is_some()
+                        || has_sum_variant(sums.as_slice(), variant)
                     {
                         return Err(diag(
                             path,
@@ -456,6 +566,7 @@ pub(crate) fn compile_unit<'a>(
                     .push(EnumDef {
                         name: decl.name,
                         variants,
+                        global_variants: true,
                     })
                     .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
             }
@@ -484,6 +595,7 @@ pub(crate) fn compile_unit<'a>(
                         consts.as_slice(),
                         enums.as_slice(),
                         records.as_slice(),
+                        sums.as_slice(),
                         path,
                         name,
                     )?;
@@ -544,6 +656,106 @@ pub(crate) fn compile_unit<'a>(
                     })
                     .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
             }
+            TypeKind::Sum(variants) => {
+                // Sum types are nominal. Each variant has at most one payload,
+                // which must already be declared; the layout is an 8-byte tag
+                // followed by the largest payload, rounded to 8 (spec 0003).
+                let mut laid_out = SliceVec::<SumVariantDef<'a>>::new(bump)
+                    .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
+                let mut largest = 0u32;
+                for variant in variants {
+                    if laid_out
+                        .as_slice()
+                        .iter()
+                        .any(|existing| existing.name == variant.name)
+                    {
+                        return Err(diag(
+                            path,
+                            name,
+                            variant.line,
+                            variant.column,
+                            format_args!("duplicate variant `{}`", variant.name),
+                        ));
+                    }
+                    if has_variant(enums.as_slice(), variant.name)
+                        || has_sum_variant(sums.as_slice(), variant.name)
+                        || find_const(consts.as_slice(), variant.name).is_some()
+                        || find_enum(enums.as_slice(), variant.name).is_some()
+                        || find_record(records.as_slice(), variant.name).is_some()
+                    {
+                        return Err(diag(
+                            path,
+                            name,
+                            variant.line,
+                            variant.column,
+                            format_args!(
+                                "duplicate variant `{}`; variants share one top-level namespace",
+                                variant.name
+                            ),
+                        ));
+                    }
+                    let payload = match &variant.payload {
+                        Some((field, ty)) => {
+                            let ty = resolve_type(
+                                ty,
+                                consts.as_slice(),
+                                enums.as_slice(),
+                                records.as_slice(),
+                                sums.as_slice(),
+                                path,
+                                name,
+                            )?;
+                            if ty.is_buffer() && ty.cap == 0 {
+                                return Err(diag(
+                                    path,
+                                    name,
+                                    variant.line,
+                                    variant.column,
+                                    format_args!(
+                                        "payload `{field}` needs a capacity of at least 1"
+                                    ),
+                                ));
+                            }
+                            largest = largest.max(ty.size());
+                            Some(ty)
+                        }
+                        None => None,
+                    };
+                    laid_out
+                        .push(SumVariantDef {
+                            name: variant.name,
+                            payload,
+                        })
+                        .map_err(|_| arena_full(path, name, variant.line, variant.column))?;
+                }
+                let size = 8u32.checked_add(largest).ok_or_else(|| {
+                    diag(
+                        path,
+                        name,
+                        decl.line,
+                        decl.column,
+                        format_args!("sum type `{}` is too large", decl.name),
+                    )
+                })?;
+                if size > MAX_CAPACITY {
+                    return Err(diag(
+                        path,
+                        name,
+                        decl.line,
+                        decl.column,
+                        format_args!(
+                            "sum type `{}` exceeds the {MAX_CAPACITY}-byte cap",
+                            decl.name
+                        ),
+                    ));
+                }
+                sums.push(SumDef {
+                    name: decl.name,
+                    variants: laid_out.into_slice(),
+                    size: align8(size),
+                })
+                .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
+            }
         }
     }
 
@@ -553,7 +765,9 @@ pub(crate) fn compile_unit<'a>(
     for decl in unit.consts {
         if find_enum(enums.as_slice(), decl.name).is_some()
             || find_record(records.as_slice(), decl.name).is_some()
+            || find_sum(sums.as_slice(), decl.name).is_some()
             || has_variant(enums.as_slice(), decl.name)
+            || has_sum_variant(sums.as_slice(), decl.name)
         {
             return Err(diag(
                 path,
@@ -573,7 +787,9 @@ pub(crate) fn compile_unit<'a>(
             || find_state(state_vars.as_slice(), decl.name).is_some()
             || find_enum(enums.as_slice(), decl.name).is_some()
             || find_record(records.as_slice(), decl.name).is_some()
+            || find_sum(sums.as_slice(), decl.name).is_some()
             || has_variant(enums.as_slice(), decl.name)
+            || has_sum_variant(sums.as_slice(), decl.name)
         {
             return Err(diag(
                 path,
@@ -588,6 +804,7 @@ pub(crate) fn compile_unit<'a>(
             consts.as_slice(),
             enums.as_slice(),
             records.as_slice(),
+            sums.as_slice(),
             path,
             name,
         )?;
@@ -638,7 +855,9 @@ pub(crate) fn compile_unit<'a>(
             || find_sig(sigs.as_slice(), proc.name).is_some()
             || find_enum(enums.as_slice(), proc.name).is_some()
             || find_record(records.as_slice(), proc.name).is_some()
+            || find_sum(sums.as_slice(), proc.name).is_some()
             || has_variant(enums.as_slice(), proc.name)
+            || has_sum_variant(sums.as_slice(), proc.name)
         {
             return Err(diag(
                 path,
@@ -674,6 +893,7 @@ pub(crate) fn compile_unit<'a>(
                 consts.as_slice(),
                 enums.as_slice(),
                 records.as_slice(),
+                sums.as_slice(),
                 path,
                 name,
             )?;
@@ -762,6 +982,7 @@ pub(crate) fn compile_unit<'a>(
             state_vars.as_slice(),
             enums.as_slice(),
             records.as_slice(),
+            sums.as_slice(),
             &mut pool,
             current,
             bump,
@@ -864,6 +1085,7 @@ fn resolve_type<'a>(
     consts: &[Const<'a>],
     enums: &[EnumDef<'a>],
     records: &[RecordDef<'a>],
+    sums: &[SumDef<'a>],
     path: &'a str,
     unit: &'a str,
 ) -> Result<Type, Diagnostic> {
@@ -891,6 +1113,19 @@ fn resolve_type<'a>(
         }
         let size = records[id as usize].size;
         return Ok(Type::record(id, size));
+    }
+    if let Some(id) = find_sum(sums, ty.name) {
+        if ty.cap.is_some() {
+            return Err(diag(
+                path,
+                unit,
+                ty.line,
+                ty.column,
+                format_args!("sum type `{}` does not take a capacity", ty.name),
+            ));
+        }
+        let size = sums[id as usize].size;
+        return Ok(Type::sum(id, size));
     }
     let kind = match ty.name {
         "int" => Kind::Int,
@@ -1047,6 +1282,8 @@ enum Target {
     StateBuffer { off: u32, ty: Type },
     LocalRecord { base: u32, ty: Type, is_ref: bool },
     StateRecord { off: u32, ty: Type },
+    LocalSum { base: u32, ty: Type, is_ref: bool },
+    StateSum { off: u32, ty: Type },
 }
 
 impl Target {
@@ -1057,7 +1294,9 @@ impl Target {
             | Target::LocalBuffer { ty, .. }
             | Target::StateBuffer { ty, .. }
             | Target::LocalRecord { ty, .. }
-            | Target::StateRecord { ty, .. } => *ty,
+            | Target::StateRecord { ty, .. }
+            | Target::LocalSum { ty, .. }
+            | Target::StateSum { ty, .. } => *ty,
         }
     }
 }
@@ -1093,6 +1332,7 @@ struct FnCompiler<'a, 'b, 'p> {
     state_vars: &'b [StateVar<'a>],
     enums: &'b [EnumDef<'a>],
     records: &'b [RecordDef<'a>],
+    sums: &'b [SumDef<'a>],
     pool: &'p mut ConstantPool<'a, 'b>,
     current: Sig<'a>,
     bump: &'b Bump<'a>,
@@ -1116,6 +1356,7 @@ struct TypeName<'a, 'b> {
     ty: Type,
     enums: &'b [EnumDef<'a>],
     records: &'b [RecordDef<'a>],
+    sums: &'b [SumDef<'a>],
 }
 
 impl fmt::Display for TypeName<'_, '_> {
@@ -1129,7 +1370,30 @@ impl fmt::Display for TypeName<'_, '_> {
                 Some(record) => f.write_str(record.name),
                 None => f.write_str("record"),
             },
+            Kind::Sum(id) => match self.sums.get(id as usize) {
+                Some(sum) => f.write_str(sum.name),
+                None => f.write_str("sum"),
+            },
             _ => write!(f, "{}", self.ty),
+        }
+    }
+}
+
+/// Where a buffer construction writes: a whole buffer variable/field, or the
+/// payload area of a sum type. The latter is referenced at `sum + 16` (its
+/// `[len][data]` image starts at the payload offset 8), so `clear` and `append`
+/// find the length word at `sum + 8`.
+#[derive(Clone, Copy)]
+enum BufferDest<'a> {
+    Place(Place<'a>),
+    SumPayload { sum: Place<'a>, ty: Type },
+}
+
+impl BufferDest<'_> {
+    fn ty(self) -> Type {
+        match self {
+            BufferDest::Place(place) => place.ty,
+            BufferDest::SumPayload { ty, .. } => ty,
         }
     }
 }
@@ -1142,6 +1406,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             ty,
             enums: self.enums,
             records: self.records,
+            sums: self.sums,
         }
     }
 
@@ -1154,6 +1419,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         state_vars: &'b [StateVar<'a>],
         enums: &'b [EnumDef<'a>],
         records: &'b [RecordDef<'a>],
+        sums: &'b [SumDef<'a>],
         pool: &'p mut ConstantPool<'a, 'b>,
         current: Sig<'a>,
         bump: &'b Bump<'a>,
@@ -1173,6 +1439,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             state_vars,
             enums,
             records,
+            sums,
             pool,
             current,
             bump,
@@ -1243,20 +1510,21 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
     }
 
     fn compile_procedure(&mut self, proc: &ProcDecl<'a>) -> Result<(), Diagnostic> {
-        // Record parameters are call-scoped references like buffers. A `value`
-        // record parameter is a copy: the slot holds the caller's reference and
-        // the prologue copies the whole record into a local area, so the callee
-        // can assign fields without touching the caller (spec 0003).
+        // Record and sum parameters are call-scoped references like buffers. A
+        // `value` parameter is a copy: the slot holds the caller's reference
+        // and the prologue copies the whole value into a local area, so the
+        // callee can assign without touching the caller (spec 0003).
         let mut copies = SliceVec::<(usize, u32)>::new(self.bump)
             .map_err(|_| self.arena_error(self.current.line, self.current.column))?;
         for (index, param) in self.current.params.iter().enumerate() {
             let base = self.next_local;
             self.next_local += 8;
+            let aggregate = param.ty.is_record() || param.ty.is_sum();
             let is_ref = param.mode == ParamMode::Var
                 || param.ty.is_buffer()
-                || (param.ty.is_record() && param.mode != ParamMode::Value);
+                || (aggregate && param.mode != ParamMode::Value);
             let mut slot_base = base;
-            if param.ty.is_record() && param.mode == ParamMode::Value {
+            if aggregate && param.mode == ParamMode::Value {
                 let copy_base = self.next_local;
                 self.next_local += param.ty.size();
                 if self.next_local > MAX_CAPACITY {
@@ -1285,8 +1553,8 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 .push(slot)
                 .map_err(|_| self.arena_error(self.current.line, self.current.column))?;
         }
-        // Prologue: copy each `value` record parameter out of the caller's
-        // record, so all later field accesses use the local copy.
+        // Prologue: copy each `value` record/sum parameter out of the caller's
+        // value, so all later accesses use the local copy.
         for index in 0..copies.len() {
             let (parameter, copied) = copies
                 .get(index)
@@ -1294,7 +1562,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             let slot = self
                 .slot(self.current.params[parameter].name)
                 .ok_or_else(|| self.internal("missing parameter slot"))?;
-            self.record_copy_from_ref(slot.base, copied, slot.ty)?;
+            self.aggregate_copy_from_ref(slot.base, copied, slot.ty)?;
         }
         for local in proc.locals {
             if self.slot(local.name).is_some() {
@@ -1309,6 +1577,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.consts,
                 self.enums,
                 self.records,
+                self.sums,
                 self.path,
                 self.unit,
             )?;
@@ -1591,6 +1860,10 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 }
                 Ok(())
             }
+            Stmt::Case { value, arms } => {
+                self.mark(value.line, value.column)?;
+                self.case_stmt(value, arms)
+            }
             Stmt::Block(stmts) => {
                 for stmt in stmts {
                     self.stmt(stmt)?;
@@ -1604,6 +1877,196 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         let ty = self.expr_scalar(expr)?;
         if ty.kind != Kind::Bool {
             return Err(self.err_at(expr, format_args!("condition must be `bool`, found `{ty}`")));
+        }
+        Ok(())
+    }
+
+    /// Compiles `case value of ... end`.
+    ///
+    /// The scrutinee is a variable or field of a sum type (a designator, so it
+    /// can be referenced repeatedly without a temporary). Every variant must
+    /// have exactly one arm; a missing, duplicate or unknown variant is a
+    /// compile error. An arm's payload is copied into a fresh local for the
+    /// arm's scope, so a buffer payload is an ordinary writable copy and a
+    /// scalar payload an ordinary local (spec 0003, "Sum types").
+    fn case_stmt(
+        &mut self,
+        value: &'a Expr<'a>,
+        arms: &'a [CaseArm<'a>],
+    ) -> Result<(), Diagnostic> {
+        let start_depth = self.depth;
+        let Some((base, path)) = Self::designator(value) else {
+            return Err(self.err_at(
+                value,
+                format_args!("a `case` subject must be a variable or a field"),
+            ));
+        };
+        let place = self.place(base, path, value.line, value.column)?;
+        let Some(sum) = sum_of(self.sums, place.ty) else {
+            let found = self.type_name(place.ty);
+            return Err(self.err_at(
+                value,
+                format_args!("`case` needs a sum value, found `{found}`"),
+            ));
+        };
+
+        // Validate the arms before emitting: variant membership, one arm per
+        // variant, and a binding exactly when the variant has a payload.
+        for variant in sum.variants {
+            let mut arms_for_variant = 0u32;
+            for arm in arms {
+                if arm.variant == variant.name {
+                    arms_for_variant += 1;
+                }
+            }
+            if arms_for_variant == 0 {
+                return Err(self.err_at(
+                    value,
+                    format_args!(
+                        "non-exhaustive `case`: `{}` has no arm for variant `{}`",
+                        sum.name, variant.name
+                    ),
+                ));
+            }
+            if arms_for_variant > 1 {
+                return Err(self.err_at(
+                    value,
+                    format_args!(
+                        "duplicate arm for variant `{}`; each variant needs exactly one arm",
+                        variant.name
+                    ),
+                ));
+            }
+        }
+        for arm in arms {
+            let Some(variant) = variant_of(&sum, arm.variant) else {
+                if let Some((owner, _)) = self.sum_variant_owner(arm.variant) {
+                    return Err(self.err(
+                        arm.line,
+                        arm.column,
+                        format_args!(
+                            "`{}` has no variant `{}`; it belongs to `{owner}`",
+                            sum.name, arm.variant
+                        ),
+                    ));
+                }
+                return Err(self.err(
+                    arm.line,
+                    arm.column,
+                    format_args!("`{}` has no variant `{}`", sum.name, arm.variant),
+                ));
+            };
+            match (variant.payload, arm.binding) {
+                (Some(_), None) => {
+                    return Err(self.err(
+                        arm.line,
+                        arm.column,
+                        format_args!(
+                            "variant `{}` carries a payload; bind it as `{}(name)`",
+                            variant.name, variant.name
+                        ),
+                    ))
+                }
+                (None, Some(_)) => {
+                    return Err(self.err(
+                        arm.line,
+                        arm.column,
+                        format_args!(
+                            "variant `{}` carries no payload; write `{}` without a binding",
+                            variant.name, variant.name
+                        ),
+                    ))
+                }
+                _ => {}
+            }
+            if let Some(binding) = arm.binding {
+                if self.slot(binding).is_some() {
+                    return Err(self.err(
+                        arm.line,
+                        arm.column,
+                        format_args!(
+                            "duplicate declaration of `{binding}`; the payload binding is a new local"
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // One payload scratch area serves every arm: arms are mutually
+        // exclusive, so the largest payload covers each binding.
+        let largest = sum
+            .variants
+            .iter()
+            .filter_map(|variant| variant.payload)
+            .map(Type::size)
+            .max()
+            .unwrap_or(0);
+        let payload_base = self.next_local;
+        self.next_local = self
+            .next_local
+            .checked_add(largest)
+            .ok_or_else(|| self.err_at(value, format_args!("`case` payload area overflows")))?;
+        if self.next_local > MAX_CAPACITY {
+            return Err(self.err_at(
+                value,
+                format_args!(
+                    "procedure `{}` needs more than {MAX_CAPACITY} bytes of locals",
+                    self.current.name
+                ),
+            ));
+        }
+
+        let end = self.label()?;
+        for arm in arms {
+            let variant = variant_of(&sum, arm.variant)
+                .ok_or_else(|| self.internal("validated arm has no variant"))?;
+            let next = self.label()?;
+            let ordinal = sum
+                .variants
+                .iter()
+                .position(|candidate| candidate.name == variant.name)
+                .ok_or_else(|| self.internal("variant is not a member of its sum"))?;
+
+            // if tag <> ordinal then next
+            self.push_place_ref(&place)?;
+            self.simple(opcodes::LOAD_REF)?;
+            self.const_i64(ordinal as i64)?;
+            self.simple(opcodes::EQ)?;
+            self.pop(1)?;
+            self.jump(opcodes::JZ, next, true)?;
+
+            let slot_count = self.slots.len();
+            if let (Some(payload_ty), Some(binding)) = (variant.payload, arm.binding) {
+                self.one(opcodes::REF_LOCAL, payload_base)?;
+                self.push();
+                self.push_place_ref(&place)?;
+                self.one(opcodes::REF_OFFSET, 8)?;
+                self.const_i64(payload_ty.size() as i64)?;
+                self.simple(opcodes::COPY_REFS)?;
+                self.pop(3)?;
+                self.slots
+                    .push(Slot {
+                        name: binding,
+                        base: payload_base,
+                        ty: payload_ty,
+                        writable: true,
+                        is_ref: false,
+                    })
+                    .map_err(|_| self.arena_error(arm.line, arm.column))?;
+            }
+            for stmt in arm.body {
+                self.stmt(stmt)?;
+            }
+            self.slots.truncate(slot_count);
+            if self.depth != start_depth {
+                return Err(self.internal("a `case` arm leaves a different operand depth"));
+            }
+            self.jump(opcodes::JMP, end, false)?;
+            self.bind(next);
+        }
+        self.bind(end);
+        if self.depth != start_depth {
+            return Err(self.internal("`case` leaves a different operand depth"));
         }
         Ok(())
     }
@@ -1649,11 +2112,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             }
             Target::LocalBuffer { .. } | Target::StateBuffer { .. } => {
                 let place = self.place_of_target(&target);
-                self.buffer_assign(&place, Some((name, &[])), value)?;
+                self.buffer_assign(BufferDest::Place(place), Some((name, &[])), value)?;
             }
             Target::LocalRecord { .. } | Target::StateRecord { .. } => {
                 let place = self.place_of_target(&target);
                 self.assign_record(&place, value)?;
+            }
+            Target::LocalSum { .. } | Target::StateSum { .. } => {
+                let place = self.place_of_target(&target);
+                self.assign_sum(&place, value)?;
             }
         }
         Ok(())
@@ -1759,6 +2226,12 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     ty: slot.ty,
                     is_ref: slot.is_ref,
                 }
+            } else if slot.ty.is_sum() {
+                Target::LocalSum {
+                    base: slot.base,
+                    ty: slot.ty,
+                    is_ref: slot.is_ref,
+                }
             } else {
                 Target::LocalScalar {
                     off: slot.base,
@@ -1775,6 +2248,11 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 }
             } else if var.ty.is_record() {
                 Target::StateRecord {
+                    off: var.off,
+                    ty: var.ty,
+                }
+            } else if var.ty.is_sum() {
+                Target::StateSum {
                     off: var.off,
                     ty: var.ty,
                 }
@@ -1806,6 +2284,13 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 format_args!("cannot assign to record type `{name}`"),
             ));
         }
+        if find_sum(self.sums, name).is_some() {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("cannot assign to sum type `{name}`"),
+            ));
+        }
         if let Some((_, ordinal)) = find_variant(self.enums, name) {
             return Err(self.err(
                 line,
@@ -1813,7 +2298,24 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 format_args!("cannot assign to enum variant `{name}` (ordinal {ordinal})"),
             ));
         }
+        if let Some((sum, _)) = self.sum_variant_owner(name) {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("cannot assign to sum variant `{name}` of `{sum}`"),
+            ));
+        }
         Err(self.err(line, column, format_args!("unknown identifier `{name}`")))
+    }
+
+    /// Finds which sum type declares `name` as a variant.
+    fn sum_variant_owner(&self, name: &str) -> Option<(&'a str, SumVariantDef<'a>)> {
+        for sum in self.sums {
+            if let Some(variant) = variant_of(sum, name) {
+                return Some((sum.name, variant));
+            }
+        }
+        None
     }
 
     fn push_target_ref(&mut self, target: &Target) -> Result<(), Diagnostic> {
@@ -1869,10 +2371,11 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             return Err(self.err(
                 line,
                 column,
-                format_args!("`{base_name}` is a constant, not a record variable"),
+                format_args!("`{base_name}` is a constant, not a value"),
             ));
         } else if find_enum(self.enums, base_name).is_some()
             || find_record(self.records, base_name).is_some()
+            || find_sum(self.sums, base_name).is_some()
         {
             return Err(self.err(
                 line,
@@ -1883,7 +2386,13 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             return Err(self.err(
                 line,
                 column,
-                format_args!("`{base_name}` is an enum variant, not a record"),
+                format_args!("`{base_name}` is an enum variant, not a value"),
+            ));
+        } else if self.sum_variant_owner(base_name).is_some() {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`{base_name}` is a sum variant, not a value"),
             ));
         } else {
             return Err(self.err(
@@ -1932,7 +2441,21 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     writable: true,
                 }
             }
+            Target::LocalSum { base, ty, is_ref } => Place {
+                base: Base::Local { off: base, is_ref },
+                base_ty: ty,
+                path: &[],
+                ty,
+                writable: true,
+            },
             Target::StateBuffer { off, ty } | Target::StateRecord { off, ty } => Place {
+                base: Base::State { off },
+                base_ty: ty,
+                path: &[],
+                ty,
+                writable: true,
+            },
+            Target::StateSum { off, ty } => Place {
                 base: Base::State { off },
                 base_ty: ty,
                 path: &[],
@@ -1977,9 +2500,9 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         Ok(())
     }
 
-    /// Copies a whole record from the reference in `src_slot` into the local
-    /// area at `dst_base` (a `value` parameter's prologue).
-    fn record_copy_from_ref(
+    /// Copies a whole record or sum value from the reference in `src_slot`
+    /// into the local area at `dst_base` (a `value` parameter's prologue).
+    fn aggregate_copy_from_ref(
         &mut self,
         dst_base: u32,
         src_slot: u32,
@@ -1995,11 +2518,11 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         Ok(())
     }
 
-    /// Emits a reference to a record expression and returns its type.
+    /// Emits a reference to a record or sum expression and returns its type.
     ///
     /// `writable` is required for a `var` parameter or an out-parameter; a
     /// `value` copy and a `const` borrow accept a read-only source.
-    fn emit_record_ref(
+    fn emit_aggregate_ref(
         &mut self,
         expr: &'a Expr<'a>,
         writable: bool,
@@ -2014,25 +2537,33 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     ),
                 ));
             }
+            if find_sum(self.sums, name).is_some() {
+                return Err(self.err_at(
+                    expr,
+                    format_args!(
+                        "`{name}(x)` is not a sum constructor; write `Variant` or `Variant(payload)`"
+                    ),
+                ));
+            }
         }
         let Some((base, path)) = Self::designator(expr) else {
             return Err(self.err_at(
                 expr,
-                format_args!("{what} must be a record variable or a record field"),
+                format_args!("{what} must be a variable or a field of a record or sum type"),
             ));
         };
         let place = self.place(base, path, expr.line, expr.column)?;
-        if !place.ty.is_record() {
+        if !place.ty.is_record() && !place.ty.is_sum() {
             let found = self.type_name(place.ty);
             return Err(self.err_at(
                 expr,
-                format_args!("{what} expects a record, found `{found}`"),
+                format_args!("{what} expects a record or sum value, found `{found}`"),
             ));
         }
         if writable && !place.writable {
             return Err(self.err_at(
                 expr,
-                format_args!("cannot pass `const` record `{base}` as `var`"),
+                format_args!("cannot pass `const` value `{base}` as `var`"),
             ));
         }
         self.push_place_ref(&place)?;
@@ -2046,11 +2577,172 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         value: &'a Expr<'a>,
     ) -> Result<(), Diagnostic> {
         self.push_place_ref(destination)?;
-        let source = self.emit_record_ref(value, false, "a record assignment")?;
+        let source = self.emit_aggregate_ref(value, false, "a record assignment")?;
         self.check_exact(destination.ty, source, value)?;
         self.const_i64(destination.ty.size() as i64)?;
         self.simple(opcodes::COPY_REFS)?;
         self.pop(3)?;
+        Ok(())
+    }
+
+    /// Assigns a whole sum value.
+    ///
+    /// A sum value is either a construction of a variant of the destination's
+    /// own type (`Ok`, `Faulted(code)`) or a copy of a value of that exact
+    /// type. Construction is destination-driven: the destination names the sum
+    /// type, so variant names never enter the global namespace. That is what
+    /// lets `ExitReason.Ok` coexist with `Status.Ok` (spec 0003, "Sum types").
+    fn assign_sum(
+        &mut self,
+        destination: &Place<'a>,
+        value: &'a Expr<'a>,
+    ) -> Result<(), Diagnostic> {
+        let sum = sum_of(self.sums, destination.ty)
+            .ok_or_else(|| self.internal("sum destination has no sum definition"))?;
+        match value.kind {
+            ExprKind::Ident(name) => {
+                if let Some(variant) = variant_of(&sum, name) {
+                    if variant.payload.is_some() {
+                        return Err(self.err_at(
+                            value,
+                            format_args!(
+                                "variant `{name}` carries a payload; construct it as `{name}(value)`"
+                            ),
+                        ));
+                    }
+                    self.construct_sum(destination, &sum, variant, None)
+                } else if let Some((owner, _)) = self.sum_variant_owner(name) {
+                    Err(self.err_at(
+                        value,
+                        format_args!("`{name}` is a variant of `{owner}`, not of `{}`", sum.name),
+                    ))
+                } else if Self::designator(value).is_some() {
+                    self.copy_sum(destination, value)
+                } else {
+                    Err(self.err_at(
+                        value,
+                        format_args!("`{name}` is not a variant of `{}`", sum.name),
+                    ))
+                }
+            }
+            ExprKind::Field { .. } => self.copy_sum(destination, value),
+            ExprKind::Call(call) => {
+                if call.target.contains('.') {
+                    return Err(self.err_at(
+                        value,
+                        format_args!(
+                            "a sum value is constructed as `Variant` or `Variant(payload)`"
+                        ),
+                    ));
+                }
+                let Some(variant) = variant_of(&sum, call.target) else {
+                    if let Some((owner, _)) = self.sum_variant_owner(call.target) {
+                        return Err(self.err_at(
+                            value,
+                            format_args!(
+                                "`{}` is a variant of `{owner}`, not of `{}`",
+                                call.target, sum.name
+                            ),
+                        ));
+                    }
+                    return Err(self.err_at(
+                        value,
+                        format_args!("`{}` is not a variant of `{}`", call.target, sum.name),
+                    ));
+                };
+                if variant.payload.is_none() {
+                    return Err(self.err_at(
+                        value,
+                        format_args!(
+                            "variant `{}` carries no payload; write `{}` without `()`",
+                            variant.name, variant.name
+                        ),
+                    ));
+                }
+                if call.args.len() != 1 {
+                    return Err(self.err_at(
+                        value,
+                        format_args!(
+                            "variant `{}` expects 1 payload argument, got {}",
+                            variant.name,
+                            call.args.len()
+                        ),
+                    ));
+                }
+                self.construct_sum(destination, &sum, variant, Some(call.args[0]))
+            }
+            _ => Err(self.err_at(
+                value,
+                format_args!(
+                    "a sum value is constructed as `Variant(payload)` or copied from a `{}` value",
+                    sum.name
+                ),
+            )),
+        }
+    }
+
+    /// Copies a whole sum value from another value of the same type.
+    fn copy_sum(&mut self, destination: &Place<'a>, value: &'a Expr<'a>) -> Result<(), Diagnostic> {
+        self.push_place_ref(destination)?;
+        let source = self.emit_aggregate_ref(value, false, "a sum assignment")?;
+        self.check_exact(destination.ty, source, value)?;
+        self.const_i64(destination.ty.size() as i64)?;
+        self.simple(opcodes::COPY_REFS)?;
+        self.pop(3)?;
+        Ok(())
+    }
+
+    /// Writes a tag and (optionally) a payload into a sum destination.
+    ///
+    /// The tag is one 8-byte slot at offset 0. The payload area starts at
+    /// offset 8: a scalar or enum is stored there directly, a buffer is
+    /// constructed as `[len][data]` through the ordinary buffer opcodes, and a
+    /// record or nested sum is copied whole.
+    fn construct_sum(
+        &mut self,
+        destination: &Place<'a>,
+        sum: &SumDef<'a>,
+        variant: SumVariantDef<'a>,
+        payload: Option<&'a Expr<'a>>,
+    ) -> Result<(), Diagnostic> {
+        let ordinal = sum
+            .variants
+            .iter()
+            .position(|candidate| candidate.name == variant.name)
+            .ok_or_else(|| self.internal("variant is not a member of its sum"))?;
+        self.push_place_ref(destination)?;
+        self.const_i64(ordinal as i64)?;
+        self.simple(opcodes::STORE_REF)?;
+        self.pop(2)?;
+
+        let Some(payload_ty) = variant.payload else {
+            return Ok(());
+        };
+        let payload = payload.ok_or_else(|| self.internal("payload variant without a value"))?;
+        if payload_ty.is_buffer() {
+            return self.buffer_assign(
+                BufferDest::SumPayload {
+                    sum: *destination,
+                    ty: payload_ty,
+                },
+                None,
+                payload,
+            );
+        }
+        self.push_place_ref(destination)?;
+        self.one(opcodes::REF_OFFSET, 8)?;
+        if payload_ty.is_record() || payload_ty.is_sum() {
+            let source = self.emit_aggregate_ref(payload, false, "a sum payload")?;
+            self.check_exact(payload_ty, source, payload)?;
+            self.const_i64(payload_ty.size() as i64)?;
+            self.simple(opcodes::COPY_REFS)?;
+            self.pop(3)?;
+        } else {
+            let found = self.expr_scalar(payload)?;
+            self.check_exact(payload_ty, found, payload)?;
+            self.simple(opcodes::STORE_REF)?;
+            self.pop(2)?;
+        }
         Ok(())
     }
 
@@ -2075,8 +2767,11 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         if place.ty.is_record() {
             return self.assign_record(&place, value);
         }
+        if place.ty.is_sum() {
+            return self.assign_sum(&place, value);
+        }
         if place.ty.is_buffer() {
-            return self.buffer_assign(&place, Some((base, path)), value);
+            return self.buffer_assign(BufferDest::Place(place), Some((base, path)), value);
         }
         self.push_place_ref(&place)?;
         let value_ty = self.expr_scalar(value)?;
@@ -2086,6 +2781,17 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         Ok(())
     }
 
+    /// Pushes a reference to the data area a buffer construction writes.
+    fn push_buffer_dest_ref(&mut self, destination: BufferDest<'a>) -> Result<(), Diagnostic> {
+        match destination {
+            BufferDest::Place(place) => self.push_place_ref(&place),
+            BufferDest::SumPayload { sum, .. } => {
+                self.push_place_ref(&sum)?;
+                self.one(opcodes::REF_OFFSET, 16)
+            }
+        }
+    }
+
     /// Assigns a whole buffer field or variable: a construction from literals
     /// and other buffers (`clear` then `append`), never a temporary.
     ///
@@ -2093,11 +2799,11 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
     /// variable passes its name, a field passes its base and path.
     fn buffer_assign(
         &mut self,
-        destination: &Place<'a>,
+        destination: BufferDest<'a>,
         home: Option<(&'a str, &'a [&'a str])>,
         value: &'a Expr<'a>,
     ) -> Result<(), Diagnostic> {
-        let ty = destination.ty;
+        let ty = destination.ty();
         let bump = self.bump;
         let mut parts = SliceVec::<&'a Expr<'a>>::new(bump)
             .map_err(|_| self.arena_error(value.line, value.column))?;
@@ -2223,13 +2929,13 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             }
         }
 
-        self.push_place_ref(destination)?;
+        self.push_buffer_dest_ref(destination)?;
         self.simple(opcodes::CLEAR)?;
         self.pop(1)?;
 
         for index in 0..parts.len() {
             let part = parts.as_slice()[index];
-            self.push_place_ref(destination)?;
+            self.push_buffer_dest_ref(destination)?;
             match part.kind {
                 ExprKind::Str(bytes) => {
                     if bytes.is_empty() {
@@ -2307,6 +3013,14 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             )),
             ExprKind::Ident(name) => self.load_scalar(name, expr),
             ExprKind::Field { base, path } => {
+                // A qualified enum variant, `TypeName.Variant`. `FaultCode`
+                // requires this form because its names overlap `Status`.
+                if path.len() == 1 {
+                    if let Some((id, ordinal)) = find_qualified_variant(self.enums, base, path[0]) {
+                        self.const_i64(ordinal as i64)?;
+                        return Ok(Type::enumeration(id));
+                    }
+                }
                 let place = self.place(base, path, expr.line, expr.column)?;
                 if place.ty.is_buffer() {
                     return Err(self.err_at(
@@ -2320,6 +3034,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                         expr,
                         format_args!(
                             "record `{found}` cannot be used as a scalar value; select a field"
+                        ),
+                    ));
+                }
+                if place.ty.is_sum() {
+                    let found = self.type_name(place.ty);
+                    return Err(self.err_at(
+                        expr,
+                        format_args!(
+                            "sum `{found}` cannot be used as a scalar value; match it with `case`"
                         ),
                     ));
                 }
@@ -2471,6 +3194,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     ),
                 ));
             }
+            if slot.ty.is_sum() {
+                let found = self.type_name(slot.ty);
+                return Err(self.err_at(
+                    expr,
+                    format_args!(
+                        "sum `{name}` of type `{found}` cannot be used as a scalar value; match it with `case`"
+                    ),
+                ));
+            }
             if slot.is_ref {
                 self.one(opcodes::LOAD_LOCAL, slot.base)?;
                 self.simple(opcodes::LOAD_REF)?;
@@ -2493,6 +3225,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     expr,
                     format_args!(
                         "record `{name}` of type `{found}` cannot be used as a scalar value; select a field"
+                    ),
+                ));
+            }
+            if var.ty.is_sum() {
+                let found = self.type_name(var.ty);
+                return Err(self.err_at(
+                    expr,
+                    format_args!(
+                        "sum `{name}` of type `{found}` cannot be used as a scalar value; match it with `case`"
                     ),
                 ));
             }
@@ -2546,13 +3287,22 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             self.one(opcodes::ENUM_CAST, count)?;
             return Ok(target);
         }
-        // A record name in `Name(x)` position is not a constructor: records are
-        // built by assigning fields (spec 0003).
+        // A record or sum name in `Name(x)` position is not a constructor:
+        // records are built by assigning fields and sums by writing a variant
+        // (spec 0003).
         if find_record(self.records, name).is_some() {
             return Err(self.err_at(
                 expr,
                 format_args!(
                     "`{name}(x)` is not a record constructor; declare a variable and assign its fields"
+                ),
+            ));
+        }
+        if find_sum(self.sums, name).is_some() {
+            return Err(self.err_at(
+                expr,
+                format_args!(
+                    "`{name}(x)` is not a sum constructor; write `Variant` or `Variant(payload)`"
                 ),
             ));
         }
@@ -2834,7 +3584,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 BinOp::And | BinOp::Or => unreachable!(),
             },
             Kind::String | Kind::Bytes => unreachable!(),
-            Kind::Record(_) => unreachable!(),
+            Kind::Record(_) | Kind::Sum(_) => unreachable!(),
             Kind::Enum(_) => match op {
                 // Ordinals are non-negative, so unsigned ordering is the
                 // declaration order (spec 0003, "Enums").
@@ -3139,7 +3889,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.emit_ref(args[0], Some(Kind::String))?;
                 self.emit_ref(args[1], Some(Kind::String))?;
                 let diagnostic = Type::record(DIAGNOSTIC_RECORD, abi::layout::diagnostic::SIZE);
-                let diag = self.emit_record_ref(args[2], true, "`var diag`")?;
+                let diag = self.emit_aggregate_ref(args[2], true, "`var diag`")?;
                 if diag != diagnostic {
                     let found = self.type_name(diag);
                     return Err(self.err_at(
@@ -3171,8 +3921,8 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     ));
                 }
                 self.builtin_id(args[0])?;
-                let exit_reason = Type::record(EXIT_REASON_RECORD, abi::layout::exit_reason::SIZE);
-                let reason = self.emit_record_ref(args[1], true, "`var reason`")?;
+                let exit_reason = Type::sum(EXIT_REASON_SUM, abi::layout::exit_reason::SIZE);
+                let reason = self.emit_aggregate_ref(args[1], true, "`var reason`")?;
                 if reason != exit_reason {
                     let found = self.type_name(reason);
                     return Err(self.err_at(
@@ -3241,9 +3991,9 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         param: &Param<'a>,
         position: usize,
     ) -> Result<(), Diagnostic> {
-        if param.ty.is_record() {
+        if param.ty.is_record() || param.ty.is_sum() {
             let writable = param.mode == ParamMode::Var;
-            let found = self.emit_record_ref(arg, writable, "argument")?;
+            let found = self.emit_aggregate_ref(arg, writable, "argument")?;
             if found != param.ty {
                 let expected = self.type_name(param.ty);
                 let found = self.type_name(found);
@@ -3525,25 +4275,50 @@ mod tests {
     }
 
     #[test]
-    fn predeclared_records_match_the_shared_layout() {
+    fn predeclared_layouts_match_the_shared_layout() {
         assert_layout(&DIAGNOSTIC_FIELDS, layout::diagnostic::SIZE);
-        assert_layout(&EXIT_REASON_FIELDS, layout::exit_reason::SIZE);
-        assert_eq!(find_record(&predeclared_names(), "Diagnostic"), Some(0));
-        assert_eq!(find_record(&predeclared_names(), "ExitReason"), Some(1));
+        assert_eq!(find_record(&predeclared_records(), "Diagnostic"), Some(0));
+
+        // `ExitReason` is a sum: 8-byte tag at 0, the `FaultCode` payload at 8,
+        // and a size fixed by `abi::layout` (spec 0003, "Sum types").
+        assert_eq!(layout::exit_reason::TAG_OFFSET, 0);
+        assert_eq!(layout::exit_reason::PAYLOAD_OFFSET, 8);
+        assert_eq!(FAULT_CODE_ENUM, 1);
+        assert_eq!(EXIT_REASON_SUM, 0);
+        let sum = SumDef {
+            name: "ExitReason",
+            variants: &EXIT_REASON_VARIANTS,
+            size: layout::exit_reason::SIZE,
+        };
+        assert_eq!(sum.size, 8 + Type::enumeration(FAULT_CODE_ENUM).size());
+        assert_eq!(find_sum(&predeclared_sums(), "ExitReason"), Some(0));
+        assert_eq!(
+            variant_of(&sum, "Faulted").and_then(|variant| variant.payload),
+            Some(Type::enumeration(FAULT_CODE_ENUM))
+        );
+        assert_eq!(
+            variant_of(&sum, "Ok").and_then(|variant| variant.payload),
+            None
+        );
+        assert_eq!(
+            variant_of(&sum, "Killed").and_then(|variant| variant.payload),
+            None
+        );
     }
 
-    fn predeclared_names() -> [RecordDef<'static>; 2] {
-        [
-            RecordDef {
-                name: "Diagnostic",
-                fields: &DIAGNOSTIC_FIELDS,
-                size: layout::diagnostic::SIZE,
-            },
-            RecordDef {
-                name: "ExitReason",
-                fields: &EXIT_REASON_FIELDS,
-                size: layout::exit_reason::SIZE,
-            },
-        ]
+    fn predeclared_records() -> [RecordDef<'static>; 1] {
+        [RecordDef {
+            name: "Diagnostic",
+            fields: &DIAGNOSTIC_FIELDS,
+            size: layout::diagnostic::SIZE,
+        }]
+    }
+
+    fn predeclared_sums() -> [SumDef<'static>; 1] {
+        [SumDef {
+            name: "ExitReason",
+            variants: &EXIT_REASON_VARIANTS,
+            size: layout::exit_reason::SIZE,
+        }]
     }
 }

@@ -246,12 +246,12 @@ pub mod builtin {
     /// reference is untouched, the host fills the diagnostic and the error
     /// `Status` ordinal is pushed (spec 0005).
     pub const SPAWN: u32 = 3;
-    /// `core.wait(id, var reason)`: pop an `ExitReason` record reference and a
-    /// task id; when the child has terminated write `kind` (`0` Ok, `1` Killed,
-    /// `2` Faulted) and `code` (the `FaultCode` ordinal) through the reference
-    /// and push `Ok`; when the wait itself fails push that `Status` ordinal.
-    /// May block; the instruction is retried on wake without consuming
-    /// operands.
+    /// `core.wait(id, var reason)`: pop an `ExitReason` sum reference and a
+    /// task id; when the child has terminated write the tag (`0` Ok, `1`
+    /// Killed, `2` Faulted) and the payload (`Faulted`'s `FaultCode` ordinal,
+    /// zero otherwise) through the reference and push `Ok`; when the wait
+    /// itself fails push that `Status` ordinal. May block; the instruction is
+    /// retried on wake without consuming operands.
     pub const WAIT: u32 = 4;
     /// `core.kill(id)`: pop a task id, push the `Status` ordinal (`Ok` on
     /// success, `NotFound` for an unknown or finished id).

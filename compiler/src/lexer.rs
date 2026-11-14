@@ -63,6 +63,10 @@ pub enum TokenKind<'a> {
     While,
     /// `do`
     Do,
+    /// `case`
+    Case,
+    /// `of`
+    Of,
     /// `and`
     And,
     /// `or`
@@ -115,6 +119,8 @@ pub enum TokenKind<'a> {
     Comma,
     /// `.`
     Dot,
+    /// `|`
+    Pipe,
     /// End of input.
     Eof,
 }
@@ -136,6 +142,8 @@ impl TokenKind<'_> {
             TokenKind::Else => "else",
             TokenKind::While => "while",
             TokenKind::Do => "do",
+            TokenKind::Case => "case",
+            TokenKind::Of => "of",
             TokenKind::And => "and",
             TokenKind::Or => "or",
             TokenKind::Not => "not",
@@ -162,6 +170,7 @@ impl TokenKind<'_> {
             TokenKind::Colon => ":",
             TokenKind::Comma => ",",
             TokenKind::Dot => ".",
+            TokenKind::Pipe => "|",
             TokenKind::Ident(_)
             | TokenKind::Int(_)
             | TokenKind::Float(_)
@@ -322,6 +331,7 @@ impl<'a, 'b> Lexer<'a, 'b> {
             b';' => TokenKind::Semi,
             b',' => TokenKind::Comma,
             b'.' => TokenKind::Dot,
+            b'|' => TokenKind::Pipe,
             other => {
                 return Err(self.error(
                     line,
@@ -362,6 +372,8 @@ impl<'a, 'b> Lexer<'a, 'b> {
             "else" => TokenKind::Else,
             "while" => TokenKind::While,
             "do" => TokenKind::Do,
+            "case" => TokenKind::Case,
+            "of" => TokenKind::Of,
             "and" => TokenKind::And,
             "or" => TokenKind::Or,
             "not" => TokenKind::Not,
