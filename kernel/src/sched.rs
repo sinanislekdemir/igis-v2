@@ -83,6 +83,13 @@ static EXITS: AtomicU64 = AtomicU64::new(0);
 struct KernelHost<'a> {
     image: &'a Ext2<'a>,
     current: u64,
+    /// The diagnostic image carried by the exit record `wait` most recently
+    /// served, and its id. `core.run` calls `diagnostic_for` right after that
+    /// wait in the same builtin step, so a per-quantum cache is enough; the
+    /// exit ring itself is consumed by the wait.
+    exit_diag: [u8; repl::DIAG_BYTES],
+    exit_diag_id: u64,
+    exit_diag_ready: bool,
 }
 
 impl Host for KernelHost<'_> {
@@ -125,14 +132,30 @@ impl Host for KernelHost<'_> {
             return WaitOutcome::Status(Status::Invalid);
         }
         // A record written by `terminate` is consumed first: the child may
-        // have finished before the parent reached `wait`.
-        if let Some(reason) = repl::take_exit(id) {
+        // have finished before the parent reached `wait`. A request failure
+        // also carries the compiler's diagnostic; keep it for `core.run`.
+        if let Some((reason, diag)) = repl::take_exit(id) {
+            self.exit_diag_id = id;
+            self.exit_diag_ready = false;
+            if let Some(diag) = diag {
+                self.exit_diag = diag;
+                self.exit_diag_ready = true;
+            }
             return WaitOutcome::Exited(reason);
         }
         if task::is_live(id) || repl::is_pending(id) {
             return WaitOutcome::Blocked;
         }
         WaitOutcome::Status(Status::NotFound)
+    }
+
+    fn diagnostic_for(&mut self, id: u64, diag: &mut [u8]) -> bool {
+        if !self.exit_diag_ready || id != self.exit_diag_id {
+            return false;
+        }
+        let copied = diag.len().min(self.exit_diag.len());
+        diag[..copied].copy_from_slice(&self.exit_diag[..copied]);
+        true
     }
 
     fn kill(&mut self, id: u64) -> Status {
@@ -263,6 +286,9 @@ fn run_quantum(task: &mut Task, image: &Ext2<'_>) -> Outcome {
     let mut host = KernelHost {
         image,
         current: *id,
+        exit_diag: [0u8; repl::DIAG_BYTES],
+        exit_diag_id: 0,
+        exit_diag_ready: false,
     };
     machine.run(
         &program,

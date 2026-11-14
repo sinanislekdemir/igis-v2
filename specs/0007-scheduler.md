@@ -290,10 +290,10 @@ There are no zombies. A terminated task leaves nothing behind.
   reserved id. `kill` on an unknown or already terminated id returns `Status.NotFound`.
   It never waits.
 - A request that fails to load (missing file, compile error, placement failure) creates no
-  task: the diagnostic is printed, `Faulted(IoError)` is recorded under the reserved id and
-  a parent blocked in `wait` is woken. The staged scalar ABI reports it through `wait` as
-  `2 + IoError` (spec 0005, "Staged ABI"); the final API reports `Status.Invalid` with the
-  caller-owned `Diagnostic`.
+  task: the compiler's diagnostic is printed, `Faulted(IoError)` is recorded under the
+  reserved id together with a 192-byte `Diagnostic` image, and a parent blocked in
+  `wait`/`run` is woken. `wait` observes `Faulted(IoError)`; `run` also copies the
+  diagnostic into its caller-owned out-parameter (spec 0005, "Implemented ABI").
 - A spawned child is independent: if the parent terminates, the child continues. The
   parent's memory is reclaimed; the child keeps running.
 - If every core is held by a realtime task, the service gets no opportunity and no
@@ -383,7 +383,7 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | `wait` on a killed id | `ExitReason.Killed` |
 | Request path malformed or not a regular file | `Status.Invalid`; no request enqueued |
 | Parent terminates with live children | Children continue (ADR 0017 addendum 2) |
-| Compile fails in the REPL service | Request fails; `Faulted(IoError)` recorded under the reserved id; a waiting parent wakes; no task created |
+| Compile fails in the REPL service | Request fails; `Faulted(IoError)` plus the diagnostic is recorded under the reserved id; a waiting parent wakes; no task created; `run` reports the diagnostic through `diag` |
 | Task blocks | Leaves the runnable set; no CPU consumed |
 | Wake with all cores halted | IPI to one core; `need_resched` set before the IPI |
 | Task terminates while owning a stream endpoint | Endpoint closes; queued data discarded; peer sees `Closed` |
@@ -423,3 +423,4 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 2026-11-13 | First scheduler implementation: 10 000-bytecode quantum and a 10 s / 200 000 000-step total budget, both provisional (Q1); the step cap is the effective watchdog while the clock ticks at 1 ms. |
 | 2026-11-13 | Spawn/wait implemented: a 1024-slot request queue serviced before every claim, a 64-entry exit ring, `Blocked(task exit)` with wake-on-termination, and `kill` for live tasks and queued requests. A blocked builtin returns without advancing `pc` or the operand stack, so the instruction is retried unchanged. |
 | 2026-11-13 | Console input implemented with a second blocking condition: the service opportunity polls COM1 and the PS/2 keyboard and wakes `Console` waiters when a finished line exists; staged line discipline in the kernel (spec 0005, Q44). |
+| 2026-11-14 | `core.run` implemented (spawn + wait); the exit ring also carries a 192-byte `Diagnostic` image for a failed request, so `run` reports a post-spawn compile error through `diag` while `wait` observes `Faulted(IoError)`. |

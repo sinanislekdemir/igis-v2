@@ -542,6 +542,7 @@ if st <> Ok then
 The implemented REPL primitives follow E1 and return `Status`:
 
 ```text
+core.run(path: const string[0], args: const string[0], var diag: Diagnostic, var reason: ExitReason) -> Status
 core.spawn(path: const string[0], args: const string[0], var diag: Diagnostic, var id: int) -> Status
 core.wait(id: int, var reason: ExitReason) -> Status
 core.kill(id: int) -> Status
@@ -549,9 +550,9 @@ core.kill(id: int) -> Status
 
 `Diagnostic` and `ExitReason` are predeclared (above), so both out-parameters are real
 language values: `spawn` fills `diag` on a synchronous failure and clears it on success;
-`wait` writes the child's `ExitReason` tag and payload, which the caller matches with
-`case`. `core.run` is not exposed yet and `TaskId` is an `int` (spec 0005,
-"Implemented ABI").
+`run` is spawn + wait and also fills `diag` from a load failure the service discovers
+after the spawn returned; `wait` writes the child's `ExitReason` tag and payload, which the
+caller matches with `case`. `TaskId` is still an `int` (spec 0005, "Implemented ABI").
 
 ## Modules
 
@@ -603,8 +604,9 @@ language values: `spawn` fills `diag` on a synchronous failure and clears it on 
   finished id it returns `Status.NotFound`.
   **Implemented slice:** `spawn`/`wait`/`kill` return `Status` and take the predeclared
   `Diagnostic` record and `ExitReason` sum type; a synchronous spawn failure fills `diag`,
-  success clears it, and `wait` writes the reason's tag/payload. `run` is not exposed yet
-  and `TaskId` is still an `int` (spec 0005).
+  success clears it, and `wait` writes the reason's tag/payload. `run` is implemented as
+  spawn + wait and additionally reports a post-spawn load failure through `diag`; `TaskId`
+  is still an `int` (spec 0005).
 - **C8 (MUST):** A spawned child is a separate application instance with its own regions.
   It shares no memory with the parent; communication is through streams.
 - **C9 (MUST):** The argument passed to `run`/`spawn` is a fixed `string[1024]`, delivered
@@ -845,3 +847,4 @@ is the signal.
 | 2026-11-14 | Enums implemented: `type Name = (Variant, ...);` with nominal types, ordinals `0..n-1`, variants as global constants in the top-level namespace, one 8-byte slot, same-enum assignment/comparison plus ordinal ordering, `int(enum)` and range-checked `EnumName(int)` (`fault(Overflow)`). `Status` is predeclared with the spec's eight variants (`Ok` = 0); a user declaration is an error. `spawn`/`wait`/`kill` return `Status` with `var id`/`var reason` out-parameters (Q43 narrowed; spec 0005, spec 0008 `enum_cast`). |
 | 2026-11-14 | Records implemented: `type Name = record field: T; ... end;` (grouped or one-per-line fields), nominal type identity, declaration-before-use, nested records, buffer fields, whole-record copy, `value`/`const`/`var` record parameters and aligned declaration-order layout. `Diagnostic` and `ExitReason` are predeclared at the fixed `abi::layout` offsets and cannot be redefined; `spawn`/`wait` use them (`var diag`, `var reason`). Record equality, sum types and `core.run` remain future work (Q43). |
 | 2026-11-14 | Sum types and pattern matching implemented: `type Name = Variant | Variant(payload: T);` is an 8-byte tag at offset 0 plus the largest payload at offset 8, nominal, with destination-driven construction (`dst := Variant(payload)`) and no global variant constants. `case value of Variant: ... Variant(binding): ... end;` is exhaustive (one arm per variant, no `else`), has no fallthrough, and binds a payload by value to an arm-local copy; unknown, duplicate and missing arms, payload mismatches and cross-sum variants are compile errors. `ExitReason` becomes the real sum type `Ok | Killed | Faulted(code: FaultCode)` at the same 16-byte layout, and `FaultCode` is predeclared as an enum whose variants are qualified (`FaultCode.DivideByZero`) because two names collide with `Status`. `Diagnostic` stays a record; `spawn` is unchanged. Q43 narrows to `core.run` and the async compile-diagnostic path. |
+| 2026-11-14 | `core.run(path, args, var diag, var reason) -> Status` implemented (spawn + wait, with the pending id held in the machine). The request-completion diagnostic path also landed: a compile/load failure after `spawn` returned fills `diag` for `run` callers while `wait` still observes `Faulted(IoError)`. Q43 narrows to a distinct `TaskId` type. |

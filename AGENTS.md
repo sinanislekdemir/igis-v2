@@ -39,11 +39,11 @@ constraints learned there.
   boot application crosses many quanta, prints its output, exits `Ok`, and the system
   prints the claim/yield/exit summary and halts. The compiler is `no_std` and
   allocation-free; the scheduler path adds no heap. The REPL request service now runs: a
-  1024-slot static queue is serviced before every claim, `core.spawn` returns a reserved
-  `TaskId` immediately, `core.wait` blocks the parent (a `Blocked` slot skipped by
-  `claim`) until the child's exit record wakes it, and a 64-entry exit ring serves `wait`.
-  These three primitives use a staged scalar `int` ABI (`Status`/`ExitReason`/`Diagnostic`
-  are not language values yet; spec 0005, "Staged ABI"). Console input now runs too: COM1
+  1024-slot static queue is serviced before every claim, `core.spawn` reserves a global
+  task id, `core.wait` blocks the parent (a `Blocked` slot skipped by `claim`) until the
+  child's exit record wakes it, and a 64-entry exit ring serves `wait`/`run`. These
+  primitives use the predeclared `Status`/`Diagnostic`/`ExitReason` shapes (spec 0005,
+  "Implemented ABI"). Console input now runs too: COM1
   and the PS/2 keyboard are polled in the service opportunity, the kernel stages
   echo/line assembly, and `core.read_line` blocks the shell until a line is ready (Q44;
   spec 0005). Buffers can be indexed and compared: `buf[i]` reads a raw `byte` (checked
@@ -75,9 +75,12 @@ constraints learned there.
   predeclared sum type `Ok | Killed | Faulted(code: FaultCode)` at the fixed `abi::layout`
   offsets: `core.spawn(path, args, var diag, var id)` fills `diag` on a synchronous
   failure, `core.wait(id, var reason)` writes the reason's tag/payload, and the shell
-  prints `diag.message` and reports the reason with a `case`. The next pieces are
-  `core.run`, `stdlib` text helpers and the async compile-diagnostic path, then APs, the
-  realtime class and streams.
+  prints `diag.message` and reports the reason with a `case`. `core.run(path, args,
+  var diag, var reason)` now composes spawn + wait with the pending id in the machine, and
+  the request-completion path carries the compiler's `Diagnostic` in the exit ring, so a
+  compile error the service finds after `spawn` returned reaches `run`'s `diag` (`wait`
+  still sees `Faulted(IoError)`). The next pieces are `stdlib` text helpers, then APs,
+  the realtime class and streams.
 
 ## Ground rules
 
@@ -216,6 +219,7 @@ host tools are unaffected.
 | Integer formatting is a staged `core` opcode; `syslib` ports are staged as scalar `uint`s | specs 0003, 0008; Q45 |
 | Enums: nominal `type Name = (Variant, ...)`, variants are global ordinal constants in one 8-byte slot; `Status` predeclared; `EnumName(int)` faults `Overflow` out of range | spec 0003, spec 0008 (`enum_cast`) |
 | `core.spawn`/`wait`/`kill` return `Status`; `spawn` takes `var diag: Diagnostic` and `wait` takes `var reason: ExitReason` | spec 0005, Q43 |
+| `core.run` is spawn + wait with the pending id in the `Machine`; a failed request carries its `Diagnostic` in the exit ring for `run`, while `wait` sees `Faulted(IoError)` | specs 0003, 0005, 0007 |
 | Compiler nesting limit 32; post-boot kernel stack is 256 KiB with a guard frame | Q42, spec 0002, `arch/x86_64/src/stack.rs` |
 | Records: nominal, declaration-order layout with every field aligned to 8; `Diagnostic` predeclared at fixed `abi::layout` offsets | spec 0003, spec 0008 |
 | Sum types: nominal, 8-byte tag at 0 plus the largest payload at 8 (rounded); destination-driven construction; exhaustive `case` with by-value arm-local payload bindings; `ExitReason` is `Ok | Killed | Faulted(code: FaultCode)`; `FaultCode` variants are qualified | spec 0003, spec 0008 |
@@ -270,3 +274,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-14 | Enums and the `Status` ABI: `type Name = (Variant, ...)` declares a nominal enum whose variants are global ordinal constants (`0..n-1`) in one 8-byte slot; assignment/comparison only within the same enum (ordering by ordinal), `int(enum)` yields the ordinal, `EnumName(int)` is range-checked and faults `Overflow` (opcode `enum_cast`, 60 → 61). `Status` is predeclared with `Ok` = 0; a user `type Status` and a duplicate type/variant are compile errors. `core.spawn(path, args, var id)`, `core.wait(id, var reason)` and `core.kill(id)` now return `Status`; the reason stays a staged `int` and `Diagnostic`/`ExitReason` records remain missing (Q43 narrowed). The shell checks each `Status` and prints `spawn failed`/`wait failed` plus ok/killed/faulted. |
 | 2026-11-14 | Records and the record-based REPL ABI: `type Name = record field: T; ... end;` with nominal types, declaration-order 8-byte-aligned layout, nested records, buffer fields, whole-record copies (`copy_refs`), field references (`ref_offset`) and `value`/`const`/`var` record parameters. `Diagnostic` and `ExitReason` are predeclared at the fixed `abi::layout` offsets; `core.spawn(path, args, var diag, var id)` fills `diag` from the kernel compiler on a synchronous failure and clears it otherwise, and `core.wait(id, var reason)` writes `kind`/`code`. `run missing` prints `spawn failed: No such application` from `diag.message`, `run faulty` reports `child: faulted` from `reason.kind`, and the staged reason `int` is gone (Q43 narrowed to sum types and `core.run`). |
 | 2026-11-14 | Sum types, `case` and the real `ExitReason`: `type Name = Variant | Variant(payload: T);` is nominal, an 8-byte tag at offset 0 plus the largest payload at offset 8, constructed into a destination (`dst := Variant(payload)`; variant names are scoped to the sum, so `Ok` is `Status.Ok` or `ExitReason.Ok` by destination). `case value of Variant: ... Variant(binding): ... end;` is exhaustive (one arm per variant, no `else`), has no fallthrough, and copies a payload by value into an arm-local binding; missing, duplicate and unknown arms, payload mismatches and cross-sum variants are compile errors. No new opcodes: construction is `store_ref`/`clear`/`append`/`copy_refs`, `case` is `load_ref`/`eq`/`jz`. `ExitReason` becomes `Ok | Killed | Faulted(code: FaultCode)` at the same 16-byte layout; `FaultCode` is a predeclared enum with qualified variant names (`FaultCode.DivideByZero`) because two names collide with `Status`. The shell's `report` is an exhaustive `case`; `run faulty` prints `child: faulted DivideByZero`, `run child world` prints `child: ok`, `run missing` keeps its `diag.message`, and the kernel run ends `task 1: exit Ok`. Q43 narrows to `core.run`, `TaskId` and the request-completion diagnostic path. |
+| 2026-11-14 | `core.run` and the request-completion diagnostic: `core.run(path, args, var diag, var reason)` is spawn + wait in the interpreter, with the pending child id in the `Machine`, so a blocked retry waits without spawning twice (builtin id 9, `(4, 1)`). The exit ring now carries a 192-byte `Diagnostic` image for a load failure the service discovers after `spawn` returned; `Host::diagnostic_for` (default `false`) lets `run` copy it into its caller-owned `diag`, while `core.wait` keeps its signature and observes only `Faulted(IoError)`. The shell's `run` command uses `core.run`; the boot child still uses spawn + wait. `run broken` prints the compiler's `unknown identifier` message, `run ../shell` prints the path rule. Q43 is now only the distinct `TaskId` type. |

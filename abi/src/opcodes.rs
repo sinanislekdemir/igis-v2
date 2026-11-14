@@ -256,6 +256,15 @@ pub mod builtin {
     /// `core.kill(id)`: pop a task id, push the `Status` ordinal (`Ok` on
     /// success, `NotFound` for an unknown or finished id).
     pub const KILL: u32 = 5;
+    /// `core.run(path, args, var diag, var reason)`: pop an `ExitReason` sum
+    /// reference, a `Diagnostic` record reference and the two buffer
+    /// references (the reason reference is on top). Spawns once, then waits for
+    /// the child. On a
+    /// synchronous spawn failure the host fills the diagnostic and the error
+    /// `Status` is pushed with the reason untouched. On completion the reason
+    /// is written and `Ok` is pushed. May block while the child is live; the
+    /// pending id lives in the machine, so the retry never spawns twice.
+    pub const RUN: u32 = 9;
     /// `core.len(buffer)`: pop a `string` or `bytes` reference, push its
     /// runtime length as a `uint`. One builtin serves both kinds; the length is
     /// read from the buffer header, so nothing is allocated or copied.
@@ -277,6 +286,7 @@ pub mod builtin {
             SPAWN => Some((4, 1)),
             WAIT => Some((2, 1)),
             KILL => Some((1, 1)),
+            RUN => Some((4, 1)),
             LEN => Some((1, 1)),
             PORT_IN8 => Some((1, 1)),
             PORT_OUT8 => Some((2, 1)),

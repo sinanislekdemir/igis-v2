@@ -327,6 +327,112 @@ end;
 }
 
 #[test]
+fn run_emits_its_builtin_id() {
+    use abi::opcodes::{self, builtin};
+
+    let source = br#"
+unit t;
+
+uses core;
+
+var
+  st: Status;
+  diag: Diagnostic;
+  reason: ExitReason;
+
+procedure main(args: const string[1024]);
+begin
+  st := core.run("child", "hello", diag, reason);
+end;
+"#;
+    let package = compile(source, "t.ig").expect("compiles");
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+
+    let mut seen = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        if op == opcodes::BUILTIN {
+            let id = u32::from_le_bytes(instructions[pc + 4..pc + 8].try_into().unwrap());
+            seen.push(id);
+        }
+        pc += words * 4;
+    }
+    assert_eq!(seen, vec![builtin::RUN]);
+}
+
+#[test]
+fn run_argument_count_and_out_parameter_types_are_checked() {
+    let wrong_count = br#"
+unit t;
+
+uses core;
+
+var
+  diag: Diagnostic;
+
+procedure main(args: const string[1024]);
+begin
+  core.run("child", "hello", diag);
+end;
+"#;
+    let error = compile(wrong_count, "t.ig").expect_err("must not compile");
+    assert!(
+        error.message.contains("`core.run` expects 4 arguments"),
+        "{}",
+        error.message
+    );
+
+    let wrong_diag = br#"
+unit t;
+
+uses core;
+
+var
+  diag: Diagnostic;
+  reason: ExitReason;
+
+procedure main(args: const string[1024]);
+begin
+  core.run("child", "hello", reason, reason);
+end;
+"#;
+    let error = compile(wrong_diag, "t.ig").expect_err("must not compile");
+    assert!(
+        error
+            .message
+            .contains("`core.run` expects `var diag: Diagnostic`"),
+        "{}",
+        error.message
+    );
+
+    let wrong_reason = br#"
+unit t;
+
+uses core;
+
+var
+  diag: Diagnostic;
+
+procedure main(args: const string[1024]);
+begin
+  core.run("child", "hello", diag, diag);
+end;
+"#;
+    let error = compile(wrong_reason, "t.ig").expect_err("must not compile");
+    assert!(
+        error
+            .message
+            .contains("`core.run` expects `var reason: ExitReason`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
 fn spawn_argument_count_and_task_id_type_are_checked() {
     let wrong_count = br#"
 unit t;

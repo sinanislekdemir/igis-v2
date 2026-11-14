@@ -153,16 +153,29 @@ impl Queue {
 
 static REQUESTS: SpinLock<Queue> = SpinLock::new(Queue::new());
 
+/// Size of the `Diagnostic` record image carried by a failed request
+/// ([`layout::diagnostic::SIZE`] bytes).
+pub const DIAG_BYTES: usize = layout::diagnostic::SIZE as usize;
+
 /// One consumed-once exit record.
+///
+/// `diag` carries the request-completion diagnostic: a load failure the service
+/// discovers after `spawn` returned fills it with the compiler's `Diagnostic`
+/// image. `core.run` copies it into the caller's out-parameter; `core.wait` has
+/// no such parameter and observes `Faulted(IoError)` only.
 #[derive(Clone, Copy)]
 struct ExitRecord {
     id: u64,
     reason: ExitReason,
+    has_diag: bool,
+    diag: [u8; DIAG_BYTES],
 }
 
 const EMPTY_EXIT: ExitRecord = ExitRecord {
     id: 0,
     reason: ExitReason::Ok,
+    has_diag: false,
+    diag: [0; DIAG_BYTES],
 };
 
 /// The global exit-reason ring. `next` is the slot the next record overwrites,
@@ -182,15 +195,38 @@ impl ExitRing {
     }
 
     fn record(&mut self, id: u64, reason: ExitReason) {
-        self.entries[self.next] = ExitRecord { id, reason };
+        self.entries[self.next] = ExitRecord {
+            id,
+            reason,
+            has_diag: false,
+            diag: [0; DIAG_BYTES],
+        };
         self.next = (self.next + 1) % EXIT_RING_CAPACITY;
     }
 
-    fn take(&mut self, id: u64) -> Option<ExitReason> {
+    fn record_failure(&mut self, id: u64, reason: ExitReason, diag: &[u8]) {
+        let mut record = ExitRecord {
+            id,
+            reason,
+            has_diag: true,
+            diag: [0; DIAG_BYTES],
+        };
+        let copied = diag.len().min(DIAG_BYTES);
+        record.diag[..copied].copy_from_slice(&diag[..copied]);
+        self.entries[self.next] = record;
+        self.next = (self.next + 1) % EXIT_RING_CAPACITY;
+    }
+
+    fn take(&mut self, id: u64) -> Option<(ExitReason, Option<[u8; DIAG_BYTES]>)> {
         for entry in self.entries.iter_mut() {
             if entry.id == id {
                 entry.id = 0;
-                return Some(entry.reason);
+                let diag = if entry.has_diag {
+                    Some(entry.diag)
+                } else {
+                    None
+                };
+                return Some((entry.reason, diag));
             }
         }
         None
@@ -207,7 +243,8 @@ static EXITS: SpinLock<ExitRing> = SpinLock::new(ExitRing::new());
 pub fn boot(image: &Ext2<'_>) -> u64 {
     for name in ["shell", "entrypoint"] {
         let id = task::reserve_id();
-        if load(image, name, id, &[]).is_ok() {
+        let mut diag = [0u8; DIAG_BYTES];
+        if load(image, name, id, &[], &mut diag).is_ok() {
             return id;
         }
     }
@@ -238,9 +275,9 @@ pub fn validate_path(path: &str) -> Status {
 /// reported as a `Status` immediately, as spec 0005 requires. Every synchronous
 /// failure fills `diag` with the `Diagnostic` record fields at
 /// [`layout::diagnostic`] offsets; success clears it. A compile error is only
-/// discovered by the service; it is printed and surfaces through `core.wait` as
-/// a faulted child (the request-completion path that would report it through
-/// `diag` is still out of scope).
+/// discovered by the service; it is printed, recorded as `Faulted(IoError)` and
+/// carries the compiler's diagnostic in the exit record, which `core.run`
+/// copies into the caller's `diag` (spec 0005, "Implemented ABI").
 pub fn request_spawn(
     image: &Ext2<'_>,
     requester: u64,
@@ -331,7 +368,13 @@ pub fn service(image: &Ext2<'_>) {
         Ok(name) => name,
         Err(_) => {
             println!("repl: task {}: malformed request path", request.reserved_id);
-            record_exit(request.reserved_id, ExitReason::Faulted(FaultCode::IoError));
+            let mut diag = [0u8; DIAG_BYTES];
+            layout::diagnostic::write(&mut diag, b"", b"request path is not valid UTF-8", 0, 0);
+            record_exit_with_diag(
+                request.reserved_id,
+                ExitReason::Faulted(FaultCode::IoError),
+                &diag,
+            );
             task::wake(request.reserved_id);
             return;
         }
@@ -342,15 +385,21 @@ pub fn service(image: &Ext2<'_>) {
         request.reserved_id, request.requester
     );
     let args = &request.args[..8 + request.args_len as usize];
-    if load(image, name, request.reserved_id, args).is_err() {
-        // The caller already has the id and may already be blocked in `wait`.
-        // A synthetic fault record wakes it; the regions were never placed (or
-        // were reclaimed by `load`), so no task exists.
+    let mut diag = [0u8; DIAG_BYTES];
+    if load(image, name, request.reserved_id, args, &mut diag).is_err() {
+        // The caller already has the id and may already be blocked in `run`.
+        // A synthetic fault record wakes it; the diagnostic rides along so a
+        // `run` caller can report the compiler's message. The regions were
+        // never placed (or were reclaimed by `load`), so no task exists.
         println!(
             "repl: task {}: request failed; no task created",
             request.reserved_id
         );
-        record_exit(request.reserved_id, ExitReason::Faulted(FaultCode::IoError));
+        record_exit_with_diag(
+            request.reserved_id,
+            ExitReason::Faulted(FaultCode::IoError),
+            &diag,
+        );
         task::wake(request.reserved_id);
     }
 }
@@ -360,8 +409,14 @@ pub fn record_exit(id: u64, reason: ExitReason) {
     EXITS.lock().record(id, reason);
 }
 
-/// Consumes the exit record for `id`, if present.
-pub fn take_exit(id: u64) -> Option<ExitReason> {
+/// Records a request failure with the compiler's `Diagnostic` image.
+pub fn record_exit_with_diag(id: u64, reason: ExitReason, diag: &[u8]) {
+    EXITS.lock().record_failure(id, reason, diag);
+}
+
+/// Consumes the exit record for `id`, if present. The optional diagnostic is
+/// the request-completion path's compiler image; only `core.run` reads it.
+pub fn take_exit(id: u64) -> Option<(ExitReason, Option<[u8; DIAG_BYTES]>)> {
     EXITS.lock().take(id)
 }
 
@@ -386,7 +441,10 @@ pub fn has_pending() -> bool {
 /// `Err(())` means "not runnable": a missing file, an over-cap source, a
 /// failed compile and a rejected package are all reported and treated the same
 /// way. On `Ok`, the task is in the runnable set and the scheduler owns it.
-fn load(image: &Ext2<'_>, name: &str, id: u64, args: &[u8]) -> Result<(), ()> {
+fn load(image: &Ext2<'_>, name: &str, id: u64, args: &[u8], diag: &mut [u8]) -> Result<(), ()> {
+    let describe = |diag: &mut [u8], message: &[u8]| {
+        layout::diagnostic::write(diag, b"", message, 0, 0);
+    };
     println!("repl: trying `{name}`");
 
     let mut source = SOURCE.lock();
@@ -394,6 +452,7 @@ fn load(image: &Ext2<'_>, name: &str, id: u64, args: &[u8]) -> Result<(), ()> {
         Ok(len) => len,
         Err(Status::NotFound) => {
             println!("repl: {name}: not found");
+            describe(diag, b"No such application");
             return Err(());
         }
         Err(Status::CapacityExceeded) => {
@@ -401,10 +460,12 @@ fn load(image: &Ext2<'_>, name: &str, id: u64, args: &[u8]) -> Result<(), ()> {
                 "repl: {name}: source is larger than the {}-byte cap",
                 compiler::MAX_SOURCE_BYTES
             );
+            describe(diag, b"source is larger than the compiler cap");
             return Err(());
         }
         Err(status) => {
             println!("repl: {name}: read failed ({})", status.name());
+            describe(diag, b"application file cannot be read");
             return Err(());
         }
     };
@@ -426,6 +487,13 @@ fn load(image: &Ext2<'_>, name: &str, id: u64, args: &[u8]) -> Result<(), ()> {
         Ok(package) => package,
         Err(diagnostic) => {
             println!("repl: {name}: {diagnostic}");
+            layout::diagnostic::write(
+                diag,
+                diagnostic.unit.as_str().as_bytes(),
+                diagnostic.message.as_str().as_bytes(),
+                i64::from(diagnostic.line),
+                i64::from(diagnostic.column),
+            );
             return Err(());
         }
     };
@@ -434,6 +502,7 @@ fn load(image: &Ext2<'_>, name: &str, id: u64, args: &[u8]) -> Result<(), ()> {
         Ok(header) => header,
         Err(status) => {
             println!("repl: {name}: bad manifest ({})", status.name());
+            describe(diag, b"bad application manifest");
             return Err(());
         }
     };
@@ -443,12 +512,14 @@ fn load(image: &Ext2<'_>, name: &str, id: u64, args: &[u8]) -> Result<(), ()> {
             header.code_len,
             package.code.len()
         );
+        describe(diag, b"manifest code length does not match the package");
         return Err(());
     }
     let state_size = header.state_size as usize;
     let stack_size = header.stack_size as usize;
     if state_size > MAX_REGION_BYTES || stack_size > MAX_REGION_BYTES {
         println!("repl: {name}: region size over the {MAX_REGION_BYTES}-byte cap");
+        describe(diag, b"application region size is over the cap");
         return Err(());
     }
 
@@ -457,6 +528,7 @@ fn load(image: &Ext2<'_>, name: &str, id: u64, args: &[u8]) -> Result<(), ()> {
         Ok(task) => task,
         Err(status) => {
             println!("repl: {name}: cannot place regions ({})", status.name());
+            describe(diag, b"cannot place application regions");
             return Err(());
         }
     };
@@ -486,6 +558,7 @@ fn load(image: &Ext2<'_>, name: &str, id: u64, args: &[u8]) -> Result<(), ()> {
     // scratch. A rejected package never enters the runnable set.
     if let Err(diagnostic) = sched::parse_program(task.regions.code.as_slice()) {
         println!("repl: {name}: verifier rejected the package: {diagnostic}");
+        describe(diag, b"verifier rejected the package");
         task.reclaim();
         return Err(());
     }
@@ -499,6 +572,7 @@ fn load(image: &Ext2<'_>, name: &str, id: u64, args: &[u8]) -> Result<(), ()> {
         Err(status) => {
             // `spawn` reclaimed the task's regions.
             println!("repl: {name}: cannot enqueue ({})", status.name());
+            describe(diag, b"cannot enqueue the application task");
             Err(())
         }
     }

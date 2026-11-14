@@ -3912,6 +3912,41 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::enumeration(STATUS_ENUM)))
             }
+            "core.run" => {
+                if args.len() != 4 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.run` expects 4 arguments, got {}", args.len()),
+                    ));
+                }
+                self.emit_ref(args[0], Some(Kind::String))?;
+                self.emit_ref(args[1], Some(Kind::String))?;
+                let diagnostic = Type::record(DIAGNOSTIC_RECORD, abi::layout::diagnostic::SIZE);
+                let diag = self.emit_aggregate_ref(args[2], true, "`var diag`")?;
+                if diag != diagnostic {
+                    let found = self.type_name(diag);
+                    return Err(self.err_at(
+                        args[2],
+                        format_args!("`core.run` expects `var diag: Diagnostic`, found `{found}`"),
+                    ));
+                }
+                let exit_reason = Type::sum(EXIT_REASON_SUM, abi::layout::exit_reason::SIZE);
+                let reason = self.emit_aggregate_ref(args[3], true, "`var reason`")?;
+                if reason != exit_reason {
+                    let found = self.type_name(reason);
+                    return Err(self.err_at(
+                        args[3],
+                        format_args!(
+                            "`core.run` expects `var reason: ExitReason`, found `{found}`"
+                        ),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::RUN)?;
+                self.pop(4)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
             "core.wait" => {
                 if args.len() != 2 {
                     return Err(self.err(

@@ -127,19 +127,24 @@ begin
         say("usage: run <app> [args]\n")
       else
       begin
-        st := core.spawn(path, argv, diag, id);
+        // `core.run` is spawn + wait in one primitive. It blocks the shell
+        // until the child terminates and writes the child's `ExitReason`.
+        st := core.run(path, argv, diag, reason);
         if st = Ok then
         begin
-          say("started\n");
-          st := core.wait(id, reason);
-          if st = Ok then
-            report(reason)
-          else
-            say("wait failed\n");
+          // On a compile error the service discovers after `spawn` returned,
+          // `run` also fills `diag` from the exit record (spec 0005).
+          if core.len(diag.message) > uint(0) then
+          begin
+            say("child: ");
+            say(diag.message);
+            say("\n");
+          end;
+          report(reason)
         end
         else
         begin
-          say("spawn failed: ");
+          say("run failed: ");
           say(diag.message);
           say("\n");
         end;

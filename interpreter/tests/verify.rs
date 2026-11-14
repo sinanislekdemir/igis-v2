@@ -351,8 +351,10 @@ struct MockHost {
     output: Vec<u8>,
     spawn_result: Option<Result<u64, Status>>,
     spawn_args: Option<(Vec<u8>, Vec<u8>)>,
+    spawn_calls: usize,
     wait_results: Vec<WaitOutcome>,
     wait_calls: usize,
+    diag_for: Option<(u64, Vec<u8>)>,
     read_lines: Vec<Option<Vec<u8>>>,
     read_calls: usize,
     killed: Vec<u64>,
@@ -393,6 +395,7 @@ impl Host for MockHost {
     }
 
     fn spawn(&mut self, path: &[u8], args: &[u8], diag: &mut [u8]) -> Result<u64, Status> {
+        self.spawn_calls += 1;
         self.spawn_args = Some((path.to_vec(), args.to_vec()));
         let result = self.spawn_result.unwrap_or(Err(Status::Invalid));
         match result {
@@ -411,6 +414,17 @@ impl Host for MockHost {
             .unwrap_or(WaitOutcome::Status(Status::NotFound))
     }
 
+    fn diagnostic_for(&mut self, id: u64, diag: &mut [u8]) -> bool {
+        match &self.diag_for {
+            Some((want, bytes)) if *want == id => {
+                let copied = diag.len().min(bytes.len());
+                diag[..copied].copy_from_slice(&bytes[..copied]);
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn kill(&mut self, id: u64) -> Status {
         self.killed.push(id);
         Status::Ok
@@ -424,12 +438,26 @@ fn run_with_host(
     host: &mut MockHost,
     budget: u64,
 ) -> (Outcome, Machine) {
+    let mut machine = Machine::new();
+    let outcome = resume_with_host(code, state, stack, host, budget, &mut machine);
+    (outcome, machine)
+}
+
+/// Resumes an existing machine, as the scheduler does across quanta. A machine
+/// carries the pending `core.run` id, so this is what proves a blocked run does
+/// not spawn twice.
+fn resume_with_host(
+    code: &[u8],
+    state: &mut [u8],
+    stack: &mut [u8],
+    host: &mut MockHost,
+    budget: u64,
+    machine: &mut Machine,
+) -> Outcome {
     let mut scratch = scratch_for(code);
     let program = Program::parse(code, &mut scratch).expect("verifies");
     let args = vec![0u8; 8 + 1024];
-    let mut machine = Machine::new();
-    let outcome = machine.run(&program, host, state, stack, &args, budget);
-    (outcome, machine)
+    machine.run(&program, host, state, stack, &args, budget)
 }
 
 fn spawn_package(spawn_result: Result<u64, Status>) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
@@ -576,6 +604,172 @@ fn wait_maps_exit_reasons_and_status_errors() {
         assert_eq!(state_u64(&state, 8), kind, "{outcome:?}");
         assert_eq!(state_u64(&state, 16), fault_code, "{outcome:?}");
     }
+}
+
+fn run_package() -> Vec<u8> {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_CONST, 8);
+    op_imm(&mut instructions, opcodes::REF_CONST, 24);
+    // `Diagnostic` occupies state[16..208]; the `ExitReason` is state[208..224]
+    // and the returned `Status` slot is state[0..8].
+    op_imm(&mut instructions, opcodes::REF_STATE, 16);
+    op_imm(&mut instructions, opcodes::REF_STATE, 208);
+    op_imm(&mut instructions, opcodes::BUILTIN, opcodes::builtin::RUN);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op(&mut instructions, opcodes::RET);
+    let mut constants = constant(b"child");
+    constants.extend_from_slice(&constant(b"hello"));
+    let spec = FnSpec {
+        frame_size: 72,
+        ..MAIN
+    };
+    build(&[spec], &instructions, &constants, 224, 128, 0)
+}
+
+fn diag_message(state: &[u8]) -> (u64, Vec<u8>) {
+    let base = 16 + abi::layout::diagnostic::MESSAGE_OFFSET as usize;
+    let length = state_u64(state, base);
+    (length, state[base + 8..base + 8 + length as usize].to_vec())
+}
+
+#[test]
+fn run_spawns_once_and_reports_an_immediate_completion() {
+    let code = run_package();
+    let mut host = MockHost {
+        spawn_result: Some(Ok(7)),
+        wait_results: vec![WaitOutcome::Exited(ExitReason::Ok)],
+        ..Default::default()
+    };
+    let mut state = vec![0u8; 224];
+    let mut stack = vec![0u8; 128];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 200);
+
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(host.spawn_calls, 1);
+    assert_eq!(host.wait_calls, 1);
+    assert_eq!(state_u64(&state, 0), Status::Ok as u64);
+    assert_eq!(
+        state_u64(&state, 208),
+        abi::layout::exit_tag::OK as u64,
+        "the reason's tag is Ok"
+    );
+    assert_eq!(diag_message(&state).0, 0, "success clears the diagnostic");
+}
+
+#[test]
+fn run_blocks_then_resumes_without_spawning_twice() {
+    let code = run_package();
+    let mut host = MockHost {
+        spawn_result: Some(Ok(7)),
+        wait_results: vec![
+            WaitOutcome::Blocked,
+            WaitOutcome::Exited(ExitReason::Faulted(FaultCode::Overflow)),
+        ],
+        ..Default::default()
+    };
+    let mut state = vec![0u8; 224];
+    let mut stack = vec![0u8; 128];
+    let mut machine = Machine::new();
+
+    let outcome = resume_with_host(&code, &mut state, &mut stack, &mut host, 200, &mut machine);
+    assert_eq!(outcome, Outcome::Blocked(WaitKind::ChildExit(7)));
+    assert_eq!(host.spawn_calls, 1);
+    assert_eq!(machine.pc(), 32, "pc stays on the run instruction");
+    assert_eq!(state_u64(&state, 0), 0, "no status is reported yet");
+    assert_eq!(
+        state_u64(&state, 208),
+        0,
+        "the reason is untouched until completion"
+    );
+
+    let outcome = resume_with_host(&code, &mut state, &mut stack, &mut host, 200, &mut machine);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(
+        host.spawn_calls, 1,
+        "the retry waits; it never spawns again"
+    );
+    assert_eq!(host.wait_calls, 2);
+    assert_eq!(state_u64(&state, 0), Status::Ok as u64);
+    assert_eq!(
+        state_u64(&state, 208),
+        abi::layout::exit_tag::FAULTED as u64
+    );
+    assert_eq!(state_u64(&state, 216), FaultCode::Overflow as u64);
+}
+
+#[test]
+fn run_spawn_error_pushes_the_status_and_fills_the_diagnostic() {
+    let code = run_package();
+    let mut host = MockHost {
+        spawn_result: Some(Err(Status::NotFound)),
+        ..Default::default()
+    };
+    let mut state = vec![0u8; 224];
+    let mut stack = vec![0u8; 128];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 200);
+
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(host.spawn_calls, 1);
+    assert_eq!(host.wait_calls, 0, "a spawn failure does not wait");
+    assert_eq!(state_u64(&state, 0), Status::NotFound as u64);
+    assert_eq!(diag_message(&state), (10, b"bad source".to_vec()));
+    assert_eq!(
+        state_u64(&state, 208),
+        0,
+        "the reason out-parameter is untouched"
+    );
+}
+
+#[test]
+fn run_wait_error_pushes_the_status_and_leaves_the_reason() {
+    let code = run_package();
+    let mut host = MockHost {
+        spawn_result: Some(Ok(7)),
+        wait_results: vec![WaitOutcome::Status(Status::NotFound)],
+        ..Default::default()
+    };
+    let mut state = vec![0u8; 224];
+    let mut stack = vec![0u8; 128];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 200);
+
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(host.spawn_calls, 1);
+    assert_eq!(host.wait_calls, 1);
+    assert_eq!(state_u64(&state, 0), Status::NotFound as u64);
+    assert_eq!(
+        state_u64(&state, 208),
+        0,
+        "the reason out-parameter is untouched"
+    );
+}
+
+#[test]
+fn run_copies_the_request_completion_diagnostic_after_a_fault() {
+    let code = run_package();
+    let mut detail = [0u8; abi::layout::diagnostic::SIZE as usize];
+    abi::layout::diagnostic::write(&mut detail, b"broken", b"expected `;`", 3, 1);
+    let mut host = MockHost {
+        spawn_result: Some(Ok(7)),
+        wait_results: vec![WaitOutcome::Exited(ExitReason::Faulted(FaultCode::IoError))],
+        diag_for: Some((7, detail.to_vec())),
+        ..Default::default()
+    };
+    let mut state = vec![0u8; 224];
+    let mut stack = vec![0u8; 128];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 200);
+
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(state_u64(&state, 0), Status::Ok as u64);
+    assert_eq!(
+        state_u64(&state, 208),
+        abi::layout::exit_tag::FAULTED as u64
+    );
+    assert_eq!(state_u64(&state, 216), FaultCode::IoError as u64);
+    assert_eq!(diag_message(&state), (12, b"expected `;`".to_vec()));
+    assert_eq!(
+        state_u64(&state, 16 + abi::layout::diagnostic::LINE_OFFSET as usize),
+        3
+    );
 }
 
 #[test]

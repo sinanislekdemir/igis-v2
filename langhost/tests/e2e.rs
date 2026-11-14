@@ -230,7 +230,6 @@ fn shell_spawns_and_waits_for_the_child_on_the_host() {
         "child: ok\n",
         "shell: help, echo <text>, run <app> [args], exit\n",
         "child: args world\n",
-        "started\n",
         "hi there\n",
     ] {
         assert!(text.contains(line), "missing {line:?} in {text:?}");
@@ -570,4 +569,35 @@ end;
     assert!(text.contains("faulty: about to divide\n"), "{text:?}");
     assert!(text.contains("reason faulted\n"), "{text:?}");
     assert!(text.contains("code divide by zero\n"), "{text:?}");
+}
+
+#[test]
+fn core_run_reports_a_spawn_failure_through_diag_on_the_host() {
+    let source = br#"
+unit runfail;
+
+uses core;
+
+var
+  st: Status;
+  diag: Diagnostic;
+  reason: ExitReason;
+
+procedure main(args: const string[1024]);
+begin
+  st := core.run("missing", "", diag, reason);
+  if st = Ok then
+    core.write("unexpected ok\n")
+  else
+  begin
+    core.write("run failed: ");
+    core.write(diag.message);
+    core.write("\n");
+  end;
+end;
+"#;
+    let package = langhost::compile(source, "runfail").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"run failed: No such application\n");
 }

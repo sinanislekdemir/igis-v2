@@ -101,6 +101,19 @@ pub trait Host {
     fn kill(&mut self, _id: u64) -> Status {
         Status::Invalid
     }
+
+    /// Copies the request-completion diagnostic for `id`, if the host kept one.
+    ///
+    /// A failure the REPL service discovers *after* `spawn` returned (a compile
+    /// error) is not known to `spawn`; the exit record carries the compiler's
+    /// `Diagnostic` image and the kernel hands it over here. `diag` is shaped
+    /// like the record ([`layout::diagnostic::SIZE`] bytes). Returns `false`
+    /// when no diagnostic is available, in which case `diag` is untouched.
+    /// `core.run` is the only caller; `core.wait` keeps its spec signature and
+    /// observes only `Faulted(IoError)`.
+    fn diagnostic_for(&mut self, _id: u64, _diag: &mut [u8]) -> bool {
+        false
+    }
 }
 
 /// What a blocked builtin is waiting for. The scheduler records the condition
@@ -164,6 +177,12 @@ pub struct Machine {
     frame_size: usize,
     yield_requested: bool,
     executed: u64,
+    /// The child id of a `core.run` that has already spawned and is waiting.
+    ///
+    /// Kept in the machine rather than the host so a `Blocked` retry resumes
+    /// the wait without spawning a second child, and so the host stays
+    /// stateless across scheduler quanta.
+    pending_run: Option<u64>,
 }
 
 impl Default for Machine {
@@ -187,6 +206,7 @@ impl Machine {
             frame_size: 0,
             yield_requested: false,
             executed: 0,
+            pending_run: None,
         }
     }
 
@@ -829,6 +849,125 @@ impl Machine {
                         let id = self.pop(stack)?;
                         let status = host.kill(id);
                         self.push(stack, status as u64)?;
+                    }
+                    builtin::RUN => {
+                        // `core.run(path, args, var diag, var reason) -> Status`:
+                        // the reason reference is on top, then diag, args, path.
+                        let reason_bits = self.pop(stack)?;
+                        let diag_bits = self.pop(stack)?;
+                        let args_bits = self.pop(stack)?;
+                        let path_bits = self.pop(stack)?;
+
+                        // The spawn result is staged exactly like `core.spawn`'s:
+                        // the host fills a local record-shaped slice and the
+                        // bytes are copied into the caller's record afterwards.
+                        let mut diag = [0u8; layout::diagnostic::SIZE as usize];
+
+                        let id = match self.pending_run {
+                            // The wait was interrupted by a block: the child was
+                            // already spawned, so never spawn again.
+                            Some(id) => id,
+                            None => {
+                                let result = {
+                                    let (path_region, path_offset) =
+                                        self.resolve(path_bits, state, stack, constants, args)?;
+                                    let (args_region, args_offset) =
+                                        self.resolve(args_bits, state, stack, constants, args)?;
+                                    let path_len = self.buffer_len(
+                                        path_region,
+                                        path_offset,
+                                        state,
+                                        stack,
+                                        constants,
+                                        args,
+                                    )?;
+                                    let args_len = self.buffer_len(
+                                        args_region,
+                                        args_offset,
+                                        state,
+                                        stack,
+                                        constants,
+                                        args,
+                                    )?;
+                                    let path = buffer_slice(
+                                        path_region,
+                                        path_offset,
+                                        path_len,
+                                        state,
+                                        stack,
+                                        constants,
+                                        args,
+                                    )?;
+                                    let argument = buffer_slice(
+                                        args_region,
+                                        args_offset,
+                                        args_len,
+                                        state,
+                                        stack,
+                                        constants,
+                                        args,
+                                    )?;
+                                    host.spawn(path, argument, &mut diag)
+                                };
+                                match result {
+                                    Ok(id) => {
+                                        // Success clears the diagnostic.
+                                        self.write_bytes(
+                                            diag_bits, &diag, state, stack, constants, args,
+                                        )?;
+                                        self.pending_run = Some(id);
+                                        id
+                                    }
+                                    Err(status) => {
+                                        // The reason out-parameter is untouched;
+                                        // the host filled the diagnostic.
+                                        self.write_bytes(
+                                            diag_bits, &diag, state, stack, constants, args,
+                                        )?;
+                                        self.push(stack, status as u64)?;
+                                        return Ok(Step::Continue);
+                                    }
+                                }
+                            }
+                        };
+
+                        match host.wait(id) {
+                            WaitOutcome::Exited(reason) => {
+                                let mut record = [0u8; layout::exit_reason::SIZE as usize];
+                                layout::exit_reason::write(&mut record, reason);
+                                // A load failure the service found after the
+                                // spawn returned is carried in the exit record;
+                                // `run` is the only primitive that reports it.
+                                let mut detail = [0u8; layout::diagnostic::SIZE as usize];
+                                if host.diagnostic_for(id, &mut detail) {
+                                    self.write_bytes(
+                                        diag_bits, &detail, state, stack, constants, args,
+                                    )?;
+                                }
+                                self.pending_run = None;
+                                self.write_bytes(
+                                    reason_bits,
+                                    &record,
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.push(stack, Status::Ok as u64)?;
+                            }
+                            WaitOutcome::Status(status) => {
+                                self.pending_run = None;
+                                self.push(stack, status as u64)?;
+                            }
+                            WaitOutcome::Blocked => {
+                                // As with `wait`: restore the operand stack and
+                                // the instruction boundary. The pending id stays
+                                // in the machine, so the retry waits only.
+                                self.pc = pc;
+                                self.sp = saved_sp;
+                                return Ok(Step::Blocked(WaitKind::ChildExit(id)));
+                            }
+                        }
                     }
                     builtin::LEN => {
                         let bits = self.pop(stack)?;

@@ -132,16 +132,17 @@ The interface is split into two namespaces:
 - `receive` copies what is available, up to the destination length; a byte stream has no
   message boundaries. Framing is a `stdlib` concern.
 
-#### Implemented ABI: `spawn`/`wait`/`kill` return `Status`
+#### Implemented ABI: `spawn`/`wait`/`kill`/`run` return `Status`
 
 `Status` is a predeclared enum, `Diagnostic` is a predeclared record and `ExitReason` is
-the predeclared sum type `Ok | Killed | Faulted(code: FaultCode)` (spec 0003), so all three
-primitives use the target shapes: the return is a real `Status`, and the out-parameters are
+the predeclared sum type `Ok | Killed | Faulted(code: FaultCode)` (spec 0003), so every
+primitive uses the target shapes: the return is a real `Status`, and the out-parameters are
 a record and a sum value at the fixed `abi::layout` offsets.
 
 | Primitive | Implemented signature | Result |
 |-----------|-----------------------|--------|
 | `core.spawn` | `(path: const string[0], args: const string[0], var diag: Diagnostic, var id: int) -> Status` | `Ok` with the reserved global id written through `id` and `diag` cleared; `NotFound`, `Invalid`, `Full` or `CapacityExceeded` with `id` untouched, `diag` filled and no task created |
+| `core.run` | `(path: const string[0], args: const string[0], var diag: Diagnostic, var reason: ExitReason) -> Status` | spawn + wait; `Ok` with `reason`'s tag/payload written, a synchronous spawn failure exactly as `spawn`, and a load failure the service discovers after the spawn returned with `reason = Faulted(IoError)` plus the compiler's diagnostic copied into `diag` |
 | `core.wait` | `(id: int, var reason: ExitReason) -> Status` | `Ok` with `reason`'s tag/payload written (`Ok`, `Killed` or `Faulted(FaultCode)`); `NotFound` for an unknown or evicted id; `Invalid` for id zero or the caller itself |
 | `core.kill` | `(id: int) -> Status` | `Ok`, `NotFound` (unknown or finished), or `Invalid` (id zero or the caller itself) |
 
@@ -161,11 +162,17 @@ a record and a sum value at the fixed `abi::layout` offsets.
 - `Diagnostic` is cleared as empty text, `0` line/column/task id and `-1` for
   `handle`/`offset`/`length`.
 - `TaskId` is an `int` (`0` is invalid) until a distinct type exists.
-- **Still staged:** a failure the service discovers *after* `spawn` returned (a compile
-  error, a read failure) is printed to the kernel console and recorded as
-  `Faulted(IoError)`; the parent's `wait` observes `Faulted` with payload `IoError`.
-  Reporting it through `diag` needs a request-completion path and is out of scope.
-  `core.run` is not exposed until `stdlib` exists (Q43).
+- `core.run` is `spawn` + `wait` with no extra kernel state: the interpreter
+  spawns once, keeps the pending id in the `Machine`, writes `diag` from the
+  spawn result, and retries only the wait after a `Blocked`. The id is cleared
+  when the run completes or returns a `Status`.
+- **Request-completion diagnostic:** a failure the service discovers *after*
+  `spawn` returned (a compile error, a read failure) is printed to the kernel
+  console, recorded as `Faulted(IoError)`, and its exit-ring entry also carries
+  the compiler's `Diagnostic` image (192 bytes). `Host::diagnostic_for(id, diag)`
+  (default `false`) lets the interpreter copy it into `run`'s caller-owned
+  `diag`. `core.wait` keeps its spec signature: it observes `Faulted(IoError)`
+  with no diagnostic, while `run` callers see both.
 
 #### Staged line discipline: `core.read_line`
 
@@ -303,6 +310,7 @@ signal for origin and cost (`0003-language.md`).
 | Path longer than 256 bytes | `Status.CapacityExceeded`; `diag` filled; no request enqueued |
 | Request path malformed or not a regular file | `Status.Invalid`; `diag` filled; no task created |
 | `run`/`spawn` compile error | `Status.Invalid`; `diag` filled; no task created |
+| `run` load error after `spawn` returned | The service records `Faulted(IoError)`; `run` returns `Ok` with that reason and fills `diag` from the exit record; `wait` sees `Faulted(IoError)` without a diagnostic |
 | Request queue full | `Status.Full`; `diag` filled; `run` blocks only on the child |
 | `wait` on an unknown or evicted id | `Status.NotFound` |
 | `kill` on a terminated or unknown id | `Status.NotFound` |
@@ -349,3 +357,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-14 | REPL ABI now uses the predeclared `Status` enum: `core.spawn(path, args, var id)`, `core.wait(id, var reason)` and `core.kill(id)` return `Status`; only the `Diagnostic` and `ExitReason` records remain staged (Q43 narrowed). `Host` is unchanged (`Result<u64, Status>`, `WaitOutcome`, `Status`); the kernel maps `abi::Status` directly. |
 | 2026-11-14 | Record-based REPL ABI: `core.spawn(path, args, var diag: Diagnostic, var id: int)` and `core.wait(id, var reason: ExitReason)` replace the staged out-parameters. `Host::spawn` gains a record-shaped `&mut [u8]` `diag` slice (filled on a synchronous failure, cleared on success); `wait` writes `kind`/`code` through the record. A compile failure the service discovers after `spawn` returned still prints to the kernel console and records `Faulted(IoError)`; `TaskId` stays an `int` and `core.run` is not exposed (Q43 narrowed to sum types and `core.run`). |
 | 2026-11-14 | `ExitReason` is now the predeclared sum type `Ok | Killed | Faulted(code: FaultCode)`, so `core.wait` writes a tag (0/1/2) at offset 0 and the `FaultCode` ordinal at offset 8, exactly the previous 16-byte image under new names (`TAG_OFFSET`/`PAYLOAD_OFFSET`). Applications match the reason with an exhaustive `case`; `reason.kind`/`reason.code` no longer exist. `FaultCode` is a predeclared enum with qualified variant names. Q43 is now `core.run`, `TaskId` and the request-completion diagnostic path. |
+| 2026-11-14 | `core.run` implemented as spawn + wait (pending id in the `Machine`, no second spawn on a blocked retry). The request-completion path landed: the exit ring carries a 192-byte `Diagnostic` image for a load failure, `Host::diagnostic_for` (default `false`) copies it, and `run` fills its `diag` while `wait` still reports only `Faulted(IoError)`. Q43 now covers only a distinct `TaskId` type. |
