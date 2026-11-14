@@ -18,13 +18,19 @@
 //!      operand stack (max_depth slots)
 //! ```
 //!
-//! A buffer local occupies `[len: u64][data: cap]`; `ref_local`/`ref_state`
-//! point at `data`, and every buffer instruction reads `len` at `data - 8`.
+//! A buffer local occupies `[len: u64][data: cap]`; a reference to its data is
+//! formed eight bytes past the value start, and every buffer instruction reads
+//! `len` at `data - 8`. A `const`/`var` buffer parameter slot already holds a
+//! data reference.
 //!
 //! A sum value is an 8-byte tag at offset 0 and the payload area at offset 8.
 //! Sum types add no opcode: construction stores the tag with `store_ref` and
 //! the payload with the payload type's ordinary instructions, and `case`
 //! compares the tag and copies the payload into an arm-local slot.
+//!
+//! Arrays add one opcode, `ref_element`: an element reference is the array's
+//! base plus `index * stride`, checked against the element count. Elements
+//! then use the same load/store/copy instructions as record fields.
 //!
 //! Name resolution is table-driven, not hash-driven: a unit is small, so
 //! constants, state variables, procedures and locals are looked up by a linear
@@ -109,6 +115,25 @@ struct SumDef<'a> {
     name: &'a str,
     variants: &'a [SumVariantDef<'a>],
     /// Size in bytes, already rounded to 8.
+    size: u32,
+}
+
+/// One fixed-size array type known to this compilation. The index in this
+/// table is the compiler-local array id carried by [`Kind::Array`].
+///
+/// Layout (spec 0003, "Arrays"): `count` elements at `element_stride` bytes
+/// each, where the stride is the element size rounded to 8; the whole array is
+/// rounded to 8. Since every current element type already has an 8-byte size,
+/// `stride == size` and `count * stride == size`.
+#[derive(Debug, Clone, Copy)]
+struct ArrayDef {
+    /// Element type.
+    elem: Type,
+    /// Element count, always at least 1.
+    count: u32,
+    /// Element stride in bytes, always a multiple of 8.
+    stride: u32,
+    /// Total size in bytes, already rounded to 8.
     size: u32,
 }
 
@@ -293,6 +318,23 @@ impl<'a, 'b> ConstantPool<'a, 'b> {
     }
 }
 
+/// True when a type can cross the library/application unit boundary.
+///
+/// Scalars, buffers and the predeclared enums have representation-only
+/// identity; records, sums and user enums are compiler-local ids. Array ids
+/// are shared by the one interning table, but their element type must itself
+/// be safe.
+fn cross_unit_type_ok(ty: Type, arrays: &[ArrayDef]) -> bool {
+    match ty.kind {
+        Kind::Record(_) | Kind::Sum(_) => false,
+        Kind::Enum(id) => id <= FAULT_CODE_ENUM,
+        Kind::Array(id) => arrays
+            .get(id as usize)
+            .is_some_and(|array| cross_unit_type_ok(array.elem, arrays)),
+        _ => true,
+    }
+}
+
 fn find_const<'a>(consts: &[Const<'a>], name: &str) -> Option<i64> {
     consts.iter().find(|c| c.name == name).map(|c| c.value)
 }
@@ -326,6 +368,76 @@ fn find_sum(sums: &[SumDef<'_>], name: &str) -> Option<u16> {
     sums.iter()
         .position(|sum| sum.name == name)
         .and_then(|index| u16::try_from(index).ok())
+}
+
+/// Finds an array type by its compiler-local id, returning its layout.
+fn array_of(arrays: &[ArrayDef], ty: Type) -> Option<ArrayDef> {
+    match ty.kind {
+        Kind::Array(id) => arrays.get(id as usize).copied(),
+        _ => None,
+    }
+}
+
+/// Interns `elem × count` structurally and returns the array type.
+///
+/// The table is shared by both units of one compilation (the application and
+/// the embedded library), so the same written `array[T, N]` resolves to the
+/// same id on either side of a call. Interning scans existing entries, so the
+/// numbering is first-use order and deterministic.
+fn intern_array<'a>(
+    arrays: &mut SliceVec<'a, '_, ArrayDef>,
+    elem: Type,
+    count: u32,
+    line: u32,
+    column: u32,
+    path: &'a str,
+    unit: &'a str,
+) -> Result<Type, Diagnostic> {
+    for (index, entry) in arrays.as_slice().iter().enumerate() {
+        if entry.elem == elem && entry.count == count {
+            return Ok(Type::array(index as u16, entry.size));
+        }
+    }
+    let stride = align8(elem.size());
+    let size = count.checked_mul(stride).ok_or_else(|| {
+        diag(
+            path,
+            unit,
+            line,
+            column,
+            format_args!("array size overflows"),
+        )
+    })?;
+    if size > MAX_CAPACITY {
+        return Err(diag(
+            path,
+            unit,
+            line,
+            column,
+            format_args!(
+                "array of {count} elements is {size} bytes, over the {MAX_CAPACITY}-byte cap"
+            ),
+        ));
+    }
+    let size = align8(size);
+    let index = u16::try_from(arrays.len()).map_err(|_| {
+        diag(
+            path,
+            unit,
+            line,
+            column,
+            format_args!("too many distinct array types"),
+        )
+    })?;
+    arrays
+        .push(ArrayDef {
+            elem,
+            count,
+            stride,
+            size,
+        })
+        .map_err(|_| arena_full(path, unit, line, column))?;
+    Ok(Type::array(index, size))
 }
 
 /// Returns the sum definition a type names, if it is a sum type.
@@ -410,7 +522,7 @@ fn has_variant(enums: &[EnumDef<'_>], name: &str) -> bool {
 fn is_builtin_type_name(name: &str) -> bool {
     matches!(
         name,
-        "int" | "uint" | "byte" | "bool" | "f64" | "string" | "bytes"
+        "int" | "uint" | "byte" | "bool" | "f64" | "string" | "bytes" | "array"
     )
 }
 
@@ -460,6 +572,7 @@ fn build_tables<'a>(
     unit: &Unit<'a>,
     path: &'a str,
     bump: &Bump<'a>,
+    arrays: &mut SliceVec<'a, '_, ArrayDef>,
 ) -> Result<UnitTables<'a>, Diagnostic> {
     let name = unit.name;
     if name.is_empty() {
@@ -627,6 +740,7 @@ fn build_tables<'a>(
                         enums.as_slice(),
                         records.as_slice(),
                         sums.as_slice(),
+                        arrays,
                         path,
                         name,
                     )?;
@@ -733,6 +847,7 @@ fn build_tables<'a>(
                                 enums.as_slice(),
                                 records.as_slice(),
                                 sums.as_slice(),
+                                arrays,
                                 path,
                                 name,
                             )?;
@@ -836,6 +951,7 @@ fn build_tables<'a>(
             enums.as_slice(),
             records.as_slice(),
             sums.as_slice(),
+            arrays,
             path,
             name,
         )?;
@@ -925,6 +1041,7 @@ fn build_tables<'a>(
                 enums.as_slice(),
                 records.as_slice(),
                 sums.as_slice(),
+                arrays,
                 path,
                 name,
             )?;
@@ -971,6 +1088,7 @@ fn build_tables<'a>(
                     enums.as_slice(),
                     records.as_slice(),
                     sums.as_slice(),
+                    arrays,
                     path,
                     name,
                 )?;
@@ -981,7 +1099,7 @@ fn build_tables<'a>(
                         ty.line,
                         ty.column,
                         format_args!(
-                            "function `{}` must return a scalar type; buffer, record and sum results are not implemented",
+                            "function `{}` must return a scalar type; buffer, record, sum and array results are not implemented",
                             proc.name
                         ),
                     ));
@@ -1024,6 +1142,7 @@ fn compile_procs<'a, 'b>(
     call_base: u32,
     library_sigs: Option<&'a [Sig<'a>]>,
     state_vars: &'a [StateVar<'a>],
+    arrays: &mut SliceVec<'a, 'b, ArrayDef>,
     unit_id: u32,
     pool: &mut ConstantPool<'a, 'b>,
     bump: &'b Bump<'a>,
@@ -1042,6 +1161,7 @@ fn compile_procs<'a, 'b>(
             tables.enums,
             tables.records,
             tables.sums,
+            &mut *arrays,
             call_base,
             library_sigs,
             unit_id,
@@ -1181,11 +1301,15 @@ fn assemble_units<'a>(
     manifest: &'a mut [u8],
 ) -> Result<Package<'a>, Diagnostic> {
     check_uses(application, application_path, is_application)?;
-    let app = build_tables(application, application_path, bump)?;
+    // One array table serves both units: interning is structural, so an
+    // `array[T, N]` written on either side of a call resolves to the same id.
+    let mut arrays = SliceVec::<ArrayDef>::new(bump)
+        .map_err(|_| arena_full(application_path, application.name, 1, 1))?;
+    let app = build_tables(application, application_path, bump, &mut arrays)?;
     let lib = match library {
         Some(unit) => {
             check_uses(unit, library_path, false)?;
-            Some(build_tables(unit, library_path, bump)?)
+            Some(build_tables(unit, library_path, bump, &mut arrays)?)
         }
         None => None,
     };
@@ -1261,6 +1385,7 @@ fn assemble_units<'a>(
                 0,
                 None,
                 rebased,
+                &mut arrays,
                 1,
                 &mut pool,
                 bump,
@@ -1276,6 +1401,7 @@ fn assemble_units<'a>(
         u32::try_from(library_len).unwrap_or(u32::MAX),
         library_sigs,
         app.state_vars,
+        &mut arrays,
         0,
         &mut pool,
         bump,
@@ -1354,15 +1480,85 @@ fn assemble_units<'a>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_type<'a>(
     ty: &TypeRef<'a>,
     consts: &[Const<'a>],
     enums: &[EnumDef<'a>],
     records: &[RecordDef<'a>],
     sums: &[SumDef<'a>],
+    arrays: &mut SliceVec<'a, '_, ArrayDef>,
     path: &'a str,
     unit: &'a str,
 ) -> Result<Type, Diagnostic> {
+    if ty.name == "array" {
+        let Some(elem_ref) = ty.elem else {
+            return Err(diag(
+                path,
+                unit,
+                ty.line,
+                ty.column,
+                format_args!("`array` needs an element type, e.g. `array[int, 4]`"),
+            ));
+        };
+        let Some(count_expr) = ty.count else {
+            return Err(diag(
+                path,
+                unit,
+                ty.line,
+                ty.column,
+                format_args!("`array` needs a count, e.g. `array[int, 4]`"),
+            ));
+        };
+        let elem = resolve_type(elem_ref, consts, enums, records, sums, arrays, path, unit)?;
+        if elem.is_buffer() && elem.cap == 0 {
+            return Err(diag(
+                path,
+                unit,
+                elem_ref.line,
+                elem_ref.column,
+                format_args!("an array element buffer needs a capacity of at least 1"),
+            ));
+        }
+        if elem.size() == 0 {
+            return Err(diag(
+                path,
+                unit,
+                elem_ref.line,
+                elem_ref.column,
+                format_args!("the array element type has no size"),
+            ));
+        }
+        let count = eval_const(count_expr, consts, path, unit, 0)?;
+        if count <= 0 {
+            return Err(diag(
+                path,
+                unit,
+                count_expr.line,
+                count_expr.column,
+                format_args!("array count must be a positive constant, found {count}"),
+            ));
+        }
+        if count > MAX_CAPACITY as i64 {
+            return Err(diag(
+                path,
+                unit,
+                count_expr.line,
+                count_expr.column,
+                format_args!("array count {count} exceeds the {MAX_CAPACITY}-element cap"),
+            ));
+        }
+        return intern_array(arrays, elem, count as u32, ty.line, ty.column, path, unit);
+    }
+    if ty.elem.is_some() || ty.count.is_some() {
+        return Err(diag(
+            path,
+            unit,
+            ty.line,
+            ty.column,
+            format_args!("`{}` is not a parametric type", ty.name),
+        ));
+    }
     if let Some(id) = find_enum(enums, ty.name) {
         if ty.cap.is_some() {
             return Err(diag(
@@ -1487,11 +1683,14 @@ fn eval_const<'a>(
     }
     match expr.kind {
         ExprKind::Int(value) => Ok(value),
-        ExprKind::Ident(name) => find_const(consts, name).ok_or_else(|| {
-            error(format_args!(
-                "unknown constant `{name}` in a constant expression"
-            ))
-        }),
+        ExprKind::Designator(designator) if designator.is_name() => {
+            find_const(consts, designator.base).ok_or_else(|| {
+                error(format_args!(
+                    "unknown constant `{}` in a constant expression",
+                    designator.base
+                ))
+            })
+        }
         ExprKind::Unary(UnOp::Neg, inner) => {
             let value = eval_const(inner, consts, path, unit, depth + 1)?;
             value
@@ -1558,21 +1757,8 @@ enum Target {
     StateRecord { off: u32, ty: Type },
     LocalSum { base: u32, ty: Type, is_ref: bool },
     StateSum { off: u32, ty: Type },
-}
-
-impl Target {
-    fn ty(&self) -> Type {
-        match self {
-            Target::LocalScalar { ty, .. }
-            | Target::StateScalar { ty, .. }
-            | Target::LocalBuffer { ty, .. }
-            | Target::StateBuffer { ty, .. }
-            | Target::LocalRecord { ty, .. }
-            | Target::StateRecord { ty, .. }
-            | Target::LocalSum { ty, .. }
-            | Target::StateSum { ty, .. } => *ty,
-        }
-    }
+    LocalArray { base: u32, ty: Type, is_ref: bool },
+    StateArray { off: u32, ty: Type },
 }
 
 /// Where a designator's storage starts, before any field path is applied.
@@ -1585,17 +1771,23 @@ enum Base {
     State { off: u32 },
 }
 
-/// A resolved designator: a base variable plus a field path.
+/// A resolved designator: a base variable plus a path of field selections and
+/// element indexes.
 ///
 /// `base_ty` is the declared type of the base variable; each path element
-/// selects a record field. With an empty path this is the variable itself.
+/// selects a record field or an array element. With an empty path this is the
+/// variable itself.
 #[derive(Debug, Clone, Copy)]
 struct Place<'a> {
     base: Base,
     base_ty: Type,
-    path: &'a [&'a str],
+    path: &'a [Access<'a>],
     ty: Type,
     writable: bool,
+    /// True when the last path step is `[i]` on a buffer: the result is one
+    /// `byte` (read with `load_u8`, written with `store_u8`), and this records
+    /// the buffer's type for the capacity immediate.
+    byte_buffer: Option<Type>,
 }
 
 struct FnCompiler<'a, 'b, 'p> {
@@ -1607,6 +1799,10 @@ struct FnCompiler<'a, 'b, 'p> {
     enums: &'b [EnumDef<'a>],
     records: &'b [RecordDef<'a>],
     sums: &'b [SumDef<'a>],
+    /// Every array type of this compilation, shared with the library unit.
+    /// Codegen may intern a local's element type here, so the table stays
+    /// mutable until both units are compiled.
+    arrays: &'p mut SliceVec<'a, 'b, ArrayDef>,
     /// Index of this unit's first function in the shared function table.
     call_base: u32,
     /// Top-level procedures of the imported `stdlib` unit, reachable only as
@@ -1634,14 +1830,15 @@ struct FnCompiler<'a, 'b, 'p> {
 
 /// Renders a resolved type for a diagnostic. [`Type`]'s own `Display` carries
 /// only the enum id, so codegen resolves the name through this table.
-struct TypeName<'a, 'b> {
+struct TypeName<'a, 'b, 'c> {
     ty: Type,
     enums: &'b [EnumDef<'a>],
     records: &'b [RecordDef<'a>],
     sums: &'b [SumDef<'a>],
+    arrays: &'c [ArrayDef],
 }
 
-impl fmt::Display for TypeName<'_, '_> {
+impl fmt::Display for TypeName<'_, '_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.ty.kind {
             Kind::Enum(id) => match self.enums.get(id as usize) {
@@ -1655,6 +1852,21 @@ impl fmt::Display for TypeName<'_, '_> {
             Kind::Sum(id) => match self.sums.get(id as usize) {
                 Some(sum) => f.write_str(sum.name),
                 None => f.write_str("sum"),
+            },
+            Kind::Array(id) => match self.arrays.get(id as usize) {
+                Some(array) => write!(
+                    f,
+                    "array[{}, {}]",
+                    TypeName {
+                        ty: array.elem,
+                        enums: self.enums,
+                        records: self.records,
+                        sums: self.sums,
+                        arrays: self.arrays,
+                    },
+                    array.count
+                ),
+                None => f.write_str("array"),
             },
             _ => write!(f, "{}", self.ty),
         }
@@ -1683,12 +1895,13 @@ impl BufferDest<'_> {
 impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
     /// Renders a type for a diagnostic. [`Type`]'s own `Display` knows only
     /// that an enum is an enum; this resolves the name through the table.
-    fn type_name(&self, ty: Type) -> TypeName<'a, '_> {
+    fn type_name(&self, ty: Type) -> TypeName<'a, '_, '_> {
         TypeName {
             ty,
             enums: self.enums,
             records: self.records,
             sums: self.sums,
+            arrays: self.arrays.as_slice(),
         }
     }
 
@@ -1702,6 +1915,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         enums: &'b [EnumDef<'a>],
         records: &'b [RecordDef<'a>],
         sums: &'b [SumDef<'a>],
+        arrays: &'p mut SliceVec<'a, 'b, ArrayDef>,
         call_base: u32,
         library_sigs: Option<&'b [Sig<'a>]>,
         unit_id: u32,
@@ -1725,6 +1939,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             enums,
             records,
             sums,
+            arrays,
             call_base,
             library_sigs,
             unit_id,
@@ -1807,7 +2022,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         for (index, param) in self.current.params.iter().enumerate() {
             let base = self.next_local;
             self.next_local += 8;
-            let aggregate = param.ty.is_record() || param.ty.is_sum();
+            let aggregate = param.ty.is_record() || param.ty.is_sum() || param.ty.is_array();
             let is_ref = param.mode == ParamMode::Var
                 || param.ty.is_buffer()
                 || (aggregate && param.mode != ParamMode::Value);
@@ -1866,6 +2081,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.enums,
                 self.records,
                 self.sums,
+                &mut *self.arrays,
                 self.path,
                 self.unit,
             )?;
@@ -2114,15 +2330,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 column,
             } => {
                 self.mark(line, column)?;
-                match target {
-                    AssignTarget::Name(name) => self.assign(name, value, line, column),
-                    AssignTarget::Field { base, path } => {
-                        self.assign_field(base, path, value, line, column)
-                    }
-                    AssignTarget::Index(name, index) => {
-                        self.assign_index(name, index, value, line, column)
-                    }
-                }
+                self.assign_designator(&target, value, line, column)
             }
             Stmt::Call(call) => {
                 self.mark(call.line, call.column)?;
@@ -2258,13 +2466,13 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         arms: &'a [CaseArm<'a>],
     ) -> Result<(), Diagnostic> {
         let start_depth = self.depth;
-        let Some((base, path)) = Self::designator(value) else {
+        let Some(designator) = Self::designator(value) else {
             return Err(self.err_at(
                 value,
-                format_args!("a `case` subject must be a variable or a field"),
+                format_args!("a `case` subject must be a variable, field or element"),
             ));
         };
-        let place = self.place(base, path, value.line, value.column)?;
+        let place = self.place(designator.base, designator.path, value.line, value.column)?;
         let Some(sum) = sum_of(self.sums, place.ty) else {
             let found = self.type_name(place.ty);
             return Err(self.err_at(
@@ -2391,7 +2599,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 .ok_or_else(|| self.internal("variant is not a member of its sum"))?;
 
             // if tag <> ordinal then next
-            self.push_place_ref(&place)?;
+            self.push_value_ref(&place)?;
             self.simple(opcodes::LOAD_REF)?;
             self.const_i64(ordinal as i64)?;
             self.simple(opcodes::EQ)?;
@@ -2402,7 +2610,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             if let (Some(payload_ty), Some(binding)) = (variant.payload, arm.binding) {
                 self.one(opcodes::REF_LOCAL, payload_base)?;
                 self.push();
-                self.push_place_ref(&place)?;
+                self.push_value_ref(&place)?;
                 self.one(opcodes::REF_OFFSET, 8)?;
                 self.const_i64(payload_ty.size() as i64)?;
                 self.simple(opcodes::COPY_REFS)?;
@@ -2434,7 +2642,66 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         Ok(())
     }
 
-    fn assign(
+    /// Assigns a value to a designator.
+    ///
+    /// A bare name takes the direct scalar/state store; any field or element
+    /// path is resolved to a [`Place`] and dispatched by its type. The base
+    /// must be writable, so a `const` parameter and everything reachable
+    /// through it is read-only.
+    fn assign_designator(
+        &mut self,
+        target: &Designator<'a>,
+        value: &'a Expr<'a>,
+        line: u32,
+        column: u32,
+    ) -> Result<(), Diagnostic> {
+        if target.path.is_empty() {
+            return self.assign_name(target.base, value, line, column);
+        }
+        let place = self.place(target.base, target.path, line, column)?;
+        if !place.writable {
+            let what = if target
+                .path
+                .iter()
+                .any(|access| matches!(access, Access::Field(_)))
+            {
+                "field"
+            } else {
+                "element"
+            };
+            return Err(self.err(
+                line,
+                column,
+                format_args!(
+                    "cannot assign to a {what} of `const` parameter `{}`",
+                    target.base
+                ),
+            ));
+        }
+        if let Some(buffer_ty) = place.byte_buffer {
+            return self.assign_byte(&place, buffer_ty, value, line, column);
+        }
+        if place.ty.is_record() {
+            return self.assign_record(&place, value);
+        }
+        if place.ty.is_sum() {
+            return self.assign_sum(&place, value);
+        }
+        if place.ty.is_array() {
+            return self.assign_array(&place, value);
+        }
+        if place.ty.is_buffer() {
+            return self.buffer_assign(BufferDest::Place(place), Some(target), value);
+        }
+        self.push_value_ref(&place)?;
+        let value_ty = self.expr_scalar(value)?;
+        self.check_exact(place.ty, value_ty, value)?;
+        self.simple(opcodes::STORE_REF)?;
+        self.pop(2)?;
+        Ok(())
+    }
+
+    fn assign_name(
         &mut self,
         name: &'a str,
         value: &'a Expr<'a>,
@@ -2475,7 +2742,11 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             }
             Target::LocalBuffer { .. } | Target::StateBuffer { .. } => {
                 let place = self.place_of_target(&target);
-                self.buffer_assign(BufferDest::Place(place), Some((name, &[])), value)?;
+                let home = Designator {
+                    base: name,
+                    path: &[],
+                };
+                self.buffer_assign(BufferDest::Place(place), Some(&home), value)?;
             }
             Target::LocalRecord { .. } | Target::StateRecord { .. } => {
                 let place = self.place_of_target(&target);
@@ -2485,57 +2756,62 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 let place = self.place_of_target(&target);
                 self.assign_sum(&place, value)?;
             }
+            Target::LocalArray { .. } | Target::StateArray { .. } => {
+                let place = self.place_of_target(&target);
+                self.assign_array(&place, value)?;
+            }
         }
         Ok(())
     }
 
-    /// Assigns one byte of a buffer: `name[index] := value`.
+    /// Assigns one byte of a buffer element: `buf[i] := value`, including an
+    /// element reached through a record field or array (`rec.s[i]`,
+    /// `rows[i][j]`).
     ///
     /// Only `bytes` is writable by index. Writing into a `string` would break
     /// the UTF-8 invariant one byte at a time, so it is a compile error
     /// (spec 0003). The declared capacity is carried in the instruction; the
     /// interpreter extends the runtime length to `index + 1` when the index is
     /// at or past the current length.
-    fn assign_index(
+    fn assign_byte(
         &mut self,
-        name: &'a str,
-        index: &'a Expr<'a>,
+        place: &Place<'a>,
+        buffer_ty: Type,
         value: &'a Expr<'a>,
         line: u32,
         column: u32,
     ) -> Result<(), Diagnostic> {
-        let target = self.resolve_target(name, line, column)?;
-        let ty = match target {
-            Target::LocalBuffer { .. } | Target::StateBuffer { .. } => target.ty(),
-            _ => {
-                return Err(self.err(
-                    line,
-                    column,
-                    format_args!("cannot index `{name}`; it is not a buffer"),
-                ))
-            }
-        };
-        if ty.kind != Kind::Bytes {
+        if buffer_ty.kind != Kind::Bytes {
+            let found = self.type_name(buffer_ty);
             return Err(self.err(
                 line,
                 column,
                 format_args!(
-                    "cannot assign into `{ty}` by index; `string` is read-only by index (UTF-8)"
+                    "cannot assign into `{found}` by index; `string` is read-only by index (UTF-8)"
                 ),
             ));
         }
-        self.push_target_ref(&target)?;
+        let Some(Access::Index(index)) = place.path.last() else {
+            return Err(self.internal("byte place does not end in an index"));
+        };
+        let prefix = Place {
+            path: &place.path[..place.path.len() - 1],
+            ty: buffer_ty,
+            byte_buffer: None,
+            ..*place
+        };
+        self.push_buffer_data_ref(&prefix)?;
         self.check_index_type(index)?;
         let value_ty = self.expr_scalar(value)?;
         if value_ty.kind != Kind::Byte {
             return Err(self.err_at(
                 value,
                 format_args!(
-                    "`{name}[...] := ...` needs a `byte`, found `{value_ty}`; convert the value with `byte(x)`"
+                    "a buffer element needs a `byte`, found `{value_ty}`; convert the value with `byte(x)`"
                 ),
             ));
         }
-        self.one(opcodes::STORE_U8, ty.cap)?;
+        self.one(opcodes::STORE_U8, buffer_ty.cap)?;
         self.pop(3)?;
         Ok(())
     }
@@ -2595,6 +2871,12 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     ty: slot.ty,
                     is_ref: slot.is_ref,
                 }
+            } else if slot.ty.is_array() {
+                Target::LocalArray {
+                    base: slot.base,
+                    ty: slot.ty,
+                    is_ref: slot.is_ref,
+                }
             } else {
                 Target::LocalScalar {
                     off: slot.base,
@@ -2616,6 +2898,11 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 }
             } else if var.ty.is_sum() {
                 Target::StateSum {
+                    off: var.off,
+                    ty: var.ty,
+                }
+            } else if var.ty.is_array() {
+                Target::StateArray {
                     off: var.off,
                     ty: var.ty,
                 }
@@ -2681,41 +2968,28 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         None
     }
 
-    fn push_target_ref(&mut self, target: &Target) -> Result<(), Diagnostic> {
-        match *target {
-            Target::LocalBuffer {
-                base, is_ref: true, ..
-            } => self.one(opcodes::LOAD_LOCAL, base)?,
-            Target::LocalBuffer {
-                base,
-                is_ref: false,
-                ..
-            } => self.one(opcodes::REF_LOCAL, base + 8)?,
-            Target::StateBuffer { off, .. } => self.one(opcodes::REF_STATE, off + 8)?,
-            _ => unreachable!("push_target_ref is only used for buffers"),
-        }
-        self.push();
-        Ok(())
-    }
+    // ---- places (variables, fields and array elements) -----------------
 
-    // ---- places (variables and record fields) ---------------------------
-
-    /// A designator is an identifier or a field path; both name storage that a
-    /// reference can point at.
-    fn designator(expr: &'a Expr<'a>) -> Option<(&'a str, &'a [&'a str])> {
+    /// A designator names storage a reference can point at; it is either a
+    /// bare name or a chain of field selections and element indexes.
+    fn designator(expr: &'a Expr<'a>) -> Option<Designator<'a>> {
         match expr.kind {
-            ExprKind::Ident(name) => Some((name, &[])),
-            ExprKind::Field { base, path } => Some((base, path)),
+            ExprKind::Designator(designator) => Some(designator),
             _ => None,
         }
     }
 
-    /// Resolves a base name and a field path to a [`Place`], checking every
-    /// field against the record table.
+    /// Resolves a designator to a [`Place`], checking every field against the
+    /// record table and every index against an array.
+    ///
+    /// The last step may index a buffer (`buf[i]`), which yields one `byte`;
+    /// [`Place::byte_buffer`] records the buffer type. An index earlier in the
+    /// path must be an array element, so nested indexing composes (`a[i][j]`,
+    /// `a[i].field`).
     fn place(
         &self,
         base_name: &'a str,
-        path: &'a [&'a str],
+        path: &'a [Access<'a>],
         line: u32,
         column: u32,
     ) -> Result<Place<'a>, Diagnostic> {
@@ -2766,22 +3040,66 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         };
 
         let mut ty = base_ty;
-        for name in path {
-            let Some(record) = record_of(self.records, ty) else {
-                return Err(self.err(
-                    line,
-                    column,
-                    format_args!("`{base_name}` is `{ty}`, which has no field `{name}`"),
-                ));
-            };
-            let Some(field) = record.fields.iter().find(|field| field.name == *name) else {
-                return Err(self.err(
-                    line,
-                    column,
-                    format_args!("`{}` has no field `{name}`", record.name),
-                ));
-            };
-            ty = field.ty;
+        let mut byte_buffer = None;
+        let count = path.len();
+        for (index, access) in path.iter().enumerate() {
+            match *access {
+                Access::Field(name) => {
+                    if byte_buffer.is_some() {
+                        return Err(self.err(
+                            line,
+                            column,
+                            format_args!("a `byte` has no field `{name}`"),
+                        ));
+                    }
+                    let Some(record) = record_of(self.records, ty) else {
+                        return Err(self.err(
+                            line,
+                            column,
+                            format_args!("`{base_name}` is `{ty}`, which has no field `{name}`"),
+                        ));
+                    };
+                    let Some(field) = record.fields.iter().find(|field| field.name == name) else {
+                        return Err(self.err(
+                            line,
+                            column,
+                            format_args!("`{}` has no field `{name}`", record.name),
+                        ));
+                    };
+                    ty = field.ty;
+                }
+                Access::Index(_) => {
+                    if byte_buffer.is_some() {
+                        return Err(self.err(
+                            line,
+                            column,
+                            format_args!("a `byte` cannot be indexed"),
+                        ));
+                    }
+                    if ty.is_buffer() {
+                        if index + 1 != count {
+                            return Err(self.err(
+                                line,
+                                column,
+                                format_args!(
+                                    "a buffer element is a `byte`; it cannot be indexed or selected further"
+                                ),
+                            ));
+                        }
+                        byte_buffer = Some(ty);
+                        ty = Type::scalar(Kind::Byte);
+                    } else if let Some(array) = array_of(self.arrays.as_slice(), ty) {
+                        ty = array.elem;
+                    } else {
+                        let found = self.type_name(ty);
+                        return Err(self.err(
+                            line,
+                            column,
+                            format_args!("`{base_name}` is `{found}`, which cannot be indexed"),
+                        ));
+                    }
+                }
+            }
         }
         Ok(Place {
             base,
@@ -2789,10 +3107,11 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             path,
             ty,
             writable,
+            byte_buffer,
         })
     }
 
-    /// Builds the [`Place`] of a local/state variable with no field path.
+    /// Builds the [`Place`] of a local/state variable with no path.
     fn place_of_target(&self, target: &Target) -> Place<'a> {
         match *target {
             Target::LocalBuffer { base, ty, is_ref } | Target::LocalRecord { base, ty, is_ref } => {
@@ -2802,28 +3121,34 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     path: &[],
                     ty,
                     writable: true,
+                    byte_buffer: None,
                 }
             }
-            Target::LocalSum { base, ty, is_ref } => Place {
-                base: Base::Local { off: base, is_ref },
-                base_ty: ty,
-                path: &[],
-                ty,
-                writable: true,
-            },
+            Target::LocalSum { base, ty, is_ref } | Target::LocalArray { base, ty, is_ref } => {
+                Place {
+                    base: Base::Local { off: base, is_ref },
+                    base_ty: ty,
+                    path: &[],
+                    ty,
+                    writable: true,
+                    byte_buffer: None,
+                }
+            }
             Target::StateBuffer { off, ty } | Target::StateRecord { off, ty } => Place {
                 base: Base::State { off },
                 base_ty: ty,
                 path: &[],
                 ty,
                 writable: true,
+                byte_buffer: None,
             },
-            Target::StateSum { off, ty } => Place {
+            Target::StateSum { off, ty } | Target::StateArray { off, ty } => Place {
                 base: Base::State { off },
                 base_ty: ty,
                 path: &[],
                 ty,
                 writable: true,
+                byte_buffer: None,
             },
             Target::LocalScalar { .. } | Target::StateScalar { .. } => {
                 unreachable!("scalars are not places")
@@ -2831,34 +3156,60 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         }
     }
 
-    /// Pushes a reference to the storage a [`Place`] names.
+    /// Pushes a reference to the first byte of the value a [`Place`] names.
     ///
-    /// A buffer is referenced at its data (the length word sits just before);
-    /// a scalar or record is referenced at its first byte. A field reference is
-    /// formed with `ref_offset`, one step per field; the interpreter
-    /// bounds-checks every intermediate offset.
-    fn push_place_ref(&mut self, place: &Place<'a>) -> Result<(), Diagnostic> {
-        let extra = if place.path.is_empty() && place.ty.is_buffer() {
-            8
-        } else {
-            0
-        };
+    /// A field step is `ref_offset` with its declared offset; an array element
+    /// step is `ref_element` with the array's stride and count. The interpreter
+    /// bounds-checks every intermediate reference.
+    fn push_value_ref(&mut self, place: &Place<'a>) -> Result<(), Diagnostic> {
         match place.base {
             Base::Local { off, is_ref: true } => self.one(opcodes::LOAD_LOCAL, off)?,
-            Base::Local { off, is_ref: false } => self.one(opcodes::REF_LOCAL, off + extra)?,
-            Base::State { off } => self.one(opcodes::REF_STATE, off + extra)?,
+            Base::Local { off, is_ref: false } => self.one(opcodes::REF_LOCAL, off)?,
+            Base::State { off } => self.one(opcodes::REF_STATE, off)?,
         }
         self.push();
 
         let mut ty = place.base_ty;
-        let count = place.path.len();
-        for (index, name) in place.path.iter().enumerate() {
-            let field = field_of(self.records, ty, name)
-                .ok_or_else(|| self.internal("unresolved field in a place"))?;
-            let last = index + 1 == count;
-            let extra = if last && field.ty.is_buffer() { 8 } else { 0 };
-            self.one(opcodes::REF_OFFSET, field.off + extra)?;
-            ty = field.ty;
+        for access in place.path {
+            match *access {
+                Access::Field(name) => {
+                    let field = field_of(self.records, ty, name)
+                        .ok_or_else(|| self.internal("unresolved field in a place"))?;
+                    self.one(opcodes::REF_OFFSET, field.off)?;
+                    ty = field.ty;
+                }
+                Access::Index(index) => {
+                    let array = array_of(self.arrays.as_slice(), ty)
+                        .ok_or_else(|| self.internal("unresolved index in a place"))?;
+                    self.check_index_type(index)?;
+                    self.word(opcodes::REF_ELEMENT, 0, 0, 0)?;
+                    self.imm32(array.stride)?;
+                    self.imm32(array.count)?;
+                    self.pop(1)?;
+                    ty = array.elem;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Pushes a reference to a buffer's data area (its runtime length sits at
+    /// `ref - 8`), for the ordinary buffer opcodes.
+    ///
+    /// A `const`/`var` buffer parameter already holds a data reference in its
+    /// slot; every other buffer names its `[len][data]` image, so the data is
+    /// eight bytes past the value.
+    fn push_buffer_data_ref(&mut self, place: &Place<'a>) -> Result<(), Diagnostic> {
+        if place.path.is_empty() && place.ty.is_buffer() {
+            if let Base::Local { off, is_ref: true } = place.base {
+                self.one(opcodes::LOAD_LOCAL, off)?;
+                self.push();
+                return Ok(());
+            }
+        }
+        self.push_value_ref(place)?;
+        if place.ty.is_buffer() {
+            self.one(opcodes::REF_OFFSET, 8)?;
         }
         Ok(())
     }
@@ -2881,7 +3232,8 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         Ok(())
     }
 
-    /// Emits a reference to a record or sum expression and returns its type.
+    /// Emits a reference to a record, sum or array expression and returns its
+    /// type.
     ///
     /// `writable` is required for a `var` parameter or an out-parameter; a
     /// `value` copy and a `const` borrow accept a read-only source.
@@ -2909,27 +3261,27 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 ));
             }
         }
-        let Some((base, path)) = Self::designator(expr) else {
+        let Some(designator) = Self::designator(expr) else {
             return Err(self.err_at(
                 expr,
-                format_args!("{what} must be a variable or a field of a record or sum type"),
+                format_args!("{what} must be a variable, field or element"),
             ));
         };
-        let place = self.place(base, path, expr.line, expr.column)?;
-        if !place.ty.is_record() && !place.ty.is_sum() {
+        let place = self.place(designator.base, designator.path, expr.line, expr.column)?;
+        if !place.ty.is_record() && !place.ty.is_sum() && !place.ty.is_array() {
             let found = self.type_name(place.ty);
             return Err(self.err_at(
                 expr,
-                format_args!("{what} expects a record or sum value, found `{found}`"),
+                format_args!("{what} expects a record, sum or array value, found `{found}`"),
             ));
         }
         if writable && !place.writable {
             return Err(self.err_at(
                 expr,
-                format_args!("cannot pass `const` value `{base}` as `var`"),
+                format_args!("cannot pass `const` value `{}` as `var`", designator.base),
             ));
         }
-        self.push_place_ref(&place)?;
+        self.push_value_ref(&place)?;
         Ok(place.ty)
     }
 
@@ -2939,8 +3291,24 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         destination: &Place<'a>,
         value: &'a Expr<'a>,
     ) -> Result<(), Diagnostic> {
-        self.push_place_ref(destination)?;
+        self.push_value_ref(destination)?;
         let source = self.emit_aggregate_ref(value, false, "a record assignment")?;
+        self.check_exact(destination.ty, source, value)?;
+        self.const_i64(destination.ty.size() as i64)?;
+        self.simple(opcodes::COPY_REFS)?;
+        self.pop(3)?;
+        Ok(())
+    }
+
+    /// Assigns a whole array: a byte copy of `N * stride` bytes, exactly like a
+    /// record copy. The types must match exactly (element type and count).
+    fn assign_array(
+        &mut self,
+        destination: &Place<'a>,
+        value: &'a Expr<'a>,
+    ) -> Result<(), Diagnostic> {
+        self.push_value_ref(destination)?;
+        let source = self.emit_aggregate_ref(value, false, "an array assignment")?;
         self.check_exact(destination.ty, source, value)?;
         self.const_i64(destination.ty.size() as i64)?;
         self.simple(opcodes::COPY_REFS)?;
@@ -2963,7 +3331,8 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         let sum = sum_of(self.sums, destination.ty)
             .ok_or_else(|| self.internal("sum destination has no sum definition"))?;
         match value.kind {
-            ExprKind::Ident(name) => {
+            ExprKind::Designator(designator) if designator.is_name() => {
+                let name = designator.base;
                 if let Some(variant) = variant_of(&sum, name) {
                     if variant.payload.is_some() {
                         return Err(self.err_at(
@@ -2979,16 +3348,13 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                         value,
                         format_args!("`{name}` is a variant of `{owner}`, not of `{}`", sum.name),
                     ))
-                } else if Self::designator(value).is_some() {
-                    self.copy_sum(destination, value)
                 } else {
-                    Err(self.err_at(
-                        value,
-                        format_args!("`{name}` is not a variant of `{}`", sum.name),
-                    ))
+                    // Not a variant of this sum: copy it from a value of the
+                    // same type (the type check reports a real mismatch).
+                    self.copy_sum(destination, value)
                 }
             }
-            ExprKind::Field { .. } => self.copy_sum(destination, value),
+            ExprKind::Designator(_) => self.copy_sum(destination, value),
             ExprKind::Call(call) => {
                 if call.target.contains('.') {
                     return Err(self.err_at(
@@ -3046,7 +3412,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
 
     /// Copies a whole sum value from another value of the same type.
     fn copy_sum(&mut self, destination: &Place<'a>, value: &'a Expr<'a>) -> Result<(), Diagnostic> {
-        self.push_place_ref(destination)?;
+        self.push_value_ref(destination)?;
         let source = self.emit_aggregate_ref(value, false, "a sum assignment")?;
         self.check_exact(destination.ty, source, value)?;
         self.const_i64(destination.ty.size() as i64)?;
@@ -3073,7 +3439,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             .iter()
             .position(|candidate| candidate.name == variant.name)
             .ok_or_else(|| self.internal("variant is not a member of its sum"))?;
-        self.push_place_ref(destination)?;
+        self.push_value_ref(destination)?;
         self.const_i64(ordinal as i64)?;
         self.simple(opcodes::STORE_REF)?;
         self.pop(2)?;
@@ -3092,9 +3458,9 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 payload,
             );
         }
-        self.push_place_ref(destination)?;
+        self.push_value_ref(destination)?;
         self.one(opcodes::REF_OFFSET, 8)?;
-        if payload_ty.is_record() || payload_ty.is_sum() {
+        if payload_ty.is_record() || payload_ty.is_sum() || payload_ty.is_array() {
             let source = self.emit_aggregate_ref(payload, false, "a sum payload")?;
             self.check_exact(payload_ty, source, payload)?;
             self.const_i64(payload_ty.size() as i64)?;
@@ -3109,47 +3475,12 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         Ok(())
     }
 
-    /// Assigns one field: a whole-record copy, a buffer construction, or a
-    /// scalar store through the field reference.
-    fn assign_field(
-        &mut self,
-        base: &'a str,
-        path: &'a [&'a str],
-        value: &'a Expr<'a>,
-        line: u32,
-        column: u32,
-    ) -> Result<(), Diagnostic> {
-        let place = self.place(base, path, line, column)?;
-        if !place.writable {
-            return Err(self.err(
-                line,
-                column,
-                format_args!("cannot assign to a field of `const` parameter `{base}`"),
-            ));
-        }
-        if place.ty.is_record() {
-            return self.assign_record(&place, value);
-        }
-        if place.ty.is_sum() {
-            return self.assign_sum(&place, value);
-        }
-        if place.ty.is_buffer() {
-            return self.buffer_assign(BufferDest::Place(place), Some((base, path)), value);
-        }
-        self.push_place_ref(&place)?;
-        let value_ty = self.expr_scalar(value)?;
-        self.check_exact(place.ty, value_ty, value)?;
-        self.simple(opcodes::STORE_REF)?;
-        self.pop(2)?;
-        Ok(())
-    }
-
     /// Pushes a reference to the data area a buffer construction writes.
     fn push_buffer_dest_ref(&mut self, destination: BufferDest<'a>) -> Result<(), Diagnostic> {
         match destination {
-            BufferDest::Place(place) => self.push_place_ref(&place),
+            BufferDest::Place(place) => self.push_buffer_data_ref(&place),
             BufferDest::SumPayload { sum, .. } => {
-                self.push_place_ref(&sum)?;
+                self.push_value_ref(&sum)?;
                 self.one(opcodes::REF_OFFSET, 16)
             }
         }
@@ -3158,12 +3489,11 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
     /// Assigns a whole buffer field or variable: a construction from literals
     /// and other buffers (`clear` then `append`), never a temporary.
     ///
-    /// `home` names the destination designator for the aliasing check; a
-    /// variable passes its name, a field passes its base and path.
+    /// `home` names the destination designator for the aliasing check.
     fn buffer_assign(
         &mut self,
         destination: BufferDest<'a>,
-        home: Option<(&'a str, &'a [&'a str])>,
+        home: Option<&Designator<'a>>,
         value: &'a Expr<'a>,
     ) -> Result<(), Diagnostic> {
         let ty = destination.ty();
@@ -3205,60 +3535,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                         ));
                     }
                 }
-                ExprKind::Ident(operand) => {
-                    let found = match self.slot(operand) {
-                        Some(slot) => Some((slot.ty, slot.is_ref)),
-                        None => find_state(self.state_vars, operand).map(|var| (var.ty, false)),
-                    };
-                    match found {
-                        Some((part_ty, is_ref)) if part_ty.is_buffer() => {
-                            if part_ty.kind != ty.kind {
-                                return Err(self.err(
-                                    part.line,
-                                    part.column,
-                                    format_args!("cannot use `{part_ty}` in a `{ty}` construction"),
-                                ));
-                            }
-                            // Direct assignment between two inline buffers is a
-                            // type assignment, so the capacities must match
-                            // exactly (spec 0003, D11). A `const`/`var` buffer
-                            // parameter is a call-scoped reference whose declared
-                            // capacity is only a lower bound, so copying one is a
-                            // runtime-checked construction.
-                            if parts.len() == 1 && !is_ref && part_ty.cap != ty.cap {
-                                return Err(self.err(
-                                    part.line,
-                                    part.column,
-                                    format_args!(
-                                        "capacity mismatch: `{part_ty}` cannot be assigned to `{ty}`"
-                                    ),
-                                ));
-                            }
-                        }
-                        Some(_) => {
-                            return Err(self.err(
-                                part.line,
-                                part.column,
-                                format_args!("`{operand}` is not a buffer"),
-                            ))
-                        }
-                        None => {
-                            return Err(self.err(
-                                part.line,
-                                part.column,
-                                format_args!("unknown identifier `{operand}`"),
-                            ))
-                        }
-                    }
-                }
-                ExprKind::Field { base, path } => {
-                    let place = self.place(base, path, part.line, part.column)?;
+                ExprKind::Designator(designator) => {
+                    let place =
+                        self.place(designator.base, designator.path, part.line, part.column)?;
                     if !place.ty.is_buffer() {
                         let found = self.type_name(place.ty);
                         return Err(self.err(
                             part.line,
                             part.column,
-                            format_args!("`{base}.` field is `{found}`, not a buffer"),
+                            format_args!("`{}` is `{found}`, not a buffer", designator.base),
                         ));
                     }
                     if place.ty.kind != ty.kind {
@@ -3269,9 +3554,14 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                             format_args!("cannot use `{found}` in a `{ty}` construction"),
                         ));
                     }
-                    // A record field has its nominal capacity; there is no
-                    // at-least-N relaxation for fields.
-                    if parts.len() == 1 && place.ty.cap != ty.cap {
+                    // Direct assignment between two inline buffers is a type
+                    // assignment, so capacities must match exactly (spec 0003,
+                    // D11). A `const`/`var` buffer parameter is a call-scoped
+                    // reference whose declared capacity is only a lower bound,
+                    // so copying one is a runtime-checked construction.
+                    let is_ref = designator.path.is_empty()
+                        && matches!(place.base, Base::Local { is_ref: true, .. });
+                    if parts.len() == 1 && !is_ref && place.ty.cap != ty.cap {
                         return Err(self.err(
                             part.line,
                             part.column,
@@ -3312,12 +3602,10 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     self.one(opcodes::REF_CONST, offset)?;
                     self.push();
                 }
-                ExprKind::Ident(operand) => {
-                    self.push_named_ref(operand, part)?;
-                }
-                ExprKind::Field { base, path } => {
-                    let place = self.place(base, path, part.line, part.column)?;
-                    self.push_place_ref(&place)?;
+                ExprKind::Designator(designator) => {
+                    let place =
+                        self.place(designator.base, designator.path, part.line, part.column)?;
+                    self.push_buffer_data_ref(&place)?;
                 }
                 _ => {
                     return Err(self.err_at(
@@ -3334,15 +3622,19 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
     }
 
     /// True when `part` names the same storage as the destination designator.
-    fn aliases(home: Option<(&'a str, &'a [&'a str])>, part: &Expr<'a>) -> bool {
-        let Some((home_base, home_path)) = home else {
+    ///
+    /// Field and index steps are compared structurally; an index whose
+    /// expression is not literally the same shape is treated as different,
+    /// which matches the old field-path rule and keeps `rec.a := rec.b`
+    /// valid. (`a[i] := a[i]` is caught; `a[i] := a[j]` is allowed.)
+    fn aliases(home: Option<&Designator<'a>>, part: &Expr<'a>) -> bool {
+        let Some(home) = home else {
             return false;
         };
-        match part.kind {
-            ExprKind::Ident(name) => name == home_base && home_path.is_empty(),
-            ExprKind::Field { base, path } => base == home_base && path == home_path,
-            _ => false,
-        }
+        let ExprKind::Designator(other) = part.kind else {
+            return false;
+        };
+        home.base == other.base && same_accesses(home.path, other.path, 0)
     }
 
     // ---- expressions ---------------------------------------------------
@@ -3374,48 +3666,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     "a string literal is a buffer; assign it into a buffer or pass it to a buffer parameter"
                 ),
             )),
-            ExprKind::Ident(name) => self.load_scalar(name, expr),
-            ExprKind::Field { base, path } => {
-                // A qualified enum variant, `TypeName.Variant`. `FaultCode`
-                // requires this form because its names overlap `Status`.
-                if path.len() == 1 {
-                    if let Some((id, ordinal)) = find_qualified_variant(self.enums, base, path[0]) {
-                        self.const_i64(ordinal as i64)?;
-                        return Ok(Type::enumeration(id));
-                    }
-                }
-                let place = self.place(base, path, expr.line, expr.column)?;
-                if place.ty.is_buffer() {
-                    return Err(self.err_at(
-                        expr,
-                        format_args!("buffer `{base}` field cannot be used as a scalar value"),
-                    ));
-                }
-                if place.ty.is_record() {
-                    let found = self.type_name(place.ty);
-                    return Err(self.err_at(
-                        expr,
-                        format_args!(
-                            "record `{found}` cannot be used as a scalar value; select a field"
-                        ),
-                    ));
-                }
-                if place.ty.is_sum() {
-                    let found = self.type_name(place.ty);
-                    return Err(self.err_at(
-                        expr,
-                        format_args!(
-                            "sum `{found}` cannot be used as a scalar value; match it with `case`"
-                        ),
-                    ));
-                }
-                self.push_place_ref(&place)?;
-                self.simple(opcodes::LOAD_REF)?;
-                // `push_place_ref` counts the reference; `load_ref` replaces it
-                // with the value, so the depth does not change.
-                Ok(place.ty)
-            }
-            ExprKind::Index(name, index) => self.load_index(name, index, expr),
+            ExprKind::Designator(designator) => self.load_designator(&designator, expr),
             ExprKind::Call(call) => match self.call(&call)? {
                 Some(ty) => Ok(ty),
                 None => Err(self.err_at(
@@ -3429,46 +3680,18 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         }
     }
 
-    /// Loads one byte of a buffer: `name[index]`.
-    ///
-    /// The result is `byte` for both `string` and `bytes`; a `string` index
-    /// yields the raw byte at that offset, not a code point (spec 0003, T4).
-    /// The interpreter checks the index against the runtime length and faults
-    /// `OutOfBounds` past it. A literal index is not folded; it is checked at
-    /// run time like any other.
-    fn load_index(
-        &mut self,
-        name: &'a str,
-        index: &'a Expr<'a>,
-        expr: &'a Expr<'a>,
-    ) -> Result<Type, Diagnostic> {
-        self.buffer_type(name, expr)?;
-        self.push_named_ref(name, expr)?;
-        self.check_index_type(index)?;
-        self.simple(opcodes::LOAD_U8)?;
-        self.pop(1)?;
-        Ok(Type::scalar(Kind::Byte))
-    }
-
     /// Returns the buffer type of a buffer expression without emitting code.
     ///
     /// A string literal reports `string[len]`; that kind is only a default,
-    /// because a literal is typed by its destination (spec 0003, T1).
+    /// because a literal is typed by its destination (spec 0003, T1). A
+    /// designator may be a variable, a record field or an array element.
     fn probe_buffer(&self, expr: &Expr<'a>) -> Option<Type> {
         match expr.kind {
             ExprKind::Str(bytes) => Some(Type::buffer(Kind::String, bytes.len() as u32)),
-            ExprKind::Ident(name) => {
-                if let Some(slot) = self.slot(name) {
-                    if slot.ty.is_buffer() {
-                        return Some(slot.ty);
-                    }
-                }
-                find_state(self.state_vars, name)
-                    .filter(|var| var.ty.is_buffer())
-                    .map(|var| var.ty)
-            }
-            ExprKind::Field { base, path } => {
-                let place = self.place(base, path, expr.line, expr.column).ok()?;
+            ExprKind::Designator(designator) => {
+                let place = self
+                    .place(designator.base, designator.path, expr.line, expr.column)
+                    .ok()?;
                 place.ty.is_buffer().then_some(place.ty)
             }
             _ => None,
@@ -3536,6 +3759,88 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         Ok(Some(Type::scalar(Kind::Bool)))
     }
 
+    /// Reads a designator as a scalar value.
+    ///
+    /// A bare name resolves to a constant, an enum variant, a local or a state
+    /// variable. A field or element path resolves to a [`Place`]; a buffer
+    /// index yields one raw `byte` (spec 0003, T4), and every other scalar or
+    /// enum element is loaded through its reference. Records, sums, arrays and
+    /// buffers are not scalar values.
+    fn load_designator(
+        &mut self,
+        designator: &Designator<'a>,
+        expr: &'a Expr<'a>,
+    ) -> Result<Type, Diagnostic> {
+        let base = designator.base;
+        let path = designator.path;
+        if path.is_empty() {
+            return self.load_scalar(base, expr);
+        }
+        // A qualified enum variant, `TypeName.Variant`. `FaultCode` requires
+        // this form because its names overlap `Status`.
+        if path.len() == 1 {
+            if let Access::Field(name) = path[0] {
+                if let Some((id, ordinal)) = find_qualified_variant(self.enums, base, name) {
+                    self.const_i64(ordinal as i64)?;
+                    return Ok(Type::enumeration(id));
+                }
+            }
+        }
+        let place = self.place(base, path, expr.line, expr.column)?;
+        if let Some(buffer_ty) = place.byte_buffer {
+            let Some(Access::Index(index)) = place.path.last() else {
+                return Err(self.internal("byte place does not end in an index"));
+            };
+            let prefix = Place {
+                path: &place.path[..place.path.len() - 1],
+                ty: buffer_ty,
+                byte_buffer: None,
+                ..place
+            };
+            self.push_buffer_data_ref(&prefix)?;
+            self.check_index_type(index)?;
+            self.simple(opcodes::LOAD_U8)?;
+            self.pop(1)?;
+            return Ok(Type::scalar(Kind::Byte));
+        }
+        if place.ty.is_buffer() {
+            return Err(self.err_at(
+                expr,
+                format_args!("buffer `{base}` cannot be used as a scalar value"),
+            ));
+        }
+        if place.ty.is_record() {
+            let found = self.type_name(place.ty);
+            return Err(self.err_at(
+                expr,
+                format_args!("record `{found}` cannot be used as a scalar value; select a field"),
+            ));
+        }
+        if place.ty.is_sum() {
+            let found = self.type_name(place.ty);
+            return Err(self.err_at(
+                expr,
+                format_args!(
+                    "sum `{found}` cannot be used as a scalar value; match it with `case`"
+                ),
+            ));
+        }
+        if place.ty.is_array() {
+            let found = self.type_name(place.ty);
+            return Err(self.err_at(
+                expr,
+                format_args!(
+                    "array `{found}` cannot be used as a scalar value; index it or copy it whole"
+                ),
+            ));
+        }
+        self.push_value_ref(&place)?;
+        self.simple(opcodes::LOAD_REF)?;
+        // `push_value_ref` counts the reference; `load_ref` replaces it with
+        // the value, so the depth does not change.
+        Ok(place.ty)
+    }
+
     fn load_scalar(&mut self, name: &'a str, expr: &'a Expr<'a>) -> Result<Type, Diagnostic> {
         if let Some(value) = find_const(self.consts, name) {
             self.const_i64(value)?;
@@ -3563,6 +3868,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     expr,
                     format_args!(
                         "sum `{name}` of type `{found}` cannot be used as a scalar value; match it with `case`"
+                    ),
+                ));
+            }
+            if slot.ty.is_array() {
+                let found = self.type_name(slot.ty);
+                return Err(self.err_at(
+                    expr,
+                    format_args!(
+                        "array `{name}` of type `{found}` cannot be used as a scalar value; index it or copy it whole"
                     ),
                 ));
             }
@@ -3597,6 +3911,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     expr,
                     format_args!(
                         "sum `{name}` of type `{found}` cannot be used as a scalar value; match it with `case`"
+                    ),
+                ));
+            }
+            if var.ty.is_array() {
+                let found = self.type_name(var.ty);
+                return Err(self.err_at(
+                    expr,
+                    format_args!(
+                        "array `{name}` of type `{found}` cannot be used as a scalar value; index it or copy it whole"
                     ),
                 ));
             }
@@ -3947,7 +4270,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 BinOp::And | BinOp::Or => unreachable!(),
             },
             Kind::String | Kind::Bytes => unreachable!(),
-            Kind::Record(_) | Kind::Sum(_) => unreachable!(),
+            Kind::Record(_) | Kind::Sum(_) | Kind::Array(_) => unreachable!(),
             Kind::Enum(_) => match op {
                 // Ordinals are non-negative, so unsigned ordering is the
                 // declaration order (spec 0003, "Enums").
@@ -4392,18 +4715,17 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 };
                 // Types are compiler-local per unit, so a cross-unit
                 // parameter or result that names a record, sum or user enum
-                // has no shared identity yet. Scalars, buffers and the two
-                // predeclared enums (`Status`, `FaultCode`) are safe.
+                // has no shared identity yet. Scalars, buffers, arrays of
+                // those and the two predeclared enums (`Status`, `FaultCode`)
+                // are safe; the array table itself is shared by both units.
                 if target.starts_with("stdlib.") {
-                    let incompatible = signature.params.iter().any(|param| {
-                        param.ty.is_record()
-                            || param.ty.is_sum()
-                            || matches!(param.ty.kind, Kind::Enum(id) if id > FAULT_CODE_ENUM)
-                    }) || signature.ret.is_some_and(|ty| {
-                        ty.is_record()
-                            || ty.is_sum()
-                            || matches!(ty.kind, Kind::Enum(id) if id > FAULT_CODE_ENUM)
-                    });
+                    let incompatible = signature
+                        .params
+                        .iter()
+                        .any(|param| !cross_unit_type_ok(param.ty, self.arrays.as_slice()))
+                        || signature
+                            .ret
+                            .is_some_and(|ty| !cross_unit_type_ok(ty, self.arrays.as_slice()));
                     if incompatible {
                         return Err(self.err(
                             line,
@@ -4477,7 +4799,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         param: &Param<'a>,
         position: usize,
     ) -> Result<(), Diagnostic> {
-        if param.ty.is_record() || param.ty.is_sum() {
+        if param.ty.is_record() || param.ty.is_sum() || param.ty.is_array() {
             let writable = param.mode == ParamMode::Var;
             let found = self.emit_aggregate_ref(arg, writable, "argument")?;
             if found != param.ty {
@@ -4594,26 +4916,13 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Type::buffer(kind, bytes.len() as u32))
             }
-            ExprKind::Ident(name) => {
-                let ty = self.buffer_type(name, expr)?;
-                if let Some(kind) = want {
-                    if kind.is_buffer() && kind != ty.kind {
-                        return Err(self.err_at(
-                            expr,
-                            format_args!("expected `{}`, found `{ty}`", kind.name()),
-                        ));
-                    }
-                }
-                self.push_named_ref(name, expr)?;
-                Ok(ty)
-            }
-            ExprKind::Field { base, path } => {
-                let place = self.place(base, path, expr.line, expr.column)?;
+            ExprKind::Designator(designator) => {
+                let place = self.place(designator.base, designator.path, expr.line, expr.column)?;
                 if !place.ty.is_buffer() {
                     let found = self.type_name(place.ty);
                     return Err(self.err_at(
                         expr,
-                        format_args!("field `{base}` is `{found}`, not a buffer"),
+                        format_args!("`{}` is `{found}`, not a buffer", designator.base),
                     ));
                 }
                 if let Some(kind) = want {
@@ -4625,7 +4934,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                         ));
                     }
                 }
-                self.push_place_ref(&place)?;
+                self.push_buffer_data_ref(&place)?;
                 Ok(place.ty)
             }
             _ => Err(self.err_at(expr, format_args!("expected a buffer expression"))),
@@ -4633,86 +4942,95 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
     }
 
     fn emit_var_buffer_ref(&mut self, expr: &'a Expr<'a>) -> Result<Type, Diagnostic> {
-        let Some((base, path)) = Self::designator(expr) else {
+        let Some(designator) = Self::designator(expr) else {
             return Err(self.err_at(
                 expr,
                 format_args!("a `var` buffer argument must be a variable or parameter"),
             ));
         };
-        let place = self.place(base, path, expr.line, expr.column)?;
+        let place = self.place(designator.base, designator.path, expr.line, expr.column)?;
         if !place.ty.is_buffer() {
-            return Err(self.err_at(expr, format_args!("`{base}` is not a buffer")));
+            return Err(self.err_at(expr, format_args!("`{}` is not a buffer", designator.base)));
         }
         if !place.writable {
             return Err(self.err_at(
                 expr,
-                format_args!("cannot pass `const` parameter `{base}` as `var`"),
+                format_args!(
+                    "cannot pass `const` parameter `{}` as `var`",
+                    designator.base
+                ),
             ));
         }
-        self.push_place_ref(&place)?;
+        self.push_buffer_data_ref(&place)?;
         Ok(place.ty)
     }
 
     fn emit_scalar_ref(&mut self, expr: &'a Expr<'a>) -> Result<Type, Diagnostic> {
-        let Some((base, path)) = Self::designator(expr) else {
+        let Some(designator) = Self::designator(expr) else {
             return Err(self.err_at(
                 expr,
                 format_args!("a `var` argument must be a variable or parameter"),
             ));
         };
-        let place = self.place(base, path, expr.line, expr.column)?;
+        let place = self.place(designator.base, designator.path, expr.line, expr.column)?;
         if !place.writable {
             return Err(self.err_at(
                 expr,
-                format_args!("cannot pass `const` parameter `{base}` as `var`"),
+                format_args!(
+                    "cannot pass `const` parameter `{}` as `var`",
+                    designator.base
+                ),
             ));
         }
         if !place.ty.is_scalar() {
             let found = self.type_name(place.ty);
-            return Err(self.err_at(expr, format_args!("`{base}` is `{found}`, not a scalar")));
+            return Err(self.err_at(
+                expr,
+                format_args!("`{}` is `{found}`, not a scalar", designator.base),
+            ));
         }
-        self.push_place_ref(&place)?;
+        self.push_value_ref(&place)?;
         Ok(place.ty)
     }
+}
 
-    fn buffer_type(&self, name: &str, expr: &Expr<'a>) -> Result<Type, Diagnostic> {
-        if let Some(slot) = self.slot(name) {
-            if slot.ty.is_buffer() {
-                return Ok(slot.ty);
-            }
-            return Err(self.err_at(expr, format_args!("`{name}` is not a buffer")));
-        }
-        if let Some(var) = find_state(self.state_vars, name) {
-            if var.ty.is_buffer() {
-                return Ok(var.ty);
-            }
-            return Err(self.err_at(expr, format_args!("`{name}` is not a buffer")));
-        }
-        Err(self.err_at(expr, format_args!("unknown identifier `{name}`")))
+/// Structural equality of two access paths, used only by the buffer
+/// self-append check. Depth is bounded by the compiler's nesting limit.
+fn same_accesses(left: &[Access<'_>], right: &[Access<'_>], depth: u32) -> bool {
+    if left.len() != right.len() || depth >= MAX_NESTING {
+        return false;
     }
+    left.iter()
+        .zip(right)
+        .all(|(left, right)| match (left, right) {
+            (Access::Field(a), Access::Field(b)) => a == b,
+            (Access::Index(a), Access::Index(b)) => same_expr(a, b, depth + 1),
+            _ => false,
+        })
+}
 
-    fn push_named_ref(&mut self, name: &str, expr: &'a Expr<'a>) -> Result<(), Diagnostic> {
-        if let Some(slot) = self.slot(name) {
-            if !slot.ty.is_buffer() {
-                return Err(self.err_at(expr, format_args!("`{name}` is not a buffer")));
-            }
-            if slot.is_ref {
-                self.one(opcodes::LOAD_LOCAL, slot.base)?;
-            } else {
-                self.one(opcodes::REF_LOCAL, slot.base + 8)?;
-            }
-            self.push();
-            return Ok(());
+/// Structural equality of two expressions, sufficient for the aliasing check.
+/// A call is never considered equal to anything else.
+fn same_expr(left: &Expr<'_>, right: &Expr<'_>, depth: u32) -> bool {
+    if depth >= MAX_NESTING {
+        return false;
+    }
+    match (&left.kind, &right.kind) {
+        (ExprKind::Int(a), ExprKind::Int(b)) => a == b,
+        (ExprKind::Float(a), ExprKind::Float(b)) => a.to_bits() == b.to_bits(),
+        (ExprKind::Str(a), ExprKind::Str(b)) => a == b,
+        (ExprKind::Bool(a), ExprKind::Bool(b)) => a == b,
+        (ExprKind::Designator(a), ExprKind::Designator(b)) => {
+            a.base == b.base && same_accesses(a.path, b.path, depth + 1)
         }
-        if let Some(var) = find_state(self.state_vars, name) {
-            if !var.ty.is_buffer() {
-                return Err(self.err_at(expr, format_args!("`{name}` is not a buffer")));
-            }
-            self.one(opcodes::REF_STATE, var.off + 8)?;
-            self.push();
-            return Ok(());
+        (ExprKind::Cast(a, ae), ExprKind::Cast(b, be)) => a == b && same_expr(ae, be, depth + 1),
+        (ExprKind::Unary(aop, ae), ExprKind::Unary(bop, be)) => {
+            aop == bop && same_expr(ae, be, depth + 1)
         }
-        Err(self.err_at(expr, format_args!("unknown identifier `{name}`")))
+        (ExprKind::Binary(aop, al, ar), ExprKind::Binary(bop, bl, br)) => {
+            aop == bop && same_expr(al, bl, depth + 1) && same_expr(ar, br, depth + 1)
+        }
+        _ => false,
     }
 }
 

@@ -130,7 +130,7 @@ particular core count or quantum size.
 | `bool`, `byte` | 1 byte in memory, zero-extended to 64 bits in an operand |
 | `int`, `uint`, `f64` | 8 bytes; `f64` is an IEEE-754 bit pattern |
 | `bytes[N]`, `string[N]` | `[len: u64][data: N]`, 8-byte aligned; `len <= N` |
-| `array[T,N]` | `N` elements, compiler-aligned |
+| `array[T,N]` | `N` elements at `stride = align8(size_of(T))`; the array size is `align8(N * stride)` (spec 0003) |
 | enum | 8-byte ordinal, nominally typed (spec 0003) |
 | record | fields in declaration order, each aligned to 8; size rounded to 8 (spec 0003) |
 | sum type | 8-byte tag at offset 0, then the largest variant payload at offset 8; size rounded to 8 (spec 0003) |
@@ -165,6 +165,17 @@ branches with `jz`; an arm's payload binding is a `copy_refs` of the payload siz
 proves exhaustiveness, so the final arm needs no run-time fallback; a tag that no arm
 matches cannot be produced by a compiled package.
 
+Arrays add **one** opcode, `ref_element` (immediates `stride` and `count`): it pops a
+base reference and an index, checks `index < count`, and pushes `base + index * stride`.
+An element is then read or written with the same instructions as a field: `load_ref` and
+`store_ref` for scalars and enums, `copy_refs` for records, sums and nested arrays, and
+the buffer opcodes for a buffer element (indexed after the element reference). A whole
+array assignment and a `value` array parameter are `copy_refs` with the compile-time array
+size. Nested access (`a[i][j]`, `a[i].field`) is a chain of `ref_element` and
+`ref_offset` steps. The compiler interns `(element type, count)` structurally in one
+table shared by the application and `stdlib`, so the same written array type has one id
+on both sides of a call.
+
 ### Frames
 
 Each call pushes one frame on the task's stack region:
@@ -177,8 +188,8 @@ frame = [ prev_fp: u64 ][ return_pc: u32 ][ function: u32 ][ return_sp: u64 ]
 The header is 32 bytes, so locals start at offset 32. `return_sp` restores the
 caller's operand-stack top and `dest_ref` names the destination that receives a
 function result. Every scalar, including `bool` and `byte`, occupies one 8-byte
-local slot in the first implementation; the packed layouts of records and
-arrays are not part of this slice.
+local slot in the first implementation; records, sums and arrays use their
+packed, 8-byte-aligned layout inline in the locals area.
 
 - Locals are addressed by slot index, 8-byte aligned; buffers are inline in the locals
   area, so a large local is a large frame (spec 0004).
@@ -214,7 +225,7 @@ artifact:
 | Comparisons | `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `cmp_buffers` for buffers |
 | Conversions | `i2f`, `f2i` (truncate and range-check), `trunc8`, `sext`, `zext` |
 | Control flow | `jmp`, `jz`, `jnz`, `call`, `ret` |
-| Buffers and aggregates | `append` (capacity-checked), `load_u8`/`store_u8` (length- and capacity-checked), `find` (byte scan), `substr` (checked slice), `format_int` (decimal/hex formatting), `enum_cast` (range-checked ordinal → enum), `ref_offset` (field reference), `copy_refs` (record, sum value and `case` payload copies), `array_load/store`, `ring_push/pop`, `map_get/put/has/remove` |
+| Buffers and aggregates | `append` (capacity-checked), `load_u8`/`store_u8` (length- and capacity-checked), `find` (byte scan), `substr` (checked slice), `format_int` (decimal/hex formatting), `enum_cast` (range-checked ordinal → enum), `ref_offset` (field reference), `ref_element` (array element reference, index-checked), `copy_refs` (record, sum, array and `case` payload copies), `ring_push/pop`, `map_get/put/has/remove` |
 | Builtins | `call_builtin n` — host-interface and `core` primitives |
 | System | `safe` (explicit poll), `trap` (compiler-inserted fault) |
 

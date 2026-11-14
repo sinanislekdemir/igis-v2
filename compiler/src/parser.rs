@@ -3,9 +3,10 @@
 //! The grammar is the subset of spec 0003 implemented by the first vertical
 //! slice: `unit`/`uses`, top-level `const`/`var`/`procedure`/`function`, a `var`
 //! section inside a subprogram, `begin`/`end`, `if`/`else`, `while`, `case`,
-//! assignment, calls, `return` and expressions. Records, enums, sum types and
-//! functions are implemented; arrays, streams and handlers are rejected by
-//! syntax, which is what "not implemented" should look like.
+//! assignment, calls, `return` and expressions. Records, enums, sum types,
+//! fixed-size arrays and functions are implemented; rings, maps, streams and
+//! handlers are rejected by syntax, which is what "not implemented" should
+//! look like.
 //!
 //! Nodes and sibling lists are allocated in the caller's arena and borrow the
 //! token stream; the parser owns nothing.
@@ -496,18 +497,45 @@ impl<'a, 'b> Parser<'a, 'b> {
 
     fn type_ref(&mut self) -> Result<TypeRef<'a>, Diagnostic> {
         let token = self.peek();
+        self.enter(token.line, token.column)?;
+        let result = self.type_ref_inner();
+        self.leave();
+        result
+    }
+
+    /// The body of [`Self::type_ref`]; array element types recurse through the
+    /// bounded wrapper, so a deeply nested `array[array[...]]` is a diagnostic
+    /// rather than a stack fault.
+    fn type_ref_inner(&mut self) -> Result<TypeRef<'a>, Diagnostic> {
+        let token = self.peek();
         let name = self.ident("a type name")?;
-        let cap = if matches!(name, "string" | "bytes") {
+        let (cap, elem, count) = if name == "array" {
+            self.expect(&TokenKind::LBracket, "`[` after `array`")?;
+            let elem = self.type_ref()?;
+            let elem = self
+                .bump
+                .alloc(elem)
+                .map_err(|_| self.arena_error(token.line, token.column))?;
+            self.expect(
+                &TokenKind::Comma,
+                "`,` between an array's element type and count",
+            )?;
+            let count = self.expression()?;
+            self.expect(&TokenKind::RBracket, "`]`")?;
+            (None, Some(&*elem), Some(count))
+        } else if matches!(name, "string" | "bytes") {
             self.expect(&TokenKind::LBracket, "`[` after `string`/`bytes`")?;
             let cap = self.expression()?;
             self.expect(&TokenKind::RBracket, "`]`")?;
-            Some(cap)
+            (Some(cap), None, None)
         } else {
-            None
+            (None, None, None)
         };
         Ok(TypeRef {
             name,
             cap,
+            elem,
+            count,
             line: token.line,
             column: token.column,
         })
@@ -678,67 +706,23 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             TokenKind::Ident(_) => {
                 let (target, line, column) = self.name_path()?;
-                if self.check(&TokenKind::LBracket) {
-                    if target.contains('.') {
-                        return Err(self.error(
-                            line,
-                            column,
-                            format_args!(
-                                "cannot index `{target}`; indexing a field is not implemented"
-                            ),
-                        ));
-                    }
-                    self.advance();
-                    let index = self.expression()?;
-                    self.expect(&TokenKind::RBracket, "`]`")?;
-                    self.expect(&TokenKind::Assign, "`:=` after an indexed target")?;
-                    let value = self.expression()?;
-                    return self.alloc_stmt(
-                        Stmt::Assign {
-                            target: AssignTarget::Index(target, index),
-                            value,
-                            line,
-                            column,
-                        },
-                        line,
-                        column,
-                    );
-                }
-                if self.eat(&TokenKind::Assign) {
-                    if target.contains('.') {
-                        let (base, path) = self.field_parts(target, line, column)?;
-                        let value = self.expression()?;
-                        return self.alloc_stmt(
-                            Stmt::Assign {
-                                target: AssignTarget::Field { base, path },
-                                value,
-                                line,
-                                column,
-                            },
-                            line,
-                            column,
-                        );
-                    }
-                    let value = self.expression()?;
-                    self.alloc_stmt(
-                        Stmt::Assign {
-                            target: AssignTarget::Name(target),
-                            value,
-                            line,
-                            column,
-                        },
-                        line,
-                        column,
-                    )
-                } else if self.check(&TokenKind::LParen) {
+                if self.check(&TokenKind::LParen) {
                     let call = self.call(target, line, column)?;
-                    self.alloc_stmt(Stmt::Call(call), line, column)
-                } else {
-                    let found = self.peek().kind;
-                    Err(self.here(format_args!(
-                        "expected `:=` or `(` after `{target}`, found {found}"
-                    )))
+                    return self.alloc_stmt(Stmt::Call(call), line, column);
                 }
+                let (base, path) = self.designator_path(target, line, column)?;
+                self.expect(&TokenKind::Assign, "`:=` after an assignment target")?;
+                let value = self.expression()?;
+                self.alloc_stmt(
+                    Stmt::Assign {
+                        target: Designator { base, path },
+                        value,
+                        line,
+                        column,
+                    },
+                    line,
+                    column,
+                )
             }
             other => Err(self.here(format_args!("expected a statement, found {other}"))),
         }
@@ -844,26 +828,42 @@ impl<'a, 'b> Parser<'a, 'b> {
         Ok((name, token.line, token.column))
     }
 
-    /// Splits a dotted name (`base.field.other`) into the base and the field
-    /// path. Both borrow the arena copy of the joined name.
-    fn field_parts(
-        &self,
-        target: &'a str,
+    /// Builds the designator path after a base name.
+    ///
+    /// A dotted name (`p.x.other`) contributes one `Field` per part; then any
+    /// postfix `[index]` and `.field` steps are appended. The path is arena
+    /// data, so a designator is `Copy` and can be referenced repeatedly.
+    fn designator_path(
+        &mut self,
+        name: &'a str,
         line: u32,
         column: u32,
-    ) -> Result<(&'a str, &'a [&'a str]), Diagnostic> {
-        let mut parts = self.list::<&'a str>(line, column)?;
-        for part in target.split('.') {
+    ) -> Result<(&'a str, &'a [Access<'a>]), Diagnostic> {
+        let mut parts = self.list::<Access<'a>>(line, column)?;
+        let mut names = name.split('.');
+        let base = names.next().unwrap_or(name);
+        if base.is_empty() {
+            return Err(self.error(line, column, format_args!("malformed field access")));
+        }
+        for part in names {
             if part.is_empty() {
                 return Err(self.error(line, column, format_args!("malformed field access")));
             }
-            self.push(&mut parts, part, line, column)?;
+            self.push(&mut parts, Access::Field(part), line, column)?;
         }
-        let parts = parts.into_slice();
-        if parts.len() < 2 {
-            return Err(self.error(line, column, format_args!("malformed field access")));
+        loop {
+            if self.eat(&TokenKind::LBracket) {
+                let index = self.expression()?;
+                self.expect(&TokenKind::RBracket, "`]`")?;
+                self.push(&mut parts, Access::Index(index), line, column)?;
+            } else if self.eat(&TokenKind::Dot) {
+                let part = self.ident("a name after `.`")?;
+                self.push(&mut parts, Access::Field(part), line, column)?;
+            } else {
+                break;
+            }
         }
-        Ok((parts[0], &parts[1..]))
+        Ok((base, parts.into_slice()))
     }
 
     fn call(&mut self, target: &'a str, line: u32, column: u32) -> Result<Call<'a>, Diagnostic> {
@@ -1101,17 +1101,14 @@ impl<'a, 'b> Parser<'a, 'b> {
                         return self.alloc_expr(ExprKind::Cast(name, inner), line, column);
                     }
                     let call = self.call(name, line, column)?;
-                    self.alloc_expr(ExprKind::Call(call), line, column)
-                } else if name.contains('.') {
-                    let (base, path) = self.field_parts(name, line, column)?;
-                    self.alloc_expr(ExprKind::Field { base, path }, line, column)
-                } else if self.eat(&TokenKind::LBracket) {
-                    let index = self.expression()?;
-                    self.expect(&TokenKind::RBracket, "`]`")?;
-                    self.alloc_expr(ExprKind::Index(name, index), line, column)
-                } else {
-                    self.alloc_expr(ExprKind::Ident(name), line, column)
+                    return self.alloc_expr(ExprKind::Call(call), line, column);
                 }
+                let (base, path) = self.designator_path(name, line, column)?;
+                self.alloc_expr(
+                    ExprKind::Designator(Designator { base, path }),
+                    line,
+                    column,
+                )
             }
             other => Err(self.here(format_args!("expected an expression, found {other}"))),
         }

@@ -652,3 +652,20 @@ text: trimmed has a space\n"
             .to_vec()
     );
 }
+
+#[test]
+fn fixed_size_arrays_read_write_copy_and_split() {
+    let result = run_sample("array.ig", b"");
+    assert_eq!(
+        result.output,
+        b"20\n30\n10\n406\n100\n5\n16\nrow\n7\n5\n97\nalpha\n4\nbb\n0\n".to_vec()
+    );
+    assert_eq!(result.reason, ExitReason::Ok);
+}
+
+#[test]
+fn an_array_index_out_of_range_faults() {
+    let result = run_sample("array_bounds.ig", b"");
+    assert_eq!(result.output, b"".to_vec(), "nothing after the fault runs");
+    assert_eq!(result.reason, ExitReason::Faulted(FaultCode::OutOfBounds));
+}

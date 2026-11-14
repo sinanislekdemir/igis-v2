@@ -86,8 +86,16 @@ constraints learned there.
   diagnostic naming `stdlib`. `function Name(...): T;` with `return` works for scalar
   results. The first helpers are `trim_into`, `split_once`, `parse_int_into`,
   `starts_with` and `contains_byte`; `samples/apps/text` exercises them on `main(args)`.
-  The next pieces are arrays/rings/maps and UTF-8 helpers, then APs, the realtime class
-  and streams.
+  Fixed-size arrays are implemented: `array[T, N]` (N a positive const) in state, locals,
+  records, sum payloads and `value`/`const`/`var` parameters, with nominal
+  element/count identity, `a[i]` read/write checked `index < N`
+  (`fault(OutOfBounds)`), whole-array `copy_refs`, nested `a[i][j]`/`a[i].field`, and one
+  new opcode `ref_element` (ABI v1 61 → 62, immediate `stride` and `count`). Layout is `N`
+  elements at `align8(element size)`, array size `align8(N * stride)`; one structural
+  array table is shared by the app and `stdlib`, so `stdlib.split_all` takes an
+  `array[string[64], 8]` parameter. `samples/lang/array.ig` exercises the whole slice.
+  The next pieces are rings/maps and UTF-8 helpers, then APs, the realtime class and
+  streams.
 
 ## Ground rules
 
@@ -233,6 +241,7 @@ host tools are unaffected.
 | Sum types: nominal, 8-byte tag at 0 plus the largest payload at 8 (rounded); destination-driven construction; exhaustive `case` with by-value arm-local payload bindings; `ExitReason` is `Ok | Killed | Faulted(code: FaultCode)`; `FaultCode` variants are qualified | spec 0003, spec 0008 |
 | `stdlib` is embedded source (`stdlib/stdlib.ig`), compiled into the application's package; `stdlib.*` is qualified, the function table is library-first, line-table unit ids are 0 (app) / 1 (stdlib) | spec 0003, spec 0008 |
 | Functions: `function Name(...): T;` with `return value;`, scalar results only, `return` on every path | spec 0003, spec 0008 |
+| Arrays: `array[T, N]` is nominal in element type and count, `N` a positive const, index `0..N-1` faults `OutOfBounds`; element refs via `ref_element`, whole copies via `copy_refs` | spec 0003, spec 0008 |
 
 ## Open questions
 
@@ -286,3 +295,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-14 | Sum types, `case` and the real `ExitReason`: `type Name = Variant | Variant(payload: T);` is nominal, an 8-byte tag at offset 0 plus the largest payload at offset 8, constructed into a destination (`dst := Variant(payload)`; variant names are scoped to the sum, so `Ok` is `Status.Ok` or `ExitReason.Ok` by destination). `case value of Variant: ... Variant(binding): ... end;` is exhaustive (one arm per variant, no `else`), has no fallthrough, and copies a payload by value into an arm-local binding; missing, duplicate and unknown arms, payload mismatches and cross-sum variants are compile errors. No new opcodes: construction is `store_ref`/`clear`/`append`/`copy_refs`, `case` is `load_ref`/`eq`/`jz`. `ExitReason` becomes `Ok | Killed | Faulted(code: FaultCode)` at the same 16-byte layout; `FaultCode` is a predeclared enum with qualified variant names (`FaultCode.DivideByZero`) because two names collide with `Status`. The shell's `report` is an exhaustive `case`; `run faulty` prints `child: faulted DivideByZero`, `run child world` prints `child: ok`, `run missing` keeps its `diag.message`, and the kernel run ends `task 1: exit Ok`. Q43 narrows to `core.run`, `TaskId` and the request-completion diagnostic path. |
 | 2026-11-14 | `core.run` and the request-completion diagnostic: `core.run(path, args, var diag, var reason)` is spawn + wait in the interpreter, with the pending child id in the `Machine`, so a blocked retry waits without spawning twice (builtin id 9, `(4, 1)`). The exit ring now carries a 192-byte `Diagnostic` image for a load failure the service discovers after `spawn` returned; `Host::diagnostic_for` (default `false`) lets `run` copy it into its caller-owned `diag`, while `core.wait` keeps its signature and observes only `Faulted(IoError)`. The shell's `run` command uses `core.run`; the boot child still uses spawn + wait. `run broken` prints the compiler's `unknown identifier` message, `run ../shell` prints the path rule. Q43 is now only the distinct `TaskId` type. |
 | 2026-11-14 | Multi-unit `stdlib`: `stdlib/stdlib.ig` is real source embedded with `include_str!`; an application with `uses stdlib;` compiles it into the same package (library functions first, shared constant pool, line-table unit ids 0 app / 1 stdlib, manifest keeps the app unit name, diagnostics name the failing unit). `function ... : T` with `return` (scalar results) and the first helpers `trim_into`, `split_once`, `parse_int_into`, `starts_with`, `contains_byte` landed; `samples/apps/text` runs `run text 42 hi` in the kernel. The stdlib adds ~5.3 KiB of source, ~4.1 KiB of code blob and ~154 KiB of compile scratch to the sample app. |
+| 2026-11-14 | Fixed-size arrays: `array[T, N]` (positive const N) in state, locals, records, sum payloads and `value`/`const`/`var` parameters. Layout is N elements at `align8(element size)` with the array rounded to 8; arrays are nominal in element type and count. `a[i]` reads/writes the element (`index < N` at run time, `fault(OutOfBounds)`, never a clamp), nested `a[i][j]`/`a[i].field` composes, whole-array assignment and `value` parameters copy `N * stride` bytes, and `const`/`var` parameters are call-scoped references. One new opcode `ref_element` (immediates stride, count; ABI v1 61 → 62) forms an element reference; the verifier requires an 8-byte-multiple stride and a non-zero count whose product fits a section. One structural array table is shared by the app and `stdlib`, so arrays cross the unit boundary; `stdlib.split_all` fills an `array[string[64], 8]`. `samples/lang/array.ig` and `array_bounds.ig` cover reads, writes, copies, records, nested arrays, buffers, parameters, the stdlib helper and the bounds fault. |

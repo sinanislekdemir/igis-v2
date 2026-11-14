@@ -483,6 +483,28 @@ fn verify_instructions(
                         return Err(invalid(base + pc + 4, "field offset is out of range"));
                     }
                 }
+                opcodes::REF_ELEMENT => {
+                    let stride = read_u32(instructions, pc + 4)
+                        .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;
+                    let count = read_u32(instructions, pc + 8)
+                        .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;
+                    // Element strides are 8-byte aligned (spec 0003, arrays),
+                    // and the whole array must fit one section.
+                    if stride == 0 || !stride.is_multiple_of(8) || stride > MAX_SECTION {
+                        return Err(invalid(base + pc + 4, "array stride is out of range"));
+                    }
+                    if count == 0
+                        || count > MAX_SECTION
+                        || stride
+                            .checked_mul(count)
+                            .is_none_or(|size| size > MAX_SECTION)
+                    {
+                        return Err(invalid(
+                            base + pc + 8,
+                            "array element count is out of range",
+                        ));
+                    }
+                }
                 opcodes::BUILTIN => {
                     let id = read_u32(instructions, pc + 4)
                         .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;

@@ -47,6 +47,10 @@ pub enum Kind {
     /// payloads and size) lives in the compiler's sum table; [`Type::cap`]
     /// carries the size in bytes.
     Sum(u16),
+    /// A fixed-size array, by compiler-local array id. The element type and
+    /// count live in the compiler's array table; [`Type::cap`] carries the
+    /// aligned size in bytes (spec 0003, "Arrays").
+    Array(u16),
 }
 
 impl Kind {
@@ -63,6 +67,7 @@ impl Kind {
             Kind::Enum(_) => "enum",
             Kind::Record(_) => "record",
             Kind::Sum(_) => "sum",
+            Kind::Array(_) => "array",
         }
     }
 
@@ -79,6 +84,11 @@ impl Kind {
     /// Returns true for a nominal sum type.
     pub const fn is_sum(self) -> bool {
         matches!(self, Kind::Sum(_))
+    }
+
+    /// Returns true for a fixed-size array type.
+    pub const fn is_array(self) -> bool {
+        matches!(self, Kind::Array(_))
     }
 }
 
@@ -126,6 +136,14 @@ impl Type {
         }
     }
 
+    /// A fixed-size array, with its aligned size in bytes.
+    pub const fn array(id: u16, size: u32) -> Self {
+        Type {
+            kind: Kind::Array(id),
+            cap: size,
+        }
+    }
+
     /// True for `string`/`bytes`.
     pub const fn is_buffer(self) -> bool {
         self.kind.is_buffer()
@@ -141,9 +159,17 @@ impl Type {
         self.kind.is_sum()
     }
 
-    /// True for every scalar kind (not a buffer, record or sum).
+    /// True for a fixed-size array.
+    pub const fn is_array(self) -> bool {
+        self.kind.is_array()
+    }
+
+    /// True for every scalar kind (not a buffer, record, sum or array).
     pub const fn is_scalar(self) -> bool {
-        !self.kind.is_buffer() && !self.kind.is_record() && !self.kind.is_sum()
+        !self.kind.is_buffer()
+            && !self.kind.is_record()
+            && !self.kind.is_sum()
+            && !self.kind.is_array()
     }
 
     /// Number of bytes this type occupies in `state` or in a frame, including
@@ -151,8 +177,9 @@ impl Type {
     pub const fn size(self) -> u32 {
         match self.kind {
             Kind::String | Kind::Bytes => align8(8 + self.cap),
-            // A record's or sum's `cap` already holds its aligned size.
-            Kind::Record(_) | Kind::Sum(_) => self.cap,
+            // A record's, sum's or array's `cap` already holds its aligned
+            // size.
+            Kind::Record(_) | Kind::Sum(_) | Kind::Array(_) => self.cap,
             _ => 8,
         }
     }
@@ -170,7 +197,8 @@ impl Type {
             | Kind::Bytes
             | Kind::Enum(_)
             | Kind::Record(_)
-            | Kind::Sum(_) => None,
+            | Kind::Sum(_)
+            | Kind::Array(_) => None,
         }
     }
 }
@@ -182,8 +210,9 @@ impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.kind {
             Kind::String | Kind::Bytes => write!(f, "{}[{}]", self.kind.name(), self.cap),
-            // A record or sum renders as its kind; codegen resolves the name.
-            Kind::Record(_) | Kind::Sum(_) => f.write_str(self.kind.name()),
+            // A record, sum or array renders as its kind; codegen resolves the
+            // name or element type.
+            Kind::Record(_) | Kind::Sum(_) | Kind::Array(_) => f.write_str(self.kind.name()),
             _ => f.write_str(self.kind.name()),
         }
     }

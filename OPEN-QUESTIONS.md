@@ -175,11 +175,17 @@ These are no longer open; they were recorded in specs and ADRs:
   `contains_byte`. Concrete capacities replace generics; callers satisfy the at-least-N
   rule. The library adds no `state`, ~5.3 KiB of source and ~4.1 KiB of code blob, and
   ~154 KiB of compile scratch is enough for the sample app plus the library.
-- **Still missing for a complete stdlib:** `array`/`ring`/`map` (language support and
-  helpers), UTF-8 helpers (`utf8_decode_into`, code-point iteration), moving
-  `substr_into` from `core` to `stdlib`, `f64` formatting/parsing, typed stream views, and
-  a shared cross-unit type table so library signatures can use records, sums and user
-  enums.
+- **Arrays and `split_all` (2026-11-14).** `array[T, N]` is a fixed-size value with
+  nominal element/count identity, `N` a positive constant, layout `N * align8(element
+  size)`, `a[i]` checked at run time against `N` (`fault(OutOfBounds)`, never a clamp),
+  whole-array copies through `copy_refs`, and one opcode `ref_element` (ABI v1 61 → 62).
+  Arrays may be state, locals, parameters, record fields and sum payloads. One structural
+  array table is shared by the application and `stdlib`, so arrays cross the unit
+  boundary; `stdlib.split_all` fills an `array[string[64], 8]`.
+- **Still missing for a complete stdlib:** `ring`/`map` (language support and helpers),
+  UTF-8 helpers (`utf8_decode_into`, code-point iteration), moving `substr_into` from
+  `core` to `stdlib`, `f64` formatting/parsing, typed stream views, and a shared
+  cross-unit type table so library signatures can use records, sums and user enums.
 
 ## Suggested next step
 
@@ -257,6 +263,14 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
     unit-named diagnostics. `function ... : T` with `return` landed, and the first helpers
     are `trim_into`, `split_once`, `parse_int_into`, `starts_with` and `contains_byte`.
     `samples/lang/stdlib.ig` runs on the host and `run text 42 hi` runs in the kernel.
-    Next on the language/stdlib track: arrays/rings/maps and UTF-8 helpers, then the
-    `substr_into` move and cross-unit aggregate types. After that: APs, the realtime class
+    Next on the language/stdlib track: rings/maps and UTF-8 helpers, then the
+    `substr_into` move and cross-unit record/sum types. After that: APs, the realtime class
     and streams.
+19. ~~Fixed-size arrays~~ — done: `array[T, N]` (positive const N) in state, locals,
+    records, sum payloads and `value`/`const`/`var` parameters; nominal in element type and
+    count; layout `N` elements at `align8(element size)`; `a[i]` read/write checked against
+    `N` (`fault(OutOfBounds)`), nested `a[i][j]`/`a[i].field`, whole-array `copy_refs` and
+    one new opcode `ref_element` (ABI v1 61 → 62). A structural array table is shared by
+    the app and `stdlib`; `stdlib.split_all` fills `array[string[64], 8]`.
+    `samples/lang/array.ig` and `array_bounds.ig` cover the slice. Next on this track:
+    `ring` and `map`, which reuse the element-reference and copy machinery.

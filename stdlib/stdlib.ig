@@ -170,3 +170,39 @@ function contains_byte(src: const string[0]; value: byte): bool;
 begin
   return core.find(src, value) >= 0;
 end;
+
+// Splits `src` at every `sep` into at most 8 destination elements, each a
+// `string[64]`. Writes the piece count through `count` and returns Ok. A
+// ninth piece returns Full before writing it; a piece longer than 64 bytes
+// returns CapacityExceeded and writes nothing further. An empty source or a
+// trailing separator yields a final empty piece. This is the first helper to
+// exercise a fixed-size array parameter (spec 0003, "Arrays").
+function split_all(dst: var array[string[64], 8]; count: var int; src: const string[0]; sep: byte): Status;
+var
+  at: int;
+  start: int;
+  length: int;
+  piece: int;
+begin
+  count := 0;
+  length := int(core.len(src));
+  start := 0;
+  while start <= length do
+  begin
+    if count >= 8 then
+      return Full;
+    at := start;
+    while at < length and src[at] <> sep do
+      at := at + 1;
+    piece := at - start;
+    if piece > 64 then
+      return CapacityExceeded;
+    if core.substr_into(dst[count], src, start, piece) < 0 then
+      return CapacityExceeded;
+    count := count + 1;
+    if at >= length then
+      return Ok;
+    start := at + 1;
+  end;
+  return Ok;
+end;

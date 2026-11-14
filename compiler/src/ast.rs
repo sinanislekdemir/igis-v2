@@ -108,13 +108,17 @@ pub struct VarDecl<'a> {
     pub column: u32,
 }
 
-/// A written type such as `int` or `string[64]`.
+/// A written type such as `int`, `string[64]` or `array[int, 4]`.
 #[derive(Debug, Clone, Copy)]
 pub struct TypeRef<'a> {
     /// Type name, before resolution.
     pub name: &'a str,
     /// Capacity expression for `string`/`bytes`.
     pub cap: Option<&'a Expr<'a>>,
+    /// Element type for `array[T, N]`.
+    pub elem: Option<&'a TypeRef<'a>>,
+    /// Element count expression for `array[T, N]`.
+    pub count: Option<&'a Expr<'a>>,
     /// 1-based source line.
     pub line: u32,
     /// 1-based source column.
@@ -172,8 +176,8 @@ pub struct ProcDecl<'a> {
 pub enum Stmt<'a> {
     /// `target := value;`
     Assign {
-        /// Destination: a name, or one byte of a `bytes` buffer.
-        target: AssignTarget<'a>,
+        /// Destination designator: a name, a field path, or an array element.
+        target: Designator<'a>,
         /// Right-hand side.
         value: &'a Expr<'a>,
         /// 1-based source line.
@@ -234,24 +238,34 @@ pub struct CaseArm<'a> {
     pub column: u32,
 }
 
-/// An assignment destination.
-///
-/// `name[index]` is only assignable for `bytes`; `string` is read-only by index
-/// so the UTF-8 invariant cannot be broken one byte at a time (spec 0003).
-/// `name.field` (possibly nested) is assignable when the base is writable.
+/// One step in a designator's path: a record field or an array/buffer element.
 #[derive(Debug, Clone, Copy)]
-pub enum AssignTarget<'a> {
-    /// `name := value`
-    Name(&'a str),
-    /// `name[index] := value`
-    Index(&'a str, &'a Expr<'a>),
-    /// `base.field.other := value`
-    Field {
-        /// Base variable or parameter.
-        base: &'a str,
-        /// Field path after the base, at least one name.
-        path: &'a [&'a str],
-    },
+pub enum Access<'a> {
+    /// `.field`
+    Field(&'a str),
+    /// `[index]`
+    Index(&'a Expr<'a>),
+}
+
+/// A variable, field path or indexed element: `name`, `p.x`, `a[i][j]`.
+///
+/// An empty path is a bare name. Field steps select record fields; index steps
+/// select array elements (or, in the last position, one `byte` of a buffer).
+/// The parser never builds a `Field` whose base is not a name, so every
+/// designator stays rooted at one variable or parameter.
+#[derive(Debug, Clone, Copy)]
+pub struct Designator<'a> {
+    /// Base variable or parameter name.
+    pub base: &'a str,
+    /// Steps after the name, in source order.
+    pub path: &'a [Access<'a>],
+}
+
+impl Designator<'_> {
+    /// True for a bare name with no field or index steps.
+    pub fn is_name(&self) -> bool {
+        self.path.is_empty()
+    }
 }
 
 /// A call expression or call statement.
@@ -289,19 +303,8 @@ pub enum ExprKind<'a> {
     Str(&'a [u8]),
     /// `true` or `false`.
     Bool(bool),
-    /// A name.
-    Ident(&'a str),
-    /// A field selection: `base.field` or `base.inner.field`. The path is never
-    /// empty.
-    Field {
-        /// Base variable or parameter.
-        base: &'a str,
-        /// Field path after the base.
-        path: &'a [&'a str],
-    },
-    /// One byte of a buffer: `name[index]`. The result is a `byte`; for a
-    /// `string` it is the raw byte at that offset (spec 0003, T4).
-    Index(&'a str, &'a Expr<'a>),
+    /// A variable, field path or indexed element.
+    Designator(Designator<'a>),
     /// A call.
     Call(Call<'a>),
     /// A binary operation.

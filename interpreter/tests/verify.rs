@@ -1511,3 +1511,142 @@ fn the_verifier_rejects_a_misaligned_field_offset() {
     let error = Program::parse(&code, &mut scratch).expect_err("must be rejected");
     assert!(error.message.contains("field offset"), "{}", error.message);
 }
+
+fn op_ref_element(out: &mut Vec<u8>, stride: u32, count: u32) {
+    op(out, opcodes::REF_ELEMENT);
+    out.extend_from_slice(&stride.to_le_bytes());
+    out.extend_from_slice(&count.to_le_bytes());
+}
+
+#[test]
+fn ref_element_reads_and_writes_array_elements() {
+    let mut instructions = Vec::new();
+    // state[16] := state[8] (element 1 of an array at 0, stride 8, count 4).
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_const(&mut instructions, 1);
+    op_ref_element(&mut instructions, 8, 4);
+    op(&mut instructions, opcodes::LOAD_REF);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 24);
+    // state[16] := 0x99 through the same element reference.
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_const(&mut instructions, 2);
+    op_ref_element(&mut instructions, 8, 4);
+    op_const(&mut instructions, 0x99);
+    op(&mut instructions, opcodes::STORE_REF);
+    op(&mut instructions, opcodes::RET);
+    let spec = FnSpec {
+        frame_size: 64,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &[], 32, 64, 0);
+    let mut scratch = scratch_for(&code);
+    let program = Program::parse(&code, &mut scratch).expect("verifies");
+    let mut state = vec![0u8; 32];
+    state[0..8].copy_from_slice(&0x11u64.to_le_bytes());
+    state[8..16].copy_from_slice(&0x22u64.to_le_bytes());
+    state[16..24].copy_from_slice(&0x33u64.to_le_bytes());
+    let mut stack = vec![0u8; 64];
+    let args = vec![0u8; 8 + 1024];
+    let mut machine = Machine::new();
+    let mut host = Recorder { output: Vec::new() };
+    assert_eq!(
+        machine.run(&program, &mut host, &mut state, &mut stack, &args, 100),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(state_u64(&state, 24), 0x22, "element 1 was read");
+    assert_eq!(state_u64(&state, 16), 0x99, "element 2 was written");
+}
+
+#[test]
+fn ref_element_nests_and_copies_a_whole_element() {
+    let mut instructions = Vec::new();
+    // state[24] := 0x77 through element [1][1] of an array of arrays
+    // (outer stride 16 count 2, inner stride 8 count 2).
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_const(&mut instructions, 1);
+    op_ref_element(&mut instructions, 16, 2);
+    op_const(&mut instructions, 1);
+    op_ref_element(&mut instructions, 8, 2);
+    op_const(&mut instructions, 0x77);
+    op(&mut instructions, opcodes::STORE_REF);
+    // state[0..16] := state[16..32] (one whole outer element).
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_const(&mut instructions, 0);
+    op_ref_element(&mut instructions, 16, 2);
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_const(&mut instructions, 1);
+    op_ref_element(&mut instructions, 16, 2);
+    op_const(&mut instructions, 16);
+    op(&mut instructions, opcodes::COPY_REFS);
+    op(&mut instructions, opcodes::RET);
+    let spec = FnSpec {
+        frame_size: 64,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &[], 32, 64, 0);
+    let mut scratch = scratch_for(&code);
+    let program = Program::parse(&code, &mut scratch).expect("verifies");
+    let mut state = vec![0u8; 32];
+    let mut stack = vec![0u8; 64];
+    let args = vec![0u8; 8 + 1024];
+    let mut machine = Machine::new();
+    let mut host = Recorder { output: Vec::new() };
+    assert_eq!(
+        machine.run(&program, &mut host, &mut state, &mut stack, &args, 100),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(state_u64(&state, 24), 0x77, "nested element [1][1] written");
+    assert_eq!(
+        &state[0..16],
+        &state[16..32],
+        "the whole outer element was copied"
+    );
+}
+
+#[test]
+fn ref_element_out_of_range_faults_out_of_bounds() {
+    for index in [4i64, -1] {
+        let mut instructions = Vec::new();
+        op_imm(&mut instructions, opcodes::REF_STATE, 0);
+        op_const(&mut instructions, index);
+        op_ref_element(&mut instructions, 8, 4);
+        op(&mut instructions, opcodes::LOAD_REF);
+        op(&mut instructions, opcodes::DROP);
+        op(&mut instructions, opcodes::RET);
+        let spec = FnSpec {
+            frame_size: 64,
+            ..MAIN
+        };
+        let code = build(&[spec], &instructions, &[], 32, 64, 0);
+        let (reason, _) = execute(&code, 32, 64);
+        assert_eq!(
+            reason,
+            ExitReason::Faulted(FaultCode::OutOfBounds),
+            "index {index} must fault, never clamp"
+        );
+    }
+}
+
+#[test]
+fn the_verifier_rejects_a_bad_element_stride_or_count() {
+    for (stride, count) in [(4u32, 4u32), (8, 0), (8, 1 << 30)] {
+        let mut instructions = Vec::new();
+        op_imm(&mut instructions, opcodes::REF_STATE, 0);
+        op_const(&mut instructions, 0);
+        op_ref_element(&mut instructions, stride, count);
+        op(&mut instructions, opcodes::DROP);
+        op(&mut instructions, opcodes::RET);
+        let spec = FnSpec {
+            frame_size: 64,
+            ..MAIN
+        };
+        let code = build(&[spec], &instructions, &[], 32, 64, 0);
+        let mut scratch = scratch_for(&code);
+        let error = Program::parse(&code, &mut scratch).expect_err("must be rejected");
+        assert!(
+            error.message.contains("array"),
+            "stride {stride}, count {count}: {}",
+            error.message
+        );
+    }
+}

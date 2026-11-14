@@ -2488,8 +2488,8 @@ fn the_embedded_stdlib_compiles_on_its_own() {
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(manifest_unit(&package), "stdlib");
     assert_eq!(
-        header.function_count, 5,
-        "trim_into, split_once, parse_int_into, starts_with, contains_byte"
+        header.function_count, 6,
+        "trim_into, split_once, parse_int_into, starts_with, contains_byte, split_all"
     );
     assert_eq!(header.entry, 0);
     assert_eq!(header.state_size, 0, "the stdlib declares no state");
@@ -2651,4 +2651,232 @@ fn header_function_count(package: &Owned) -> u32 {
     CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE])
         .expect("header")
         .function_count
+}
+
+#[test]
+fn arrays_of_every_element_kind_compile() {
+    let source = br#"
+unit t;
+
+type
+  Point = record x: int; end;
+  Sum = A | B(value: int);
+  Color = (Red, Green);
+
+var
+  ints: array[int, 2];
+  floats: array[f64, 2];
+  raws: array[bytes[4], 2];
+  words: array[string[4], 2];
+  colors: array[Color, 2];
+  points: array[Point, 2];
+  sums: array[Sum, 2];
+  nested: array[array[int, 2], 2];
+  total: int;
+  b: byte;
+
+procedure main(args: const string[1024]);
+begin
+  ints[0] := 1;
+  floats[0] := 1.5;
+  raws[0] := "ab";
+  words[0] := "cd";
+  colors[0] := Red;
+  points[0].x := 3;
+  sums[0] := A;
+  nested[1][1] := 5;
+  nested[0] := nested[1];
+  points[1] := points[0];
+  total := ints[0] + nested[1][1] + points[0].x;
+  b := raws[0][0];
+end;
+"#;
+    let package = compile(source, "t.ig").expect("arrays compile");
+    let ops = opcodes_of(&package);
+    assert!(
+        ops.contains(&abi::opcodes::REF_ELEMENT),
+        "no ref_element in {ops:?}"
+    );
+    assert!(ops.contains(&abi::opcodes::COPY_REFS));
+}
+
+#[test]
+fn an_array_count_comes_from_a_positive_constant() {
+    let good = br#"
+unit t;
+
+const
+  Rows = 2;
+  Cols = Rows + 1;
+
+var
+  cells: array[int, Cols];
+
+procedure main(args: const string[1024]);
+begin
+  cells[Cols - 1] := 7;
+end;
+"#;
+    compile(good, "t.ig").expect("a const expression sizes an array");
+
+    for count in ["0", "-1"] {
+        let source = format!(
+            r#"
+unit t;
+
+var
+  cells: array[int, {count}];
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#
+        );
+        let error = compile(source.as_bytes(), "t.ig").expect_err("count must be positive");
+        assert!(
+            error.message.contains("positive constant"),
+            "{}",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn array_types_are_nominal_in_element_and_count() {
+    let source = br#"
+unit t;
+
+var
+  a: array[int, 2];
+  b: array[int, 3];
+
+procedure main(args: const string[1024]);
+begin
+  a := b;
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("counts differ");
+    assert!(
+        error
+            .message
+            .contains("type mismatch: expected `array[int, 2]`, found `array[int, 3]`"),
+        "{}",
+        error.message
+    );
+
+    let source = br#"
+unit t;
+
+var
+  a: array[int, 2];
+  b: array[byte, 2];
+
+procedure main(args: const string[1024]);
+begin
+  a := b;
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("elements differ");
+    assert!(
+        error
+            .message
+            .contains("expected `array[int, 2]`, found `array[byte, 2]`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn array_parameters_and_record_fields_work() {
+    let source = br#"
+unit t;
+
+type
+  Row = record cells: array[int, 2]; end;
+
+var
+  row: Row;
+
+procedure fill(dst: var array[int, 2]);
+begin
+  dst[0] := 1;
+  dst[1] := 2;
+end;
+
+procedure read(src: const array[int, 2]; total: var int);
+begin
+  total := src[0] + src[1];
+end;
+
+function first(items: array[int, 2]): int;
+begin
+  return items[0];
+end;
+
+procedure main(args: const string[1024]);
+var
+  local: array[int, 2];
+  total: int;
+begin
+  fill(local);
+  read(local, total);
+  row.cells := local;
+  total := total + first(row.cells);
+end;
+"#;
+    compile(source, "t.ig").expect("arrays in parameters and records compile");
+}
+
+#[test]
+fn indexing_an_array_needs_an_integer() {
+    let source = br#"
+unit t;
+
+var
+  a: array[int, 2];
+  f: f64;
+
+procedure main(args: const string[1024]);
+begin
+  a[0] := 1;
+  f := 1.0;
+  a[f] := 2;
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("an f64 is not an index");
+    assert!(
+        error
+            .message
+            .contains("index must be `int`, `uint` or `byte`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn writing_an_element_of_a_const_array_is_rejected() {
+    let source = br#"
+unit t;
+
+procedure touch(src: const array[int, 2]);
+begin
+  src[0] := 1;
+end;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("const arrays are read-only");
+    assert!(
+        error.message.contains("`const` parameter"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn the_array_sample_compiles() {
+    let source = include_bytes!("../../samples/lang/array.ig");
+    compile(source, "array.ig").expect("the array sample compiles");
 }

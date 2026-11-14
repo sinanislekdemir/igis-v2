@@ -36,13 +36,13 @@ pub const RET: u8 = 0x06;
 pub const LOAD_LOCAL: u8 = 0x10;
 /// Pop a scalar into `locals[off]`. Immediate: `off: u32`.
 pub const STORE_LOCAL: u8 = 0x11;
-/// Push a reference to `locals[off]` (a buffer's data start). Immediate: `off: u32`.
+/// Push a reference to `locals[off]` (the first byte of the value). Immediate: `off: u32`.
 pub const REF_LOCAL: u8 = 0x12;
 /// Push the scalar 8 bytes at `state[off]`. Immediate: `off: u32`.
 pub const LOAD_STATE: u8 = 0x13;
 /// Pop a scalar into `state[off]`. Immediate: `off: u32`.
 pub const STORE_STATE: u8 = 0x14;
-/// Push a reference to `state[off]` (a buffer's data start). Immediate: `off: u32`.
+/// Push a reference to `state[off]` (the first byte of the value). Immediate: `off: u32`.
 pub const REF_STATE: u8 = 0x15;
 /// Pop a reference, push the scalar 8 bytes it names.
 pub const LOAD_REF: u8 = 0x16;
@@ -81,6 +81,17 @@ pub const REF_OFFSET: u8 = 0x1B;
 /// Used for a whole-record assignment and for a `value` record parameter, where
 /// the compiler knows the record size and emits it as a constant.
 pub const COPY_REFS: u8 = 0x1C;
+/// Pop an index, pop a base reference, check `index < count` and push
+/// `base + index * stride`. Immediates: `stride: u32`, `count: u32`.
+///
+/// This is how an `array[T, N]` element reference is formed (spec 0003): the
+/// base reference names the array's first byte, `stride` is the element size
+/// rounded to 8, and `count` is `N`. An index at or past `count` faults
+/// `OutOfBounds`; a negative `int` index is a huge `uint` and fails the same
+/// check. Elements are then read and written with `load_ref`/`store_ref`
+/// (scalars and enums) or `copy_refs` (records, sums and arrays), exactly like
+/// record fields.
+pub const REF_ELEMENT: u8 = 0x1D;
 
 /// Checked signed integer addition.
 pub const ADD: u8 = 0x20;
@@ -308,6 +319,7 @@ pub const fn instruction_words(op: u8) -> Option<u32> {
         JMP | JZ | JNZ | CALL | LOAD_LOCAL | STORE_LOCAL | REF_LOCAL | LOAD_STATE | STORE_STATE
         | REF_STATE | REF_CONST | APPEND | READ_LINE | STORE_U8 | BUILTIN | SUBSTR | FORMAT_INT
         | ENUM_CAST | REF_OFFSET => Some(2),
+        REF_ELEMENT => Some(3),
         _ => None,
     }
 }
@@ -335,6 +347,7 @@ pub const fn mnemonic(op: u8) -> Option<&'static str> {
         STORE_U8 => Some("store_u8"),
         REF_OFFSET => Some("ref_offset"),
         COPY_REFS => Some("copy_refs"),
+        REF_ELEMENT => Some("ref_element"),
         ADD => Some("add"),
         SUB => Some("sub"),
         MUL => Some("mul"),

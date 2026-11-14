@@ -534,6 +534,30 @@ impl Machine {
                 }
                 self.push(stack, refs::encode(region, shifted as u64))?;
             }
+            opcodes::REF_ELEMENT => {
+                let stride = read_u32(code, pc + 4)? as u64;
+                let count = read_u32(code, pc + 8)? as u64;
+                let index = self.pop(stack)?;
+                let bits = self.pop(stack)?;
+                let (region, base) = self.resolve(bits, state, stack, constants, args)?;
+                let length = region_len(region, state, stack, constants, args)
+                    .ok_or(FaultCode::OutOfBounds)?;
+                // A negative `int` index is a huge `uint` and fails here; an
+                // index at or past the count is never clamped (spec 0003).
+                if index >= count {
+                    return Err(FaultCode::OutOfBounds);
+                }
+                let shift = index.checked_mul(stride).ok_or(FaultCode::OutOfBounds)?;
+                let base = u64::try_from(base).map_err(|_| FaultCode::OutOfBounds)?;
+                let shifted = base.checked_add(shift).ok_or(FaultCode::OutOfBounds)?;
+                let shifted = usize::try_from(shifted).map_err(|_| FaultCode::OutOfBounds)?;
+                // The whole element must fit, not just its first slot.
+                let stride = usize::try_from(stride).map_err(|_| FaultCode::OutOfBounds)?;
+                if shifted.checked_add(stride).is_none_or(|tail| tail > length) {
+                    return Err(FaultCode::OutOfBounds);
+                }
+                self.push(stack, refs::encode(region, shifted as u64))?;
+            }
             opcodes::COPY_REFS => {
                 let count = self.pop(stack)?;
                 let source_bits = self.pop(stack)?;

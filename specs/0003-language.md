@@ -248,7 +248,8 @@ Rules:
   Sized by the largest variant; no boxing, no indirect variant. See "Sum types" below
   for the layout, construction and `case` rules.
 - **Enums (implemented):** `type Status = (Ok, WouldBlock, Closed, NotFound, Invalid, Full, CapacityExceeded, IoError);`
-- **Arrays:** `array[T, N]` — fixed, index `0..N-1`, value semantics.
+- **Arrays (implemented):** `array[T, N]` — fixed, index `0..N-1`, value semantics. See
+  "Arrays" below for the layout, index and copy rules.
 - **Rings:** `ring[T, N]` — fixed-capacity FIFO with `push`/`pop`/`full`/`empty`.
 - **Maps:** `map[K, V, N]` — at most N entries, open addressing, no growth. `K` is
   restricted to `int`, `bytes[N]` or `string[N]`.
@@ -378,6 +379,44 @@ type Token = Ident(name: string[32]) | Number(value: int) | Eof;
   The binding name shares the local namespace, so it may not repeat an existing local or
   parameter name; it is not visible outside its arm. `case` statements nest.
 
+#### Arrays (implemented)
+
+```text
+type Row = record cells: array[int, 3]; end;
+
+var
+  cells: array[int, 4];
+  rows: array[array[string[8], 2], 3];
+  grid: Row;
+```
+
+- `array[T, N]` is a fixed-size value: exactly `N` elements, indexes `0..N-1`, no
+  append and no dynamic growth. `T` is any fixed-size type already supported (scalar,
+  enum, record, sum, buffer or another array) and `N` is a positive constant expression
+  (an integer literal or a `const`); `N = 0` and a negative `N` are compile errors.
+- **Nominal identity:** arrays are identified by element type and count, so
+  `array[int, 4]` and `array[int, 8]`, and `array[int, 4]` and `array[byte, 4]`, are
+  distinct. Assignment, whole-array copies and parameters require the exact same type.
+- **Layout:** `N` elements at `stride = align8(size_of(T))` bytes each; the array size is
+  `align8(N * stride)`. Every current element type already has an 8-byte-aligned size, so
+  the stride is its size and the array is `N * stride` bytes. Elements are inline; an
+  array of buffers stores each element's `[len][data]` image.
+- **Indexing:** `a[i]` reads the element and `a[i] := value` writes it. The index is
+  `int`, `uint` or `byte`; the run-time check is `index < N` and failure is
+  `fault(OutOfBounds)`, never a clamp (a negative `int` index is a huge `uint` and fails
+  the same check). Nested access composes: `a[i][j]`, `a[i].field` and `rec.cells[j]`.
+- **Element values:** scalars and enums load/store in one 8-byte slot; records, sums and
+  nested arrays are copied whole; a buffer element is used through the ordinary buffer
+  operations (indexing it yields a `byte`). The base must be writable for a write; a
+  `const` parameter and everything reached through it is read-only.
+- **Copies and parameters:** `dst := src` copies the whole `N * stride` image, exactly
+  like a record copy. A `value` parameter is a by-value copy; `const`/`var` parameters
+  are call-scoped references, so element writes through a `var` parameter reach the
+  caller's array. The at-least-N rule does not apply to arrays: the element type and
+  count must match exactly.
+- Arrays may be `state` variables, locals, procedure parameters (`value`, `const`,
+  `var`), record fields and sum payloads. Comparison is not defined for arrays.
+
 #### Predeclared records and sum type
 
 `Diagnostic` and `ExitReason` exist in every unit, with the fixed layout below
@@ -421,7 +460,7 @@ Capacities are part of the type: `string[128]` and `string[256]` are distinct (D
 so are `array[int, 4]` and `array[int, 8]`. Two rules make this bearable:
 
 - **Variables and fields:** exact type. Assignment between two variables of different
-  capacities is a compile error.
+  capacities, element types or array counts is a compile error.
 - **Construction:** assigning a literal or a construction expression into a buffer is a
   write into the destination, not a type assignment; the destination's capacity is what
   matters. `name := "igis"` into a `string[64]` is valid; `s64 := s32` is not.
