@@ -1,0 +1,17 @@
+unit faulty;
+
+// Faults at run time so a parent can observe `ExitReason.kind = 2` (Faulted)
+// and `code = DivideByZero` through `core.wait`.
+uses core;
+
+var
+  zero: int;
+  value: int;
+
+procedure main(args: const string[1024]);
+begin
+  zero := 0;
+  core.write("faulty: about to divide\n");
+  value := 1 div zero;
+  core.write("faulty: unreachable\n");
+end;

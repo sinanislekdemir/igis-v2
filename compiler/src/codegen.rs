@@ -28,6 +28,7 @@
 
 use core::fmt;
 
+use abi::layout;
 use abi::opcodes::{self, builtin};
 
 use crate::arena::{Bump, OutOfSpace, SliceVec};
@@ -62,6 +63,91 @@ struct EnumDef<'a> {
     name: &'a str,
     variants: &'a [&'a str],
 }
+
+/// One record field after layout: name, resolved type and byte offset from the
+/// record start.
+#[derive(Debug, Clone, Copy)]
+struct RecordField<'a> {
+    name: &'a str,
+    ty: Type,
+    off: u32,
+}
+
+/// One nominal record type known to this compilation. The index in this table
+/// is the compiler-local record id carried by [`Kind::Record`].
+#[derive(Debug, Clone, Copy)]
+struct RecordDef<'a> {
+    name: &'a str,
+    fields: &'a [RecordField<'a>],
+    /// Size in bytes, already rounded to 8.
+    size: u32,
+}
+
+/// Compiler-local id of the predeclared `Diagnostic` record.
+const DIAGNOSTIC_RECORD: u16 = 0;
+
+/// Compiler-local id of the predeclared `ExitReason` record.
+const EXIT_REASON_RECORD: u16 = 1;
+
+/// Fields of the predeclared `Diagnostic` record, at the offsets `abi::layout`
+/// fixes. The kernel writes the same fields directly.
+const DIAGNOSTIC_FIELDS: [RecordField<'static>; 8] = [
+    RecordField {
+        name: "unit_name",
+        ty: Type::buffer(Kind::String, layout::diagnostic::UNIT_NAME_CAP),
+        off: layout::diagnostic::UNIT_NAME_OFFSET,
+    },
+    RecordField {
+        name: "message",
+        ty: Type::buffer(Kind::String, layout::diagnostic::MESSAGE_CAP),
+        off: layout::diagnostic::MESSAGE_OFFSET,
+    },
+    RecordField {
+        name: "line",
+        ty: Type::scalar(Kind::Int),
+        off: layout::diagnostic::LINE_OFFSET,
+    },
+    RecordField {
+        name: "column",
+        ty: Type::scalar(Kind::Int),
+        off: layout::diagnostic::COLUMN_OFFSET,
+    },
+    RecordField {
+        name: "handle",
+        ty: Type::scalar(Kind::Int),
+        off: layout::diagnostic::HANDLE_OFFSET,
+    },
+    RecordField {
+        name: "offset",
+        ty: Type::scalar(Kind::Int),
+        off: layout::diagnostic::OFFSET_OFFSET,
+    },
+    RecordField {
+        name: "length",
+        ty: Type::scalar(Kind::Int),
+        off: layout::diagnostic::LENGTH_OFFSET,
+    },
+    RecordField {
+        name: "task_id",
+        ty: Type::scalar(Kind::Int),
+        off: layout::diagnostic::TASK_ID_OFFSET,
+    },
+];
+
+/// Fields of the predeclared `ExitReason` record: the staged record form of
+/// the spec's `Ok | Killed | Faulted(code)` sum type.
+const EXIT_REASON_FIELDS: [RecordField<'static>; 2] = [
+    RecordField {
+        name: "kind",
+        ty: Type::scalar(Kind::Int),
+        off: layout::exit_reason::KIND_OFFSET,
+    },
+    RecordField {
+        name: "code",
+        ty: Type::scalar(Kind::Int),
+        off: layout::exit_reason::CODE_OFFSET,
+    },
+];
 
 /// Variants of the predeclared `Status` type, in the order spec 0003 fixes.
 /// Their ordinals are `0..7` and match `abi::Status`.
@@ -172,6 +258,31 @@ fn find_enum(enums: &[EnumDef<'_>], name: &str) -> Option<u16> {
         .and_then(|index| u16::try_from(index).ok())
 }
 
+/// Finds a record type by name.
+fn find_record(records: &[RecordDef<'_>], name: &str) -> Option<u16> {
+    records
+        .iter()
+        .position(|record| record.name == name)
+        .and_then(|index| u16::try_from(index).ok())
+}
+
+/// Returns the record definition a type names, if it is a record.
+fn record_of<'a>(records: &[RecordDef<'a>], ty: Type) -> Option<RecordDef<'a>> {
+    match ty.kind {
+        Kind::Record(id) => records.get(id as usize).copied(),
+        _ => None,
+    }
+}
+
+/// Returns the field named `name` of a record type.
+fn field_of<'a>(records: &[RecordDef<'a>], ty: Type, name: &str) -> Option<RecordField<'a>> {
+    record_of(records, ty)?
+        .fields
+        .iter()
+        .find(|field| field.name == name)
+        .copied()
+}
+
 /// Finds a variant in any enum, returning its enum id and ordinal.
 fn find_variant(enums: &[EnumDef<'_>], name: &str) -> Option<(u16, u32)> {
     for (index, enumeration) in enums.iter().enumerate() {
@@ -223,74 +334,12 @@ pub(crate) fn compile_unit<'a>(
         }
     }
 
-    // The predeclared `Status` comes first, so its id is `STATUS_ENUM` and its
-    // ordinals match `abi::Status`. User `type` declarations follow in source
-    // order; the index in this table is the compiler-local enum id.
-    let mut enums = SliceVec::<EnumDef<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
-    enums
-        .push(EnumDef {
-            name: "Status",
-            variants: &STATUS_VARIANTS,
-        })
-        .map_err(|_| arena_full(path, name, 1, 1))?;
-    for decl in unit.types {
-        if decl.name == "Status" {
-            return Err(diag(
-                path,
-                name,
-                decl.line,
-                decl.column,
-                format_args!("`Status` is predeclared by the language and cannot be declared"),
-            ));
-        }
-        if is_builtin_type_name(decl.name) {
-            return Err(diag(
-                path,
-                name,
-                decl.line,
-                decl.column,
-                format_args!(
-                    "enum name `{}` shadows a built-in type; choose another name",
-                    decl.name
-                ),
-            ));
-        }
-        if find_enum(enums.as_slice(), decl.name).is_some() {
-            return Err(diag(
-                path,
-                name,
-                decl.line,
-                decl.column,
-                format_args!("duplicate declaration of type `{}`", decl.name),
-            ));
-        }
-        for (index, variant) in decl.variants.iter().enumerate() {
-            if has_variant(enums.as_slice(), variant) || decl.variants[..index].contains(variant) {
-                return Err(diag(
-                    path,
-                    name,
-                    decl.line,
-                    decl.column,
-                    format_args!(
-                        "duplicate variant `{variant}`; variants share one top-level namespace"
-                    ),
-                ));
-            }
-        }
-        enums
-            .push(EnumDef {
-                name: decl.name,
-                variants: decl.variants,
-            })
-            .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
-    }
-
+    // Constants come first: they may size a record field's buffer, and their
+    // values depend on nothing but other constants. The type table is built
+    // next and rejects a type name that collides with a constant.
     let mut consts = SliceVec::<Const<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
     for decl in unit.consts {
-        if find_const(consts.as_slice(), decl.name).is_some()
-            || find_enum(enums.as_slice(), decl.name).is_some()
-            || has_variant(enums.as_slice(), decl.name)
-        {
+        if find_const(consts.as_slice(), decl.name).is_some() {
             return Err(diag(
                 path,
                 name,
@@ -308,13 +357,202 @@ pub(crate) fn compile_unit<'a>(
             .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
     }
 
-    let mut state_vars =
-        SliceVec::<StateVar<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
-    let mut state_size = 0u32;
-    for decl in unit.vars {
-        if find_const(consts.as_slice(), decl.name).is_some()
-            || find_state(state_vars.as_slice(), decl.name).is_some()
-            || find_enum(enums.as_slice(), decl.name).is_some()
+    // The predeclared `Status` comes first, so its id is `STATUS_ENUM` and its
+    // ordinals match `abi::Status`. User `type` declarations follow in source
+    // order; the index in this table is the compiler-local enum id.
+    let mut enums = SliceVec::<EnumDef<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
+    enums
+        .push(EnumDef {
+            name: "Status",
+            variants: &STATUS_VARIANTS,
+        })
+        .map_err(|_| arena_full(path, name, 1, 1))?;
+
+    // The predeclared records are the first two entries: `Diagnostic` and
+    // `ExitReason`. Their layouts are fixed by `abi::layout`, so the kernel and
+    // the compiler cannot disagree.
+    let mut records =
+        SliceVec::<RecordDef<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
+    records
+        .push(RecordDef {
+            name: "Diagnostic",
+            fields: &DIAGNOSTIC_FIELDS,
+            size: layout::diagnostic::SIZE,
+        })
+        .map_err(|_| arena_full(path, name, 1, 1))?;
+    records
+        .push(RecordDef {
+            name: "ExitReason",
+            fields: &EXIT_REASON_FIELDS,
+            size: layout::exit_reason::SIZE,
+        })
+        .map_err(|_| arena_full(path, name, 1, 1))?;
+
+    for decl in unit.types {
+        if decl.name == "Status" {
+            return Err(diag(
+                path,
+                name,
+                decl.line,
+                decl.column,
+                format_args!("`Status` is predeclared by the language and cannot be declared"),
+            ));
+        }
+        if decl.name == "Diagnostic" || decl.name == "ExitReason" {
+            return Err(diag(
+                path,
+                name,
+                decl.line,
+                decl.column,
+                format_args!(
+                    "`{}` is predeclared by the language and cannot be declared",
+                    decl.name
+                ),
+            ));
+        }
+        if is_builtin_type_name(decl.name) {
+            return Err(diag(
+                path,
+                name,
+                decl.line,
+                decl.column,
+                format_args!(
+                    "type name `{}` shadows a built-in type; choose another name",
+                    decl.name
+                ),
+            ));
+        }
+        if find_enum(enums.as_slice(), decl.name).is_some()
+            || find_record(records.as_slice(), decl.name).is_some()
+            || find_const(consts.as_slice(), decl.name).is_some()
+        {
+            return Err(diag(
+                path,
+                name,
+                decl.line,
+                decl.column,
+                format_args!("duplicate declaration of type `{}`", decl.name),
+            ));
+        }
+        match decl.kind {
+            TypeKind::Enum(variants) => {
+                for (index, variant) in variants.iter().enumerate() {
+                    if has_variant(enums.as_slice(), variant)
+                        || variants[..index].contains(variant)
+                        || find_const(consts.as_slice(), variant).is_some()
+                    {
+                        return Err(diag(
+                            path,
+                            name,
+                            decl.line,
+                            decl.column,
+                            format_args!(
+                                "duplicate variant `{variant}`; variants share one top-level namespace"
+                            ),
+                        ));
+                    }
+                }
+                enums
+                    .push(EnumDef {
+                        name: decl.name,
+                        variants,
+                    })
+                    .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
+            }
+            TypeKind::Record(fields) => {
+                // Records are nominal and every field type must already be
+                // declared: declaration before use keeps layout a single pass.
+                let mut laid_out = SliceVec::<RecordField<'a>>::new(bump)
+                    .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
+                let mut size = 0u32;
+                for field in fields {
+                    if laid_out
+                        .as_slice()
+                        .iter()
+                        .any(|existing| existing.name == field.name)
+                    {
+                        return Err(diag(
+                            path,
+                            name,
+                            field.line,
+                            field.column,
+                            format_args!("duplicate field `{}`", field.name),
+                        ));
+                    }
+                    let ty = resolve_type(
+                        &field.ty,
+                        consts.as_slice(),
+                        enums.as_slice(),
+                        records.as_slice(),
+                        path,
+                        name,
+                    )?;
+                    if ty.is_buffer() && ty.cap == 0 {
+                        return Err(diag(
+                            path,
+                            name,
+                            field.line,
+                            field.column,
+                            format_args!(
+                                "buffer field `{}` needs a capacity of at least 1",
+                                field.name
+                            ),
+                        ));
+                    }
+                    if ty.is_record() && ty.cap == 0 {
+                        return Err(diag(
+                            path,
+                            name,
+                            field.line,
+                            field.column,
+                            format_args!("record field `{}` is empty", field.name),
+                        ));
+                    }
+                    let off = align8(size);
+                    size = off.checked_add(ty.size()).ok_or_else(|| {
+                        diag(
+                            path,
+                            name,
+                            field.line,
+                            field.column,
+                            format_args!("record `{}` is too large", decl.name),
+                        )
+                    })?;
+                    laid_out
+                        .push(RecordField {
+                            name: field.name,
+                            ty,
+                            off,
+                        })
+                        .map_err(|_| arena_full(path, name, field.line, field.column))?;
+                }
+                let size = align8(size);
+                if size > MAX_CAPACITY {
+                    return Err(diag(
+                        path,
+                        name,
+                        decl.line,
+                        decl.column,
+                        format_args!("record `{}` exceeds the {MAX_CAPACITY}-byte cap", decl.name),
+                    ));
+                }
+                records
+                    .push(RecordDef {
+                        name: decl.name,
+                        fields: laid_out.into_slice(),
+                        size,
+                    })
+                    .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
+            }
+        }
+    }
+
+    // Constants are declared before the type table is built, so a constant
+    // that collides with a type or variant is rejected here, once the type
+    // names exist.
+    for decl in unit.consts {
+        if find_enum(enums.as_slice(), decl.name).is_some()
+            || find_record(records.as_slice(), decl.name).is_some()
             || has_variant(enums.as_slice(), decl.name)
         {
             return Err(diag(
@@ -325,7 +563,34 @@ pub(crate) fn compile_unit<'a>(
                 format_args!("duplicate declaration of `{}`", decl.name),
             ));
         }
-        let ty = resolve_type(&decl.ty, consts.as_slice(), enums.as_slice(), path, name)?;
+    }
+
+    let mut state_vars =
+        SliceVec::<StateVar<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
+    let mut state_size = 0u32;
+    for decl in unit.vars {
+        if find_const(consts.as_slice(), decl.name).is_some()
+            || find_state(state_vars.as_slice(), decl.name).is_some()
+            || find_enum(enums.as_slice(), decl.name).is_some()
+            || find_record(records.as_slice(), decl.name).is_some()
+            || has_variant(enums.as_slice(), decl.name)
+        {
+            return Err(diag(
+                path,
+                name,
+                decl.line,
+                decl.column,
+                format_args!("duplicate declaration of `{}`", decl.name),
+            ));
+        }
+        let ty = resolve_type(
+            &decl.ty,
+            consts.as_slice(),
+            enums.as_slice(),
+            records.as_slice(),
+            path,
+            name,
+        )?;
         if ty.is_buffer() && ty.cap == 0 {
             return Err(diag(
                 path,
@@ -372,6 +637,7 @@ pub(crate) fn compile_unit<'a>(
             || find_state(state_vars.as_slice(), proc.name).is_some()
             || find_sig(sigs.as_slice(), proc.name).is_some()
             || find_enum(enums.as_slice(), proc.name).is_some()
+            || find_record(records.as_slice(), proc.name).is_some()
             || has_variant(enums.as_slice(), proc.name)
         {
             return Err(diag(
@@ -403,7 +669,14 @@ pub(crate) fn compile_unit<'a>(
                     format_args!("duplicate parameter `{}`", param.name),
                 ));
             }
-            let ty = resolve_type(&param.ty, consts.as_slice(), enums.as_slice(), path, name)?;
+            let ty = resolve_type(
+                &param.ty,
+                consts.as_slice(),
+                enums.as_slice(),
+                records.as_slice(),
+                path,
+                name,
+            )?;
             if ty.is_buffer() {
                 if param.mode == ParamMode::Value {
                     return Err(diag(
@@ -488,6 +761,7 @@ pub(crate) fn compile_unit<'a>(
             consts.as_slice(),
             state_vars.as_slice(),
             enums.as_slice(),
+            records.as_slice(),
             &mut pool,
             current,
             bump,
@@ -589,6 +863,7 @@ fn resolve_type<'a>(
     ty: &TypeRef<'a>,
     consts: &[Const<'a>],
     enums: &[EnumDef<'a>],
+    records: &[RecordDef<'a>],
     path: &'a str,
     unit: &'a str,
 ) -> Result<Type, Diagnostic> {
@@ -603,6 +878,19 @@ fn resolve_type<'a>(
             ));
         }
         return Ok(Type::enumeration(id));
+    }
+    if let Some(id) = find_record(records, ty.name) {
+        if ty.cap.is_some() {
+            return Err(diag(
+                path,
+                unit,
+                ty.line,
+                ty.column,
+                format_args!("record type `{}` does not take a capacity", ty.name),
+            ));
+        }
+        let size = records[id as usize].size;
+        return Ok(Type::record(id, size));
     }
     let kind = match ty.name {
         "int" => Kind::Int,
@@ -757,6 +1045,8 @@ enum Target {
     StateScalar { off: u32, ty: Type },
     LocalBuffer { base: u32, ty: Type, is_ref: bool },
     StateBuffer { off: u32, ty: Type },
+    LocalRecord { base: u32, ty: Type, is_ref: bool },
+    StateRecord { off: u32, ty: Type },
 }
 
 impl Target {
@@ -765,9 +1055,34 @@ impl Target {
             Target::LocalScalar { ty, .. }
             | Target::StateScalar { ty, .. }
             | Target::LocalBuffer { ty, .. }
-            | Target::StateBuffer { ty, .. } => *ty,
+            | Target::StateBuffer { ty, .. }
+            | Target::LocalRecord { ty, .. }
+            | Target::StateRecord { ty, .. } => *ty,
         }
     }
+}
+
+/// Where a designator's storage starts, before any field path is applied.
+#[derive(Debug, Clone, Copy)]
+enum Base {
+    /// A frame local. `is_ref` means the slot holds a call-scoped reference
+    /// (a `const`/`var` parameter) instead of the value.
+    Local { off: u32, is_ref: bool },
+    /// A `state` region variable.
+    State { off: u32 },
+}
+
+/// A resolved designator: a base variable plus a field path.
+///
+/// `base_ty` is the declared type of the base variable; each path element
+/// selects a record field. With an empty path this is the variable itself.
+#[derive(Debug, Clone, Copy)]
+struct Place<'a> {
+    base: Base,
+    base_ty: Type,
+    path: &'a [&'a str],
+    ty: Type,
+    writable: bool,
 }
 
 struct FnCompiler<'a, 'b, 'p> {
@@ -777,6 +1092,7 @@ struct FnCompiler<'a, 'b, 'p> {
     consts: &'b [Const<'a>],
     state_vars: &'b [StateVar<'a>],
     enums: &'b [EnumDef<'a>],
+    records: &'b [RecordDef<'a>],
     pool: &'p mut ConstantPool<'a, 'b>,
     current: Sig<'a>,
     bump: &'b Bump<'a>,
@@ -799,6 +1115,7 @@ struct FnCompiler<'a, 'b, 'p> {
 struct TypeName<'a, 'b> {
     ty: Type,
     enums: &'b [EnumDef<'a>],
+    records: &'b [RecordDef<'a>],
 }
 
 impl fmt::Display for TypeName<'_, '_> {
@@ -807,6 +1124,10 @@ impl fmt::Display for TypeName<'_, '_> {
             Kind::Enum(id) => match self.enums.get(id as usize) {
                 Some(enumeration) => f.write_str(enumeration.name),
                 None => f.write_str("enum"),
+            },
+            Kind::Record(id) => match self.records.get(id as usize) {
+                Some(record) => f.write_str(record.name),
+                None => f.write_str("record"),
             },
             _ => write!(f, "{}", self.ty),
         }
@@ -820,6 +1141,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         TypeName {
             ty,
             enums: self.enums,
+            records: self.records,
         }
     }
 
@@ -831,6 +1153,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         consts: &'b [Const<'a>],
         state_vars: &'b [StateVar<'a>],
         enums: &'b [EnumDef<'a>],
+        records: &'b [RecordDef<'a>],
         pool: &'p mut ConstantPool<'a, 'b>,
         current: Sig<'a>,
         bump: &'b Bump<'a>,
@@ -849,6 +1172,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             consts,
             state_vars,
             enums,
+            records,
             pool,
             current,
             bump,
@@ -919,13 +1243,40 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
     }
 
     fn compile_procedure(&mut self, proc: &ProcDecl<'a>) -> Result<(), Diagnostic> {
-        for param in self.current.params {
+        // Record parameters are call-scoped references like buffers. A `value`
+        // record parameter is a copy: the slot holds the caller's reference and
+        // the prologue copies the whole record into a local area, so the callee
+        // can assign fields without touching the caller (spec 0003).
+        let mut copies = SliceVec::<(usize, u32)>::new(self.bump)
+            .map_err(|_| self.arena_error(self.current.line, self.current.column))?;
+        for (index, param) in self.current.params.iter().enumerate() {
             let base = self.next_local;
             self.next_local += 8;
-            let is_ref = param.mode == ParamMode::Var || param.ty.is_buffer();
+            let is_ref = param.mode == ParamMode::Var
+                || param.ty.is_buffer()
+                || (param.ty.is_record() && param.mode != ParamMode::Value);
+            let mut slot_base = base;
+            if param.ty.is_record() && param.mode == ParamMode::Value {
+                let copy_base = self.next_local;
+                self.next_local += param.ty.size();
+                if self.next_local > MAX_CAPACITY {
+                    return Err(self.err(
+                        self.current.line,
+                        self.current.column,
+                        format_args!(
+                            "procedure `{}` needs more than {MAX_CAPACITY} bytes of locals",
+                            self.current.name
+                        ),
+                    ));
+                }
+                slot_base = copy_base;
+                copies
+                    .push((index, base))
+                    .map_err(|_| self.arena_error(self.current.line, self.current.column))?;
+            }
             let slot = Slot {
                 name: param.name,
-                base,
+                base: slot_base,
                 ty: param.ty,
                 writable: param.mode != ParamMode::Const,
                 is_ref,
@@ -933,6 +1284,17 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             self.slots
                 .push(slot)
                 .map_err(|_| self.arena_error(self.current.line, self.current.column))?;
+        }
+        // Prologue: copy each `value` record parameter out of the caller's
+        // record, so all later field accesses use the local copy.
+        for index in 0..copies.len() {
+            let (parameter, copied) = copies
+                .get(index)
+                .ok_or_else(|| self.internal("missing copy slot"))?;
+            let slot = self
+                .slot(self.current.params[parameter].name)
+                .ok_or_else(|| self.internal("missing parameter slot"))?;
+            self.record_copy_from_ref(slot.base, copied, slot.ty)?;
         }
         for local in proc.locals {
             if self.slot(local.name).is_some() {
@@ -942,7 +1304,14 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     format_args!("duplicate declaration of `{}`", local.name),
                 ));
             }
-            let ty = resolve_type(&local.ty, self.consts, self.enums, self.path, self.unit)?;
+            let ty = resolve_type(
+                &local.ty,
+                self.consts,
+                self.enums,
+                self.records,
+                self.path,
+                self.unit,
+            )?;
             if ty.is_buffer() && ty.cap == 0 {
                 return Err(self.err(
                     local.line,
@@ -1159,6 +1528,9 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.mark(line, column)?;
                 match target {
                     AssignTarget::Name(name) => self.assign(name, value, line, column),
+                    AssignTarget::Field { base, path } => {
+                        self.assign_field(base, path, value, line, column)
+                    }
                     AssignTarget::Index(name, index) => {
                         self.assign_index(name, index, value, line, column)
                     }
@@ -1276,7 +1648,12 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.pop(1)?;
             }
             Target::LocalBuffer { .. } | Target::StateBuffer { .. } => {
-                self.buffer_assign(name, &target, value)?;
+                let place = self.place_of_target(&target);
+                self.buffer_assign(&place, Some((name, &[])), value)?;
+            }
+            Target::LocalRecord { .. } | Target::StateRecord { .. } => {
+                let place = self.place_of_target(&target);
+                self.assign_record(&place, value)?;
             }
         }
         Ok(())
@@ -1376,6 +1753,12 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     ty: slot.ty,
                     is_ref: slot.is_ref,
                 }
+            } else if slot.ty.is_record() {
+                Target::LocalRecord {
+                    base: slot.base,
+                    ty: slot.ty,
+                    is_ref: slot.is_ref,
+                }
             } else {
                 Target::LocalScalar {
                     off: slot.base,
@@ -1387,6 +1770,11 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         if let Some(var) = find_state(self.state_vars, name) {
             return Ok(if var.ty.is_buffer() {
                 Target::StateBuffer {
+                    off: var.off,
+                    ty: var.ty,
+                }
+            } else if var.ty.is_record() {
+                Target::StateRecord {
                     off: var.off,
                     ty: var.ty,
                 }
@@ -1409,6 +1797,13 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 line,
                 column,
                 format_args!("cannot assign to enum type `{name}`"),
+            ));
+        }
+        if find_record(self.records, name).is_some() {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("cannot assign to record type `{name}`"),
             ));
         }
         if let Some((_, ordinal)) = find_variant(self.enums, name) {
@@ -1438,13 +1833,271 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         Ok(())
     }
 
-    fn buffer_assign(
+    // ---- places (variables and record fields) ---------------------------
+
+    /// A designator is an identifier or a field path; both name storage that a
+    /// reference can point at.
+    fn designator(expr: &'a Expr<'a>) -> Option<(&'a str, &'a [&'a str])> {
+        match expr.kind {
+            ExprKind::Ident(name) => Some((name, &[])),
+            ExprKind::Field { base, path } => Some((base, path)),
+            _ => None,
+        }
+    }
+
+    /// Resolves a base name and a field path to a [`Place`], checking every
+    /// field against the record table.
+    fn place(
+        &self,
+        base_name: &'a str,
+        path: &'a [&'a str],
+        line: u32,
+        column: u32,
+    ) -> Result<Place<'a>, Diagnostic> {
+        let (base, base_ty, writable) = if let Some(slot) = self.slot(base_name) {
+            (
+                Base::Local {
+                    off: slot.base,
+                    is_ref: slot.is_ref,
+                },
+                slot.ty,
+                slot.writable,
+            )
+        } else if let Some(var) = find_state(self.state_vars, base_name) {
+            (Base::State { off: var.off }, var.ty, true)
+        } else if find_const(self.consts, base_name).is_some() {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`{base_name}` is a constant, not a record variable"),
+            ));
+        } else if find_enum(self.enums, base_name).is_some()
+            || find_record(self.records, base_name).is_some()
+        {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`{base_name}` is a type, not a value"),
+            ));
+        } else if find_variant(self.enums, base_name).is_some() {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`{base_name}` is an enum variant, not a record"),
+            ));
+        } else {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("unknown identifier `{base_name}`"),
+            ));
+        };
+
+        let mut ty = base_ty;
+        for name in path {
+            let Some(record) = record_of(self.records, ty) else {
+                return Err(self.err(
+                    line,
+                    column,
+                    format_args!("`{base_name}` is `{ty}`, which has no field `{name}`"),
+                ));
+            };
+            let Some(field) = record.fields.iter().find(|field| field.name == *name) else {
+                return Err(self.err(
+                    line,
+                    column,
+                    format_args!("`{}` has no field `{name}`", record.name),
+                ));
+            };
+            ty = field.ty;
+        }
+        Ok(Place {
+            base,
+            base_ty,
+            path,
+            ty,
+            writable,
+        })
+    }
+
+    /// Builds the [`Place`] of a local/state variable with no field path.
+    fn place_of_target(&self, target: &Target) -> Place<'a> {
+        match *target {
+            Target::LocalBuffer { base, ty, is_ref } | Target::LocalRecord { base, ty, is_ref } => {
+                Place {
+                    base: Base::Local { off: base, is_ref },
+                    base_ty: ty,
+                    path: &[],
+                    ty,
+                    writable: true,
+                }
+            }
+            Target::StateBuffer { off, ty } | Target::StateRecord { off, ty } => Place {
+                base: Base::State { off },
+                base_ty: ty,
+                path: &[],
+                ty,
+                writable: true,
+            },
+            Target::LocalScalar { .. } | Target::StateScalar { .. } => {
+                unreachable!("scalars are not places")
+            }
+        }
+    }
+
+    /// Pushes a reference to the storage a [`Place`] names.
+    ///
+    /// A buffer is referenced at its data (the length word sits just before);
+    /// a scalar or record is referenced at its first byte. A field reference is
+    /// formed with `ref_offset`, one step per field; the interpreter
+    /// bounds-checks every intermediate offset.
+    fn push_place_ref(&mut self, place: &Place<'a>) -> Result<(), Diagnostic> {
+        let extra = if place.path.is_empty() && place.ty.is_buffer() {
+            8
+        } else {
+            0
+        };
+        match place.base {
+            Base::Local { off, is_ref: true } => self.one(opcodes::LOAD_LOCAL, off)?,
+            Base::Local { off, is_ref: false } => self.one(opcodes::REF_LOCAL, off + extra)?,
+            Base::State { off } => self.one(opcodes::REF_STATE, off + extra)?,
+        }
+        self.push();
+
+        let mut ty = place.base_ty;
+        let count = place.path.len();
+        for (index, name) in place.path.iter().enumerate() {
+            let field = field_of(self.records, ty, name)
+                .ok_or_else(|| self.internal("unresolved field in a place"))?;
+            let last = index + 1 == count;
+            let extra = if last && field.ty.is_buffer() { 8 } else { 0 };
+            self.one(opcodes::REF_OFFSET, field.off + extra)?;
+            ty = field.ty;
+        }
+        Ok(())
+    }
+
+    /// Copies a whole record from the reference in `src_slot` into the local
+    /// area at `dst_base` (a `value` parameter's prologue).
+    fn record_copy_from_ref(
         &mut self,
-        name: &'a str,
-        target: &Target,
+        dst_base: u32,
+        src_slot: u32,
+        ty: Type,
+    ) -> Result<(), Diagnostic> {
+        self.one(opcodes::REF_LOCAL, dst_base)?;
+        self.push();
+        self.one(opcodes::LOAD_LOCAL, src_slot)?;
+        self.push();
+        self.const_i64(ty.size() as i64)?;
+        self.simple(opcodes::COPY_REFS)?;
+        self.pop(3)?;
+        Ok(())
+    }
+
+    /// Emits a reference to a record expression and returns its type.
+    ///
+    /// `writable` is required for a `var` parameter or an out-parameter; a
+    /// `value` copy and a `const` borrow accept a read-only source.
+    fn emit_record_ref(
+        &mut self,
+        expr: &'a Expr<'a>,
+        writable: bool,
+        what: &str,
+    ) -> Result<Type, Diagnostic> {
+        if let ExprKind::Cast(name, _) = expr.kind {
+            if find_record(self.records, name).is_some() {
+                return Err(self.err_at(
+                    expr,
+                    format_args!(
+                        "`{name}(x)` is not a record constructor; declare a variable and assign its fields"
+                    ),
+                ));
+            }
+        }
+        let Some((base, path)) = Self::designator(expr) else {
+            return Err(self.err_at(
+                expr,
+                format_args!("{what} must be a record variable or a record field"),
+            ));
+        };
+        let place = self.place(base, path, expr.line, expr.column)?;
+        if !place.ty.is_record() {
+            let found = self.type_name(place.ty);
+            return Err(self.err_at(
+                expr,
+                format_args!("{what} expects a record, found `{found}`"),
+            ));
+        }
+        if writable && !place.writable {
+            return Err(self.err_at(
+                expr,
+                format_args!("cannot pass `const` record `{base}` as `var`"),
+            ));
+        }
+        self.push_place_ref(&place)?;
+        Ok(place.ty)
+    }
+
+    /// Assigns a whole record: a byte copy of the destination-size region.
+    fn assign_record(
+        &mut self,
+        destination: &Place<'a>,
         value: &'a Expr<'a>,
     ) -> Result<(), Diagnostic> {
-        let ty = target.ty();
+        self.push_place_ref(destination)?;
+        let source = self.emit_record_ref(value, false, "a record assignment")?;
+        self.check_exact(destination.ty, source, value)?;
+        self.const_i64(destination.ty.size() as i64)?;
+        self.simple(opcodes::COPY_REFS)?;
+        self.pop(3)?;
+        Ok(())
+    }
+
+    /// Assigns one field: a whole-record copy, a buffer construction, or a
+    /// scalar store through the field reference.
+    fn assign_field(
+        &mut self,
+        base: &'a str,
+        path: &'a [&'a str],
+        value: &'a Expr<'a>,
+        line: u32,
+        column: u32,
+    ) -> Result<(), Diagnostic> {
+        let place = self.place(base, path, line, column)?;
+        if !place.writable {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("cannot assign to a field of `const` parameter `{base}`"),
+            ));
+        }
+        if place.ty.is_record() {
+            return self.assign_record(&place, value);
+        }
+        if place.ty.is_buffer() {
+            return self.buffer_assign(&place, Some((base, path)), value);
+        }
+        self.push_place_ref(&place)?;
+        let value_ty = self.expr_scalar(value)?;
+        self.check_exact(place.ty, value_ty, value)?;
+        self.simple(opcodes::STORE_REF)?;
+        self.pop(2)?;
+        Ok(())
+    }
+
+    /// Assigns a whole buffer field or variable: a construction from literals
+    /// and other buffers (`clear` then `append`), never a temporary.
+    ///
+    /// `home` names the destination designator for the aliasing check; a
+    /// variable passes its name, a field passes its base and path.
+    fn buffer_assign(
+        &mut self,
+        destination: &Place<'a>,
+        home: Option<(&'a str, &'a [&'a str])>,
+        value: &'a Expr<'a>,
+    ) -> Result<(), Diagnostic> {
+        let ty = destination.ty;
         let bump = self.bump;
         let mut parts = SliceVec::<&'a Expr<'a>>::new(bump)
             .map_err(|_| self.arena_error(value.line, value.column))?;
@@ -1452,16 +2105,16 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
 
         for index in 0..parts.len() {
             let part = parts.as_slice()[index];
+            if Self::aliases(home, part) {
+                return Err(self.err(
+                    part.line,
+                    part.column,
+                    format_args!(
+                        "destination aliases an operand; a buffer cannot be appended to itself"
+                    ),
+                ));
+            }
             match part.kind {
-                ExprKind::Ident(operand) if operand == name => {
-                    return Err(self.err(
-                        part.line,
-                        part.column,
-                        format_args!(
-                            "destination `{name}` aliases an operand; `{name} := {name} + ...` is not allowed"
-                        ),
-                    ));
-                }
                 ExprKind::Str(bytes) => {
                     if bytes.len() as u64 > ty.cap as u64 {
                         return Err(self.err(
@@ -1529,6 +2182,37 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                         }
                     }
                 }
+                ExprKind::Field { base, path } => {
+                    let place = self.place(base, path, part.line, part.column)?;
+                    if !place.ty.is_buffer() {
+                        let found = self.type_name(place.ty);
+                        return Err(self.err(
+                            part.line,
+                            part.column,
+                            format_args!("`{base}.` field is `{found}`, not a buffer"),
+                        ));
+                    }
+                    if place.ty.kind != ty.kind {
+                        let found = self.type_name(place.ty);
+                        return Err(self.err(
+                            part.line,
+                            part.column,
+                            format_args!("cannot use `{found}` in a `{ty}` construction"),
+                        ));
+                    }
+                    // A record field has its nominal capacity; there is no
+                    // at-least-N relaxation for fields.
+                    if parts.len() == 1 && place.ty.cap != ty.cap {
+                        return Err(self.err(
+                            part.line,
+                            part.column,
+                            format_args!(
+                                "capacity mismatch: `{}` cannot be assigned to `{ty}`",
+                                self.type_name(place.ty)
+                            ),
+                        ));
+                    }
+                }
                 _ => {
                     return Err(self.err(
                         part.line,
@@ -1539,28 +2223,32 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             }
         }
 
-        self.push_target_ref(target)?;
+        self.push_place_ref(destination)?;
         self.simple(opcodes::CLEAR)?;
         self.pop(1)?;
 
         for index in 0..parts.len() {
             let part = parts.as_slice()[index];
+            self.push_place_ref(destination)?;
             match part.kind {
                 ExprKind::Str(bytes) => {
                     if bytes.is_empty() {
+                        self.pop(1)?;
                         continue;
                     }
                     let offset = match self.pool.intern(bytes) {
                         Ok(offset) => offset,
                         Err(_) => return Err(self.arena_error(part.line, part.column)),
                     };
-                    self.push_target_ref(target)?;
                     self.one(opcodes::REF_CONST, offset)?;
                     self.push();
                 }
                 ExprKind::Ident(operand) => {
-                    self.push_target_ref(target)?;
                     self.push_named_ref(operand, part)?;
+                }
+                ExprKind::Field { base, path } => {
+                    let place = self.place(base, path, part.line, part.column)?;
+                    self.push_place_ref(&place)?;
                 }
                 _ => {
                     return Err(self.err_at(
@@ -1574,6 +2262,18 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         }
 
         Ok(())
+    }
+
+    /// True when `part` names the same storage as the destination designator.
+    fn aliases(home: Option<(&'a str, &'a [&'a str])>, part: &Expr<'a>) -> bool {
+        let Some((home_base, home_path)) = home else {
+            return false;
+        };
+        match part.kind {
+            ExprKind::Ident(name) => name == home_base && home_path.is_empty(),
+            ExprKind::Field { base, path } => base == home_base && path == home_path,
+            _ => false,
+        }
     }
 
     // ---- expressions ---------------------------------------------------
@@ -1606,6 +2306,29 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 ),
             )),
             ExprKind::Ident(name) => self.load_scalar(name, expr),
+            ExprKind::Field { base, path } => {
+                let place = self.place(base, path, expr.line, expr.column)?;
+                if place.ty.is_buffer() {
+                    return Err(self.err_at(
+                        expr,
+                        format_args!("buffer `{base}` field cannot be used as a scalar value"),
+                    ));
+                }
+                if place.ty.is_record() {
+                    let found = self.type_name(place.ty);
+                    return Err(self.err_at(
+                        expr,
+                        format_args!(
+                            "record `{found}` cannot be used as a scalar value; select a field"
+                        ),
+                    ));
+                }
+                self.push_place_ref(&place)?;
+                self.simple(opcodes::LOAD_REF)?;
+                // `push_place_ref` counts the reference; `load_ref` replaces it
+                // with the value, so the depth does not change.
+                Ok(place.ty)
+            }
             ExprKind::Index(name, index) => self.load_index(name, index, expr),
             ExprKind::Call(call) => match self.call(&call)? {
                 Some(ty) => Ok(ty),
@@ -1657,6 +2380,10 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 find_state(self.state_vars, name)
                     .filter(|var| var.ty.is_buffer())
                     .map(|var| var.ty)
+            }
+            ExprKind::Field { base, path } => {
+                let place = self.place(base, path, expr.line, expr.column).ok()?;
+                place.ty.is_buffer().then_some(place.ty)
             }
             _ => None,
         }
@@ -1735,6 +2462,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     format_args!("buffer `{name}` cannot be used as a scalar value"),
                 ));
             }
+            if slot.ty.is_record() {
+                let found = self.type_name(slot.ty);
+                return Err(self.err_at(
+                    expr,
+                    format_args!(
+                        "record `{name}` of type `{found}` cannot be used as a scalar value; select a field"
+                    ),
+                ));
+            }
             if slot.is_ref {
                 self.one(opcodes::LOAD_LOCAL, slot.base)?;
                 self.simple(opcodes::LOAD_REF)?;
@@ -1749,6 +2485,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 return Err(self.err_at(
                     expr,
                     format_args!("buffer `{name}` cannot be used as a scalar value"),
+                ));
+            }
+            if var.ty.is_record() {
+                let found = self.type_name(var.ty);
+                return Err(self.err_at(
+                    expr,
+                    format_args!(
+                        "record `{name}` of type `{found}` cannot be used as a scalar value; select a field"
+                    ),
                 ));
             }
             self.one(opcodes::LOAD_STATE, var.off)?;
@@ -1800,6 +2545,16 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 .unwrap_or(0);
             self.one(opcodes::ENUM_CAST, count)?;
             return Ok(target);
+        }
+        // A record name in `Name(x)` position is not a constructor: records are
+        // built by assigning fields (spec 0003).
+        if find_record(self.records, name).is_some() {
+            return Err(self.err_at(
+                expr,
+                format_args!(
+                    "`{name}(x)` is not a record constructor; declare a variable and assign its fields"
+                ),
+            ));
         }
         let target = match name {
             "int" => Kind::Int,
@@ -2079,6 +2834,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 BinOp::And | BinOp::Or => unreachable!(),
             },
             Kind::String | Kind::Bytes => unreachable!(),
+            Kind::Record(_) => unreachable!(),
             Kind::Enum(_) => match op {
                 // Ordinals are non-negative, so unsigned ordering is the
                 // declaration order (spec 0003, "Enums").
@@ -2373,25 +3129,36 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             // E1; spec 0005). `Status` ordinals are the `abi::Status`
             // discriminants, so the interpreter pushes them directly.
             "core.spawn" => {
-                if args.len() != 3 {
+                if args.len() != 4 {
                     return Err(self.err(
                         line,
                         column,
-                        format_args!("`core.spawn` expects 3 arguments, got {}", args.len()),
+                        format_args!("`core.spawn` expects 4 arguments, got {}", args.len()),
                     ));
                 }
                 self.emit_ref(args[0], Some(Kind::String))?;
                 self.emit_ref(args[1], Some(Kind::String))?;
-                let id = self.emit_scalar_ref(args[2])?;
+                let diagnostic = Type::record(DIAGNOSTIC_RECORD, abi::layout::diagnostic::SIZE);
+                let diag = self.emit_record_ref(args[2], true, "`var diag`")?;
+                if diag != diagnostic {
+                    let found = self.type_name(diag);
+                    return Err(self.err_at(
+                        args[2],
+                        format_args!(
+                            "`core.spawn` expects `var diag: Diagnostic`, found `{found}`"
+                        ),
+                    ));
+                }
+                let id = self.emit_scalar_ref(args[3])?;
                 if id.kind != Kind::Int {
                     let found = self.type_name(id);
                     return Err(self.err_at(
-                        args[2],
+                        args[3],
                         format_args!("`core.spawn` expects `var id: int`, found `{found}`"),
                     ));
                 }
                 self.one(opcodes::BUILTIN, builtin::SPAWN)?;
-                self.pop(3)?;
+                self.pop(4)?;
                 self.push();
                 Ok(Some(Type::enumeration(STATUS_ENUM)))
             }
@@ -2404,12 +3171,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     ));
                 }
                 self.builtin_id(args[0])?;
-                let reason = self.emit_scalar_ref(args[1])?;
-                if reason.kind != Kind::Int {
+                let exit_reason = Type::record(EXIT_REASON_RECORD, abi::layout::exit_reason::SIZE);
+                let reason = self.emit_record_ref(args[1], true, "`var reason`")?;
+                if reason != exit_reason {
                     let found = self.type_name(reason);
                     return Err(self.err_at(
                         args[1],
-                        format_args!("`core.wait` expects `var reason: int`, found `{found}`"),
+                        format_args!(
+                            "`core.wait` expects `var reason: ExitReason`, found `{found}`"
+                        ),
                     ));
                 }
                 self.one(opcodes::BUILTIN, builtin::WAIT)?;
@@ -2471,7 +3241,19 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         param: &Param<'a>,
         position: usize,
     ) -> Result<(), Diagnostic> {
-        if param.ty.is_buffer() {
+        if param.ty.is_record() {
+            let writable = param.mode == ParamMode::Var;
+            let found = self.emit_record_ref(arg, writable, "argument")?;
+            if found != param.ty {
+                let expected = self.type_name(param.ty);
+                let found = self.type_name(found);
+                return Err(self.err_at(
+                    arg,
+                    format_args!("argument {position} expects `{expected}`, found `{found}`"),
+                ));
+            }
+            Ok(())
+        } else if param.ty.is_buffer() {
             let found = if param.mode == ParamMode::Var {
                 self.emit_var_buffer_ref(arg)?
             } else {
@@ -2589,71 +3371,72 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push_named_ref(name, expr)?;
                 Ok(ty)
             }
+            ExprKind::Field { base, path } => {
+                let place = self.place(base, path, expr.line, expr.column)?;
+                if !place.ty.is_buffer() {
+                    let found = self.type_name(place.ty);
+                    return Err(self.err_at(
+                        expr,
+                        format_args!("field `{base}` is `{found}`, not a buffer"),
+                    ));
+                }
+                if let Some(kind) = want {
+                    if kind.is_buffer() && kind != place.ty.kind {
+                        let found = self.type_name(place.ty);
+                        return Err(self.err_at(
+                            expr,
+                            format_args!("expected `{}`, found `{found}`", kind.name()),
+                        ));
+                    }
+                }
+                self.push_place_ref(&place)?;
+                Ok(place.ty)
+            }
             _ => Err(self.err_at(expr, format_args!("expected a buffer expression"))),
         }
     }
 
     fn emit_var_buffer_ref(&mut self, expr: &'a Expr<'a>) -> Result<Type, Diagnostic> {
-        let name = match expr.kind {
-            ExprKind::Ident(name) => name,
-            _ => {
-                return Err(self.err_at(
-                    expr,
-                    format_args!("a `var` buffer argument must be a variable or parameter"),
-                ))
-            }
+        let Some((base, path)) = Self::designator(expr) else {
+            return Err(self.err_at(
+                expr,
+                format_args!("a `var` buffer argument must be a variable or parameter"),
+            ));
         };
-        let target = self.resolve_target(name, expr.line, expr.column)?;
-        match target {
-            Target::LocalBuffer { .. } | Target::StateBuffer { .. } => {
-                let ty = target.ty();
-                self.push_target_ref(&target)?;
-                Ok(ty)
-            }
-            _ => Err(self.err_at(expr, format_args!("`{name}` is not a buffer"))),
+        let place = self.place(base, path, expr.line, expr.column)?;
+        if !place.ty.is_buffer() {
+            return Err(self.err_at(expr, format_args!("`{base}` is not a buffer")));
         }
+        if !place.writable {
+            return Err(self.err_at(
+                expr,
+                format_args!("cannot pass `const` parameter `{base}` as `var`"),
+            ));
+        }
+        self.push_place_ref(&place)?;
+        Ok(place.ty)
     }
 
     fn emit_scalar_ref(&mut self, expr: &'a Expr<'a>) -> Result<Type, Diagnostic> {
-        let name = match expr.kind {
-            ExprKind::Ident(name) => name,
-            _ => {
-                return Err(self.err_at(
-                    expr,
-                    format_args!("a `var` argument must be a variable or parameter"),
-                ))
-            }
+        let Some((base, path)) = Self::designator(expr) else {
+            return Err(self.err_at(
+                expr,
+                format_args!("a `var` argument must be a variable or parameter"),
+            ));
         };
-        if let Some(slot) = self.slot(name) {
-            if !slot.writable {
-                return Err(self.err_at(
-                    expr,
-                    format_args!("cannot pass `const` parameter `{name}` as `var`"),
-                ));
-            }
-            if slot.ty.is_buffer() {
-                return Err(self.err_at(expr, format_args!("`{name}` is not a scalar")));
-            }
-            if slot.is_ref {
-                self.one(opcodes::LOAD_LOCAL, slot.base)?;
-            } else {
-                self.one(opcodes::REF_LOCAL, slot.base)?;
-            }
-            self.push();
-            return Ok(slot.ty);
+        let place = self.place(base, path, expr.line, expr.column)?;
+        if !place.writable {
+            return Err(self.err_at(
+                expr,
+                format_args!("cannot pass `const` parameter `{base}` as `var`"),
+            ));
         }
-        if let Some(var) = find_state(self.state_vars, name) {
-            if var.ty.is_buffer() {
-                return Err(self.err_at(expr, format_args!("`{name}` is not a scalar")));
-            }
-            self.one(opcodes::REF_STATE, var.off)?;
-            self.push();
-            return Ok(var.ty);
+        if !place.ty.is_scalar() {
+            let found = self.type_name(place.ty);
+            return Err(self.err_at(expr, format_args!("`{base}` is `{found}`, not a scalar")));
         }
-        if find_const(self.consts, name).is_some() {
-            return Err(self.err_at(expr, format_args!("cannot pass constant `{name}` as `var`")));
-        }
-        Err(self.err_at(expr, format_args!("unknown identifier `{name}`")))
+        self.push_place_ref(&place)?;
+        Ok(place.ty)
     }
 
     fn buffer_type(&self, name: &str, expr: &Expr<'a>) -> Result<Type, Diagnostic> {
@@ -2722,4 +3505,45 @@ fn collect_concat<'a, 'b>(
             .map_err(|_| out_of_space(path, unit, expr.line, expr.column, Resource::Arena))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The predeclared tables must agree with `abi::layout` field for field; a
+    /// drift here would make the kernel and the compiler disagree about where
+    /// a diagnostic field lives.
+    fn assert_layout(fields: &[RecordField<'_>], size: u32) {
+        let mut next = 0u32;
+        for field in fields {
+            next = align8(next);
+            assert_eq!(field.off, next, "field `{}` offset", field.name);
+            next += field.ty.size();
+        }
+        assert_eq!(align8(next), size, "record size");
+    }
+
+    #[test]
+    fn predeclared_records_match_the_shared_layout() {
+        assert_layout(&DIAGNOSTIC_FIELDS, layout::diagnostic::SIZE);
+        assert_layout(&EXIT_REASON_FIELDS, layout::exit_reason::SIZE);
+        assert_eq!(find_record(&predeclared_names(), "Diagnostic"), Some(0));
+        assert_eq!(find_record(&predeclared_names(), "ExitReason"), Some(1));
+    }
+
+    fn predeclared_names() -> [RecordDef<'static>; 2] {
+        [
+            RecordDef {
+                name: "Diagnostic",
+                fields: &DIAGNOSTIC_FIELDS,
+                size: layout::diagnostic::SIZE,
+            },
+            RecordDef {
+                name: "ExitReason",
+                fields: &EXIT_REASON_FIELDS,
+                size: layout::exit_reason::SIZE,
+            },
+        ]
+    }
 }

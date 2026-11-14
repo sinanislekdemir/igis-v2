@@ -297,12 +297,13 @@ uses core;
 var
   st: Status;
   id: int;
-  code: int;
+  diag: Diagnostic;
+  reason: ExitReason;
 
 procedure main(args: const string[1024]);
 begin
-  st := core.spawn("child", "hello", id);
-  st := core.wait(id, code);
+  st := core.spawn("child", "hello", diag, id);
+  st := core.wait(id, reason);
   st := core.kill(id);
 end;
 "#;
@@ -339,7 +340,7 @@ end;
 "#;
     let error = compile(wrong_count, "t.ig").expect_err("must not compile");
     assert!(
-        error.message.contains("`core.spawn` expects 3 arguments"),
+        error.message.contains("`core.spawn` expects 4 arguments"),
         "{}",
         error.message
     );
@@ -351,12 +352,12 @@ uses core;
 
 var
   u: uint;
-  code: int;
+  reason: ExitReason;
 
 procedure main(args: const string[1024]);
 begin
   u := uint(1);
-  core.wait(u, code);
+  core.wait(u, reason);
 end;
 "#;
     let error = compile(wrong_type, "t.ig").expect_err("must not compile");
@@ -370,17 +371,18 @@ uses core;
 var
   st: Status;
   id: int;
+  diag: Diagnostic;
   code: uint;
 
 procedure main(args: const string[1024]);
 begin
-  st := core.spawn("child", "hello", id);
+  st := core.spawn("child", "hello", diag, id);
   st := core.wait(id, code);
 end;
 "#;
-    let error = compile(wrong_out_parameter, "t.ig").expect_err("reason is an int");
+    let error = compile(wrong_out_parameter, "t.ig").expect_err("reason is an ExitReason");
     assert!(
-        error.message.contains("var reason: int"),
+        error.message.contains("`var reason` expects a record"),
         "{}",
         error.message
     );
@@ -1652,4 +1654,233 @@ end;
         "{}",
         error.message
     );
+}
+
+#[test]
+fn records_layout_in_declaration_order() {
+    use abi::{ManifestHeader, MANIFEST_HEADER_SIZE};
+
+    // `name: string[8]` is 16 bytes (`8 + 8`); `at: Point` is 16; `count` is 8.
+    let source = br#"
+unit t;
+
+type Point = record x, y: int; end;
+type Mixed = record name: string[8]; at: Point; count: int; end;
+
+var
+  m: Mixed;
+
+procedure main(args: const string[1024]);
+begin
+  m.count := 1;
+  m.at.x := 2;
+  m.at.y := 3;
+  m.name := "n";
+end;
+"#;
+    let package = compile(source, "t.ig").expect("records compile");
+    let header = ManifestHeader::from_bytes(&package.manifest[..MANIFEST_HEADER_SIZE])
+        .expect("manifest header");
+    assert_eq!(header.state_size, 40, "fields in order, each aligned to 8");
+}
+
+#[test]
+fn records_accept_nested_fields_buffer_fields_and_copies() {
+    let source = br#"
+unit t;
+
+type Point = record x, y: int; end;
+type Named = record label: string[8]; at: Point; end;
+
+var
+  n: Named;
+  p: Point;
+  copy: Named;
+
+procedure set(q: var Point; x: int; y: int);
+begin
+  q.x := x;
+  q.y := y;
+end;
+
+procedure main(args: const string[1024]);
+begin
+  set(p, 3, 4);
+  n.at := p;
+  n.label := "n";
+  copy := n;
+  copy.at := n.at;
+  p := copy.at;
+end;
+"#;
+    compile(source, "t.ig").expect("records compile");
+}
+
+#[test]
+fn unknown_record_field_is_reported() {
+    let source = br#"
+unit t;
+
+type Point = record x, y: int; end;
+
+var
+  p: Point;
+
+procedure main(args: const string[1024]);
+begin
+  p.z := 1;
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("must not compile");
+    assert!(
+        error.message.contains("has no field `z`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn record_type_mismatch_is_reported() {
+    let source = br#"
+unit t;
+
+type A = record x: int; end;
+type B = record x: int; end;
+
+var
+  a: A;
+  b: B;
+
+procedure main(args: const string[1024]);
+begin
+  a := b;
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("records are nominal");
+    assert!(error.message.contains("type mismatch"), "{}", error.message);
+}
+
+#[test]
+fn writing_a_const_record_field_is_reported() {
+    let source = br#"
+unit t;
+
+type Point = record x, y: int; end;
+
+procedure move(q: const Point);
+begin
+  q.x := 1;
+end;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("const records are read-only");
+    assert!(
+        error
+            .message
+            .contains("cannot assign to a field of `const` parameter"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_record_type_must_be_declared_before_use() {
+    let source = br#"
+unit t;
+
+type Outer = record inner: Inner; end;
+type Inner = record x: int; end;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("no forward references");
+    assert!(
+        error.message.contains("unknown type `Inner`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn defining_a_predeclared_record_is_reported() {
+    let diagnostic = br#"
+unit t;
+
+type Diagnostic = record x: int; end;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile(diagnostic, "t.ig").expect_err("Diagnostic is predeclared");
+    assert!(
+        error.message.contains("`Diagnostic` is predeclared"),
+        "{}",
+        error.message
+    );
+
+    let exit_reason = br#"
+unit t;
+
+type ExitReason = record x: int; end;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile(exit_reason, "t.ig").expect_err("ExitReason is predeclared");
+    assert!(
+        error.message.contains("`ExitReason` is predeclared"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_record_name_is_not_a_constructor() {
+    let source = br#"
+unit t;
+
+type Point = record x, y: int; end;
+
+var
+  p: Point;
+
+procedure main(args: const string[1024]);
+begin
+  p := Point(1);
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("records have no constructors");
+    assert!(
+        error.message.contains("is not a record constructor"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_records_buffer_field_is_usable_as_a_buffer() {
+    let source = br#"
+unit t;
+
+type Named = record label: string[8]; end;
+
+var
+  n: Named;
+  size: uint;
+
+procedure main(args: const string[1024]);
+begin
+  n.label := "hi";
+  core.write(n.label);
+  size := core.len(n.label);
+end;
+"#;
+    compile(source, "t.ig").expect("buffer fields work");
 }

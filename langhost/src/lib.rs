@@ -146,20 +146,37 @@ impl Host for ConsoleHost {
         START.get_or_init(Instant::now).elapsed().as_nanos() as u64
     }
 
-    fn spawn(&mut self, path: &[u8], args: &[u8]) -> Result<u64, Status> {
+    fn spawn(&mut self, path: &[u8], args: &[u8], diag: &mut [u8]) -> Result<u64, Status> {
+        let describe = |diag: &mut [u8], message: &[u8]| {
+            abi::layout::diagnostic::write(diag, b"", message, 0, 0);
+        };
         if self.depth >= MAX_SPAWN_DEPTH {
             eprintln!("langhost: spawn refused: nesting deeper than {MAX_SPAWN_DEPTH}");
+            describe(diag, b"spawn nesting is too deep");
             return Err(Status::Full);
         }
-        let path = std::str::from_utf8(path).map_err(|_| Status::Invalid)?;
+        let path = match std::str::from_utf8(path) {
+            Ok(path) => path,
+            Err(_) => {
+                eprintln!("langhost: spawn refused: path is not valid UTF-8");
+                describe(diag, b"path is not valid UTF-8");
+                return Err(Status::Invalid);
+            }
+        };
         if !valid_path(path) {
             eprintln!("langhost: spawn refused: malformed path `{path}`");
+            describe(
+                diag,
+                b"path must be relative with no empty or `..` component",
+            );
             return Err(Status::Invalid);
         }
         if args.len() > 1024 {
+            describe(diag, b"argument is longer than 1024 bytes");
             return Err(Status::CapacityExceeded);
         }
         if std::str::from_utf8(args).is_err() {
+            describe(diag, b"argument is not valid UTF-8");
             return Err(Status::Invalid);
         }
 
@@ -172,6 +189,14 @@ impl Host for ConsoleHost {
                     Status::IoError
                 };
                 eprintln!("langhost: spawn `{path}`: {error}");
+                describe(
+                    diag,
+                    if status == Status::NotFound {
+                        b"No such application"
+                    } else {
+                        b"application file cannot be read"
+                    },
+                );
                 return Err(status);
             }
         };
@@ -179,6 +204,13 @@ impl Host for ConsoleHost {
             Ok(package) => package,
             Err(diagnostic) => {
                 eprintln!("langhost: spawn `{path}`: {diagnostic}");
+                abi::layout::diagnostic::write(
+                    diag,
+                    diagnostic.unit.as_str().as_bytes(),
+                    diagnostic.message.as_str().as_bytes(),
+                    i64::from(diagnostic.line),
+                    i64::from(diagnostic.column),
+                );
                 return Err(Status::Invalid);
             }
         };
@@ -190,10 +222,12 @@ impl Host for ConsoleHost {
                 let id = self.next_id;
                 self.next_id += 1;
                 self.children.insert(id, result.reason);
+                abi::layout::diagnostic::clear(diag);
                 Ok(id)
             }
             Err(diagnostic) => {
                 eprintln!("langhost: spawn `{path}`: verifier rejected it: {diagnostic}");
+                describe(diag, b"verifier rejected the package");
                 Err(Status::Invalid)
             }
         }

@@ -22,6 +22,7 @@
 //! Every buffer the queue, the compiler and the verifier need is static
 //! (`.bss`); no part of this path allocates (spec 0008, B11).
 
+use abi::layout;
 use abi::{
     ExitReason, FaultCode, ManifestHeader, Status, ABI_VERSION, MANIFEST_HEADER_SIZE,
     MANIFEST_MAGIC, PROFILE_X86_64_LE,
@@ -230,31 +231,75 @@ pub fn validate_path(path: &str) -> Status {
     Status::Ok
 }
 
-/// The kernel side of `core.spawn`: validate, reserve an id, enqueue.
+/// The kernel side of `core.spawn`: validate, fill the diagnostic, reserve an
+/// id, enqueue.
 ///
 /// The path is checked against ext2 now so a missing or non-regular file is
-/// reported as a `Status` immediately, as spec 0005 requires. A compile error
-/// is only discovered by the service; it is printed and surfaces through
-/// `core.wait` as a faulted child.
+/// reported as a `Status` immediately, as spec 0005 requires. Every synchronous
+/// failure fills `diag` with the `Diagnostic` record fields at
+/// [`layout::diagnostic`] offsets; success clears it. A compile error is only
+/// discovered by the service; it is printed and surfaces through `core.wait` as
+/// a faulted child (the request-completion path that would report it through
+/// `diag` is still out of scope).
 pub fn request_spawn(
     image: &Ext2<'_>,
     requester: u64,
     path: &[u8],
     args: &[u8],
+    diag: &mut [u8],
 ) -> Result<u64, Status> {
-    let path = core::str::from_utf8(path).map_err(|_| Status::Invalid)?;
+    let describe = |diag: &mut [u8], message: &[u8]| {
+        layout::diagnostic::write(diag, b"", message, 0, 0);
+    };
+    let path = match core::str::from_utf8(path) {
+        Ok(path) => path,
+        Err(_) => {
+            describe(diag, b"path is not valid UTF-8");
+            return Err(Status::Invalid);
+        }
+    };
     match validate_path(path) {
         Status::Ok => {}
-        status => return Err(status),
+        Status::Invalid => {
+            describe(
+                diag,
+                b"path must be relative with no empty or `..` component",
+            );
+            return Err(Status::Invalid);
+        }
+        Status::CapacityExceeded => {
+            describe(diag, b"path is longer than 256 bytes");
+            return Err(Status::CapacityExceeded);
+        }
+        status => {
+            describe(diag, b"invalid path");
+            return Err(status);
+        }
     }
     if args.len() > ARGS_BYTES {
+        describe(diag, b"argument is longer than 1024 bytes");
         return Err(Status::CapacityExceeded);
     }
     if core::str::from_utf8(args).is_err() {
+        describe(diag, b"argument is not valid UTF-8");
         return Err(Status::Invalid);
     }
     // `file_size` also refuses a directory with `Invalid`.
-    image.file_size(path)?;
+    match image.file_size(path) {
+        Ok(_) => {}
+        Err(Status::NotFound) => {
+            describe(diag, b"No such application");
+            return Err(Status::NotFound);
+        }
+        Err(Status::Invalid) => {
+            describe(diag, b"not a regular application file");
+            return Err(Status::Invalid);
+        }
+        Err(status) => {
+            describe(diag, b"application file cannot be read");
+            return Err(status);
+        }
+    }
 
     let id = task::reserve_id();
     let mut request = EMPTY_REQUEST;
@@ -265,8 +310,12 @@ pub fn request_spawn(
     request.args_len = args.len() as u16;
     request.args[..8].copy_from_slice(&(args.len() as u64).to_le_bytes());
     request.args[8..8 + args.len()].copy_from_slice(args);
-    REQUESTS.lock().push(request)?;
+    if let Err(status) = REQUESTS.lock().push(request) {
+        describe(diag, b"request queue is full");
+        return Err(status);
+    }
 
+    layout::diagnostic::clear(diag);
     println!("repl: task {requester} requested `{path}` as task {id}");
     Ok(id)
 }

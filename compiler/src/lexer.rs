@@ -45,6 +45,8 @@ pub enum TokenKind<'a> {
     Var,
     /// `type`
     Type,
+    /// `record`
+    Record,
     /// `procedure`
     Procedure,
     /// `begin`
@@ -125,6 +127,7 @@ impl TokenKind<'_> {
             TokenKind::Const => "const",
             TokenKind::Var => "var",
             TokenKind::Type => "type",
+            TokenKind::Record => "record",
             TokenKind::Procedure => "procedure",
             TokenKind::Begin => "begin",
             TokenKind::End => "end",
@@ -350,6 +353,7 @@ impl<'a, 'b> Lexer<'a, 'b> {
             "const" => TokenKind::Const,
             "var" => TokenKind::Var,
             "type" => TokenKind::Type,
+            "record" => TokenKind::Record,
             "procedure" => TokenKind::Procedure,
             "begin" => TokenKind::Begin,
             "end" => TokenKind::End,

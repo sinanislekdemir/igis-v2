@@ -132,32 +132,38 @@ The interface is split into two namespaces:
 - `receive` copies what is available, up to the destination length; a byte stream has no
   message boundaries. Framing is a `stdlib` concern.
 
-#### Implemented ABI: `spawn`/`wait`/`kill` return `Status`
+#### Implemented ABI: `spawn`/`wait`/`kill` return `Status` and use records
 
-`Status` is a predeclared enum (spec 0003), so the REPL primitives now use the real
-return type and `var` out-parameters. `ExitReason` and `Diagnostic` are still records
-the language cannot express, so those two stay staged:
+`Status` is a predeclared enum and `Diagnostic`/`ExitReason` are predeclared records
+(spec 0003), so all three primitives now use the target shapes: the return is a real
+`Status`, and the out-parameters are records at the fixed `abi::layout` offset.
 
 | Primitive | Implemented signature | Result |
 |-----------|-----------------------|--------|
-| `core.spawn` | `(path: const string[0], args: const string[0], var id: int) -> Status` | `Ok` with the reserved global id written through `id`; `NotFound`, `Invalid`, `Full` or `CapacityExceeded` with `id` untouched and no task created |
-| `core.wait` | `(id: int, var reason: int) -> Status` | `Ok` with the reason int written (`0` Ok, `1` Killed, `2 + fault_code` Faulted); `NotFound` for an unknown or evicted id; `Invalid` for id zero or the caller itself |
+| `core.spawn` | `(path: const string[0], args: const string[0], var diag: Diagnostic, var id: int) -> Status` | `Ok` with the reserved global id written through `id` and `diag` cleared; `NotFound`, `Invalid`, `Full` or `CapacityExceeded` with `id` untouched, `diag` filled and no task created |
+| `core.wait` | `(id: int, var reason: ExitReason) -> Status` | `Ok` with `reason.kind`/`reason.code` written; `NotFound` for an unknown or evicted id; `Invalid` for id zero or the caller itself |
 | `core.kill` | `(id: int) -> Status` | `Ok`, `NotFound` (unknown or finished), or `Invalid` (id zero or the caller itself) |
 
-- The interpreter maps them directly: `Host::spawn` returns `Result<u64, Status>`, so
-  success writes the id through the reference and pushes `Status.Ok` (ordinal 0), and a
-  failure pushes the returned `Status` ordinal. `Host::wait`'s `Exited(reason)` writes
-  the staged reason int and pushes `Ok`; `WaitOutcome::Status(s)` pushes `s`; `Blocked`
-  keeps both operands on the stack and retries the instruction after a wake-up.
-  `Host::kill` pushes its returned `Status`. `abi::Status` and the language `Status`
-  share ordinals, so neither side translates.
+- `Host::spawn(path, args, diag: &mut [u8])` receives a slice shaped like the record
+  (`layout::diagnostic::SIZE` bytes). The interpreter hands the host a local
+  record-shaped buffer, so the path/argument borrows and the destination record can never
+  alias; the bytes are copied into the caller's `state`/`stack` reference afterwards. On
+  success the host clears the slice; on failure it fills it. The kernel writes unit,
+  message, line and column from the compiler's `Diagnostic`; the host toolchain does the
+  same for a compile error it discovers synchronously.
+- `Host::wait`'s `Exited(reason)` maps to the record: `kind` is `0` Ok, `1` Killed or
+  `2` Faulted, and `code` is the `FaultCode` ordinal (`0` otherwise). `WaitOutcome::Status(s)`
+  pushes `s` and leaves `reason` untouched; `Blocked` keeps both operands on the stack and
+  retries the instruction after a wake-up. `Host::kill` pushes its returned `Status`.
+  `abi::Status` and the language `Status` share ordinals, so neither side translates.
+- `Diagnostic` is cleared as empty text, `0` line/column/task id and `-1` for
+  `handle`/`offset`/`length`.
 - `TaskId` is an `int` (`0` is invalid) until a distinct type exists.
-- **Still staged:** there is no `var diag: Diagnostic` parameter and no `ExitReason`
-  value. A failure the service discovers after `spawn` returned (a compile error, a read
-  failure) is printed to the kernel console and recorded as `Faulted(IoError)`; the
-  parent's `wait` observes reason `2 + 11`. The target signature keeps
-  `var diag: Diagnostic` and `var reason: ExitReason`, and `core.run` is not exposed
-  until both records exist (Q43).
+- **Still staged:** a failure the service discovers *after* `spawn` returned (a compile
+  error, a read failure) is printed to the kernel console and recorded as
+  `Faulted(IoError)`; the parent's `wait` observes `kind = 2`, `code = 11`. Reporting it
+  through `diag` needs a request-completion path and is out of scope. `core.run` is not
+  exposed until `stdlib` exists (Q43).
 
 #### Staged line discipline: `core.read_line`
 
@@ -256,7 +262,7 @@ trait Host {
     fn realtime_on(&mut self) -> Status;
     fn heartbeat(&mut self);
     fn run(&mut self, path: &str, args: &str, diag: &mut Diagnostic, reason: &mut ExitReason) -> Status;
-    fn spawn(&mut self, path: &str, args: &str, diag: &mut Diagnostic, id: &mut TaskId) -> Status;
+    fn spawn(&mut self, path: &[u8], args: &[u8], diag: &mut [u8]) -> Result<u64, Status>;
     fn wait(&mut self, id: TaskId, reason: &mut ExitReason) -> Status;
     fn kill(&mut self, id: TaskId) -> Status;
 }
@@ -290,12 +296,12 @@ signal for origin and cost (`0003-language.md`).
 | `sleep_until` in the past | Returns immediately |
 | Realtime requested with no free core | `Status.Full`; the task stays normal |
 | Realtime task misses its heartbeat | Terminate at the next safe point; `fault(WatchdogTimeout)`; recovery rejected; `exit`; reclaim |
-| `run`/`spawn` path not found | `Status.NotFound`; `diag` cleared; no task created |
-| Argument longer than 1024 bytes | `Status.CapacityExceeded`; no request enqueued |
-| Path longer than 256 bytes | `Status.CapacityExceeded`; no request enqueued |
-| Request path malformed or not a regular file | `Status.Invalid`; `diag` cleared; no task created |
+| `run`/`spawn` path not found | `Status.NotFound`; `diag` filled; no task created |
+| Argument longer than 1024 bytes | `Status.CapacityExceeded`; `diag` filled; no request enqueued |
+| Path longer than 256 bytes | `Status.CapacityExceeded`; `diag` filled; no request enqueued |
+| Request path malformed or not a regular file | `Status.Invalid`; `diag` filled; no task created |
 | `run`/`spawn` compile error | `Status.Invalid`; `diag` filled; no task created |
-| Request queue full | `Status.Full`; `diag` cleared; `run` blocks only on the child |
+| Request queue full | `Status.Full`; `diag` filled; `run` blocks only on the child |
 | `wait` on an unknown or evicted id | `Status.NotFound` |
 | `kill` on a terminated or unknown id | `Status.NotFound` |
 | `kill` on a queued request | Cancelled; `ExitReason.Killed` recorded; no task created |
@@ -339,3 +345,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-13 | Staged `core.read_line` line discipline added: polled COM1/PS-2 bytes, kernel echo and a four-line ring, blocking on an unfinished line. Temporary until indexing exists (Q44). |
 | 2026-11-14 | First `syslib` slice: `port_in8`/`port_out8` as `uint` scalars through `Host::port_in8`/`port_out8` defaults, kernel implementation over `arch_x86_64::port`; opaque `Port`/MMIO/DMA remain the target (Q45). |
 | 2026-11-14 | REPL ABI now uses the predeclared `Status` enum: `core.spawn(path, args, var id)`, `core.wait(id, var reason)` and `core.kill(id)` return `Status`; only the `Diagnostic` and `ExitReason` records remain staged (Q43 narrowed). `Host` is unchanged (`Result<u64, Status>`, `WaitOutcome`, `Status`); the kernel maps `abi::Status` directly. |
+| 2026-11-14 | Record-based REPL ABI: `core.spawn(path, args, var diag: Diagnostic, var id: int)` and `core.wait(id, var reason: ExitReason)` replace the staged out-parameters. `Host::spawn` gains a record-shaped `&mut [u8]` `diag` slice (filled on a synchronous failure, cleared on success); `wait` writes `kind`/`code` through the record. A compile failure the service discovers after `spawn` returned still prints to the kernel console and records `Faulted(IoError)`; `TaskId` stays an `int` and `core.run` is not exposed (Q43 narrowed to sum types and `core.run`). |

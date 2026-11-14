@@ -392,9 +392,14 @@ impl Host for MockHost {
         self.port_writes.push((port, value));
     }
 
-    fn spawn(&mut self, path: &[u8], args: &[u8]) -> Result<u64, Status> {
+    fn spawn(&mut self, path: &[u8], args: &[u8], diag: &mut [u8]) -> Result<u64, Status> {
         self.spawn_args = Some((path.to_vec(), args.to_vec()));
-        self.spawn_result.unwrap_or(Err(Status::Invalid))
+        let result = self.spawn_result.unwrap_or(Err(Status::Invalid));
+        match result {
+            Ok(_) => abi::layout::diagnostic::clear(diag),
+            Err(_) => abi::layout::diagnostic::write(diag, b"unit", b"bad source", 7, 3),
+        }
+        result
     }
 
     fn wait(&mut self, _id: u64) -> WaitOutcome {
@@ -431,6 +436,8 @@ fn spawn_package(spawn_result: Result<u64, Status>) -> (Vec<u8>, Vec<u8>, Vec<u8
     let mut instructions = Vec::new();
     op_imm(&mut instructions, opcodes::REF_CONST, 8);
     op_imm(&mut instructions, opcodes::REF_CONST, 24);
+    // `Diagnostic` occupies state[16..208]; the id slot is state[0..8].
+    op_imm(&mut instructions, opcodes::REF_STATE, 16);
     op_imm(&mut instructions, opcodes::REF_STATE, 0);
     op_imm(&mut instructions, opcodes::BUILTIN, opcodes::builtin::SPAWN);
     op_imm(&mut instructions, opcodes::STORE_STATE, 8);
@@ -438,16 +445,16 @@ fn spawn_package(spawn_result: Result<u64, Status>) -> (Vec<u8>, Vec<u8>, Vec<u8
     let mut constants = constant(b"child");
     constants.extend_from_slice(&constant(b"hello"));
     let spec = FnSpec {
-        frame_size: 64,
+        frame_size: 72,
         ..MAIN
     };
-    let code = build(&[spec], &instructions, &constants, 16, 64, 0);
+    let code = build(&[spec], &instructions, &constants, 208, 128, 0);
     let mut host = MockHost {
         spawn_result: Some(spawn_result),
         ..Default::default()
     };
-    let mut state = vec![0u8; 16];
-    let mut stack = vec![0u8; 64];
+    let mut state = vec![0u8; 208];
+    let mut stack = vec![0u8; 128];
     let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
     assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
     let (path, args) = host.spawn_args.unwrap_or_default();
@@ -465,13 +472,33 @@ fn spawn_writes_the_reserved_id_and_pushes_ok() {
     assert_eq!(state_u64(&state, 8), Status::Ok as u64);
     assert_eq!(path, b"child");
     assert_eq!(args, b"hello");
+    assert_eq!(
+        state_u64(&state, 16),
+        0,
+        "success clears the diagnostic's unit_name length"
+    );
 }
 
 #[test]
-fn spawn_failure_pushes_the_status_and_leaves_the_id_alone() {
+fn spawn_failure_pushes_the_status_and_fills_the_diagnostic() {
     let (state, _, _) = spawn_package(Err(Status::Full));
-    assert_eq!(state_u64(&state, 0), 0, "the out-parameter is untouched");
+    assert_eq!(state_u64(&state, 0), 0, "the id out-parameter is untouched");
     assert_eq!(state_u64(&state, 8), Status::Full as u64);
+    // `Diagnostic.message` is at record offset 40, so state[56..64] is its
+    // length word and state[64..] its data.
+    let message_len = state_u64(
+        &state,
+        16 + abi::layout::diagnostic::MESSAGE_OFFSET as usize,
+    );
+    assert_eq!(message_len, b"bad source".len() as u64);
+    assert_eq!(
+        &state[16 + abi::layout::diagnostic::MESSAGE_OFFSET as usize + 8..][..b"bad source".len()],
+        b"bad source"
+    );
+    assert_eq!(
+        state_u64(&state, 16 + abi::layout::diagnostic::LINE_OFFSET as usize),
+        7
+    );
 }
 
 #[test]
@@ -486,7 +513,7 @@ fn wait_blocks_without_advancing_and_retries_the_same_instruction() {
         frame_size: 56,
         ..MAIN
     };
-    let code = build(&[spec], &instructions, &[], 16, 64, 0);
+    let code = build(&[spec], &instructions, &[], 24, 64, 0);
 
     let mut host = MockHost {
         wait_results: vec![
@@ -495,13 +522,13 @@ fn wait_blocks_without_advancing_and_retries_the_same_instruction() {
         ],
         ..Default::default()
     };
-    let mut state = vec![0u8; 16];
+    let mut state = vec![0u8; 24];
     let mut stack = vec![0u8; 64];
 
     let (outcome, machine) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
     assert_eq!(outcome, Outcome::Blocked(WaitKind::ChildExit(3)));
     assert_eq!(machine.pc(), 20, "pc stays on the wait instruction");
-    assert_eq!(state, vec![0u8; 16], "nothing is consumed or stored");
+    assert_eq!(state, vec![0u8; 24], "nothing is consumed or stored");
 
     let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
     assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
@@ -509,17 +536,22 @@ fn wait_blocks_without_advancing_and_retries_the_same_instruction() {
     assert_eq!(state_u64(&state, 0), Status::Ok as u64);
     assert_eq!(
         state_u64(&state, 8),
-        2 + FaultCode::Overflow as u64,
-        "the reason int keeps the staged 0/1/2+code encoding"
+        abi::layout::exit_kind::FAULTED as u64,
+        "the reason record's kind is Faulted"
+    );
+    assert_eq!(
+        state_u64(&state, 16),
+        FaultCode::Overflow as u64,
+        "the reason record's code is the fault code"
     );
 }
 
 #[test]
 fn wait_maps_exit_reasons_and_status_errors() {
-    for (outcome, status, reason) in [
-        (WaitOutcome::Exited(ExitReason::Ok), 0u64, 0u64),
-        (WaitOutcome::Exited(ExitReason::Killed), 0, 1),
-        (WaitOutcome::Status(Status::NotFound), 3, 0),
+    for (outcome, status, kind, fault_code) in [
+        (WaitOutcome::Exited(ExitReason::Ok), 0u64, 0u64, 0u64),
+        (WaitOutcome::Exited(ExitReason::Killed), 0, 1, 0),
+        (WaitOutcome::Status(Status::NotFound), 3, 0, 0),
     ] {
         let mut instructions = Vec::new();
         op_const(&mut instructions, 9);
@@ -531,17 +563,18 @@ fn wait_maps_exit_reasons_and_status_errors() {
             frame_size: 56,
             ..MAIN
         };
-        let code = build(&[spec], &instructions, &[], 16, 64, 0);
+        let code = build(&[spec], &instructions, &[], 24, 64, 0);
         let mut host = MockHost {
             wait_results: vec![outcome],
             ..Default::default()
         };
-        let mut state = vec![0u8; 16];
+        let mut state = vec![0u8; 24];
         let mut stack = vec![0u8; 64];
         let (result, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
         assert_eq!(result, Outcome::Exited(ExitReason::Ok));
         assert_eq!(state_u64(&state, 0), status, "{outcome:?}");
-        assert_eq!(state_u64(&state, 8), reason, "{outcome:?}");
+        assert_eq!(state_u64(&state, 8), kind, "{outcome:?}");
+        assert_eq!(state_u64(&state, 16), fault_code, "{outcome:?}");
     }
 }
 
@@ -1169,4 +1202,118 @@ fn port_out8_writes_and_rejects_values_over_255() {
         "a value over 255 is Status::Invalid"
     );
     assert!(host.port_writes.is_empty(), "the port is not touched");
+}
+
+#[test]
+fn ref_offset_forms_a_field_reference() {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_imm(&mut instructions, opcodes::REF_OFFSET, 8);
+    op(&mut instructions, opcodes::LOAD_REF);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 24);
+    op(&mut instructions, opcodes::RET);
+    let spec = FnSpec {
+        frame_size: 48,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &[], 32, 64, 0);
+    let mut scratch = scratch_for(&code);
+    let program = Program::parse(&code, &mut scratch).expect("verifies");
+    let mut state = vec![0u8; 32];
+    state[8..16].copy_from_slice(&0x42u64.to_le_bytes());
+    let mut stack = vec![0u8; 64];
+    let args = vec![0u8; 8 + 1024];
+    let mut machine = Machine::new();
+    let mut host = Recorder { output: Vec::new() };
+    assert_eq!(
+        machine.run(&program, &mut host, &mut state, &mut stack, &args, 100),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(state_u64(&state, 24), 0x42, "the field at +8 was loaded");
+}
+
+#[test]
+fn ref_offset_past_the_region_faults_out_of_bounds() {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_imm(&mut instructions, opcodes::REF_OFFSET, 32);
+    op(&mut instructions, opcodes::LOAD_REF);
+    op(&mut instructions, opcodes::DROP);
+    op(&mut instructions, opcodes::RET);
+    let spec = FnSpec {
+        frame_size: 48,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &[], 32, 64, 0);
+    let (reason, _) = execute(&code, 32, 64);
+    assert_eq!(reason, ExitReason::Faulted(FaultCode::OutOfBounds));
+}
+
+#[test]
+fn copy_refs_moves_a_record_and_handles_overlap() {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 8);
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_const(&mut instructions, 16);
+    op(&mut instructions, opcodes::COPY_REFS);
+    op(&mut instructions, opcodes::RET);
+    let spec = FnSpec {
+        frame_size: 64,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &[], 32, 64, 0);
+    let mut scratch = scratch_for(&code);
+    let program = Program::parse(&code, &mut scratch).expect("verifies");
+    let mut state = vec![0u8; 32];
+    for (index, byte) in state[..16].iter_mut().enumerate() {
+        *byte = index as u8 + 1;
+    }
+    let original = state[..16].to_vec();
+    let mut stack = vec![0u8; 64];
+    let args = vec![0u8; 8 + 1024];
+    let mut machine = Machine::new();
+    let mut host = Recorder { output: Vec::new() };
+    assert_eq!(
+        machine.run(&program, &mut host, &mut state, &mut stack, &args, 100),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(
+        &state[8..24],
+        &original[..16],
+        "the overlapping move copied the original bytes"
+    );
+    assert_eq!(&state[24..], &[0u8; 8], "nothing past the copy changed");
+}
+
+#[test]
+fn copy_refs_past_the_region_faults_out_of_bounds() {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 16);
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_const(&mut instructions, 32);
+    op(&mut instructions, opcodes::COPY_REFS);
+    op(&mut instructions, opcodes::RET);
+    let spec = FnSpec {
+        frame_size: 64,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &[], 32, 64, 0);
+    let (reason, _) = execute(&code, 32, 64);
+    assert_eq!(reason, ExitReason::Faulted(FaultCode::OutOfBounds));
+}
+
+#[test]
+fn the_verifier_rejects_a_misaligned_field_offset() {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_imm(&mut instructions, opcodes::REF_OFFSET, 4);
+    op(&mut instructions, opcodes::RET);
+    let spec = FnSpec {
+        frame_size: 48,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &[], 32, 64, 0);
+    let mut scratch = scratch_for(&code);
+    let error = Program::parse(&code, &mut scratch).expect_err("must be rejected");
+    assert!(error.message.contains("field offset"), "{}", error.message);
 }

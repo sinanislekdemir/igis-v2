@@ -28,6 +28,7 @@
 //! uses this to release a task, and a kill request is delivered by setting the
 //! yield flag and waiting for the next `Yielded`.
 
+use abi::layout;
 use abi::opcodes::{self, builtin, value_kind};
 use abi::{refs, ExitReason, FaultCode, Status};
 
@@ -78,10 +79,13 @@ pub trait Host {
 
     /// Requests a new application instance (`core.spawn`).
     ///
-    /// `path` and `args` are the bytes of the two `string` buffers. A
-    /// successful call returns the reserved global task id; an error is a
-    /// `Status` with no task created.
-    fn spawn(&mut self, _path: &[u8], _args: &[u8]) -> Result<u64, Status> {
+    /// `path` and `args` are the bytes of the two `string` buffers. `diag` is a
+    /// slice shaped like the `Diagnostic` record ([`layout::diagnostic::SIZE`]
+    /// bytes): the host fills it on a synchronous failure and clears it on
+    /// success, at the offsets [`layout::diagnostic`] fixes. A successful call
+    /// returns the reserved global task id; an error is a `Status` with no task
+    /// created.
+    fn spawn(&mut self, _path: &[u8], _args: &[u8], _diag: &mut [u8]) -> Result<u64, Status> {
         Err(Status::Invalid)
     }
 
@@ -494,6 +498,36 @@ impl Machine {
                     }
                 }
             }
+            opcodes::REF_OFFSET => {
+                let offset = read_u32(code, pc + 4)? as u64;
+                let bits = self.pop(stack)?;
+                let (region, base) = self.resolve(bits, state, stack, constants, args)?;
+                let length = region_len(region, state, stack, constants, args)
+                    .ok_or(FaultCode::OutOfBounds)?;
+                let base = u64::try_from(base).map_err(|_| FaultCode::OutOfBounds)?;
+                let shifted = base.checked_add(offset).ok_or(FaultCode::OutOfBounds)?;
+                let shifted = usize::try_from(shifted).map_err(|_| FaultCode::OutOfBounds)?;
+                // A field reference must name at least one full 8-byte slot;
+                // a wider field (a buffer or a record) checks the rest itself.
+                if shifted.checked_add(8).is_none_or(|tail| tail > length) {
+                    return Err(FaultCode::OutOfBounds);
+                }
+                self.push(stack, refs::encode(region, shifted as u64))?;
+            }
+            opcodes::COPY_REFS => {
+                let count = self.pop(stack)?;
+                let source_bits = self.pop(stack)?;
+                let destination_bits = self.pop(stack)?;
+                self.copy_refs(
+                    destination_bits,
+                    source_bits,
+                    count,
+                    state,
+                    stack,
+                    constants,
+                    args,
+                )?;
+            }
             opcodes::CMP_BUFFERS => {
                 let right_bits = self.pop(stack)?;
                 let left_bits = self.pop(stack)?;
@@ -693,11 +727,17 @@ impl Machine {
                         self.push(stack, now)?;
                     }
                     builtin::SPAWN => {
-                        // `core.spawn(path, args, var id) -> Status`: the id
-                        // reference is on top, then the two buffer references.
+                        // `core.spawn(path, args, var diag, var id) -> Status`:
+                        // the id reference is on top, then diag, args and path.
                         let id_bits = self.pop(stack)?;
+                        let diag_bits = self.pop(stack)?;
                         let args_bits = self.pop(stack)?;
                         let path_bits = self.pop(stack)?;
+                        // The host writes the diagnostic into a local slice
+                        // shaped like the record, so the path/args borrows of
+                        // `state`/`stack` and the destination record can never
+                        // alias. The bytes are copied out afterwards.
+                        let mut diag = [0u8; layout::diagnostic::SIZE as usize];
                         let result = {
                             let (path_region, path_offset) =
                                 self.resolve(path_bits, state, stack, constants, args)?;
@@ -737,15 +777,17 @@ impl Machine {
                                 constants,
                                 args,
                             )?;
-                            host.spawn(path, argument)
+                            host.spawn(path, argument, &mut diag)
                         };
+                        self.write_bytes(diag_bits, &diag, state, stack, constants, args)?;
                         match result {
                             Ok(id) => {
                                 self.write_ref(id_bits, id, state, stack, constants, args)?;
                                 self.push(stack, Status::Ok as u64)?;
                             }
                             Err(status) => {
-                                // The out-parameter is untouched on failure.
+                                // The id out-parameter is untouched on failure;
+                                // `diag` was filled by the host.
                                 self.push(stack, status as u64)?;
                             }
                         }
@@ -757,9 +799,11 @@ impl Machine {
                         let id = self.pop(stack)?;
                         match host.wait(id) {
                             WaitOutcome::Exited(reason) => {
-                                self.write_ref(
+                                let mut record = [0u8; layout::exit_reason::SIZE as usize];
+                                layout::exit_reason::write(&mut record, reason);
+                                self.write_bytes(
                                     reason_bits,
-                                    exit_code(reason),
+                                    &record,
                                     state,
                                     stack,
                                     constants,
@@ -1148,6 +1192,107 @@ impl Machine {
             refs::REGION_STACK => write_u64(stack, offset, value),
             _ => Err(FaultCode::IllegalOperation),
         }
+    }
+
+    /// Copies a whole record image through a `var` reference (`core.spawn`'s
+    /// `diag`, `core.wait`'s `reason`). The caller supplies the bytes, shaped by
+    /// `abi::layout`; the destination must be a writable region wide enough for
+    /// every byte.
+    fn write_bytes(
+        &self,
+        bits: u64,
+        bytes: &[u8],
+        state: &mut [u8],
+        stack: &mut [u8],
+        code: &[u8],
+        args: &[u8],
+    ) -> Result<(), FaultCode> {
+        let (region, offset) = self.resolve(bits, state, stack, code, args)?;
+        if region != refs::REGION_STATE && region != refs::REGION_STACK {
+            return Err(FaultCode::IllegalOperation);
+        }
+        let end = offset
+            .checked_add(bytes.len())
+            .ok_or(FaultCode::OutOfBounds)?;
+        if end > region_len(region, state, stack, code, args).ok_or(FaultCode::OutOfBounds)? {
+            return Err(FaultCode::OutOfBounds);
+        }
+        match region {
+            refs::REGION_STATE => state[offset..end].copy_from_slice(bytes),
+            refs::REGION_STACK => stack[offset..end].copy_from_slice(bytes),
+            _ => return Err(FaultCode::IllegalOperation),
+        }
+        Ok(())
+    }
+
+    /// `copy_refs`: copy `count` bytes from one reference to another.
+    ///
+    /// Used for a whole-record copy. Both regions are bounds-checked, the
+    /// destination must be writable, and a copy inside one region is a move so
+    /// overlapping records cannot corrupt the source.
+    fn copy_refs(
+        &mut self,
+        destination_bits: u64,
+        source_bits: u64,
+        count: u64,
+        state: &mut [u8],
+        stack: &mut [u8],
+        code: &[u8],
+        args: &[u8],
+    ) -> Result<(), FaultCode> {
+        let (destination_region, destination) =
+            self.resolve(destination_bits, state, stack, code, args)?;
+        let (source_region, source) = self.resolve(source_bits, state, stack, code, args)?;
+        if destination_region != refs::REGION_STATE && destination_region != refs::REGION_STACK {
+            return Err(FaultCode::IllegalOperation);
+        }
+        let count = usize::try_from(count).map_err(|_| FaultCode::OutOfBounds)?;
+        let destination_end = destination
+            .checked_add(count)
+            .ok_or(FaultCode::OutOfBounds)?;
+        let source_end = source.checked_add(count).ok_or(FaultCode::OutOfBounds)?;
+        if destination_end
+            > region_len(destination_region, state, stack, code, args)
+                .ok_or(FaultCode::OutOfBounds)?
+            || source_end
+                > region_len(source_region, state, stack, code, args)
+                    .ok_or(FaultCode::OutOfBounds)?
+        {
+            return Err(FaultCode::OutOfBounds);
+        }
+        if count == 0 {
+            return Ok(());
+        }
+        if destination_region == source_region {
+            match destination_region {
+                refs::REGION_STATE => state.copy_within(source..source_end, destination),
+                refs::REGION_STACK => stack.copy_within(source..source_end, destination),
+                _ => return Err(FaultCode::IllegalOperation),
+            }
+        } else {
+            match destination_region {
+                refs::REGION_STATE => {
+                    let source_bytes = match source_region {
+                        refs::REGION_STACK => &stack[source..source_end],
+                        refs::REGION_CODE => &code[source..source_end],
+                        refs::REGION_ARGS => &args[source..source_end],
+                        _ => return Err(FaultCode::OutOfBounds),
+                    };
+                    state[destination..destination_end].copy_from_slice(source_bytes);
+                }
+                refs::REGION_STACK => {
+                    let source_bytes = match source_region {
+                        refs::REGION_STATE => &state[source..source_end],
+                        refs::REGION_CODE => &code[source..source_end],
+                        refs::REGION_ARGS => &args[source..source_end],
+                        _ => return Err(FaultCode::OutOfBounds),
+                    };
+                    stack[destination..destination_end].copy_from_slice(source_bytes);
+                }
+                _ => return Err(FaultCode::IllegalOperation),
+            }
+        }
+        Ok(())
     }
 
     fn buffer_len(
@@ -1573,17 +1718,6 @@ fn byte_at(
 /// encoding (spec 0005).
 fn status_code(status: Status) -> u64 {
     (-(status as i64)) as u64
-}
-
-/// Maps a finished child to the staged `core.wait` reason int: `0` for `Ok`,
-/// `1` for `Killed`, `2 + code` for `Faulted(code)`. `ExitReason` is not a
-/// language type yet (spec 0005).
-fn exit_code(reason: ExitReason) -> u64 {
-    match reason {
-        ExitReason::Ok => 0,
-        ExitReason::Killed => 1,
-        ExitReason::Faulted(code) => 2 + code as u64,
-    }
 }
 
 /// The bytes a buffer reference names, bounds-checked like `WRITE` does.

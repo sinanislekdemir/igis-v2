@@ -26,15 +26,40 @@ pub struct Unit<'a> {
     pub procs: &'a [ProcDecl<'a>],
 }
 
-/// `type Name = (Variant, Variant, ...);`
+/// `type Name = (Variant, ...);` or `type Name = record field: T; end;`
 ///
-/// This slice implements enums only; records and sum types stay future work.
+/// A `type` declaration is either an enum or a record. Sum types remain future
+/// work.
 #[derive(Debug, Clone, Copy)]
 pub struct TypeDecl<'a> {
-    /// Enum type name.
+    /// Type name.
     pub name: &'a str,
-    /// Variant names, in declaration order (their ordinals are `0..n-1`).
-    pub variants: &'a [&'a str],
+    /// Enum variants or record fields.
+    pub kind: TypeKind<'a>,
+    /// 1-based source line.
+    pub line: u32,
+    /// 1-based source column.
+    pub column: u32,
+}
+
+/// The body of a `type` declaration.
+#[derive(Debug, Clone, Copy)]
+pub enum TypeKind<'a> {
+    /// `(Variant, Variant, ...)`: variants in declaration order, ordinals
+    /// `0..n-1`.
+    Enum(&'a [&'a str]),
+    /// `record field: T; other: T; end;`: fields in declaration order.
+    Record(&'a [FieldDecl<'a>]),
+}
+
+/// One record field: `name: type;`. A grouped declaration `x, y: int;` becomes
+/// one `FieldDecl` per name.
+#[derive(Debug, Clone, Copy)]
+pub struct FieldDecl<'a> {
+    /// Field name.
+    pub name: &'a str,
+    /// Declared type.
+    pub ty: TypeRef<'a>,
     /// 1-based source line.
     pub line: u32,
     /// 1-based source column.
@@ -163,12 +188,20 @@ pub enum Stmt<'a> {
 ///
 /// `name[index]` is only assignable for `bytes`; `string` is read-only by index
 /// so the UTF-8 invariant cannot be broken one byte at a time (spec 0003).
+/// `name.field` (possibly nested) is assignable when the base is writable.
 #[derive(Debug, Clone, Copy)]
 pub enum AssignTarget<'a> {
     /// `name := value`
     Name(&'a str),
     /// `name[index] := value`
     Index(&'a str, &'a Expr<'a>),
+    /// `base.field.other := value`
+    Field {
+        /// Base variable or parameter.
+        base: &'a str,
+        /// Field path after the base, at least one name.
+        path: &'a [&'a str],
+    },
 }
 
 /// A call expression or call statement.
@@ -208,6 +241,14 @@ pub enum ExprKind<'a> {
     Bool(bool),
     /// A name.
     Ident(&'a str),
+    /// A field selection: `base.field` or `base.inner.field`. The path is never
+    /// empty.
+    Field {
+        /// Base variable or parameter.
+        base: &'a str,
+        /// Field path after the base.
+        path: &'a [&'a str],
+    },
     /// One byte of a buffer: `name[index]`. The result is a `byte`; for a
     /// `string` it is the raw byte at that offset (spec 0003, T4).
     Index(&'a str, &'a Expr<'a>),

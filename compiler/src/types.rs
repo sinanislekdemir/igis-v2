@@ -38,6 +38,11 @@ pub enum Kind {
     /// A nominal enum type, by compiler-local enum id. The value is the
     /// variant ordinal in one 8-byte slot (spec 0003).
     Enum(u16),
+    /// A nominal record type, by compiler-local record id. The layout (field
+    /// offsets and size) lives in the compiler's record table; [`Type::cap`]
+    /// carries the size in bytes so frame and state layout need no extra
+    /// table lookup.
+    Record(u16),
 }
 
 impl Kind {
@@ -52,12 +57,18 @@ impl Kind {
             Kind::String => "string",
             Kind::Bytes => "bytes",
             Kind::Enum(_) => "enum",
+            Kind::Record(_) => "record",
         }
     }
 
     /// Returns true for `string` and `bytes`.
     pub const fn is_buffer(self) -> bool {
         matches!(self, Kind::String | Kind::Bytes)
+    }
+
+    /// Returns true for a nominal record type.
+    pub const fn is_record(self) -> bool {
+        matches!(self, Kind::Record(_))
     }
 }
 
@@ -89,14 +100,27 @@ impl Type {
         Type { kind, cap }
     }
 
+    /// A nominal record type, with its layout size in bytes.
+    pub const fn record(id: u16, size: u32) -> Self {
+        Type {
+            kind: Kind::Record(id),
+            cap: size,
+        }
+    }
+
     /// True for `string`/`bytes`.
     pub const fn is_buffer(self) -> bool {
         self.kind.is_buffer()
     }
 
-    /// True for every scalar kind.
+    /// True for a nominal record.
+    pub const fn is_record(self) -> bool {
+        self.kind.is_record()
+    }
+
+    /// True for every scalar kind (not a buffer and not a record).
     pub const fn is_scalar(self) -> bool {
-        !self.kind.is_buffer()
+        !self.kind.is_buffer() && !self.kind.is_record()
     }
 
     /// Number of bytes this type occupies in `state` or in a frame, including
@@ -104,6 +128,8 @@ impl Type {
     pub const fn size(self) -> u32 {
         match self.kind {
             Kind::String | Kind::Bytes => align8(8 + self.cap),
+            // A record's `cap` already holds its aligned size.
+            Kind::Record(_) => self.cap,
             _ => 8,
         }
     }
@@ -116,7 +142,7 @@ impl Type {
             Kind::Uint => Some(value_kind::UINT),
             Kind::Byte => Some(value_kind::BYTE),
             Kind::Float => Some(value_kind::F64),
-            Kind::Bool | Kind::String | Kind::Bytes | Kind::Enum(_) => None,
+            Kind::Bool | Kind::String | Kind::Bytes | Kind::Enum(_) | Kind::Record(_) => None,
         }
     }
 }
@@ -128,6 +154,8 @@ impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.kind {
             Kind::String | Kind::Bytes => write!(f, "{}[{}]", self.kind.name(), self.cap),
+            // A record renders as `record`; codegen resolves the name.
+            Kind::Record(_) => f.write_str(self.kind.name()),
             _ => f.write_str(self.kind.name()),
         }
     }

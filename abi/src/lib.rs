@@ -43,6 +43,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod layout;
 pub mod opcodes;
 pub mod refs;
 

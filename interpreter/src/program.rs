@@ -471,6 +471,14 @@ fn verify_instructions(
                         return Err(invalid(base + pc + 4, "enum variant count is out of range"));
                     }
                 }
+                opcodes::REF_OFFSET => {
+                    let offset = read_u32(instructions, pc + 4)
+                        .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;
+                    // Field offsets are 8-byte aligned (spec 0003, records).
+                    if !offset.is_multiple_of(8) || offset > MAX_SECTION {
+                        return Err(invalid(base + pc + 4, "field offset is out of range"));
+                    }
+                }
                 opcodes::BUILTIN => {
                     let id = read_u32(instructions, pc + 4)
                         .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;

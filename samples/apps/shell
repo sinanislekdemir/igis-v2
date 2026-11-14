@@ -11,26 +11,28 @@ var
   argv: string[256];
   st: Status;
   id: int;
-  code: int;
+  read: int;
   space: int;
   split: int;
   done: bool;
+  diag: Diagnostic;
+  reason: ExitReason;
 
 procedure say(text: const string[0]);
 begin
   core.write(text);
 end;
 
-// Reports the staged reason int from `core.wait`: `0` Ok, `1` Killed,
-// `2 + fault_code` Faulted. `ExitReason` is not a language type yet (spec
-// 0005), so the reason stays an `int` and this procedure decodes it.
-procedure report(reason: int);
+// Reports the child's `ExitReason` record. The record is the staged form of
+// the spec's sum type: `kind` is 0 Ok, 1 Killed, 2 Faulted, and `code` holds
+// the fault code (spec 0003, spec 0005).
+procedure report(why: const ExitReason);
 begin
-  if reason = 0 then
+  if why.kind = 0 then
     say("child: ok\n")
-  else if reason = 1 then
+  else if why.kind = 1 then
     say("child: killed\n")
-  else if reason >= 2 then
+  else if why.kind = 2 then
     say("child: faulted\n")
   else
     say("child: bad reason\n");
@@ -42,22 +44,24 @@ begin
   say(banner);
   say("shell: spawning child\n");
 
-  // `core.spawn` returns `Status` and writes the reserved task id through the
-  // `var` out-parameter (spec 0003 E1, spec 0005). `core.wait` blocks until
-  // the child exits and writes its reason int.
-  st := core.spawn("child", "hello", id);
+  // `core.spawn` returns `Status` and fills the caller's `Diagnostic` record on
+  // a synchronous failure (spec 0003 E1, spec 0005). `core.wait` blocks until
+  // the child exits and writes its `ExitReason`.
+  st := core.spawn("child", "hello", diag, id);
   if st = Ok then
   begin
     say("shell: child task id assigned\n");
-    st := core.wait(id, code);
+    st := core.wait(id, reason);
     if st = Ok then
-      report(code)
+      report(reason)
     else
       say("child: wait failed\n");
   end
   else
   begin
-    say("shell: spawn failed\n");
+    say("spawn failed: ");
+    say(diag.message);
+    say("\n");
   end;
 
   // Command loop. Staged line discipline (spec 0005, Q44): the kernel echoes
@@ -71,7 +75,7 @@ begin
   while not done do
   begin
     say("shell> ");
-    code := core.read_line(line);
+    read := core.read_line(line);
     space := core.find(line, byte(32));
     if space < 0 then
     begin
@@ -111,18 +115,22 @@ begin
         say("usage: run <app> [args]\n")
       else
       begin
-        st := core.spawn(path, argv, id);
+        st := core.spawn(path, argv, diag, id);
         if st = Ok then
         begin
           say("started\n");
-          st := core.wait(id, code);
+          st := core.wait(id, reason);
           if st = Ok then
-            report(code)
+            report(reason)
           else
             say("wait failed\n");
         end
         else
-          say("spawn failed\n");
+        begin
+          say("spawn failed: ");
+          say(diag.message);
+          say("\n");
+        end;
       end;
     end
     else if cmd = "exit" then

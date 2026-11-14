@@ -242,10 +242,11 @@ Rules:
 
 ### Compound and parametric types
 
-- **Records:** `type Point = record x, y: int; end;`
+- **Records (implemented):** `type Point = record x, y: int; end;` (also accepted as
+  `field: T;` lines). See "Records" below for the layout and access rules.
 - **Sum types:** `type Token = Ident(name: string[32]) | Number(value: int) | Eof;`
   Sized by the largest variant; no boxing, no indirect variant.
-- **Enums:** `type Status = (Ok, WouldBlock, Closed, NotFound, Invalid, Full, CapacityExceeded, IoError);`
+- **Enums (implemented):** `type Status = (Ok, WouldBlock, Closed, NotFound, Invalid, Full, CapacityExceeded, IoError);`
 - **Arrays:** `array[T, N]` — fixed, index `0..N-1`, value semantics.
 - **Rings:** `ring[T, N]` — fixed-capacity FIFO with `push`/`pop`/`full`/`empty`.
 - **Maps:** `map[K, V, N]` — at most N entries, open addressing, no growth. `K` is
@@ -267,9 +268,9 @@ type Color = (Red, Green, Blue);
 ```
 
 - A `type` section sits with `const` and `var` at unit level and may appear in any
-  order; one declaration is `Name = (Variant, Variant, ...);`. A unit may have several
-  `type` sections. Records and sum types are still future work; only the enum form is
-  accepted.
+  order; one declaration is either `Name = (Variant, Variant, ...);` or
+  `Name = record field: T; ... end;`. A unit may have several `type` sections.
+  Records and sum types are documented below; sum types are still future work.
 - Enum types are **nominal**: `Color` and another enum with identical variants are
   distinct types. An enum name and its variant names share the one top-level namespace
   with constants, variables, procedures and other enum names. A duplicate type name, a
@@ -289,6 +290,62 @@ type Color = (Red, Green, Blue);
   for an enum cast is `int` (or the same enum, which is the identity).
 - The declaration emits no runtime type tag; only `EnumName(int)` emits an `enum_cast`
   instruction carrying the variant count (spec 0008).
+
+#### Records (implemented)
+
+```text
+type Point = record
+  x, y: int;
+end;
+
+type Named = record
+  label: string[8];
+  at: Point;
+end;
+```
+
+- Fields may be scalars (`int`, `uint`, `byte`, `bool`, `f64`), enums, buffers
+  (`string[N]`, `bytes[N]`) and other records. Grouped names (`x, y: int;`) and one
+  `name: type;` per line are both accepted. Every field type must be declared before
+  the record; there are no forward references.
+- Records are **nominal**: `Point` and another record with identical fields are distinct
+  types. Assignment, parameters and comparisons require the same record type.
+  Record equality is field-wise and not implemented in this slice; comparing two records
+  is a compile error.
+- There are **no record literals or constructors**. Declare a variable and assign its
+  fields individually (`p.x := 1`); `Point(1)` is a compile error.
+- Field access is `p.field` and nests (`n.at.x`). A read needs no writability; an
+  assignment requires the base to be writable (a local, a state variable, a field of one,
+  or a `var` parameter). A `const` parameter or any of its fields is read-only.
+- Records appear as top-level `var`s, locals, procedure parameters (`value`, `const`,
+  `var`) and fields of other records. `dst := src` copies the whole record; a `value`
+  parameter is a copy, `const`/`var` parameters are call-scoped references.
+- **Layout:** fields in declaration order, each aligned to 8 bytes: a scalar or enum is
+  8; a buffer field is its `[len: u64][data: N]` image (`8 + N`, rounded to 8); a nested
+  record is its own aligned size. The record size is rounded to 8.
+- **Predeclared records:** `Diagnostic` and `ExitReason` exist in every unit, with the
+  fixed layout below (`abi::layout` is the shared source of truth); declaring either name
+  is a compile error. `ExitReason` is the staged record form of the spec's sum type:
+  `kind` is `0` Ok, `1` Killed, `2` Faulted, and `code` is the `FaultCode` ordinal (zero
+  unless faulted). It becomes a real sum type when the language has one.
+
+```text
+type Diagnostic = record          // offsets, size 192
+  unit_name: string[32];          // 0   (8 + 32 = 40 bytes)
+  message: string[96];            // 40  (8 + 96 = 104 bytes)
+  line: int;                      // 144
+  column: int;                    // 152
+  handle: int;                    // 160  (-1 when not involved)
+  offset: int;                    // 168  (-1 when not involved)
+  length: int;                    // 176  (-1 when not involved)
+  task_id: int;                   // 184
+end;
+
+type ExitReason = record          // size 16 (staged sum type)
+  kind: int;                      // 0
+  code: int;                      // 8
+end;
+```
 
 There are **no user-defined generics**. The parametric types above are built in; the
 compiler knows their layout and operations. Generic algorithms are either built-ins
@@ -421,15 +478,15 @@ if st <> Ok then
 The implemented REPL primitives follow E1 and return `Status`:
 
 ```text
-core.spawn(path: const string[0], args: const string[0], var id: int) -> Status
-core.wait(id: int, var reason: int) -> Status
+core.spawn(path: const string[0], args: const string[0], var diag: Diagnostic, var id: int) -> Status
+core.wait(id: int, var reason: ExitReason) -> Status
 core.kill(id: int) -> Status
 ```
 
-`ExitReason` and `Diagnostic` are not language types yet, so `wait` writes a reason
-`int` (`0` Ok, `1` Killed, `2 + fault_code` Faulted) and there is no `var diag`
-parameter; `run`/`spawn` compile diagnostics still go to the serial log (spec 0005,
-"Staged ABI"). `TaskId` is an `int` for now.
+`Diagnostic` and `ExitReason` are predeclared records (above), so both out-parameters are
+real records: `spawn` fills `diag` on a synchronous failure and clears it on success;
+`wait` writes the child's `kind`/`code`. `core.run` is not exposed yet and `TaskId` is an
+`int` (spec 0005, "Implemented ABI").
 
 ## Modules
 
@@ -479,9 +536,10 @@ parameter; `run`/`spawn` compile diagnostics still go to the serial log (spec 00
   root (`0005-host-interface.md`). `kill(id)` on a queued request cancels it and records
   `Killed`; on a live task it requests termination at the next safe point; on an unknown or
   finished id it returns `Status.NotFound`.
-  **Implemented slice:** `spawn`/`wait`/`kill` return `Status` and use `var id: int` /
-  `var reason: int`; `diag` and `ExitReason` wait for records, and `run` is not exposed
-  yet (spec 0005).
+  **Implemented slice:** `spawn`/`wait`/`kill` return `Status` and take the predeclared
+  `Diagnostic`/`ExitReason` records; a synchronous spawn failure fills `diag`, success
+  clears it, and `wait` writes `reason.kind`/`reason.code`. `run` is not exposed yet and
+  `TaskId` is still an `int` (spec 0005).
 - **C8 (MUST):** A spawned child is a separate application instance with its own regions.
   It shares no memory with the parent; communication is through streams.
 - **C9 (MUST):** The argument passed to `run`/`spawn` is a fixed `string[1024]`, delivered
@@ -592,9 +650,11 @@ end;
 ```
 
 The same record carries compile diagnostics. `core.run` and `core.spawn` take a
-`var diag: Diagnostic` out-parameter: on `Status.Invalid` it holds the failing unit, line,
-column and message; on any other status it is cleared. The compiler writes into the
-caller's buffer, so there is no global error slot and no diagnostic stream.
+`var diag: Diagnostic` out-parameter: a synchronous failure (a malformed, missing or
+non-regular path, an over-long path or argument, a full request queue, or a compile
+error) fills the failing unit, line, column and message; success clears it (zeroed text,
+`0` line/column/task id and `-1` for `handle`/`offset`/`length`). The compiler writes
+into the caller's buffer, so there is no global error slot and no diagnostic stream.
 
 There is no stack trace in the first milestone. Frames carry no debug metadata, and a trace
 would need an unwind table in the manifest; `Diagnostic` plus the serial log is the
@@ -656,7 +716,11 @@ is the signal.
 | Shift count outside `0..63` | `fault(IllegalOperation)` |
 | Duplicate or malformed stream name | Compile error |
 | Duplicate enum type, duplicate variant, or a variant colliding with another top-level name | Compile error |
-| `type Status = ...` (predeclared) | Compile error |
+| `type Status = ...`, `type Diagnostic = ...`, `type ExitReason = ...` (predeclared) | Compile error |
+| Duplicate record field, unknown field, or a field of a non-record | Compile error |
+| Record assigned, passed or compared with a different record type | Compile error |
+| Assignment to a field of a `const` parameter or record | Compile error |
+| Comparing two records for equality | Compile error (field-wise comparison is not implemented) |
 | Enum compared or assigned to a different enum, or to an integer, without a cast | Compile error |
 | Arithmetic on an enum | Compile error |
 | `EnumName(x)` with `x` outside `0..variant_count` | `fault(Overflow)`; no invalid enum value can exist |
@@ -666,8 +730,8 @@ is the signal.
 | Send on a receive endpoint | Compile error (distinct types) |
 | Send on a closed endpoint | `Status.Closed` |
 | Realtime heartbeat missed | `fault(WatchdogTimeout)`; recovery rejected |
-| `run`/`spawn` path not found | `Status.NotFound`; `diag` cleared |
-| Argument longer than 1024 bytes | `Status.CapacityExceeded` |
+| `run`/`spawn` path not found | `Status.NotFound`; `diag` filled; no child |
+| Argument longer than 1024 bytes | `Status.CapacityExceeded`; `diag` filled |
 | `run`/`spawn` compile error | `Status.Invalid`; `diag` filled; no child |
 | `wait` on an unknown or evicted id | `Status.NotFound` |
 | `kill` on an unknown or terminated id | `Status.NotFound` |
@@ -708,3 +772,4 @@ is the signal.
 | 2026-11-14 | Staged slicing and search: `core.substr_into(dst, src, start, len) -> int` (same kind, negative → `-4`, past-end → 0, clamped copy, UTF-8 boundary check for `string`) and `core.find(buf, byte) -> int` (first index or `-1`, `0..len`, both kinds). Both are `core` opcodes until `stdlib.substr_into` exists (T4 staging). |
 | 2026-11-14 | Staged integer formatting: `core.format_int_into(dst, value, base, width) -> int` (decimal/hex, negative sign, zero padding, exact capacity or `-6`, bad base `-4`). First `syslib` slice: `port_in8`/`port_out8` with `Port` staged as a scalar `uint` (Q45); MMIO/DMA handles remain the target design. |
 | 2026-11-14 | Enums implemented: `type Name = (Variant, ...);` with nominal types, ordinals `0..n-1`, variants as global constants in the top-level namespace, one 8-byte slot, same-enum assignment/comparison plus ordinal ordering, `int(enum)` and range-checked `EnumName(int)` (`fault(Overflow)`). `Status` is predeclared with the spec's eight variants (`Ok` = 0); a user declaration is an error. `spawn`/`wait`/`kill` return `Status` with `var id`/`var reason` out-parameters (Q43 narrowed; spec 0005, spec 0008 `enum_cast`). |
+| 2026-11-14 | Records implemented: `type Name = record field: T; ... end;` (grouped or one-per-line fields), nominal type identity, declaration-before-use, nested records, buffer fields, whole-record copy, `value`/`const`/`var` record parameters and aligned declaration-order layout. `Diagnostic` and `ExitReason` are predeclared at the fixed `abi::layout` offsets and cannot be redefined; `spawn`/`wait` use them (`var diag`, `var reason`). Record equality, sum types and `core.run` remain future work (Q43). |

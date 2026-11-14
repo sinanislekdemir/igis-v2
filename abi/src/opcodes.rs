@@ -65,6 +65,22 @@ pub const LOAD_U8: u8 = 0x19;
 /// runtime length is allowed: the gap between the old length and the index is
 /// filled with zero bytes and the length becomes `index + 1` (write extends).
 pub const STORE_U8: u8 = 0x1A;
+/// Pop a reference, add an immediate byte offset, bounds-check and push the
+/// resulting reference. Immediate: `offset: u32`, a multiple of 8.
+///
+/// This is how a record field reference is formed: one step per field, each
+/// checked against the owning region. A reference into a buffer field points at
+/// its data, so the step for that field carries the extra 8 bytes of the length
+/// word.
+pub const REF_OFFSET: u8 = 0x1B;
+/// Pop a byte count, a source reference and a destination reference; copy
+/// `count` bytes. Every reference is bounds-checked against its region, the
+/// destination must be writable (`state` or `stack`), and an overlap inside one
+/// region is handled by a move.
+///
+/// Used for a whole-record assignment and for a `value` record parameter, where
+/// the compiler knows the record size and emits it as a constant.
+pub const COPY_REFS: u8 = 0x1C;
 
 /// Checked signed integer addition.
 pub const ADD: u8 = 0x20;
@@ -223,16 +239,19 @@ pub mod builtin {
     pub const WRITE: u32 = 1;
     /// `core.clock()`: push the host's monotonic nanosecond counter.
     pub const CLOCK: u32 = 2;
-    /// `core.spawn(path, args, var id)`: pop an id reference, two buffer
-    /// references; on success write the reserved task id through the reference
-    /// and push `Ok` (0). On failure the reference is untouched and the error
+    /// `core.spawn(path, args, var diag, var id)`: pop an id reference, a
+    /// `Diagnostic` record reference and two buffer references; on success
+    /// write the reserved task id through the id reference (and the cleared
+    /// diagnostic through its reference) and push `Ok` (0). On failure the id
+    /// reference is untouched, the host fills the diagnostic and the error
     /// `Status` ordinal is pushed (spec 0005).
     pub const SPAWN: u32 = 3;
-    /// `core.wait(id, var reason)`: pop a reason reference and a task id; when
-    /// the child has terminated write the reason int (`0` Ok, `1` Killed,
-    /// `2 + fault_code` Faulted) through the reference and push `Ok`; when the
-    /// wait itself fails push that `Status` ordinal. May block; the instruction
-    /// is retried on wake without consuming operands.
+    /// `core.wait(id, var reason)`: pop an `ExitReason` record reference and a
+    /// task id; when the child has terminated write `kind` (`0` Ok, `1` Killed,
+    /// `2` Faulted) and `code` (the `FaultCode` ordinal) through the reference
+    /// and push `Ok`; when the wait itself fails push that `Status` ordinal.
+    /// May block; the instruction is retried on wake without consuming
+    /// operands.
     pub const WAIT: u32 = 4;
     /// `core.kill(id)`: pop a task id, push the `Status` ordinal (`Ok` on
     /// success, `NotFound` for an unknown or finished id).
@@ -255,7 +274,7 @@ pub mod builtin {
         match id {
             WRITE => Some((1, 0)),
             CLOCK => Some((0, 1)),
-            SPAWN => Some((3, 1)),
+            SPAWN => Some((4, 1)),
             WAIT => Some((2, 1)),
             KILL => Some((1, 1)),
             LEN => Some((1, 1)),
@@ -273,11 +292,12 @@ pub const fn instruction_words(op: u8) -> Option<u32> {
         DROP | RET | LOAD_REF | STORE_REF | NOT | CLEAR | CONVERT | FADD | FSUB | FMUL | FDIV
         | FNEG | FEQ | FNE | FLT | FLE | FGT | FGE => Some(1),
         ADD | SUB | MUL | DIV | MOD | NEG | ADD_U | SUB_U | MUL_U | DIV_U | MOD_U | EQ | NE
-        | LT | LE | GT | GE | LT_U | LE_U | GT_U | GE_U | LOAD_U8 | CMP_BUFFERS | FIND => Some(1),
+        | LT | LE | GT | GE | LT_U | LE_U | GT_U | GE_U | LOAD_U8 | CMP_BUFFERS | FIND
+        | COPY_REFS => Some(1),
         CONST => Some(3),
         JMP | JZ | JNZ | CALL | LOAD_LOCAL | STORE_LOCAL | REF_LOCAL | LOAD_STATE | STORE_STATE
         | REF_STATE | REF_CONST | APPEND | READ_LINE | STORE_U8 | BUILTIN | SUBSTR | FORMAT_INT
-        | ENUM_CAST => Some(2),
+        | ENUM_CAST | REF_OFFSET => Some(2),
         _ => None,
     }
 }
@@ -303,6 +323,8 @@ pub const fn mnemonic(op: u8) -> Option<&'static str> {
         REF_CONST => Some("ref_const"),
         LOAD_U8 => Some("load_u8"),
         STORE_U8 => Some("store_u8"),
+        REF_OFFSET => Some("ref_offset"),
+        COPY_REFS => Some("copy_refs"),
         ADD => Some("add"),
         SUB => Some("sub"),
         MUL => Some("mul"),

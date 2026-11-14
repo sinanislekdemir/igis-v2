@@ -191,7 +191,7 @@ fn host_trait_implementation_sees_application_bytes() {
 
 #[test]
 fn stage_app_samples_compile_with_the_spawn_builtins() {
-    for name in ["shell", "child", "clock"] {
+    for name in ["shell", "child", "clock", "faulty"] {
         let path = format!("{}/../samples/apps/{name}", env!("CARGO_MANIFEST_DIR"));
         let source = std::fs::read(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
         let package = langhost::compile(&source, name).unwrap_or_else(|error| {
@@ -347,15 +347,19 @@ uses core;
 var
   st: Status;
   id: int;
-  code: int;
+  diag: Diagnostic;
 
 procedure main(args: const string[1024]);
 begin
-  st := core.spawn("does_not_exist", "", id);
+  st := core.spawn("does_not_exist", "", diag, id);
   if st = NotFound then
     core.write("spawn not found ok\n")
   else
     core.write("wrong spawn status\n");
+  if diag.message = "No such application" then
+    core.write("diagnostic ok\n")
+  else
+    core.write("wrong diagnostic\n");
   st := core.kill(id);
   if st = NotFound then
     core.write("kill not found ok\n")
@@ -368,6 +372,105 @@ end;
     assert_eq!(result.reason, ExitReason::Ok);
     assert_eq!(
         result.output,
-        b"spawn not found ok\nkill not found ok\n".to_vec()
+        b"spawn not found ok\ndiagnostic ok\nkill not found ok\n".to_vec()
     );
+}
+
+#[test]
+fn records_fields_and_value_parameters_work_end_to_end() {
+    let source = br#"
+unit records;
+
+type Point = record x, y: int; end;
+type Named = record label: string[8]; at: Point; end;
+
+var
+  n: Named;
+  p: Point;
+  copy: Named;
+  text: string[16];
+
+procedure set(q: var Point; x: int; y: int);
+begin
+  q.x := x;
+  q.y := y;
+end;
+
+// A `value` record parameter is a copy: `bump` must not touch the caller.
+procedure bump(q: Point);
+begin
+  q.x := q.x + 100;
+end;
+
+procedure main(args: const string[1024]);
+begin
+  set(p, 3, 4);
+  n.at := p;
+  n.label := "n";
+  copy := n;
+  // A `value` parameter is a copy: `bump` leaves `copy.at.x` alone.
+  bump(copy.at);
+  core.write(copy.label);
+  core.format_int_into(text, copy.at.x, uint(10), uint(0));
+  core.write(text);
+  core.write("/");
+  core.format_int_into(text, n.at.x, uint(10), uint(0));
+  core.write(text);
+  core.write("/");
+  // A `var` parameter is a reference to the caller's nested field.
+  set(copy.at, 9, 9);
+  core.format_int_into(text, copy.at.x, uint(10), uint(0));
+  core.write(text);
+  core.write("\n");
+end;
+"#;
+    let package = langhost::compile(source, "records").expect("records compile");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"n3/3/9\n");
+}
+
+#[test]
+fn a_faulted_child_reports_kind_and_code_through_the_reason_record() {
+    let source = br#"
+unit faultreport;
+
+uses core;
+
+var
+  st: Status;
+  id: int;
+  diag: Diagnostic;
+  reason: ExitReason;
+
+procedure main(args: const string[1024]);
+begin
+  st := core.spawn("faulty", "", diag, id);
+  if st <> Ok then
+    core.write("spawn failed\n")
+  else
+  begin
+    st := core.wait(id, reason);
+    if st <> Ok then
+      core.write("wait failed\n")
+    else if reason.kind = 2 then
+      core.write("kind faulted\n")
+    else
+      core.write("kind wrong\n");
+    if reason.code = 4 then
+      core.write("code divide by zero\n")
+    else
+      core.write("code wrong\n");
+  end;
+end;
+"#;
+    let package = langhost::compile(source, "faultreport").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    // `faulty` prints one line before dividing by zero; the parent then sees
+    // `ExitReason.kind = 2` and `code = 4` (`DivideByZero`).
+    let text = String::from_utf8(result.output).expect("UTF-8");
+    assert!(text.contains("faulty: about to divide\n"), "{text:?}");
+    assert!(text.contains("kind faulted\n"), "{text:?}");
+    assert!(text.contains("code divide by zero\n"), "{text:?}");
 }

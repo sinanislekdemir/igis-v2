@@ -271,8 +271,9 @@ impl<'a, 'b> Parser<'a, 'b> {
         })
     }
 
-    /// Parses a `type` section. This slice accepts enums only:
-    /// `type Name = (Variant, ...);`.
+    /// Parses a `type` section. Two declaration forms are accepted:
+    /// `type Name = (Variant, ...);` (enum) and
+    /// `type Name = record field: T; ... end;` (record).
     fn type_section(
         &mut self,
         decls: &mut SliceVec<'a, 'b, TypeDecl<'a>>,
@@ -284,33 +285,46 @@ impl<'a, 'b> Parser<'a, 'b> {
             let token = self.peek();
             let name = self.ident("a type name")?;
             self.expect(&TokenKind::Eq, "`=`")?;
-            self.expect(&TokenKind::LParen, "`(` after `=`")?;
-            let mut variants = self.list::<&'a str>(token.line, token.column)?;
-            if !self.check(&TokenKind::RParen) {
-                loop {
-                    let variant = self.ident("a variant name")?;
-                    self.push(&mut variants, variant, token.line, token.column)?;
-                    if self.eat(&TokenKind::Comma) {
-                        if self.check(&TokenKind::RParen) {
-                            break;
-                        }
-                        continue;
-                    }
-                    break;
+            let kind = if self.eat(&TokenKind::Record) {
+                let fields = self.record_fields()?;
+                if fields.len() == 0 {
+                    return Err(self.error(
+                        token.line,
+                        token.column,
+                        format_args!("record `{name}` needs at least one field"),
+                    ));
                 }
-            }
-            self.expect(&TokenKind::RParen, "`)`")?;
+                TypeKind::Record(fields)
+            } else {
+                self.expect(&TokenKind::LParen, "`(` or `record` after `=`")?;
+                let mut variants = self.list::<&'a str>(token.line, token.column)?;
+                if !self.check(&TokenKind::RParen) {
+                    loop {
+                        let variant = self.ident("a variant name")?;
+                        self.push(&mut variants, variant, token.line, token.column)?;
+                        if self.eat(&TokenKind::Comma) {
+                            if self.check(&TokenKind::RParen) {
+                                break;
+                            }
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RParen, "`)`")?;
+                if variants.len() == 0 {
+                    return Err(self.error(
+                        token.line,
+                        token.column,
+                        format_args!("enum `{name}` needs at least one variant"),
+                    ));
+                }
+                TypeKind::Enum(variants.into_slice())
+            };
             self.expect(&TokenKind::Semi, "`;`")?;
-            if variants.len() == 0 {
-                return Err(self.error(
-                    token.line,
-                    token.column,
-                    format_args!("enum `{name}` needs at least one variant"),
-                ));
-            }
             let decl = TypeDecl {
                 name,
-                variants: variants.into_slice(),
+                kind,
                 line: token.line,
                 column: token.column,
             };
@@ -321,10 +335,50 @@ impl<'a, 'b> Parser<'a, 'b> {
             return Err(self.error(
                 start.line,
                 start.column,
-                format_args!("`type` must be followed by at least one `Name = (Variant, ...);`"),
+                format_args!("`type` must be followed by at least one declaration"),
             ));
         }
         Ok(())
+    }
+
+    /// Parses `field[, field]* : type;` lines up to `end`.
+    fn record_fields(&mut self) -> Result<&'a [FieldDecl<'a>], Diagnostic> {
+        let start = self.peek();
+        let mut fields = self.list::<FieldDecl<'a>>(start.line, start.column)?;
+        loop {
+            if self.check(&TokenKind::End) {
+                self.advance();
+                break;
+            }
+            if self.check(&TokenKind::Eof) {
+                return Err(self.here(format_args!("record body is missing `end`")));
+            }
+            if self.eat(&TokenKind::Semi) {
+                continue;
+            }
+            let token = self.peek();
+            let mut names = self.list::<&'a str>(token.line, token.column)?;
+            let first = self.ident("a field name")?;
+            self.push(&mut names, first, token.line, token.column)?;
+            while self.eat(&TokenKind::Comma) {
+                let name = self.ident("a field name")?;
+                self.push(&mut names, name, token.line, token.column)?;
+            }
+            self.expect(&TokenKind::Colon, "`:`")?;
+            let ty = self.type_ref()?;
+            self.expect(&TokenKind::Semi, "`;`")?;
+            for index in 0..names.len() {
+                let name = names.as_slice()[index];
+                let field = FieldDecl {
+                    name,
+                    ty,
+                    line: token.line,
+                    column: token.column,
+                };
+                self.push(&mut fields, field, token.line, token.column)?;
+            }
+        }
+        Ok(fields.into_slice())
     }
 
     fn const_section(
@@ -548,7 +602,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                             line,
                             column,
                             format_args!(
-                                "cannot index `{target}`; only variables and parameters can be indexed"
+                                "cannot index `{target}`; indexing a field is not implemented"
                             ),
                         ));
                     }
@@ -570,11 +624,18 @@ impl<'a, 'b> Parser<'a, 'b> {
                 }
                 if self.eat(&TokenKind::Assign) {
                     if target.contains('.') {
-                        return Err(self.error(
+                        let (base, path) = self.field_parts(target, line, column)?;
+                        let value = self.expression()?;
+                        return self.alloc_stmt(
+                            Stmt::Assign {
+                                target: AssignTarget::Field { base, path },
+                                value,
+                                line,
+                                column,
+                            },
                             line,
                             column,
-                            format_args!("cannot assign to `{target}`; only variables and parameters are assignable"),
-                        ));
+                        );
                     }
                     let value = self.expression()?;
                     self.alloc_stmt(
@@ -615,6 +676,28 @@ impl<'a, 'b> Parser<'a, 'b> {
         }
         let name = self.join(parts.as_slice(), token.line, token.column)?;
         Ok((name, token.line, token.column))
+    }
+
+    /// Splits a dotted name (`base.field.other`) into the base and the field
+    /// path. Both borrow the arena copy of the joined name.
+    fn field_parts(
+        &self,
+        target: &'a str,
+        line: u32,
+        column: u32,
+    ) -> Result<(&'a str, &'a [&'a str]), Diagnostic> {
+        let mut parts = self.list::<&'a str>(line, column)?;
+        for part in target.split('.') {
+            if part.is_empty() {
+                return Err(self.error(line, column, format_args!("malformed field access")));
+            }
+            self.push(&mut parts, part, line, column)?;
+        }
+        let parts = parts.into_slice();
+        if parts.len() < 2 {
+            return Err(self.error(line, column, format_args!("malformed field access")));
+        }
+        Ok((parts[0], &parts[1..]))
     }
 
     fn call(&mut self, target: &'a str, line: u32, column: u32) -> Result<Call<'a>, Diagnostic> {
@@ -845,7 +928,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                     let call = self.call(name, line, column)?;
                     self.alloc_expr(ExprKind::Call(call), line, column)
                 } else if name.contains('.') {
-                    Err(self.here(format_args!("expected `(` after `{name}`")))
+                    let (base, path) = self.field_parts(name, line, column)?;
+                    self.alloc_expr(ExprKind::Field { base, path }, line, column)
                 } else if self.eat(&TokenKind::LBracket) {
                     let index = self.expression()?;
                     self.expect(&TokenKind::RBracket, "`]`")?;

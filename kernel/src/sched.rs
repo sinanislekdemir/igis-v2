@@ -116,8 +116,8 @@ impl Host for KernelHost<'_> {
         unsafe { arch_x86_64::port::outb(port, value) }
     }
 
-    fn spawn(&mut self, path: &[u8], args: &[u8]) -> Result<u64, Status> {
-        repl::request_spawn(self.image, self.current, path, args)
+    fn spawn(&mut self, path: &[u8], args: &[u8], diag: &mut [u8]) -> Result<u64, Status> {
+        repl::request_spawn(self.image, self.current, path, args, diag)
     }
 
     fn wait(&mut self, id: u64) -> WaitOutcome {
