@@ -14,7 +14,7 @@ use core::fmt;
 use crate::arena::{Bump, SliceVec};
 use crate::ast::*;
 use crate::lexer::{Token, TokenKind};
-use crate::{diag, out_of_space, Diagnostic, Resource};
+use crate::{diag, out_of_space, Diagnostic, Resource, MAX_NESTING};
 
 struct Parser<'a, 'b> {
     tokens: &'a [Token<'a>],
@@ -22,6 +22,10 @@ struct Parser<'a, 'b> {
     path: &'a str,
     unit: &'a str,
     bump: &'b Bump<'a>,
+    /// Nesting levels currently on the recursive-descent stack. Per
+    /// compilation, incremented by `expression`, `statement` and recursive
+    /// unary operators, and always decremented before returning.
+    nesting: u32,
 }
 
 /// Parses a token stream into a unit.
@@ -36,6 +40,7 @@ pub fn parse<'a>(
         path,
         unit: "",
         bump,
+        nesting: 0,
     };
     parser.unit()
 }
@@ -43,6 +48,26 @@ pub fn parse<'a>(
 impl<'a, 'b> Parser<'a, 'b> {
     fn peek(&self) -> Token<'a> {
         self.tokens[self.pos.min(self.tokens.len() - 1)]
+    }
+
+    /// Enters one recursive-descent level, or rejects the source when the
+    /// fixed limit is reached. The caller must pair every success with
+    /// [`Self::leave`], including on error paths.
+    fn enter(&mut self, line: u32, column: u32) -> Result<(), Diagnostic> {
+        if self.nesting >= MAX_NESTING {
+            return Err(self.error(
+                line,
+                column,
+                format_args!("nesting too deep (limit {MAX_NESTING})"),
+            ));
+        }
+        self.nesting += 1;
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        debug_assert!(self.nesting > 0);
+        self.nesting -= 1;
     }
 
     fn advance(&mut self) -> Token<'a> {
@@ -390,6 +415,14 @@ impl<'a, 'b> Parser<'a, 'b> {
 
     fn statement(&mut self) -> Result<&'a Stmt<'a>, Diagnostic> {
         let token = self.peek();
+        self.enter(token.line, token.column)?;
+        let result = self.statement_inner();
+        self.leave();
+        result
+    }
+
+    fn statement_inner(&mut self) -> Result<&'a Stmt<'a>, Diagnostic> {
+        let token = self.peek();
         match token.kind {
             TokenKind::Begin => {
                 self.advance();
@@ -528,8 +561,15 @@ impl<'a, 'b> Parser<'a, 'b> {
 
     // ---- expressions ---------------------------------------------------
 
+    // The precedence chain is marked `inline(always)` so a nested expression
+    // carries one merged frame per level instead of eight chained frames. This
+    // nearly halves the stack cost of a nesting level (Q42).
     fn expression(&mut self) -> Result<&'a Expr<'a>, Diagnostic> {
-        self.parse_or()
+        let token = self.peek();
+        self.enter(token.line, token.column)?;
+        let result = self.parse_or();
+        self.leave();
+        result
     }
 
     fn binary(
@@ -541,6 +581,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         self.alloc_expr(ExprKind::Binary(op, left, right), left.line, left.column)
     }
 
+    #[inline(always)]
     fn parse_or(&mut self) -> Result<&'a Expr<'a>, Diagnostic> {
         let mut left = self.parse_and()?;
         while self.eat(&TokenKind::Or) {
@@ -550,6 +591,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         Ok(left)
     }
 
+    #[inline(always)]
     fn parse_and(&mut self) -> Result<&'a Expr<'a>, Diagnostic> {
         let mut left = self.parse_equality()?;
         while self.eat(&TokenKind::And) {
@@ -559,6 +601,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         Ok(left)
     }
 
+    #[inline(always)]
     fn parse_equality(&mut self) -> Result<&'a Expr<'a>, Diagnostic> {
         let mut left = self.parse_relational()?;
         loop {
@@ -579,6 +622,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         }
     }
 
+    #[inline(always)]
     fn parse_relational(&mut self) -> Result<&'a Expr<'a>, Diagnostic> {
         let mut left = self.parse_additive()?;
         loop {
@@ -603,6 +647,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         }
     }
 
+    #[inline(always)]
     fn parse_additive(&mut self) -> Result<&'a Expr<'a>, Diagnostic> {
         let mut left = self.parse_multiplicative()?;
         loop {
@@ -623,6 +668,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         }
     }
 
+    #[inline(always)]
     fn parse_multiplicative(&mut self) -> Result<&'a Expr<'a>, Diagnostic> {
         let mut left = self.parse_unary()?;
         loop {
@@ -647,10 +693,14 @@ impl<'a, 'b> Parser<'a, 'b> {
         }
     }
 
+    #[inline(always)]
     fn parse_unary(&mut self) -> Result<&'a Expr<'a>, Diagnostic> {
         let token = self.peek();
         if self.eat(&TokenKind::Minus) {
-            let operand = self.parse_unary()?;
+            self.enter(token.line, token.column)?;
+            let operand = self.parse_unary();
+            self.leave();
+            let operand = operand?;
             return self.alloc_expr(
                 ExprKind::Unary(UnOp::Neg, operand),
                 token.line,
@@ -658,7 +708,10 @@ impl<'a, 'b> Parser<'a, 'b> {
             );
         }
         if self.eat(&TokenKind::Not) {
-            let operand = self.parse_unary()?;
+            self.enter(token.line, token.column)?;
+            let operand = self.parse_unary();
+            self.leave();
+            let operand = operand?;
             return self.alloc_expr(
                 ExprKind::Unary(UnOp::Not, operand),
                 token.line,

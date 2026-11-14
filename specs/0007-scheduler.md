@@ -305,6 +305,7 @@ There are no zombies. A terminated task leaves nothing behind.
 Each core has:
 
 - a kernel stack used by interrupt entry, `fault`/`exit` and the loop itself,
+  with a not-present guard frame below it (Q42; `arch/x86_64/src/stack.rs`),
 - a pointer to the currently claimed task (or none),
 - a quantum counter and the last budget check,
 - scratch space that must never hold application state across a release.

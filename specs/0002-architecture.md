@@ -236,6 +236,10 @@ stack size. A not-present guard page at the growing end raises a page fault even
 panicking the kernel. Large locals are allowed in frames; the manifest declares the stack
 that must hold the worst case.
 
+The kernel stack used by the loop, the REPL and the in-kernel compiler is guarded first:
+after early boot the core switches to a 256 KiB stack with one not-present guard frame
+below it (`arch/x86_64/src/stack.rs`). Per-task stack guards are still future work.
+
 ### Hardening (provisional, ADR 0006)
 
 The MMU cannot separate applications at CPL 0, but it can still catch kernel bugs. Three
@@ -380,6 +384,13 @@ R7).
 6. Loader registers the ext2 provider; the REPL service compiles `shell` from the image
    root and starts it as a task on the boot core. The shell provides the prompt and
    requests further runs through the spawn queue.
+
+Before step 6, the boot core leaves the `.boot` stack for a dedicated kernel stack with a
+not-present guard frame below it (one guard frame plus 256 KiB of stack, from the frame
+allocator). The guard turns a kernel stack overflow into a `#PF` instead of a write into the
+boot page tables; the fault handler runs on its own IST. The in-kernel compiler additionally
+has a fixed nesting limit (32 counted levels); exceeding it is a compile `Diagnostic`. The
+limit is calibrated to the guarded stack size (Q42; `arch/x86_64/src/stack.rs`).
 
 UEFI and real-hardware boot are out of scope (ADR 0014). The boot path lives entirely in
 `arch/x86_64`.

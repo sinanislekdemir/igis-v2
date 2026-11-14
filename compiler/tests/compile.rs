@@ -1114,3 +1114,186 @@ end;
     let error = compile(wrong_value, "t.ig").expect_err("a port value is a uint");
     assert!(error.message.contains("`uint` value"), "{}", error.message);
 }
+
+/// The exact diagnostic text expected when the nesting limit is reached.
+fn nesting_message() -> String {
+    format!("nesting too deep (limit {})", compiler::MAX_NESTING)
+}
+
+/// Runs a nesting test on a thread with enough stack for a debug build.
+///
+/// An unoptimised frame is much larger than a release frame (the kernel builds
+/// release), so the default 2 MiB test-thread stack is not the stack these
+/// bounds describe. 64 MiB is test scaffolding only; the kernel bound is the
+/// 256 KiB guarded stack in `arch/x86_64/src/stack.rs`.
+fn with_test_stack<T: Send + 'static>(body: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(body)
+        .expect("spawn test thread")
+        .join()
+        .expect("test thread panicked")
+}
+
+/// `depth` nested `begin`/`end` statements around an empty body.
+fn nested_blocks(depth: usize) -> String {
+    let mut source = String::from("unit t;\n\nprocedure main(args: const string[1024]);\nbegin\n");
+    for _ in 0..depth {
+        source.push_str("begin\n");
+    }
+    for _ in 0..depth {
+        source.push_str("end;\n");
+    }
+    source.push_str("end;\n");
+    source
+}
+
+/// `depth` nested `if true then` statements around an empty block.
+fn nested_ifs(depth: usize) -> String {
+    let mut source = String::from("unit t;\n\nprocedure main(args: const string[1024]);\nbegin\n");
+    for _ in 0..depth {
+        source.push_str("if true then\n");
+    }
+    source.push_str("begin end;\n");
+    for _ in 0..depth {
+        source.push_str(";\n");
+    }
+    source.push_str("end;\n");
+    source
+}
+
+/// `depth` nested `while true do` statements around an empty block.
+fn nested_whiles(depth: usize) -> String {
+    let mut source = String::from("unit t;\n\nprocedure main(args: const string[1024]);\nbegin\n");
+    for _ in 0..depth {
+        source.push_str("while true do\n");
+    }
+    source.push_str("begin end;\n");
+    for _ in 0..depth {
+        source.push_str(";\n");
+    }
+    source.push_str("end;\n");
+    source
+}
+
+#[test]
+fn blocks_nested_to_the_limit_compile_and_one_more_is_rejected() {
+    with_test_stack(|| {
+        let limit = compiler::MAX_NESTING as usize;
+        compile(nested_blocks(limit).as_bytes(), "deep.ig").expect("the limit itself is accepted");
+
+        let error = compile(nested_blocks(limit + 1).as_bytes(), "deep.ig")
+            .expect_err("one level past the limit is rejected");
+        assert!(
+            error.message.contains(&nesting_message()),
+            "{}",
+            error.message
+        );
+        assert!(error.line > 0 && error.column > 0);
+    });
+}
+
+#[test]
+fn parentheses_nested_to_the_limit_compile_and_one_more_is_rejected() {
+    // A `const` value is parsed by one `expression` call, so `n` parentheses
+    // reach nesting `n + 1`.
+    with_test_stack(|| {
+        let limit = compiler::MAX_NESTING as usize;
+        let source = |depth: usize| {
+            format!(
+                "unit t;\nconst C = {open}1{close};\n\nprocedure main(args: const string[1024]);\nbegin\nend;\n",
+                open = "(".repeat(depth),
+                close = ")".repeat(depth),
+            )
+        };
+
+        compile(source(limit - 1).as_bytes(), "deep.ig").expect("the limit itself is accepted");
+
+        let error = compile(source(limit).as_bytes(), "deep.ig")
+            .expect_err("one level past the limit is rejected");
+        assert!(
+            error.message.contains(&nesting_message()),
+            "{}",
+            error.message
+        );
+    });
+}
+
+#[test]
+fn nested_if_and_while_statements_are_bounded() {
+    with_test_stack(|| {
+        let limit = compiler::MAX_NESTING as usize;
+        // A condition is parsed one level below its `if`/`while`, so one fewer
+        // statement level fits; deeper programs are rejected, never crashed on.
+        compile(nested_ifs(limit - 1).as_bytes(), "deep.ig").expect("deep `if` is accepted");
+        compile(nested_whiles(limit - 1).as_bytes(), "deep.ig").expect("deep `while` is accepted");
+
+        let error = compile(nested_ifs(limit).as_bytes(), "deep.ig").expect_err("bounded `if`");
+        assert!(
+            error.message.contains(&nesting_message()),
+            "{}",
+            error.message
+        );
+        let error =
+            compile(nested_whiles(limit).as_bytes(), "deep.ig").expect_err("bounded `while`");
+        assert!(
+            error.message.contains(&nesting_message()),
+            "{}",
+            error.message
+        );
+    });
+}
+
+#[test]
+fn left_deep_operator_chains_are_bounded_in_codegen() {
+    // `1 + 1 + ...` is parsed by a loop, so the AST is deep even though the
+    // parser never recurses; codegen bounds its own walk.
+    with_test_stack(|| {
+        let limit = compiler::MAX_NESTING as usize;
+        let source = |terms: usize| {
+            let chain = vec!["1"; terms].join(" + ");
+            format!(
+                "unit t;\nvar x: int;\n\nprocedure main(args: const string[1024]);\nbegin\n  x := {chain};\nend;\n"
+            )
+        };
+
+        compile(source(limit).as_bytes(), "deep.ig").expect("the limit itself is accepted");
+
+        let error = compile(source(limit + 1).as_bytes(), "deep.ig")
+            .expect_err("one term past the limit is rejected");
+        assert!(
+            error.message.contains(&nesting_message()),
+            "{}",
+            error.message
+        );
+    });
+}
+
+#[test]
+fn left_deep_const_and_buffer_chains_are_bounded() {
+    with_test_stack(|| {
+        let limit = compiler::MAX_NESTING as usize;
+
+        let chain = vec!["1"; limit + 1].join(" + ");
+        let constant = format!(
+            "unit t;\nconst C = {chain};\n\nprocedure main(args: const string[1024]);\nbegin\nend;\n"
+        );
+        let error = compile(constant.as_bytes(), "deep.ig").expect_err("bounded const walk");
+        assert!(
+            error.message.contains(&nesting_message()),
+            "{}",
+            error.message
+        );
+
+        let parts = vec!["\"a\""; limit + 1].join(" + ");
+        let buffer = format!(
+            "unit t;\nvar s: string[256];\n\nprocedure main(args: const string[1024]);\nbegin\n  s := {parts};\nend;\n"
+        );
+        let error = compile(buffer.as_bytes(), "deep.ig").expect_err("bounded concat walk");
+        assert!(
+            error.message.contains(&nesting_message()),
+            "{}",
+            error.message
+        );
+    });
+}

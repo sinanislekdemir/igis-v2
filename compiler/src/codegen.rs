@@ -34,7 +34,7 @@ use crate::arena::{Bump, OutOfSpace, SliceVec};
 use crate::ast::*;
 use crate::package::LineEntry;
 use crate::types::{align8, Kind, Type, MAX_CAPACITY};
-use crate::{diag, out_of_space, package, Diagnostic, Package, Resource};
+use crate::{diag, out_of_space, package, Diagnostic, Package, Resource, MAX_NESTING};
 
 /// Bytes reserved at the bottom of every frame (spec 0008, "Frames" plus the
 /// saved `return_sp` and the destination reference this ABI version adds).
@@ -177,7 +177,7 @@ pub(crate) fn compile_unit<'a>(
                 format_args!("duplicate declaration of `{}`", decl.name),
             ));
         }
-        let value = eval_const(decl.value, consts.as_slice(), path, name)?;
+        let value = eval_const(decl.value, consts.as_slice(), path, name, 0)?;
         consts
             .push(Const {
                 name: decl.name,
@@ -485,7 +485,7 @@ fn resolve_type<'a>(
     if kind.is_buffer() {
         let cap = match ty.cap {
             Some(expr) => {
-                let value = eval_const(expr, consts, path, unit)?;
+                let value = eval_const(expr, consts, path, unit, 0)?;
                 if value < 0 {
                     return Err(diag(
                         path,
@@ -540,8 +540,14 @@ fn eval_const<'a>(
     consts: &[Const<'a>],
     path: &'a str,
     unit: &'a str,
+    depth: u32,
 ) -> Result<i64, Diagnostic> {
     let error = |message: fmt::Arguments<'_>| diag(path, unit, expr.line, expr.column, message);
+    if depth >= MAX_NESTING {
+        return Err(error(format_args!(
+            "nesting too deep (limit {MAX_NESTING})"
+        )));
+    }
     match expr.kind {
         ExprKind::Int(value) => Ok(value),
         ExprKind::Ident(name) => find_const(consts, name).ok_or_else(|| {
@@ -550,14 +556,14 @@ fn eval_const<'a>(
             ))
         }),
         ExprKind::Unary(UnOp::Neg, inner) => {
-            let value = eval_const(inner, consts, path, unit)?;
+            let value = eval_const(inner, consts, path, unit, depth + 1)?;
             value
                 .checked_neg()
                 .ok_or_else(|| error(format_args!("constant expression overflows")))
         }
         ExprKind::Binary(op, left, right) => {
-            let a = eval_const(left, consts, path, unit)?;
-            let b = eval_const(right, consts, path, unit)?;
+            let a = eval_const(left, consts, path, unit, depth + 1)?;
+            let b = eval_const(right, consts, path, unit, depth + 1)?;
             let overflow = || error(format_args!("constant expression overflows"));
             match op {
                 BinOp::Add => a.checked_add(b).ok_or_else(overflow),
@@ -638,6 +644,10 @@ struct FnCompiler<'a, 'b, 'p> {
     next_local: u32,
     depth: i32,
     max_depth: i32,
+    /// Recursive codegen depth (spec 0002, Q42). The parser bounds nesting
+    /// while it descends, but a left-associative operator chain is parsed by a
+    /// loop and builds a deep AST, so `expr_scalar` bounds its own walk too.
+    nesting: u32,
     labels: SliceVec<'a, 'b, Option<usize>>,
     pending: SliceVec<'a, 'b, Pending>,
     lines: SliceVec<'a, 'b, LineEntry>,
@@ -676,6 +686,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             next_local: 0,
             depth: 0,
             max_depth: 0,
+            nesting: 0,
             labels,
             pending,
             lines,
@@ -692,6 +703,26 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
 
     fn err_at(&self, expr: &Expr<'_>, message: fmt::Arguments<'_>) -> Diagnostic {
         self.err(expr.line, expr.column, message)
+    }
+
+    /// Enters one recursive expression level, or rejects the source when the
+    /// fixed limit is reached. The caller must pair every success with
+    /// [`Self::leave_nesting`], including on error paths.
+    fn enter_nesting(&mut self, line: u32, column: u32) -> Result<(), Diagnostic> {
+        if self.nesting >= MAX_NESTING {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("nesting too deep (limit {MAX_NESTING})"),
+            ));
+        }
+        self.nesting += 1;
+        Ok(())
+    }
+
+    fn leave_nesting(&mut self) {
+        debug_assert!(self.nesting > 0);
+        self.nesting -= 1;
     }
 
     fn internal(&self, message: &str) -> Diagnostic {
@@ -1230,8 +1261,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         let bump = self.bump;
         let mut parts = SliceVec::<&'a Expr<'a>>::new(bump)
             .map_err(|_| self.arena_error(value.line, value.column))?;
-        collect_concat(value, &mut parts)
-            .map_err(|_| self.arena_error(value.line, value.column))?;
+        collect_concat(value, &mut parts, 0, self.path, self.unit)?;
 
         for index in 0..parts.len() {
             let part = parts.as_slice()[index];
@@ -1362,6 +1392,13 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
     // ---- expressions ---------------------------------------------------
 
     fn expr_scalar(&mut self, expr: &'a Expr<'a>) -> Result<Type, Diagnostic> {
+        self.enter_nesting(expr.line, expr.column)?;
+        let result = self.expr_scalar_inner(expr);
+        self.leave_nesting();
+        result
+    }
+
+    fn expr_scalar_inner(&mut self, expr: &'a Expr<'a>) -> Result<Type, Diagnostic> {
         match expr.kind {
             ExprKind::Int(value) => {
                 self.const_i64(value)?;
@@ -2381,12 +2418,26 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
 fn collect_concat<'a, 'b>(
     expr: &'a Expr<'a>,
     parts: &mut SliceVec<'a, 'b, &'a Expr<'a>>,
-) -> Result<(), OutOfSpace> {
+    depth: u32,
+    path: &str,
+    unit: &str,
+) -> Result<(), Diagnostic> {
+    if depth >= MAX_NESTING {
+        return Err(diag(
+            path,
+            unit,
+            expr.line,
+            expr.column,
+            format_args!("nesting too deep (limit {MAX_NESTING})"),
+        ));
+    }
     if let ExprKind::Binary(BinOp::Add, left, right) = expr.kind {
-        collect_concat(left, parts)?;
-        collect_concat(right, parts)?;
+        collect_concat(left, parts, depth + 1, path, unit)?;
+        collect_concat(right, parts, depth + 1, path, unit)?;
     } else {
-        parts.push(expr)?;
+        parts
+            .push(expr)
+            .map_err(|_| out_of_space(path, unit, expr.line, expr.column, Resource::Arena))?;
     }
     Ok(())
 }

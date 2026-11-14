@@ -135,6 +135,12 @@ pub fn init(code_selector: u16) {
         let double_fault: unsafe extern "C" fn() = isr_8;
         (*idt)[8] = Entry::handler(double_fault as u64, code_selector, 1);
 
+        // #PF runs on its own IST too: a kernel stack overflow leaves no room
+        // for the exception frame, and the guard page then reports a clean
+        // page fault instead of escalating to #DF (Q42, stack.rs).
+        let page_fault: unsafe extern "C" fn() = isr_14;
+        (*idt)[14] = Entry::handler(page_fault as u64, code_selector, 2);
+
         let timer_isr: unsafe extern "C" fn() = irq_timer;
         let spurious_isr: unsafe extern "C" fn() = irq_spurious;
         (*idt)[crate::apic::TIMER_VECTOR as usize] =

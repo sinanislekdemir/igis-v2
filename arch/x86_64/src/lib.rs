@@ -14,6 +14,7 @@ pub mod idt;
 pub mod keyboard;
 pub mod port;
 pub mod serial;
+pub mod stack;
 
 /// Virtual base of the kernel image; physical addresses map through this offset.
 pub const KERNEL_BASE: u64 = 0xFFFF_FFFF_8000_0000;

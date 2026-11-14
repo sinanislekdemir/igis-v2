@@ -131,6 +131,41 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
         _ => println!("frame test: allocation failed"),
     }
 
+    // Everything after early boot runs on a dedicated, guarded stack. The
+    // in-kernel compiler is recursive and `spawn` compiles application source,
+    // so a depth bug used to write into the boot page tables directly above
+    // this stack (Q42, arch_x86_64/src/stack.rs). The guard turns that into a
+    // clean #PF; the compiler's own nesting limit is the first line of defence.
+    let frames = arch_x86_64::stack::GUARD_FRAMES + arch_x86_64::stack::STACK_FRAMES;
+    let guard = match frame::alloc_contiguous(frames) {
+        Some(guard) => guard,
+        None => {
+            println!("stack: cannot allocate {frames} contiguous frames");
+            arch_x86_64::halt();
+        }
+    };
+    // SAFETY: the frames were just reserved, the guard is 4 KiB aligned and
+    // below 4 GiB, and this runs before the boot stack is abandoned.
+    let stack = unsafe { arch_x86_64::stack::install_guarded(guard) };
+    println!(
+        "stack: guard {:#x}, top {:#x}, {} KiB (higher-half alias: {})",
+        stack.guard,
+        stack.top,
+        arch_x86_64::stack::STACK_BYTES / 1024,
+        if stack.aliased { "yes" } else { "no" }
+    );
+
+    // SAFETY: `top` is the mapped top of the new stack; the continuation never
+    // returns, so the boot stack is abandoned once, on purpose. Interrupts stay
+    // enabled across the switch.
+    unsafe { arch_x86_64::stack::switch_to(stack.top, kmain_on_stack, mb2_info) }
+}
+
+/// The rest of `kmain`, on the guarded stack.
+///
+/// The multiboot2 structure is still identity-mapped and owned by the
+/// bootloader; the frame allocator already reserved it.
+extern "C" fn kmain_on_stack(mb2_info: u64) -> ! {
     println!("modules:");
     mb2::for_each_module(mb2_info as usize, |found, command| {
         let command = core::str::from_utf8(command).unwrap_or("<non-utf8>");

@@ -19,7 +19,6 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 |---|----------|--------------------------|---------|
 | Q3 | Handler emergency budget | 1 ms or 10 000 steps for `fault`/`exit` | fault/exit implementation |
 | Q4 | Realtime heartbeat interval | 1 s default; configurable per task? | realtime implementation |
-| Q42 | Kernel stack bound for in-kernel compilation | the recursive compiler runs on the boot stack, now 128 KiB after two overflows into the boot page tables (64 KiB at the first vertical slice, 128 KiB when `format_int`/`syslib` grew the code paths). It needs a guard page or a bounded recursion depth; `spawn` already compiles application-supplied source | before the REPL accepts untrusted source; now a standing risk |
 
 ## B. Host interface and I/O
 
@@ -45,6 +44,24 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 |---|----------|--------------------------|---------|
 | Q40 | `f32` support | not in M1; additive later, but it needs its own opcode and conversion rules | when single precision is needed |
 | Q41 | Float text beyond fixed decimal | shortest round-trip formatting and full decimal parsing are deferred | when float output must round-trip losslessly |
+
+## Decided in the 2026-11-14 session
+
+- **Q42 — bounded compilation and a guarded kernel stack.** The compiler has a fixed
+  nesting limit of **32** counted levels (parser expression/statement/unary recursion, plus
+  the independent codegen walks for left-deep chains). Exceeding it is a `Diagnostic`
+  ("nesting too deep (limit 32)"), never a crash. The limit is measured, not guessed: a
+  level costs about 4.9–5.6 KiB of release stack and the existing `shell` already reaches
+  15 levels and ~70 KiB. After the frame allocator is ready, `kmain` allocates **65
+  contiguous frames**: one not-present guard frame and a **256 KiB** stack. The guard's
+  2 MiB identity page is split into 4 KiB PTEs in a static `.bss` page table, the guard PTE
+  cleared and CR3 reloaded; the higher-half alias shares the same PD0 entry for guards
+  below 1 GiB. Everything after early boot — module mount, REPL, compile, scheduler — runs
+  on that stack. `#PF` now has its own IST because an overflow cannot push an exception
+  frame on the exhausted stack; the double-fault IST remains the backstop. 256 KiB (not the
+  proposed 128 KiB) is required to keep the 32-level bound with ~60 KiB of headroom; a
+  larger limit needs either a larger stack or a non-recursive parser. Per-task stack guards
+  remain separate future work (spec 0002, H2).
 
 ## Decided in the 2026-11-13 session
 
@@ -115,9 +132,10 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
   is finer. Tune after measurement (spec 0007, "Quantum" and "Budget").
 - **Already decided, removed from the table:** Q25 (timer source, closed by Q6), Q28 and
   Q29 (ADR 0017 addendum), Q34 (children continue), Q35 (64-entry exit ring).
-- Q5, Q6, Q7, Q11–Q13 and Q15–Q38 are resolved and removed from the table; Q1 and Q2 are
-  now closed provisionally, so only the handler budget and heartbeat (Q3/Q4), the deferred
-  debug/DMA/streams items, the staged port handles (Q45) and the two float follow-ups remain.
+- Q5, Q6, Q7, Q11–Q13, Q15–Q38 and Q42 are resolved and removed from the table; Q1 and Q2
+  are now closed provisionally, so only the handler budget and heartbeat (Q3/Q4), the
+  deferred debug/DMA/streams items, the staged port handles (Q45) and the two float
+  follow-ups remain.
 
 ## Decided in the 2026-11-12 session
 
@@ -185,3 +203,7 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
     types, MMIO mapping and bounds checks, then DMA and block access. On the language side:
     `stdlib` text helpers, records/enums and the record-based `spawn` ABI (Q43); then APs,
     the realtime class and streams (Q3/Q4 when their features land).
+15. ~~Kernel stack bound for compilation~~ — done (Q42): a fixed 32-level compiler nesting
+    limit with a diagnostic, plus a dedicated 256 KiB guarded kernel stack for everything
+    after early boot (one not-present frame, 2 MiB page split to 4 KiB PTEs, `#PF` on its
+    own IST). The boot stack is now early-boot only. Per-task stack guards stay future work.

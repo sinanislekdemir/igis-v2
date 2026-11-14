@@ -51,6 +51,16 @@ pub const MAX_CODE_BYTES: usize = 256 * 1024;
 /// the unit name and endpoints; a few KiB is generous.
 pub const MAX_MANIFEST_BYTES: usize = 4 * 1024;
 
+/// Maximum nesting depth accepted by the recursive parser and by the recursive
+/// codegen walks (spec 0002, Q42).
+///
+/// The compiler runs in the kernel on a 256 KiB guarded stack. The measured
+/// worst case is about 5.6 KiB per level (a nested call expression, release
+/// build), and the existing `shell` already reaches 15 levels and ~70 KiB, so
+/// 32 is the largest round value that leaves roughly 60 KiB of headroom for
+/// deepest-case source. Exceeding it is a diagnostic, never a stack fault.
+pub const MAX_NESTING: u32 = 32;
+
 /// Capacity of [`Diagnostic::message`], matching `message: string[96]` in spec
 /// 0003.
 pub const DIAGNOSTIC_MESSAGE_BYTES: usize = 96;

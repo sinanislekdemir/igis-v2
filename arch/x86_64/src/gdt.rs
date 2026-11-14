@@ -2,7 +2,10 @@
 //!
 //! The boot stub installs a minimal GDT so it can enter long mode. This module
 //! replaces it with the kernel's GDT: null, kernel code, kernel data, and a
-//! 64-bit TSS with an IST stack for the double fault.
+//! 64-bit TSS with IST stacks for the double fault and page fault. A page
+//! fault needs its own stack because the fault may be a kernel stack overflow:
+//! the exception frame cannot be pushed on the stack that just ran out. The
+//! guard stack design is in `stack.rs` (Q42).
 
 use core::arch::asm;
 use core::mem::size_of;
@@ -47,6 +50,9 @@ static mut TSS: Tss = Tss {
 };
 
 static mut DOUBLE_FAULT_STACK: Stack = Stack([0; 16 * 1024]);
+/// Page-fault IST. A guard-page hit has already consumed the kernel stack, so
+/// the hardware frame must go somewhere else.
+static mut PAGE_FAULT_STACK: Stack = Stack([0; 16 * 1024]);
 
 #[repr(C, align(8))]
 struct Gdt([u64; 5]);
@@ -81,6 +87,9 @@ pub unsafe fn init() {
 
     let df_top = addr_of_mut!(DOUBLE_FAULT_STACK) as u64 + size_of::<Stack>() as u64;
     (*tss).ist[0] = df_top;
+
+    let pf_top = addr_of_mut!(PAGE_FAULT_STACK) as u64 + size_of::<Stack>() as u64;
+    (*tss).ist[1] = pf_top;
 
     let gdt = addr_of_mut!(GDT);
     let (low, high) = tss_descriptor(tss as u64, (size_of::<Tss>() - 1) as u32);

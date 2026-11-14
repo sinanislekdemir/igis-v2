@@ -146,6 +146,7 @@ long_mode_high:
 pml4:  .space 4096, 0
 pdpt0: .space 4096, 0
 pdpt1: .space 4096, 0
+.global pd0
 pd0:   .space 4096, 0
 pd1:   .space 4096, 0
 pd2:   .space 4096, 0
@@ -153,9 +154,10 @@ pd3:   .space 4096, 0
 
 .balign 16
 stack:
-    # 128 KiB: the in-kernel compiler is recursive and runs on this stack at
-    # boot. It sits directly above the boot page tables, so an overflow here
-    # corrupts paging; keep the headroom generous.
+    # Early-boot stack only. Everything after the frame allocator is ready
+    # runs on a dedicated guarded stack (arch/x86_64/src/stack.rs, Q42); the
+    # in-kernel compiler no longer uses this stack. It still sits directly
+    # above the boot page tables, so it is deliberately small and temporary.
     .space 131072, 0
 stack_top:
 
