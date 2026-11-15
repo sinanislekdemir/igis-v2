@@ -162,9 +162,12 @@ and `call`s the kernel entry. Its GDT keeps 64-bit code at selector `0x08` so th
 already on the kernel's code selector when the kernel GDT is loaded.
 
 Per-core state is static: one GDT holds one TSS per core (each with its own kernel `RSP0`,
-double-fault IST and page-fault IST stacks), one 64 KiB kernel stack per AP in `.bss`, and
-the boot core keeps its guarded 256 KiB stack. Every core loads the shared IDT; only the
-boot core programs the timer, and the clock stays one global counter.
+double-fault IST and page-fault IST stacks), and every core has a 256 KiB kernel stack —
+the boot core's guarded one in the frame allocator, one 256 KiB `.bss` stack per AP. The
+size is not arbitrary: any core may compile a request (spec 0007, "Services and task
+creation"), and the compiler's bounded recursion costs up to ~200 KiB at the 32-level
+limit, with a `stdlib`-using application already needing ~60 KiB. Every core loads the
+shared IDT; only the boot core programs the timer, and the clock stays one global counter.
 
 ## Memory model
 

@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use abi::{ExitReason, FaultCode, Status};
-use interpreter::{Host, Machine, Outcome, Program, WaitOutcome};
+use interpreter::{Host, Machine, Outcome, Program, StreamError, WaitOutcome};
 
 /// Default instruction budget for one `langhost` run. This is a host-side
 /// watchdog, not a scheduler quantum: the machine is resumed between slices
@@ -94,6 +94,8 @@ struct ConsoleHost {
     children: HashMap<u64, ExitReason>,
     next_id: u64,
     next_line: usize,
+    /// One loopback FIFO for every endpoint (see `stream_send`).
+    stream: Vec<u8>,
 }
 
 impl ConsoleHost {
@@ -105,6 +107,7 @@ impl ConsoleHost {
             children: HashMap::new(),
             next_id: 1,
             next_line: 0,
+            stream: Vec::new(),
         }
     }
 }
@@ -144,6 +147,29 @@ impl Host for ConsoleHost {
         // One process-wide baseline, so nested runs observe the same clock.
         static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
         START.get_or_init(Instant::now).elapsed().as_nanos() as u64
+    }
+
+    // The host has no scheduler, no stream registry and no manifest reader, so
+    // it models every endpoint as one loopback FIFO: a send appends and a
+    // receive takes from the front. That is enough to exercise the typed views
+    // in `stdlib` (length prefixes, delimiters, byte order) deterministically.
+    // Capacity is not modelled, and an empty FIFO reports `WouldBlock`, which
+    // the host cannot honour: a program that receives before it sends stops
+    // with `IllegalOperation` like any other host-side block. The kernel owns
+    // the real FIFO (spec 0006).
+    fn stream_send(&mut self, _handle: u64, bytes: &[u8]) -> Result<(), StreamError> {
+        self.stream.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn stream_recv(&mut self, _handle: u64, dst: &mut [u8]) -> Result<usize, StreamError> {
+        if self.stream.is_empty() {
+            return Err(StreamError::WouldBlock);
+        }
+        let copied = self.stream.len().min(dst.len());
+        dst[..copied].copy_from_slice(&self.stream[..copied]);
+        self.stream.drain(..copied);
+        Ok(copied)
     }
 
     fn spawn(&mut self, path: &[u8], args: &[u8], diag: &mut [u8]) -> Result<u64, Status> {
@@ -380,5 +406,170 @@ mod tests {
     fn oversized_args_are_refused() {
         let error = run(&[], &vec![b'x'; 1025], 10).expect_err("must be refused");
         assert_eq!(error.status, abi::Status::CapacityExceeded);
+    }
+
+    /// The `stdlib` framing helpers on top of the host's loopback FIFO
+    /// (spec 0006, "Interfaces"). Every case is a `report(name, passed)` line,
+    /// so the assertion pins the status, the payload and the "destination
+    /// untouched" promise of each error path.
+    #[test]
+    fn framing_helpers_round_trip_and_reject_bad_lengths() {
+        let source = br#"
+unit framing;
+
+uses core, stdlib;
+
+var
+  out: out_stream[64];
+  inp: in_stream[64];
+  chunk64: string[64];
+  long: string[320];
+  max: string[252];
+  digits: string[32];
+  line: bytes[256];
+  frame: bytes[256];
+  kept: bytes[256];
+  big: bytes[320];
+  header: bytes[4];
+  value: int;
+  n: int;
+  i: int;
+  st: Status;
+  st2: Status;
+
+procedure report(name: const string[0]; passed: bool);
+begin
+  if passed then
+    core.write("ok ")
+  else
+    core.write("FAILED ");
+  core.write(name);
+  core.write("\n");
+end;
+
+procedure main(args: const string[1024]);
+begin
+  chunk64 := "0123456789012345678901234567890123456789012345678901234567890123";
+  long := chunk64 + chunk64 + chunk64 + chunk64 + chunk64;
+
+  // ---- recv_exact bounds: nothing is read, so nothing is consumed --------
+  kept := "keep";
+  st := stdlib.recv_exact(inp, kept, -1);
+  report("exact negative is Invalid", st = Invalid and kept = "keep");
+  st := stdlib.recv_exact(inp, kept, 257);
+  report("exact over capacity is CapacityExceeded", st = CapacityExceeded and kept = "keep");
+
+  // ---- newline-delimited text ------------------------------------------
+  st := stdlib.send_line(out, "alpha");
+  st2 := stdlib.recv_line_into(inp, line);
+  report("line round trip", st = Ok and st2 = Ok and line = "alpha");
+
+  st := stdlib.send_bytes(out, "crlf\r\n");
+  st2 := stdlib.recv_line_into(inp, line);
+  report("crlf is stripped", st2 = Ok and line = "crlf");
+
+  st := stdlib.send_bytes(out, "\n");
+  st2 := stdlib.recv_line_into(inp, line);
+  report("empty line", st2 = Ok and int(core.len(line)) = 0);
+
+  i := 0;
+  while i < 300 do
+  begin
+    big[i] := byte(65);
+    i := i + 1;
+  end;
+  big[300] := byte(10);
+  st := stdlib.send_bytes(out, big);
+  kept := "keep";
+  st2 := stdlib.recv_line_into(inp, kept);
+  report("overlong line is CapacityExceeded", st2 = CapacityExceeded and kept = "keep");
+
+  st := stdlib.send_line(out, "after");
+  st2 := stdlib.recv_line_into(inp, line);
+  report("overlong line keeps the stream in sync", st2 = Ok and line = "after");
+
+  // ---- length-prefixed frames ------------------------------------------
+  st := stdlib.send_frame(out, "hello frame");
+  st2 := stdlib.recv_frame_into(inp, frame);
+  report("frame round trip", st = Ok and st2 = Ok and frame = "hello frame");
+
+  if core.substr_into(max, long, 0, 252) <> 252 then
+    report("frame payload of 252 bytes fits", false)
+  else
+  begin
+    st := stdlib.send_frame(out, max);
+    st2 := stdlib.recv_frame_into(inp, frame);
+    report("frame payload of 252 bytes fits", st = Ok and st2 = Ok and int(core.len(frame)) = 252);
+  end;
+
+  st := stdlib.send_frame(out, long);
+  report("frame payload of 320 bytes is CapacityExceeded", st = CapacityExceeded);
+
+  // The failed send queued nothing: the next frame is the next send's.
+  st := stdlib.send_frame(out, "tiny");
+  st2 := stdlib.recv_frame_into(inp, frame);
+  report("failed frame sends nothing", st2 = Ok and frame = "tiny");
+
+  header[0] := byte(44);
+  header[1] := byte(1);
+  header[2] := byte(0);
+  header[3] := byte(0);
+  st := stdlib.send_bytes(out, header);
+  kept := "keep";
+  st2 := stdlib.recv_frame_into(inp, kept);
+  report("unsatisfiable frame length is CapacityExceeded",
+    st2 = CapacityExceeded and kept = "keep");
+
+  // ---- typed u64 view ---------------------------------------------------
+  st := stdlib.send_u64(out, 0x0102030405060708);
+  st2 := stdlib.recv_exact(inp, frame, 8);
+  report("u64 is little endian", st2 = Ok and int(frame[0]) = 8 and int(frame[7]) = 1);
+
+  st := stdlib.send_u64(out, 42);
+  st2 := stdlib.recv_u64(inp, value);
+  report("u64 positive round trip", st2 = Ok and value = 42);
+
+  st := stdlib.send_u64(out, -1);
+  st2 := stdlib.recv_u64(inp, value);
+  report("u64 -1 round trip", st2 = Ok and value = -1);
+
+  st := stdlib.send_u64(out, -9223372036854775807 - 1);
+  st2 := stdlib.recv_u64(inp, value);
+  report("u64 MinInt round trip", st2 = Ok and value = -9223372036854775807 - 1);
+
+  st := stdlib.send_u64(out, 9223372036854775807);
+  st2 := stdlib.recv_u64(inp, value);
+  report("u64 MaxInt round trip", st2 = Ok and value = 9223372036854775807);
+end;
+"#;
+        let package = compile(source, "framing.ig").expect("compiles");
+        let result = run(&package.code, b"", DEFAULT_BUDGET).expect("verifies and runs");
+        let output = String::from_utf8(result.output).expect("UTF-8 output");
+        let mut expected = String::new();
+        for name in [
+            "exact negative is Invalid",
+            "exact over capacity is CapacityExceeded",
+            "line round trip",
+            "crlf is stripped",
+            "empty line",
+            "overlong line is CapacityExceeded",
+            "overlong line keeps the stream in sync",
+            "frame round trip",
+            "frame payload of 252 bytes fits",
+            "frame payload of 320 bytes is CapacityExceeded",
+            "failed frame sends nothing",
+            "unsatisfiable frame length is CapacityExceeded",
+            "u64 is little endian",
+            "u64 positive round trip",
+            "u64 -1 round trip",
+            "u64 MinInt round trip",
+            "u64 MaxInt round trip",
+        ] {
+            expected.push_str("ok ");
+            expected.push_str(name);
+            expected.push('\n');
+        }
+        assert_eq!(output, expected);
+        assert_eq!(result.reason, ExitReason::Ok);
     }
 }

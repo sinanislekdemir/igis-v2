@@ -191,7 +191,19 @@ fn host_trait_implementation_sees_application_bytes() {
 
 #[test]
 fn stage_app_samples_compile_with_the_spawn_builtins() {
-    for name in ["shell", "child", "clock", "faulty"] {
+    for name in [
+        "shell",
+        "child",
+        "clock",
+        "faulty",
+        "streams",
+        "pipe_in",
+        "pipe_out",
+        "streams_bad",
+        "frames",
+        "frame_in",
+        "frame_out",
+    ] {
         let path = format!("{}/../samples/apps/{name}", env!("CARGO_MANIFEST_DIR"));
         let source = std::fs::read(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
         let package = langhost::compile(&source, name).unwrap_or_else(|error| {

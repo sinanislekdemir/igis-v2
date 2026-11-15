@@ -204,8 +204,55 @@ different admission rule (realtime time slicing), which is a new decision.
   framing on top of streams remain future work; the closed state is already independent
   of owner lifetime, so the queue does not need reworking.
 - **`stdlib` may not declare stream variables** (a library endpoint name would be shared
-  by every application) but may take a `const` stream parameter; that is what the future
-  framing helpers will use.
+  by every application) but may take a `const` stream parameter; that is what the framing
+  helpers use (below).
+
+## Decided in the 2026-11-15 framing session
+
+- **The framing layer is `stdlib` source, with one buffer size and no generics.**
+  `recv_exact`, `send_frame`, `recv_frame_into`, `send_line`, `recv_line_into`, `send_u64`,
+  `recv_u64` and `send_bytes` are ordinary language code over `const in_stream[1]`/
+  `const out_stream[1]` parameters. Capacity `1` is deliberate: the declared capacity of a
+  stream parameter is not checked against the argument's, so one helper serves every
+  endpoint size; writing the real capacity in the signature would claim a guarantee the
+  language does not make. The concrete bound that does exist is the 256-byte local work
+  buffer, and `CapacityExceeded` reports a payload that does not fit it.
+- **Every helper is atomic at its boundary.** The destination is written only by the one
+  copy that publishes a whole value (`dst := staged`, or `core.substr_into` when a CR must
+  not be copied). A failure therefore returns a status and leaves the destination exactly
+  as it was — the caller never sees a half-filled buffer, even though the receive loop
+  blocks and resumes inside the helper.
+- **A receive is one byte wide.** `core.recv` copies `min(queued, destination capacity)`;
+  a chunk wider than the bytes a view still needs takes part of the peer's next message,
+  and a stream has no pushback, so that surplus is lost and later reads misparse. The
+  receive bound would have to be the *remaining* count, which a buffer parameter cannot
+  express (Q46). The spec's original `chunk: bytes[N]` loop had exactly this bug and was
+  corrected. One byte per receive is exact by construction; the cost is one stream
+  operation per byte, and boundaries are the only place it matters.
+- **Frames reject an impossible length, they never read a partial payload.**
+  `recv_frame_into` reads the `u32` little-endian length first and refuses a length above
+  256 with `CapacityExceeded`, leaving the payload queued: the four length bytes are gone,
+  so the stream is desynchronised and the caller must stop. `recv_line_into` can stay in
+  sync differently — an overlong line keeps consuming to its `\n` and then returns
+  `CapacityExceeded`, so the next line reads correctly (proved on the host and in
+  `samples/apps/frames`).
+- **`send_u64` writes true two's complement.** `byte(x)` is a checked cast, so a negative
+  value cannot be split with `mod` directly; the helper maps `value < 0` to
+  `value + MaxInt + 1` (that is `value + 2^63`, built from two in-range addends) and sets
+  the top bit, so `-1`, `MinInt` and `MaxInt` all round-trip.
+- **The host models a stream as one loopback FIFO.** `ConsoleHost` appends on send and
+  takes from the front on receive, with no capacity model and `WouldBlock` on empty (a
+  host-side block ends the run). That is enough to test the typed views deterministically
+  in `cargo test`; the kernel keeps the real FIFO.
+- **AP kernel stacks are 256 KiB, not 64 KiB (bug fix).** Every core services the request
+  queue before a claim, so any core may compile an application. A release-build compile of
+  a `stdlib`-using application needs ~59–62 KiB (measured on the host by bisecting a
+  thread stack), which left only a few KiB under the old 64 KiB AP stack; the compiler
+  overflowed into the neighbouring `.bss` (the next core's stack — AP stacks have no
+  guard) and killed a core with a random `#UD` or `#PF`. `AP_STACK_BYTES` now matches the
+  boot core's 256 KiB, which is also the bound the 32-level compiler limit implies.
+  Guards for AP stacks remain future work (they need per-core page-table splits, as
+  `stack.rs` does for the boot stack).
 
 ## Decided in the 2026-11-12 session
 
@@ -429,6 +476,17 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
     queued bytes and frees the buffer when no side remains. `samples/apps/streams`
     (`pipe_in` + `pipe_out`) proves in-order delivery, sender blocking and `Closed`;
     `streams_bad` proves the duplicate-direction and capacity-mismatch load errors; the
-    `bad_send`/`bad_recv`/`bad_name` samples prove the compile errors. Next: `stdlib`
-    framing helpers (`send_line`, `recv_line_into`, length-prefixed frames) on top of the
-    new primitives, then explicit close (Q10), `f64` text, and per-task stack guards.
+    `bad_send`/`bad_recv`/`bad_name` samples prove the compile errors.
+24. ~~`stdlib` stream framing~~ — done (spec 0006, "Receive" and "Interfaces"): eight
+    typed views over `const ..._stream[1]` parameters — `recv_exact`, `send_frame`,
+    `recv_frame_into`, `send_line`, `recv_line_into`, `send_u64`, `recv_u64`,
+    `send_bytes`. Length-prefixed `u32` LE frames by default, `\n` lines with CRLF
+    stripping, fixed-width `u64`; each publishes a whole value with one copy, so an error
+    leaves the destination untouched. Receives are one byte wide because a receive returns
+    up to the destination capacity and there is no pushback (the spec's chunk loop was
+    corrected). `pipe_in`/`pipe_out` now run through the line helpers, `samples/apps/frames`
+    proves the binary paths end to end, and the host has a loopback FIFO for deterministic
+    tests. The lane also fixed an SMP bug it exposed: AP kernel stacks were 64 KiB while any
+    core may compile, so a `stdlib`-using compile overflowed into the neighbouring `.bss`;
+    every core's stack is now 256 KiB. Next: per-task stack guards (and guards for AP
+    stacks), `f64` text, then explicit close (Q10).

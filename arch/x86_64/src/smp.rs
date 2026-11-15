@@ -19,7 +19,15 @@ pub const MAX_CORES: usize = 8;
 
 /// Kernel stack an AP runs on, per core. Static and unguarded; the boot core
 /// keeps its guarded 256 KiB stack (`stack.rs`).
-pub const AP_STACK_BYTES: usize = 64 * 1024;
+///
+/// It must cover the compiler: every core services the request queue before a
+/// claim (spec 0007, "Services and task creation"), so any core can compile an
+/// application. The compiler's bounded recursion costs up to ~200 KiB at the
+/// 32-level limit (Q42), and a `stdlib`-using application already needs ~60 KiB
+/// on a release build. A 64 KiB stack overflowed into the neighbouring `.bss`
+/// (the next core's stack) with no guard to stop it, so the size matches the
+/// boot core's stack instead.
+pub const AP_STACK_BYTES: usize = 256 * 1024;
 
 /// Physical page the trampoline is copied to. Must be 4 KiB aligned and below
 /// 1 MiB: the SIPI vector is `AP_TRAMPOLINE >> 12` and firmware/real-mode code

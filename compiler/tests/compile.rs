@@ -2647,9 +2647,11 @@ fn the_embedded_stdlib_compiles_on_its_own() {
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(manifest_unit(&package), "stdlib");
     assert_eq!(
-        header.function_count, 12,
+        header.function_count, 20,
         "trim_into, split_once, parse_int_into, starts_with, contains_byte, split_all, \
-         drain_into, map_get_or, utf8_decode_into, utf8_len, utf8_decode, utf8_valid"
+         drain_into, map_get_or, utf8_decode_into, utf8_len, utf8_decode, utf8_valid, \
+         recv_exact, send_frame, recv_frame_into, send_line, recv_line_into, send_u64, \
+         recv_u64, send_bytes"
     );
     assert_eq!(header.entry, 0);
     assert_eq!(header.state_size, 0, "the stdlib declares no state");
@@ -4519,6 +4521,94 @@ begin
 end;
 "#;
     compile(source, "t.ig").expect("a const stream parameter borrows the caller's handle");
+}
+
+#[test]
+fn a_framing_helper_accepts_any_endpoint_capacity() {
+    // The framing helpers declare their endpoints as `const out_stream[1]` /
+    // `const in_stream[1]`: the declared capacity of a stream parameter is
+    // only a lower bound that the compiler does not check, so one helper
+    // serves every capacity (spec 0003, "Streams").
+    let source = br#"
+unit t;
+
+uses core, stdlib;
+
+var
+  events_out: out_stream[128];
+  commands_in: in_stream[65536];
+  frame: bytes[256];
+
+procedure main(args: const string[1024]);
+begin
+  stdlib.send_line(events_out, "hi");
+  stdlib.send_frame(events_out, "hi");
+  stdlib.send_u64(events_out, 1);
+  stdlib.send_bytes(events_out, frame);
+  stdlib.recv_line_into(commands_in, frame);
+  stdlib.recv_frame_into(commands_in, frame);
+end;
+"#;
+    compile(source, "t.ig").expect("a `const ..._stream[1]` parameter accepts every capacity");
+}
+
+#[test]
+fn stream_parameter_capacity_is_not_checked_but_the_mode_is() {
+    let accepted = br#"
+unit t;
+
+uses core;
+
+var
+  events_out: out_stream[65536];
+  commands_in: in_stream[128];
+
+procedure send_it(ep: const out_stream[1]);
+begin
+  core.send(ep, "x");
+end;
+
+procedure recv_it(ep: const in_stream[1]; dst: var bytes[8]);
+begin
+  core.recv(ep, dst);
+end;
+
+procedure main(args: const string[1024]);
+var
+  raw: bytes[8];
+begin
+  send_it(events_out);
+  recv_it(commands_in, raw);
+end;
+"#;
+    compile(accepted, "t.ig")
+        .expect("a `const` stream parameter of capacity 1 accepts any capacity");
+
+    let cases: &[(&str, &str)] = &[
+        (
+            "procedure p(ep: var out_stream[1]);\nbegin\nend;",
+            "stream parameter `ep` must be declared `const`",
+        ),
+        (
+            "procedure p(ep: out_stream[1]);\nbegin\nend;",
+            "stream parameter `ep` must be declared `const`",
+        ),
+        (
+            "procedure p(ep: var in_stream[1]);\nbegin\nend;",
+            "stream parameter `ep` must be declared `const`",
+        ),
+    ];
+    for (procedure, expected) in cases {
+        let source = format!(
+            "unit t;\n\nuses core;\n\nvar\n  s: out_stream[8];\n\n{procedure}\n\nprocedure main(args: const string[1024]);\nbegin\nend;\n"
+        );
+        let error = compile(source.as_bytes(), "t.ig").expect_err("must be rejected");
+        assert!(
+            error.message.contains(expected),
+            "expected `{expected}`, got `{}`",
+            error.message
+        );
+    }
 }
 
 #[test]

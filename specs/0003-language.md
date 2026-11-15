@@ -575,7 +575,8 @@ var
   record fields, sum payloads, arrays, rings, maps and `value`/`var` parameters are
   compile errors. A `const in_stream`/`const out_stream` parameter is allowed and
   accepts any capacity of the same direction (it borrows the caller's handle); this is
-  how future `stdlib` framing helpers will take an endpoint.
+  how the `stdlib` framing helpers take an endpoint (they declare capacity `1`, since the
+  declared capacity of a stream parameter is not checked).
 - Stream handles occupy the first `8 * endpoint_count` bytes of `state`, in declaration
   order; the manifest descriptors are emitted in the same order (spec 0008). The loader
   writes handle `i` at `state[i * 8]` before the task starts.
@@ -1057,13 +1058,23 @@ declared capacities and the at-least-N rule applies to callers.
 | `function stdlib.utf8_len(src: const string[0]): int` | Number of code points: the bytes that are not continuation bytes (`0x80..0xBF`). The source is a valid `string`, so the count is a byte scan (T5: capacities stay in bytes). |
 | `function stdlib.utf8_decode(src: const string[0]; index: int; codepoint: var int; next: var int): Status` | Decodes the code point that starts at `index`. `Invalid` and nothing written when `index < 0`, `index >= len`, the byte at `index` is a continuation byte, or the sequence would run past the end; otherwise writes the scalar (`0..=0x10FFFF`) and the index just past it and returns `Ok`. A `string` source needs no re-validation, only the bounds checks. |
 | `function stdlib.utf8_valid(src: const bytes[0]): bool` | Strict UTF-8 validator for raw bytes, matching the interpreter's rule exactly: 1- to 4-byte sequences only, no overlong encodings, no surrogates, nothing above `U+10FFFF`, no truncated sequence, no stray continuation byte. It checks bytes without converting them and cross-checks `utf8_decode_into`'s primitive. |
+| `function stdlib.recv_exact(ep: const in_stream[1]; dst: var bytes[256]; n: int): Status` | Reads exactly `n` bytes into `dst[0..n]` and sets the destination length to `n`. `n < 0` → `Invalid`; `n > 256` → `CapacityExceeded`; both read nothing. `Closed` (or a zero receive) returns `Closed` with `dst`'s length unchanged. Bytes are staged in a local `bytes[256]` and published with one copy, so no partial value is ever visible. One byte per receive (see spec 0006, "Receive"). |
+| `function stdlib.send_frame(ep: const out_stream[1]; text: const string[0]): Status` | Sends `[u32 little-endian length][payload]` as one atomic send. A payload over 252 bytes (256 − 4) returns `CapacityExceeded` and sends nothing; the endpoint's own capacity is the other bound and `core.send` enforces it. |
+| `function stdlib.recv_frame_into(ep: const in_stream[1]; dst: var bytes[256]): Status` | Reads the 4-byte little-endian length with `recv_exact`, then the payload. A length above 256 returns `CapacityExceeded` and leaves the payload bytes queued: the stream is desynchronised and the caller must stop using it. `Closed`/a short read propagate with `dst` untouched. |
+| `function stdlib.send_line(ep: const out_stream[1]; text: const string[0]): Status` | Sends `text` plus one `\n` as one atomic send. Text over 255 bytes returns `CapacityExceeded` and sends nothing. |
+| `function stdlib.recv_line_into(ep: const in_stream[1]; dst: var bytes[256]): Status` | Accumulates one `\n`-terminated line and strips the terminator and a preceding CR (CRLF). A line over 256 bytes keeps consuming to its LF (discarding the excess, so the stream stays synchronised) and returns `CapacityExceeded` with `dst` untouched; `Closed` before the LF returns `Closed` with `dst` untouched. |
+| `function stdlib.send_u64(ep: const out_stream[1]; value: int): Status` | Sends exactly 8 little-endian bytes (two's complement, so negatives round-trip) as one atomic send. |
+| `function stdlib.recv_u64(ep: const in_stream[1]; value: var int): Status` | Reads exactly 8 little-endian bytes with `recv_exact` and stores the signed value. `Closed`/`CapacityExceeded` propagate and leave `value` untouched. |
+| `function stdlib.send_bytes(ep: const out_stream[1]; data: const bytes[0]): Status` | Sends any `bytes` buffer as one atomic send. The `const bytes[0]` capacity accepts a buffer of any size (at-least-N rule); the endpoint capacity still bounds the send. |
 
-Still missing for a complete standard library: `f64` formatting/parsing and typed stream
-views. The `substr_into` move is withdrawn: the checked slice stays in `core` because the
-destination capacity must be a call-site immediate, and the language has no generics
-(see "Slicing and search"). `map` support and `map_get_or` landed with the structural map
-table (spec 0003, "Maps"); the UTF-8 helpers landed as ordinary language code over
-`core.substr_into`, `core.len` and buffer indexing, adding no opcode.
+Still missing for a complete standard library: `f64` formatting/parsing. The typed stream
+views landed with the framing layer (`recv_exact`, `send_frame`, `recv_frame_into`,
+`send_line`, `recv_line_into`, `send_u64`, `recv_u64`, `send_bytes`). The `substr_into`
+move is withdrawn: the checked slice stays in `core` because the destination capacity must
+be a call-site immediate, and the language has no generics (see "Slicing and search").
+`map` support and `map_get_or` landed with the structural map table (spec 0003, "Maps");
+the UTF-8 helpers landed as ordinary language code over `core.substr_into`, `core.len` and
+buffer indexing, adding no opcode.
 
 ## Failure modes
 
@@ -1160,6 +1171,7 @@ table (spec 0003, "Maps"); the UTF-8 helpers landed as ordinary language code ov
 | 2026-11-13 | Stream endpoint names are application-wide unique (spec 0006, S11); `stdlib` framing defaults to a length prefix with newline-delimited helpers for text. |
 | 2026-11-13 | Floating point added to the first milestone: `f64` only, IEEE-754, per-task 512-byte FXSAVE region (ADR 0018); explicit `T(x)` casts, IEEE float semantics; every top-level declaration is public with no visibility modifiers; FNV-1a maps with linear probing; comparisons bind tighter than `and`/`or` and bitwise operations are `core` functions; `Diagnostic` only, no stack trace; stream names are `string[32]` and capacities are `1..=65536`; `run`/`spawn` paths are limited to 256 bytes. |
 | 2026-11-15 | Stream endpoints implemented: `in_stream[N]`/`out_stream[N]` top-level state variables with the name as the stream name, `const` endpoints as parameters, `core.send`/`try_send` (atomic, `CapacityExceeded`/`WouldBlock`/`Closed`) and `core.recv`/`try_recv` (bytes destination only, staged `-1`/`-2` codes). Handles occupy the `state` prefix and the manifest lists the descriptors in the same order. Dynamic loading and its load errors are spec 0006. |
+| 2026-11-15 | Typed stream views in `stdlib`: `recv_exact`, `send_frame`, `recv_frame_into`, `send_line`, `recv_line_into`, `send_u64`, `recv_u64` and `send_bytes`, all ordinary language code over `const ..._stream[1]` parameters (capacity `1` because the declared capacity of a stream parameter is not checked). Each publishes a whole value with one copy, so an error leaves the destination untouched. A receive is one byte wide: `core.recv` returns up to the destination capacity and there is no pushback, so a wider view would steal the peer's next message (spec 0006, "Receive"). |
 | 2026-11-13 | `ExitReason` gained `Killed`; `kill` cancels a queued request and runs `exit(Killed)` on a live task; request paths are validated as relative with no `..` and must name regular files. |
 | 2026-11-13 | Buffer indexing, comparison and length: `buf[i]` yields a `byte` (raw for `string`, T4); writes are `bytes`-only and extend the length to `index + 1`, zero-filling the gap; reads check the runtime length and writes the declared capacity; `=`/`<>` compare buffers of the same kind across capacities; `core.len(buf) -> uint`. |
 | 2026-11-14 | Staged slicing and search: `core.substr_into(dst, src, start, len) -> int` (same kind, negative → `-4`, past-end → 0, clamped copy, UTF-8 boundary check for `string`) and `core.find(buf, byte) -> int` (first index or `-1`, `0..len`, both kinds). Both are `core` opcodes until `stdlib.substr_into` exists (T4 staging). |

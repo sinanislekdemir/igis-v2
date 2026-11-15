@@ -127,8 +127,9 @@ constraints learned there.
   generics a `stdlib` helper could only serve one capacity (the `stdlib.substr_into` move
   is withdrawn). Every online core now runs the scheduler: `smp::start()` brings the APs
   up with INIT-SIPI-SIPI through a trampoline copied to physical `0x8000` beside a
-  parameter page at `0x9000`, one per-core TSS/IST set, one static 64 KiB kernel stack per
-  AP (the boot core keeps its guarded 256 KiB one), and a bounded 100 ms wait, so `-smp 1`
+  parameter page at `0x9000`, one per-core TSS/IST set, one static 256 KiB kernel stack per
+  AP (matching the boot core's guarded 256 KiB one, because any core may compile a
+  request), and a bounded 100 ms wait, so `-smp 1`
   and `-smp 2` boot with fewer cores instead of hanging. Discovery is by attempt over APIC
   ids `1..MAX_CORES` with `MAX_CORES` = 8; the core index is internal and the APIC id is
   the identity software sees through `syslib.cpu_id()` (builtin 10). All cores run the
@@ -166,8 +167,21 @@ constraints learned there.
   bytes and frees the buffer at the close (the record stays until the surviving endpoint
   ends). `samples/apps/streams` (consumer
   `pipe_in`, producer `pipe_out`) proves in-order delivery through a blocking sender and
-  the `Closed` exit; `streams_bad` proves both load errors. The next pieces are `stdlib`
-  framing on top of streams and per-task stack guards; explicit close is v2.
+  the `Closed` exit; `streams_bad` proves both load errors. The `stdlib` framing layer
+  now sits on top, as ordinary language code taking `const in_stream[1]`/`const
+  out_stream[1]` parameters (a stream parameter's declared capacity is not checked, so one
+  helper serves every capacity): `recv_exact`, `send_frame`/`recv_frame_into` (a `u32`
+  little-endian length prefix), `send_line`/`recv_line_into` (`\n`, CRLF stripped, an
+  overlong line keeps consuming to stay in sync), `send_u64`/`recv_u64` and `send_bytes`.
+  Each helper publishes a whole value with one copy, so an error leaves the destination
+  untouched; a receive is one byte wide because `core.recv` returns up to the destination
+  capacity and there is no pushback. `pipe_out`/`pipe_in` now run through `send_line`/
+  `recv_line_into`, and `samples/apps/frames` (`frame_in` + `frame_out`, with an ack
+  stream so the producer exits only after the consumer drained) proves the length prefix,
+  the typed `u64` view, both `CapacityExceeded` paths and the close. Every core's kernel
+  stack is now 256 KiB: a compile on an AP overflowed the old 64 KiB stack into the
+  neighbouring `.bss`. The next pieces are per-task stack guards and `f64` text; explicit
+  close is v2.
 
 ## Ground rules
 
@@ -317,12 +331,13 @@ host tools are unaffected.
 | Rings: `ring[T, N]` is nominal in element and count, elements then `head`/`count`, `core.ring_push`/`pop`/`peek`/`full`/`empty` lowered by the compiler with no opcode; `Full`/`NotFound` leave the ring and out-parameter untouched | spec 0003, spec 0008 |
 | Maps: `map[K, V, N]` is nominal in key, value and count; `count` then `capacity` slots of state/hash/key/value; FNV-1a, linear probing, backward-shift deletion; `core.map_put`/`get`/`has`/`remove`/`count` are five `map_*` opcodes and `put` at `N` is `Full` | spec 0003, spec 0008 |
 | UTF-8: `core.substr_into` has four kind combinations and the destination kind decides (boundaries for `string`, strict validation for `bytes`→`string`, raw for a `bytes` destination); the source kind is the `SUBSTR` `b` field, no new opcode; the checked slice stays in `core` forever (destination capacity is a call-site immediate) | spec 0003, spec 0008 |
-| APs come up by attempt: INIT-SIPI-SIPI, trampoline at `0x8000` with a parameter page at `0x9000`, `MAX_CORES` = 8, per-core TSS/IST and 64 KiB stacks, bounded 100 ms wait; absent ids are not online | spec 0002 "SMP", spec 0007 |
+| APs come up by attempt: INIT-SIPI-SIPI, trampoline at `0x8000` with a parameter page at `0x9000`, `MAX_CORES` = 8, per-core TSS/IST and 256 KiB stacks (the compiler's bound, since any core may compile), bounded 100 ms wait; absent ids are not online | spec 0002 "SMP", spec 0007 |
 | Every online core runs the scheduler loop over the global set; an idle core does one `sti; hlt` step and producers set `need_resched` before the `0x40` IPI, whose handler only EOIs | spec 0007, ADR 0011 |
 | A claimed task's slot stays reserved by task id until reclaim; a request id stays live while it compiles; the boot core stops the APs and prints per-core totals | spec 0007 |
 | `syslib.cpu_id()` (builtin 10) reports the APIC id of the executing core; the core index is internal | spec 0003, spec 0008 |
 | Realtime: one-way `core.realtime_on()` (builtin 11) admitted by a CAS counter against online cores, `core.heartbeat()` (builtin 12) with a fixed 1 s non-blocked deadline, realtime-first claim, no quantum preemption, no total budget, `WatchdogTimeout`, admission released only at termination | spec 0007, ADR 0016 |
 | Streams: top-level `in_stream[N]`/`out_stream[N]` state variables, handles in the `state` prefix in manifest order, dynamic load-time pairing with a waiting peer, same-direction/mismatch/closed load errors, four `stream_*` opcodes, `WaitFor::Stream` block/wake, kernel arena with first-fit free list, close-on-termination discards queued bytes | spec 0006 (amended), spec 0008 |
+| Stream framing is `stdlib` code over `const ..._stream[1]` parameters: length-prefixed `u32` LE frames, `\n`-delimited lines with CRLF stripping, fixed-width `u64`, one-byte receives (a receive returns up to the destination capacity and has no pushback), one copy publishes a whole value so errors never leave a partial destination | spec 0003, spec 0006 |
 
 ## Open questions
 
@@ -383,3 +398,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-15 | SMP: `smp::start` brings the APs up by attempt (INIT-SIPI-SIPI through the `0x8000` trampoline and `0x9000` parameter page, `MAX_CORES` 8, per-core TSS/IST and 64 KiB stacks, bounded 100 ms), every online core runs the claim/quantum/release loop with per-core verifier scratch and counters, idle cores do one `sti; hlt` step woken by the `0x40` IPI, the boot core stops the APs and prints per-core totals, and `syslib.cpu_id()` (builtin 10) reports the APIC id. Fixed two SMP races: a claimed task's slot stays reserved by id, and a reserved request id stays live while it compiles. `samples/apps/worker` + `cores` prove distribution; `xtask run` defaults to `-smp 4` (`--cores N`). |
 | 2026-11-15 | Realtime class implemented (ADR 0016): `core.realtime_on()`/`core.heartbeat()` (builtins 11/12) through `Host::realtime_on`/`Host::heartbeat` defaults, admission by a CAS counter against `smp::online_count()`, realtime-first claim, no quantum preemption (an inner per-core loop keeps the claimed value), no total budget, a one-second deadline in non-blocked `budget_ns` (`HEARTBEAT_NS`) terminated as `Faulted(WatchdogTimeout)`, and admission released only in `terminate`. `samples/apps/{realtime,beat,spin}` prove promotion, `Full` on `-smp 1`, and the watchdog; the shell reports `WatchdogTimeout`. |
 | 2026-11-15 | Streams implemented (spec 0006, amended): `in_stream[N]`/`out_stream[N]` top-level state variables whose name is the stream name; handles occupy the first `8 * endpoint_count` state bytes and the manifest lists descriptors in declaration order. The loader opens or pairs endpoints before placement (waiting semantics for an absent peer; same-direction duplicate, capacity mismatch and closed-stream declarations are load errors), writes handles into `state`, and rolls back on failure. A kernel table of 32 records over a 256 KiB static arena with a first-fit free list holds the buffers; handles are `(generation, index)`. `core.send`/`try_send` and `core.recv`/`try_recv` are four new opcodes; blocking is `WaitFor::Stream(handle)` with sends waking receivers, receives waking senders and close waking both. `samples/apps/{streams,pipe_in,pipe_out}` prove in-order delivery and `Closed`; `streams_bad` proves the two load errors; `bad_send`/`bad_recv`/`bad_name` cover the compile errors. |
+| 2026-11-15 | `stdlib` framing layer (spec 0006, "Receive" and "Interfaces"): `recv_exact`, `send_frame`, `recv_frame_into`, `send_line`, `recv_line_into`, `send_u64`, `recv_u64` and `send_bytes` as ordinary language code over `const in_stream[1]`/`const out_stream[1]` parameters (the declared capacity of a stream parameter is not checked, so one helper serves every capacity). Each helper stages into a local `bytes[256]` and publishes the value with one copy, so a failure leaves the destination untouched; `send_frame`/`send_line`/`send_u64` build the whole message and send it atomically; `recv_line_into` strips CRLF and keeps consuming an overlong line to stay synchronised. Receives are one byte wide: `core.recv` returns up to the destination capacity and there is no pushback, so a wider chunk would steal the peer's next message (the spec's original loop was corrected). `pipe_out`/`pipe_in` now use `send_line`/`recv_line_into`; `samples/apps/frames` (`frame_in` + `frame_out` on `frames`/`frames_ack`) proves the length prefix, the `u64` view, both `CapacityExceeded` paths and the close, and the host `ConsoleHost` has a loopback FIFO so `langhost` tests the views deterministically. Also fixed an SMP bug this exposed: AP kernel stacks were 64 KiB, but any core may compile a request and a `stdlib`-using compile needs ~60 KiB, so the compiler overflowed an AP stack into the neighbouring `.bss` (random `#UD`/`#PF`). `AP_STACK_BYTES` is now 256 KiB, matching the boot core. |

@@ -3,12 +3,15 @@ unit pipe_out;
 // Producer half of the stream sample (spec 0006). `report` is an `out_stream`
 // endpoint declared with the same capacity as `pipe_in`'s receiver. Twenty
 // numbered lines are about 180 bytes, well over the 64-byte queue, so the
-// sender fills the stream and blocks until the consumer drains it. After the
-// last send the task waits for the queue to drain before exiting: termination
-// discards queued bytes immediately (S7), so a short delay is what makes the
-// received total deterministic in this demonstration.
+// sender fills the stream and blocks until the consumer drains it.
+//
+// Each line goes out through `stdlib.send_line`, which appends the newline and
+// sends the whole line as one atomic `core.send`. After the last send the task
+// waits for the queue to drain before exiting: termination discards queued
+// bytes immediately (S7), so a short delay is what makes the received total
+// deterministic in this demonstration.
 
-uses core;
+uses core, stdlib;
 
 var
   report: out_stream[64];
@@ -25,8 +28,8 @@ begin
   while i < 20 do
   begin
     core.format_int_into(digits, i, uint(10), uint(0));
-    line := "line " + digits + "\n";
-    st := core.send(report, line);
+    line := "line " + digits;
+    st := stdlib.send_line(report, line);
     i := i + 1;
   end;
 

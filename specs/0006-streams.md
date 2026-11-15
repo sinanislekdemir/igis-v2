@@ -107,27 +107,34 @@ the destination length. Typed views that need exactly N bytes loop:
 ```
 recv_exact(ep, var dst: bytes[N], n: int):
     var got := 0
-    var chunk: bytes[N]
+    var one: bytes[1]
+    var staged: bytes[N]
     while got < n do
-        var k := receive(ep, var chunk)
+        k := receive(ep, var one)          // exactly one byte, see below
         if k == 0 then return Status.Closed
-        var i := 0
-        while (i < k) and (got < n) do
-            dst[got] := chunk[i]
-            got := got + 1
-            i := i + 1
+        staged[got] := one[0]
+        got := got + 1
+    dst := staged
 ```
 
-There is no sub-range expression: `dst` and `chunk` are whole buffers, indexed with
-runtime bounds checks. A `stdlib` helper that wants to fill a buffer at an offset takes
-the buffer and the offset as separate parameters, not a view.
+**A receive must never ask for more bytes than the view still needs.** `receive` copies
+`min(count, destination capacity)` bytes, so a chunk wider than `remaining` takes bytes
+that belong to the peer's next message, and there is no pushback: the surplus is lost and
+every later read on that stream is misparsed. A `bytes[256]` chunk is therefore wrong for
+any view smaller than 256 bytes. The receive bound has to be the *remaining* count, which
+a buffer parameter cannot express today (the language has no runtime-capacity buffers, see
+`OPEN-QUESTIONS.md` Q46), so a view reads **one byte per receive**: exact by construction
+at the cost of one stream operation per byte. A `stdlib` helper that wants to fill a
+buffer at an offset also takes the buffer and the offset as separate parameters, not a
+view.
 
-`stdlib` provides `recv_u64`, `recv_string_into`, and framing helpers on top of this loop.
-The default frame is length-prefixed: a little-endian `u32` length followed by that many
-bytes, with the length required to fit both the destination and the endpoint capacity; a
-length that cannot be satisfied is an error, never a partial read. Text protocols use the
-delimiter helpers (`send_line`, `recv_line_into`, `\n`-terminated) instead. The kernel has
-no opinion: framing is a convention between the two peers.
+`stdlib` provides `recv_exact`, `recv_frame_into`, `recv_line_into`, `recv_u64`,
+`send_frame`, `send_line`, `send_u64` and `send_bytes` on top of this loop. The default
+frame is length-prefixed: a little-endian `u32` length followed by that many bytes, with
+the length required to fit both the destination and the endpoint capacity; a length that
+cannot be satisfied is an error, never a partial read. Text protocols use the delimiter
+helpers (`send_line`, `recv_line_into`, `\n`-terminated) instead. The kernel has no
+opinion: framing is a convention between the two peers.
 
 ### Close and peer death
 
@@ -269,3 +276,4 @@ fn try_receive(ep: Endpoint, buf: &mut [u8]) -> Result<usize, Status>;
 | 2026-11-13 | Stream names are unique application-wide (S11); one sender and one receiver are fixed, a shared type would be a separate addition; `stdlib` framing uses length prefixes by default and newline delimiters for text; explicit close is deferred to v2 with the constraint that closed state is independent of owner lifetime. |
 | 2026-11-13 | Stream names are `string[32]` matching `[a-z][a-z0-9_]*` and capacities are `1..=65536` bytes (S12). |
 | 2026-11-15 | Implemented. Dynamic loading replaces the static "unmatched is a load error" rule (S8): an endpoint is created when its task loads and waits for a later peer, so a sender may fill a waiting stream and a receiver blocks on it. A same-direction duplicate, a capacity mismatch, or a declaration against a closed stream is the load error. Handles are `(generation, index)`; termination closes the owner's sides, discards queued bytes and frees the buffer when no side remains. Explicit close is still v2. |
+| 2026-11-15 | The `stdlib` framing layer is implemented as ordinary language code over `const in_stream[1]`/`const out_stream[1]` parameters (the declared capacity is a lower bound the compiler does not check, so one helper serves every capacity): `recv_exact`, `send_frame`, `recv_frame_into`, `send_line`, `recv_line_into`, `send_u64`, `recv_u64` and `send_bytes`. Each is atomic at its boundary — a destination is written only by the one copy that publishes a whole value — so a failure never exposes a partial value. The "Receive" pseudocode is corrected: a receive returns up to the destination capacity, so a view must never ask for more than the bytes it still needs; without runtime-capacity buffer parameters a view reads one byte per receive. `samples/apps/streams` now runs through `send_line`/`recv_line_into`, and `samples/apps/frames` (`frame_in` + `frame_out`) proves the length prefix, the typed `u64` view, the `CapacityExceeded` paths and the close. |

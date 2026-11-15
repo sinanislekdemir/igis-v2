@@ -2,19 +2,22 @@ unit pipe_in;
 
 // Consumer half of the stream sample (spec 0006). `report` is an `in_stream`
 // endpoint; the loader creates it when this task loads even though no sender
-// exists yet, so the first `core.recv` blocks instead of failing. Every chunk
-// is written as soon as it arrives, which is what lets the blocked producer
-// resume as the queue drains. The loop ends when the producer terminates and
-// the stream reports `Closed`.
+// exists yet, so the first receive blocks instead of failing. Each line is
+// written as soon as it is complete, which is what lets the blocked producer
+// resume as the queue drains. `stdlib.recv_line_into` accumulates the bytes
+// until the newline and strips it (and a preceding CR), so the reader works on
+// whole lines while the stream stays a byte FIFO. The loop ends when the
+// producer terminates and the stream reports `Closed`.
 
-uses core;
+uses core, stdlib;
 
 var
   report: in_stream[64];
-  chunk: bytes[64];
+  line: bytes[256];
   digits: string[16];
   formatted: int;
   total: int;
+  lines: int;
 
 procedure say(text: const string[0]);
 begin
@@ -29,20 +32,28 @@ end;
 
 procedure main(args: const string[1024]);
 var
-  got: int;
+  st: Status;
 begin
   total := 0;
-  got := 1;
-  while got > 0 do
+  lines := 0;
+  st := Ok;
+  while st = Ok do
   begin
-    got := core.recv(report, chunk);
-    if got > 0 then
+    st := stdlib.recv_line_into(report, line);
+    if st = Ok then
     begin
-      core.write(chunk);
-      total := total + got;
+      core.write(line);
+      say("\n");
+      total := total + int(core.len(line));
+      lines := lines + 1;
     end;
   end;
-  say("pipe_in: closed after ");
+  if st = Closed then
+    say("pipe_in: closed after ")
+  else
+    say("pipe_in: stopped after ");
+  show(lines);
+  say(" lines, ");
   show(total);
   say(" bytes\n");
 end;

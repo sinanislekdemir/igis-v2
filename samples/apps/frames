@@ -1,0 +1,61 @@
+unit frames;
+
+// Driver for the binary framing sample (spec 0006, "Interfaces"). The consumer
+// is spawned without waiting, so it can load (creating the waiting `frames`
+// receiver and the waiting `frames_ack` sender) before the producer runs.
+// `core.run` then starts the producer and blocks; the two peers exchange typed
+// messages and the acknowledgement that ends the run, and the driver reports
+// both exit reasons.
+
+uses core;
+
+var
+  st: Status;
+  consumer: int;
+  diag: Diagnostic;
+  reason: ExitReason;
+
+procedure say(text: const string[0]);
+begin
+  core.write(text);
+end;
+
+procedure report(what: const string[0]; why: const ExitReason);
+begin
+  say(what);
+  case why of
+    Ok: say("ok\n")
+    Killed: say("killed\n")
+    Faulted(code): say("faulted\n")
+  end;
+end;
+
+procedure main(args: const string[1024]);
+begin
+  st := core.spawn("frame_in", "", diag, consumer);
+  if st <> Ok then
+  begin
+    say("frames: spawn frame_in failed: ");
+    say(diag.message);
+    say("\n");
+  end
+  else
+  begin
+    st := core.run("frame_out", "", diag, reason);
+    if st = Ok then
+      report("frames: producer ", reason)
+    else
+    begin
+      say("frames: run frame_out failed: ");
+      say(diag.message);
+      say("\n");
+    end;
+
+    st := core.wait(consumer, reason);
+    if st = Ok then
+      report("frames: consumer ", reason)
+    else
+      say("frames: wait for consumer failed\n");
+    say("frames: done\n");
+  end;
+end;

@@ -19,6 +19,10 @@ const
   SplitHeadCapacity = 128;
   SplitTailCapacity = 256;
   Utf8Capacity = 256;
+  FrameCapacity = 256;
+  FrameHeader = 4;
+  FramePayloadCapacity = 252;
+  LineCapacity = 255;
   MaxInt = 9223372036854775807;
   MinInt = -9223372036854775807 - 1;
 
@@ -402,4 +406,285 @@ begin
     end;
   end;
   return true;
+end;
+
+// ---- typed stream views (spec 0006, "Receive" and "Interfaces") --------
+//
+// The kernel has no message boundaries (S10): a `core.recv` returns whatever
+// bytes are available, up to the destination capacity. These helpers recover
+// typed messages on top of that byte FIFO, using only `core.send`,
+// `core.recv`, `core.substr_into`, `core.len` and indexing.
+//
+// Every endpoint parameter is declared with capacity 1 on purpose: a `const`
+// endpoint parameter accepts any capacity of its direction (the declared
+// capacity is a lower bound that the compiler does not check for streams;
+// spec 0003, "Streams"). Writing the real capacity here would suggest a
+// guarantee the language does not make, and one helper would need a copy per
+// capacity. The capacity that matters is checked where it can be: the size of
+// the local work buffer, `CapacityExceeded` on an oversized payload, and the
+// endpoint's own capacity in `core.send`.
+//
+// Each helper is atomic at its boundary. A destination is written only by the
+// final copy that publishes a whole value, so a failure never exposes a
+// half-filled buffer: the caller either gets `Ok` with a complete value or a
+// status with the destination untouched. Blocking inside a helper is safe:
+// the machine rewinds to the blocking `core.send`/`core.recv` instruction and
+// retries it, so the callee's frame, locals included, is preserved.
+//
+// Work buffers are locals with concrete capacities, because the language has
+// no generics. That is the whole cost of the layer: the frame of each helper
+// below.
+
+// Reads exactly `n` bytes from `ep` into `dst[0..n]` and sets the
+// destination's runtime length to `n`. `n < 0` returns Invalid and `n > 256`
+// returns CapacityExceeded without reading anything. A close before `n` bytes
+// returns Closed with `dst` untouched (the length it had on entry), so the
+// caller never sees a partial value. The bytes are staged in a local buffer
+// and published with one copy at the end, which is what makes that promise
+// hold even though the receive loop blocks.
+//
+// Every receive asks for exactly one byte, on purpose. A receive returns
+// *up to* the destination capacity, not exactly the bytes the caller wants, so
+// a 256-byte chunk would take bytes that belong to the peer's next message and
+// silently drop them: the stream has no pushback, and the language has no
+// buffer parameter that carries its capacity at run time (Q46), so
+// `remaining` cannot become the receive bound. One byte per receive is exact
+// by construction; the price is one stream operation per byte, which is the
+// right trade for a reference implementation and is invisible at the sizes
+// this layer frames.
+function recv_exact(ep: const in_stream[1]; dst: var bytes[256]; n: int): Status;
+var
+  one: bytes[1];
+  staged: bytes[256];
+  got: int;
+begin
+  if n < 0 then
+    return Invalid;
+  if n > FrameCapacity then
+    return CapacityExceeded;
+  got := 0;
+  while got < n do
+  begin
+    if core.recv(ep, one) <= 0 then
+      return Closed;
+    staged[got] := one[0];
+    got := got + 1;
+  end;
+  dst := staged;
+  return Ok;
+end;
+
+// Sends `[u32 little-endian length][payload]` as one atomic `core.send`, so a
+// peer never observes a torn frame. The payload must fit the local frame
+// buffer: 256 - 4 header bytes = 252 bytes. A longer payload returns
+// CapacityExceeded and sends nothing. The peer's own capacity is the other
+// bound: a frame larger than it is refused by `core.send` with the same
+// status, again without sending anything.
+function send_frame(ep: const out_stream[1]; text: const string[0]): Status;
+var
+  frame: bytes[256];
+  length: int;
+  i: int;
+begin
+  length := int(core.len(text));
+  if length > FramePayloadCapacity then
+    return CapacityExceeded;
+  frame[0] := byte(length mod 256);
+  frame[1] := byte((length div 256) mod 256);
+  frame[2] := byte((length div 65536) mod 256);
+  frame[3] := byte((length div 16777216) mod 256);
+  i := 0;
+  while i < length do
+  begin
+    frame[FrameHeader + i] := text[i];
+    i := i + 1;
+  end;
+  return core.send(ep, frame);
+end;
+
+// Reads one length-prefixed frame into `dst`. The length is a little-endian
+// `u32`; a payload was limited to 252 bytes by `send_frame`, so a length above
+// 256 cannot be a frame this library produced (`recv_exact` would also refuse
+// it). Such a length returns CapacityExceeded and leaves the payload bytes in
+// the stream: the stream is then desynchronised, because the four length bytes
+// are gone and the peer's message boundaries are lost. The caller must stop
+// using that stream (spec 0006: a length that cannot be satisfied is an error,
+// never a partial read). Closed and a short read propagate unchanged, with
+// `dst` untouched.
+function recv_frame_into(ep: const in_stream[1]; dst: var bytes[256]): Status;
+var
+  header: bytes[256];
+  length: int;
+  st: Status;
+begin
+  // `recv_exact` takes a `bytes[256]` destination (a `var` buffer parameter
+  // must be at least that large), so the 4 header bytes get their own staging
+  // buffer. Only `header[0..3]` is read below.
+  st := recv_exact(ep, header, FrameHeader);
+  if st <> Ok then
+    return st;
+  length := int(header[0])
+    + int(header[1]) * 256
+    + int(header[2]) * 65536
+    + int(header[3]) * 16777216;
+  if length > FrameCapacity then
+    return CapacityExceeded;
+  return recv_exact(ep, dst, length);
+end;
+
+// Sends `text` and one trailing newline as one atomic `core.send`, so a peer
+// receives whole lines or nothing. Text longer than 255 bytes returns
+// CapacityExceeded and sends nothing (the local line buffer is 256 bytes).
+function send_line(ep: const out_stream[1]; text: const string[0]): Status;
+var
+  line: bytes[256];
+  length: int;
+  i: int;
+begin
+  length := int(core.len(text));
+  if length > LineCapacity then
+    return CapacityExceeded;
+  i := 0;
+  while i < length do
+  begin
+    line[i] := text[i];
+    i := i + 1;
+  end;
+  line[length] := byte(10);
+  return core.send(ep, line);
+end;
+
+// Reads one `\n`-terminated line into `dst`, without the terminator; a CR
+// immediately before the LF is stripped too, so CRLF peers work. The line is
+// accumulated in a local buffer and published with one copy, so a failure
+// leaves `dst` untouched. A line longer than 256 bytes keeps consuming bytes
+// up to its LF (discarding the excess, so the stream stays synchronised) and
+// then returns CapacityExceeded. A close before the LF returns Closed.
+//
+// One byte per receive, for the same reason as `recv_exact`: a wider receive
+// could swallow the first bytes of the next line and the stream cannot give
+// them back.
+function recv_line_into(ep: const in_stream[1]; dst: var bytes[256]): Status;
+var
+  one: bytes[1];
+  staged: bytes[256];
+  got: int;
+  over: bool;
+  done: bool;
+  st: Status;
+  b: byte;
+begin
+  got := 0;
+  over := false;
+  done := false;
+  st := Ok;
+  while not done do
+  begin
+    if core.recv(ep, one) <= 0 then
+    begin
+      st := Closed;
+      done := true;
+    end
+    else
+    begin
+      b := one[0];
+      if b = byte(10) then
+      begin
+        done := true;
+        if over then
+          st := CapacityExceeded
+        else
+        begin
+          if got > 0 and staged[got - 1] = byte(13) then
+            got := got - 1;
+          // `staged` holds at least `got` bytes, so the explicit length
+          // makes the copy exact even after a stripped CR. It cannot fail
+          // (`got` is at most the destination capacity); the branch keeps
+          // the result total instead of asserting.
+          if core.substr_into(dst, staged, 0, got) < 0 then
+            st := CapacityExceeded;
+        end;
+      end
+      else if got < FrameCapacity then
+      begin
+        staged[got] := b;
+        got := got + 1;
+      end
+      else
+        over := true;
+    end;
+  end;
+  return st;
+end;
+
+// Sends one `int` as exactly 8 little-endian bytes (two's complement, so a
+// negative value round-trips) in one atomic `core.send`.
+function send_u64(ep: const out_stream[1]; value: int): Status;
+var
+  raw: bytes[8];
+  magnitude: int;
+  top: int;
+begin
+  if value < 0 then
+  begin
+    // The 64-bit pattern is `value + 2^63` with the top bit set. `2^63` does
+    // not fit an `int`, so it is built from two in-range addends; for
+    // `MinInt` the sum is `0`.
+    magnitude := value + MaxInt + 1;
+    top := 128;
+  end
+  else
+  begin
+    magnitude := value;
+    top := 0;
+  end;
+  raw[0] := byte(magnitude mod 256);
+  raw[1] := byte((magnitude div 256) mod 256);
+  raw[2] := byte((magnitude div 65536) mod 256);
+  raw[3] := byte((magnitude div 16777216) mod 256);
+  raw[4] := byte((magnitude div 4294967296) mod 256);
+  raw[5] := byte((magnitude div 1099511627776) mod 256);
+  raw[6] := byte((magnitude div 281474976710656) mod 256);
+  raw[7] := byte((magnitude div 72057594037927936) mod 256 + top);
+  return core.send(ep, raw);
+end;
+
+// Reads exactly 8 little-endian bytes and stores the signed value. Closed and
+// CapacityExceeded propagate from `recv_exact` and leave `value` untouched.
+function recv_u64(ep: const in_stream[1]; value: var int): Status;
+var
+  raw: bytes[256];
+  st: Status;
+  number: int;
+  low: int;
+  top: int;
+begin
+  st := recv_exact(ep, raw, 8);
+  if st <> Ok then
+    return st;
+  low := int(raw[0])
+    + int(raw[1]) * 256
+    + int(raw[2]) * 65536
+    + int(raw[3]) * 16777216
+    + int(raw[4]) * 4294967296
+    + int(raw[5]) * 1099511627776
+    + int(raw[6]) * 281474976710656;
+  top := int(raw[7]);
+  if top < 128 then
+    number := low + top * 72057594037927936
+  else
+    // The top bit means the pattern is negative: subtract 2^63, spelled as
+    // `MinInt`, after adding the remaining 7 bits of the top byte.
+    number := low + (top - 128) * 72057594037927936 + MinInt;
+  value := number;
+  return Ok;
+end;
+
+// Sends any `bytes` buffer as one atomic `core.send`. The payload capacity is
+// 0, so a caller may pass a buffer of any capacity (the at-least-N rule); the
+// endpoint's capacity still bounds the send. This is the raw counterpart of
+// `send_frame`/`send_line` for a payload the application built itself.
+function send_bytes(ep: const out_stream[1]; data: const bytes[0]): Status;
+begin
+  return core.send(ep, data);
 end;

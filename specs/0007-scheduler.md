@@ -330,10 +330,11 @@ There are no zombies. A terminated task leaves nothing behind.
 
 Each core has:
 
-- a kernel stack used by interrupt entry, `fault`/`exit` and the loop itself,
-  with a not-present guard frame below it on the boot core (Q42;
-  `arch/x86_64/src/stack.rs`); an AP runs on a static 64 KiB `.bss` stack (guards
-  for AP stacks are future work),
+- a kernel stack used by interrupt entry, `fault`/`exit`, the service opportunity and the
+  loop itself: 256 KiB on every core, with a not-present guard frame below the boot
+  core's (Q42; `arch/x86_64/src/stack.rs`). An AP's static `.bss` stack matches the size
+  because any core may compile a request and the compiler's bounded recursion needs up to
+  ~200 KiB. Guards for AP stacks are future work,
 - a pointer to the currently claimed task (or none),
 - a quantum counter and the last budget check,
 - scratch space that must never hold application state across a release. The
