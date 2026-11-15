@@ -46,6 +46,30 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | Q41 | Float text beyond fixed decimal | shortest round-trip formatting and full decimal parsing are deferred | when float output must round-trip losslessly |
 | Q46 | Moving the checked slice into `stdlib` | **Blocked, not pending.** `core.substr_into` cannot move: the destination capacity must be a *call-site immediate* (the `SUBSTR` `capacity` field), while a `stdlib` helper declares concrete capacities and the language has no generics, so one helper could serve only one destination size (it would lose `split_once`'s `string[128]` head and every smaller destination). The future option is a buffer parameter that carries its **runtime capacity**, which would need a language change. Until then the checked slice stays in `core` and there is one slicing primitive, not two (spec 0003, "Slicing and search") | only if runtime-capacity buffer parameters are added |
 
+## Decided in the 2026-11-15 SMP session
+
+**AP bring-up details (spec 0002 OQ 5) are resolved.** Discovery is by attempt, not by
+ACPI/MADT: `MAX_CORES` is one constant (**8**, core index 0 is the boot core), and
+`smp::start()` sends INIT plus two SIPIs to APIC ids `1..MAX_CORES` through a trampoline
+copied to physical `0x8000` (SIPI vector 8) with a parameter page at `0x9000` (PML4,
+higher-half entry, per-core stack tops, an atomic next-index counter). The waits are 10 ms
+after INIT, ~200 µs between SIPIs and a bounded 100 ms for the online reports, so a
+`-smp 1` or `-smp 2` machine boots with fewer cores instead of hanging. Each core has its
+own TSS (kernel `RSP0`, double-fault IST, page-fault IST), a static 64 KiB kernel stack in
+`.bss` (the boot core keeps its guarded 256 KiB one), and loads the shared IDT. Only the
+boot core programs the timer; the clock stays one global counter. One IPI vector (`0x40`)
+wakes idle cores: the producer publishes work, claims an idle core, sets `need_resched` and
+sends the IPI; the handler only EOIs and the idle loop re-checks. The boot core's idle path
+prints the per-core summary, sets a stop flag, IPIs every online core, waits bounded for
+acknowledgements and halts.
+
+The lane also settled two concurrency holes the single-core scheduler never showed: a
+claimed task's slot is reserved by task id until it is reclaimed (a concurrent `spawn` can
+no longer place a child in a running task's slot), and a reserved id stays "live" while its
+request is being compiled, so `core.wait` cannot observe `NotFound` in the pop-to-spawn
+window. `syslib.cpu_id()` (builtin 10) reports the executing core's APIC id — the proof
+hook, not an affinity.
+
 ## Decided in the 2026-11-14 session
 
 - **Q42 — bounded compilation and a guarded kernel stack.** The compiler has a fixed

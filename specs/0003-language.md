@@ -855,13 +855,16 @@ stages `Port` as a plain `uint`, not an opaque handle:
 ```text
 syslib.port_in8(port: uint) -> uint;
 syslib.port_out8(port: uint, value: uint) -> int;
+syslib.cpu_id() -> uint;
 ```
 
 `port_in8` returns the byte as a `uint`; the low 16 bits of `port` are the x86 port number.
 `port_out8` returns `0`, or `-4` (`Status.Invalid`) without touching the port when
-`value > 255`. `Port`, `MmioRegion` and the `mmio_*`/DMA primitives above remain the target
-design; `syslib.*` names other than these two are compile errors for now. There is still no
-capability check (H4).
+`value > 255`. `cpu_id` returns the APIC id of the core executing the call: a task is
+migratable, so it reports "where am I now", never an affinity (ADR 0011). `Port`,
+`MmioRegion` and the `mmio_*`/DMA primitives above remain the target design; `syslib.*`
+names other than these three are compile errors for now. There is still no capability check
+(H4).
 
 ## Constants and manifests
 
@@ -1101,3 +1104,4 @@ table (spec 0003, "Maps"); the UTF-8 helpers landed as ordinary language code ov
 | 2026-11-14 | `function Name(...): T;` with `return value;` implemented for scalar results; a function must end in a `return` on every path, and a procedure may `return;`. Implemented the first `stdlib` slice in real source: `trim_into`, `split_once`, `parse_int_into`, `starts_with` and `contains_byte`, compiled into the application package, qualified as `stdlib.*`, with no new opcodes. |
 | 2026-11-14 | Fixed-capacity rings implemented: `ring[T, N]` is nominal in element and count, layout is `N` elements at `align8(element size)` followed by `head: u64` and `count: u64`, and the built-in `core.ring_push`/`pop`/`peek`/`full`/`empty` lower to the existing reference/copy/branch instructions (no opcode). `push` returns `Full` on a full ring; `pop`/`peek` return `NotFound` and leave the out-parameter untouched on an empty one; `push`/`pop` require a writable place, so a `const` receiver is rejected while a `value` copy is writable and private to the callee. Rings may be state, locals, parameters, record fields, sum payloads and array elements; the structural ring table is shared with `stdlib`, whose `drain_into` takes a ring. |
 | 2026-11-15 | UTF-8 slice implemented. `core.substr_into` accepts all four destination/source kind combinations: the destination kind decides the check (a `string` source keeps T4's code-point-boundary rule, a `bytes` source is validated as strict UTF-8, a `bytes` destination copies raw), encoded in the `SUBSTR` `b` field as the source kind with no new opcode. `stdlib` gains `utf8_decode_into` (T3, checked bytes→string), `utf8_len`, `utf8_decode` and `utf8_valid`. The `stdlib.substr_into` move is withdrawn: the destination capacity must be a call-site immediate, and without generics a library helper could only serve one capacity (recorded in `OPEN-QUESTIONS.md`). |
+| 2026-11-15 | `syslib.cpu_id() -> uint` added (builtin 10): the APIC id of the executing core, the proof hook for per-core scheduling. |

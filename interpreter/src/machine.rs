@@ -77,6 +77,15 @@ pub trait Host {
     /// The default is a no-op; a test host overrides it to record writes.
     fn port_out8(&mut self, _port: u16, _value: u8) {}
 
+    /// The APIC id of the core executing this call (`syslib.cpu_id`).
+    ///
+    /// The default is 0 so a host mock or a single-core test sees a stable
+    /// value. On the kernel this is the identity software may observe; a task
+    /// is migratable, so the value may differ between two calls (ADR 0011).
+    fn cpu_id(&mut self) -> u64 {
+        0
+    }
+
     /// Requests a new application instance (`core.spawn`).
     ///
     /// `path` and `args` are the bytes of the two `string` buffers. `diag` is a
@@ -1041,6 +1050,10 @@ impl Machine {
                             host.port_out8(port as u16, value as u8);
                             self.push(stack, 0)?;
                         }
+                    }
+                    builtin::CPU_ID => {
+                        let id = host.cpu_id();
+                        self.push(stack, id)?;
                     }
                     _ => return Err(FaultCode::IllegalOperation),
                 }

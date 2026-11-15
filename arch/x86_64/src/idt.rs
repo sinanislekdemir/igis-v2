@@ -2,7 +2,7 @@
 //! `interrupts.s`; this module installs gates and describes the frame.
 
 use core::arch::asm;
-use core::ptr::addr_of_mut;
+use core::ptr::{addr_of, addr_of_mut};
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -110,6 +110,7 @@ extern "C" {
     fn isr_31();
 
     fn irq_timer();
+    fn irq_wake();
     fn irq_spurious();
 }
 
@@ -121,7 +122,8 @@ static STUBS: [unsafe extern "C" fn(); 32] = [
 
 static mut IDT: [Entry; 256] = [Entry::missing(); 256];
 
-/// Install the exception gates, the double-fault IST gate and the timer gates.
+/// Install the exception gates, the IST gates and the device gates, then load
+/// the table on the calling core.
 pub fn init(code_selector: u16) {
     // SAFETY: called once during boot with interrupts disabled; the only
     // outstanding writes are to IDT, which nothing else reads yet.
@@ -142,18 +144,32 @@ pub fn init(code_selector: u16) {
         (*idt)[14] = Entry::handler(page_fault as u64, code_selector, 2);
 
         let timer_isr: unsafe extern "C" fn() = irq_timer;
+        let wake_isr: unsafe extern "C" fn() = irq_wake;
         let spurious_isr: unsafe extern "C" fn() = irq_spurious;
         (*idt)[crate::apic::TIMER_VECTOR as usize] =
             Entry::handler(timer_isr as u64, code_selector, 0);
+        (*idt)[crate::apic::WAKE_VECTOR as usize] =
+            Entry::handler(wake_isr as u64, code_selector, 0);
         (*idt)[crate::apic::SPURIOUS_VECTOR as usize] =
             Entry::handler(spurious_isr as u64, code_selector, 0);
-
-        let pointer = DescriptorPointer {
-            limit: (core::mem::size_of::<[Entry; 256]>() - 1) as u16,
-            base: idt as u64,
-        };
-        asm!("lidt [{}]", in(reg) &pointer, options(readonly, nostack, preserves_flags));
     }
+    // SAFETY: the table was just filled; interrupts are disabled on the boot
+    // core until the timer is started.
+    unsafe { load() };
+}
+
+/// Loads the shared IDT on the calling core.
+///
+/// # Safety
+/// [`init`] must have run on the boot core (the table is written once), and
+/// interrupts must be disabled while this core has no table loaded.
+pub unsafe fn load() {
+    let idt = addr_of!(IDT);
+    let pointer = DescriptorPointer {
+        limit: (core::mem::size_of::<[Entry; 256]>() - 1) as u16,
+        base: idt as u64,
+    };
+    asm!("lidt [{}]", in(reg) &pointer, options(readonly, nostack, preserves_flags));
 }
 
 pub fn name(vector: usize) -> &'static str {

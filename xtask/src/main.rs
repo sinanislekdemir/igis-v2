@@ -26,11 +26,11 @@ fn main() -> ExitCode {
     match command {
         "build" => build(),
         "image" => image(),
-        "run" => run(args.iter().any(|arg| arg == "--headless")),
+        "run" => run(&args[1..]),
         "clean" => clean(),
         other => {
             eprintln!("unknown command: {other}");
-            eprintln!("usage: cargo xtask <build|image|run [--headless]|clean>");
+            eprintln!("usage: cargo xtask <build|image|run [--headless] [--cores N]|clean>");
             ExitCode::FAILURE
         }
     }
@@ -191,9 +191,23 @@ fn stage_files(source: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn run(headless: bool) -> ExitCode {
+fn run(args: &[String]) -> ExitCode {
     if image() == ExitCode::FAILURE {
         return ExitCode::FAILURE;
+    }
+
+    let headless = args.iter().any(|arg| arg == "--headless");
+    // Guest cores; the kernel brings up at most `MAX_CORES`. `-smp 1` is the
+    // single-core path, `-smp 2` proves absent APIC ids are tolerated.
+    let mut cores = 4u32;
+    if let Some(position) = args.iter().position(|arg| arg == "--cores") {
+        match args.get(position + 1).and_then(|value| value.parse::<u32>().ok()) {
+            Some(value) if value >= 1 => cores = value,
+            _ => {
+                eprintln!("--cores needs a number of at least 1");
+                return ExitCode::FAILURE;
+            }
+        }
     }
 
     let iso = root().join("build").join("igis.iso");
@@ -204,6 +218,8 @@ fn run(headless: bool) -> ExitCode {
         .arg(&iso)
         .arg("-m")
         .arg("256M")
+        .arg("-smp")
+        .arg(cores.to_string())
         .arg("-serial")
         .arg("stdio")
         .arg("-monitor")

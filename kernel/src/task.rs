@@ -16,7 +16,7 @@
 //! record can be executed by any core (spec 0004, C8). Region allocation is the
 //! only dynamic step and it happens before the task enters the set.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use abi::Status;
 use interpreter::Machine;
@@ -182,17 +182,44 @@ impl Task {
         Ok(task)
     }
 
-    /// Frees every region (Sch10). Called once, when the task terminates or
-    /// cannot be enqueued.
+    /// Frees every region (Sch10) and releases the slot. Called once, when the
+    /// task terminates or cannot be enqueued.
     pub fn reclaim(self) {
         self.regions.code.free();
         self.regions.state.free();
         self.regions.stack.free();
+        if let Some(slot) = SLOT_ID.get(self.slot) {
+            // The slot id is cleared only after the regions are back with the
+            // allocator, so a slot is never reused while its task still owns
+            // memory. A stale kill request must not reach the next tenant.
+            if let Some(kill) = KILL_FLAGS.get(self.slot) {
+                kill.store(false, Ordering::Release);
+            }
+            slot.store(0, Ordering::Release);
+        }
     }
 }
 
 /// The global runnable set. One slot per possible live task.
 static SLOTS: [SpinLock<Option<Task>>; MAX_TASKS] = [const { SpinLock::new(None) }; MAX_TASKS];
+
+/// The task id assigned to each slot, or 0 when the slot is free.
+///
+/// A slot is reserved for one task from [`spawn`] until [`Task::reclaim`]. The
+/// value moves out of the slot while the task runs, so the slot itself is empty
+/// then; without this reservation a concurrent `spawn` on another core could
+/// hand that slot to a child, and the release would overwrite the child. The
+/// bookkeeping also makes a *running* task visible to [`is_live`], which
+/// `core.wait` needs (a running child is alive).
+static SLOT_ID: [AtomicU64; MAX_TASKS] = [const { AtomicU64::new(0) }; MAX_TASKS];
+
+/// Pending `core.kill` requests, one per slot.
+///
+/// A kill for a task that is *running* on another core cannot reach the task
+/// value (it lives in that core's registers and stack), so the request parks
+/// here and the owning core terminates the task at its next quantum boundary
+/// (Sch8's safe-point rule, with the boundary as the safe point).
+static KILL_FLAGS: [AtomicBool; MAX_TASKS] = [const { AtomicBool::new(false) }; MAX_TASKS];
 
 /// Enqueues `task` in the first free slot (Sch2).
 ///
@@ -203,16 +230,39 @@ pub fn spawn(task: Task) -> Result<(), Status> {
     let mut task = task;
     task.state = TaskState::Runnable;
     task.waiting = None;
+    let id = task.id;
     for (index, slot) in SLOTS.iter().enumerate() {
-        let mut guard = slot.lock();
-        if guard.is_none() {
-            task.slot = index;
-            *guard = Some(task);
-            return Ok(());
+        // Reserve the slot for this task first; a slot whose task is running
+        // elsewhere is not empty but is still reserved, so the CAS fails.
+        if SLOT_ID[index]
+            .compare_exchange(0, id, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            continue;
         }
+        task.slot = index;
+        let mut guard = slot.lock();
+        *guard = Some(task);
+        drop(guard);
+        // New work in the shared set: wake one idle core so a `-smp N` run
+        // spreads the task instead of leaving it to the enqueuing core.
+        crate::smp::kick_one();
+        return Ok(());
     }
     task.reclaim();
     Err(Status::Full)
+}
+
+/// True when at least one slot holds a runnable task.
+///
+/// The scheduler's idle decision needs this: with no runnable task, no live
+/// blocked task and no pending request, no core has work.
+pub fn has_runnable() -> bool {
+    SLOTS.iter().any(|slot| {
+        slot.lock()
+            .as_ref()
+            .is_some_and(|task| task.state == TaskState::Runnable)
+    })
 }
 
 /// Claims one runnable task, or `None` when no slot is runnable.
@@ -259,53 +309,83 @@ pub fn wake_console() {
 }
 
 fn wake_matching(matches: impl Fn(WaitFor) -> bool) {
+    let mut woken = false;
     for slot in SLOTS.iter() {
         let mut guard = slot.lock();
         if let Some(task) = guard.as_mut() {
             if task.state == TaskState::Blocked && task.waiting.is_some_and(|wait| matches(wait)) {
                 task.waiting = None;
                 task.state = TaskState::Runnable;
+                woken = true;
             }
         }
+    }
+    if woken {
+        // A wake on this core must not depend on another idle core noticing:
+        // kick one so the woken task can be claimed wherever it is cheapest.
+        crate::smp::kick_one();
     }
 }
 
 /// Requests termination of `id` at its next safe point (`core.kill`).
 ///
 /// A blocked task is made runnable as well, so the request cannot sit behind a
-/// wait that will never complete. The task is not reclaimed here; the
-/// scheduler sees the flag at the next quantum boundary.
+/// wait that will never complete. A task another core has claimed cannot be
+/// reached (its value is not in the table), so the request is recorded in
+/// [`KILL_FLAGS`] and the owning core terminates it at its next quantum
+/// boundary. The task is not reclaimed here.
 pub fn request_kill(id: u64) -> Status {
-    for slot in SLOTS.iter() {
-        let mut guard = slot.lock();
-        if let Some(task) = guard.as_mut() {
-            if task.id == id {
-                task.kill_requested = true;
-                task.machine.request_yield();
-                if task.state == TaskState::Blocked {
-                    task.waiting = None;
-                    task.state = TaskState::Runnable;
-                }
-                return Status::Ok;
-            }
+    for (index, slot) in SLOTS.iter().enumerate() {
+        if SLOT_ID[index].load(Ordering::Acquire) != id {
+            continue;
         }
+        // Recorded for a task that is running elsewhere; the scheduler checks
+        // it after every quantum.
+        KILL_FLAGS[index].store(true, Ordering::SeqCst);
+        let mut guard = slot.lock();
+        let Some(task) = guard.as_mut() else {
+            // Claimed by another core; the flag above is the whole request.
+            return Status::Ok;
+        };
+        task.kill_requested = true;
+        task.machine.request_yield();
+        if task.state == TaskState::Blocked {
+            task.waiting = None;
+            task.state = TaskState::Runnable;
+            drop(guard);
+            crate::smp::kick_one();
+        }
+        return Status::Ok;
     }
     Status::NotFound
 }
 
-/// True when `id` names a live task (runnable or blocked) in a slot.
+/// Takes a pending kill request for the task in `slot` (set by [`request_kill`]
+/// while the task was claimed by another core).
+pub fn take_kill(slot: usize) -> bool {
+    KILL_FLAGS
+        .get(slot)
+        .is_some_and(|flag| flag.swap(false, Ordering::SeqCst))
+}
+
+/// True when `id` names a live task (runnable, blocked or running) in a
+/// reserved slot.
 ///
 /// A `spawn` request reserves its id before the task exists; the request
 /// queue is the other half of "live" and is checked by the REPL service.
 pub fn is_live(id: u64) -> bool {
-    SLOTS
-        .iter()
-        .any(|slot| slot.lock().as_ref().is_some_and(|task| task.id == id))
+    id != 0
+        && SLOT_ID
+            .iter()
+            .any(|slot| slot.load(Ordering::Acquire) == id)
 }
 
-/// Number of live tasks (runnable or blocked).
+/// Number of live tasks (runnable, blocked or running).
 pub fn live_count() -> usize {
-    SLOTS.iter().filter(|slot| slot.lock().is_some()).count()
+    SLOT_ID
+        .iter()
+        .filter(|slot| slot.load(Ordering::Acquire) != 0)
+        .count()
 }
 
 /// Releases a claimed task back into its recorded slot (Sch7).
@@ -314,9 +394,12 @@ pub fn release(task: Task) {
     task.state = TaskState::Runnable;
     task.waiting = None;
     put(task);
+    // The released task may be claimed by any core; tell an idle one so work
+    // migrates instead of piling up behind the core that just released it.
+    crate::smp::kick_one();
 }
 
-/// Places a claimed task value into its recorded slot.
+/// Places a claimed task value into its reserved slot.
 fn put(task: Task) {
     let index = task.slot;
     let Some(slot) = SLOTS.get(index) else {

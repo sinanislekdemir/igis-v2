@@ -5132,6 +5132,22 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             // access"). `Port` is staged as a plain `uint` (Q45); the namespace
             // is still separate from `core`, so a hardware access stays
             // visible as such. MMIO and DMA are not implemented.
+            //
+            // `syslib.cpu_id()` reports the APIC id of the core that executes
+            // the call. A task is migratable, so this is "where am I now", not
+            // an affinity (ADR 0011).
+            "syslib.cpu_id" => {
+                if !args.is_empty() {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`syslib.cpu_id` expects 0 arguments, got {}", args.len()),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::CPU_ID)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Uint)))
+            }
             "syslib.port_in8" => {
                 if args.len() != 1 {
                     return Err(self.err(

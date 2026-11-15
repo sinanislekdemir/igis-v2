@@ -5,7 +5,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0001, 0002, 0003, 0004, 0006, 0011, 0012, 0013, 0014, 0015, 0016, 0018
-- **Updated:** 2026-11-13
+- **Updated:** 2026-11-15
 
 ## Context
 
@@ -144,6 +144,27 @@ The model is designed for N cores and boots with one. Within the first milestone
 additional cores are brought up through the APIC path and join the same global runnable
 set. The claim protocol is identical on one core and on many; a single-core run is the
 degenerate case, not a different design.
+
+`MAX_CORES` is one constant (8): core index 0 is the boot core, APs take `1..MAX_CORES`.
+The index is internal; the **APIC id** is the identity software sees (`syslib.cpu_id`).
+
+Discovery is by attempt, with no ACPI/MADT parsing. After the boot core has its APIC and
+clock, `smp::start()` copies the trampoline blob to the fixed page `0x8000` (so the SIPI
+vector is 8) beside a parameter page at `0x9000` (PML4 physical address, higher-half entry
+point, per-core stack tops, an atomic next-index counter). It sends INIT to APIC ids
+`1..MAX_CORES`, waits 10 ms, sends two SIPIs ~200 µs apart and then waits a bounded 100 ms
+for each to report. An id that never reports is simply not online: `-smp 1` boots with no
+APs and `-smp 2` boots with one, without hanging.
+
+The trampoline runs 16-bit real mode → 32-bit protected mode → long mode with the shared
+PML4 and a flat 64-bit GDT, claims a core index with `lock xadd`, loads that core's stack
+and `call`s the kernel entry. Its GDT keeps 64-bit code at selector `0x08` so the AP is
+already on the kernel's code selector when the kernel GDT is loaded.
+
+Per-core state is static: one GDT holds one TSS per core (each with its own kernel `RSP0`,
+double-fault IST and page-fault IST stacks), one 64 KiB kernel stack per AP in `.bss`, and
+the boot core keeps its guarded 256 KiB stack. Every core loads the shared IDT; only the
+boot core programs the timer, and the clock stays one global counter.
 
 ## Memory model
 
@@ -380,7 +401,8 @@ R7).
    the console is the only interface.
 4. Platform discovery: memory map, ACPI, APIC, timers, keyboard.
 5. Interpreter loop on the boot core; APs are brought up with INIT-SIPI-SIPI through a
-   sub-1 MiB trampoline within the milestone.
+   sub-1 MiB trampoline within the milestone (see "SMP": `MAX_CORES` 8, trampoline at
+   `0x8000`, parameter page at `0x9000`, per-core TSS/IST/stacks, bounded discovery).
 6. Loader registers the ext2 provider; the REPL service compiles `shell` from the image
    root and starts it as a task on the boot core. The shell provides the prompt and
    requests further runs through the spawn queue.
@@ -470,10 +492,10 @@ task; after that, shutdown.
 | # | Question | Blocking what |
 |---|----------|---------------|
 | 1 | Quantum size and total budget value | Tuning, not structure; both are compile-time constants. |
-| 2 | Global run queue vs per-core deques with stealing | Performance only; claim semantics are unchanged. |
+| 2 | ~~Global run queue vs per-core deques with stealing~~ | **Resolved** — one global table of `MAX_TASKS` slots, each under a spin lock; the atomic take is the claim. Per-core deques are a performance option only. |
 | 3 | Stream endpoint naming and pairing strictness | `0006-streams.md`; first choice is name-based pairing by the loader. |
 | 4 | Console input semantics: byte stream, line buffering, or key events | `0005-host-interface.md`. |
-| 5 | AP bring-up details: trampoline vs INIT-SIPI, per-core stacks | `arch/x86_64`, second half of the first milestone. |
+| 5 | ~~AP bring-up details: trampoline vs INIT-SIPI, per-core stacks~~ | **Resolved** — INIT-SIPI-SIPI through the `0x8000` trampoline with a `0x9000` parameter page, observation by attempt, `MAX_CORES` 8, per-core TSS/IST/stacks (see "SMP"). |
 | 6 | Debug/introspection surface (task listing, counters, trace) | Deferred; not part of the first host interface. |
 | 7 | ~~Whether to reserve one core for the REPL/system when realtime tasks are admitted~~ | **Resolved** — no reservation; realtime may occupy every core (ADR 0016 addendum). |
 | 8 | ~~Shell boot fallback: drop to a built-in prompt, or boot without a UI~~ | **Resolved** — try `shell`, then `entrypoint`; otherwise `no entry` and halt (ADR 0017 addendum). |
@@ -493,3 +515,4 @@ task; after that, shutdown.
 | 2026-11-13 | Loader and boot fixed: read-only ext2 subset (1/4 KiB blocks, double indirect, regular root files, validated metadata); request paths validated as relative with no `..`; the multiboot2 framebuffer tag is mandatory; APs come up through a sub-1 MiB trampoline. |
 | 2026-11-13 | The interpreter layer is split into a `compiler` and an `interpreter` crate over a shared `abi` (spec 0008). |
 | 2026-11-13 | Delivery fixed as source-only: the image never contains bytecode, and the manifest is a runtime value (ADR 0019). |
+| 2026-11-15 | APs are real: `MAX_CORES` 8, INIT-SIPI-SIPI through the `0x8000` trampoline, a `0x9000` parameter page, per-core TSS/IST/stacks, observation by attempt with a bounded wait, one IPI vector shared by every core. |

@@ -42,6 +42,7 @@ use crate::ext2::Ext2;
 use crate::frame;
 use crate::println;
 use crate::repl;
+use crate::smp;
 use crate::sync::SpinLock;
 use crate::task::{self, Task, WaitFor};
 
@@ -65,15 +66,18 @@ pub const TOTAL_BUDGET_NS: u64 = 10_000_000_000;
 pub const TOTAL_BUDGET_STEPS: u64 = 200_000_000;
 
 /// Verifier scratch: one bit per 4-byte instruction word. Shared by the loader
-/// (initial validation) and the loop (re-parse per quantum). A lock is enough
-/// for one core; SMP needs per-core scratch (Sch6).
+/// (initial validation) and the loop (re-parse per quantum). One buffer per
+/// core: the interpreter must have no global mutable state (Sch6), so two cores
+/// parsing at the same time each use their own scratch and never wait on each
+/// other.
 const VERIFY_BYTES: usize = compiler::MAX_CODE_BYTES / 4 / 8;
-static VERIFY: SpinLock<[u8; VERIFY_BYTES]> = SpinLock::new([0; VERIFY_BYTES]);
+static VERIFY: [SpinLock<[u8; VERIFY_BYTES]>; smp::MAX_CORES] =
+    [const { SpinLock::new([0; VERIFY_BYTES]) }; smp::MAX_CORES];
 
-// Loop statistics; the summary prints them when the system goes idle.
-static CLAIMS: AtomicU64 = AtomicU64::new(0);
-static YIELDS: AtomicU64 = AtomicU64::new(0);
-static EXITS: AtomicU64 = AtomicU64::new(0);
+// Per-core loop statistics; the boot core sums them in the final summary.
+static CLAIMS: [AtomicU64; smp::MAX_CORES] = [const { AtomicU64::new(0) }; smp::MAX_CORES];
+static YIELDS: [AtomicU64; smp::MAX_CORES] = [const { AtomicU64::new(0) }; smp::MAX_CORES];
+static EXITS: [AtomicU64; smp::MAX_CORES] = [const { AtomicU64::new(0) }; smp::MAX_CORES];
 
 /// The kernel's implementation of the interpreter host interface (spec 0005).
 ///
@@ -123,6 +127,13 @@ impl Host for KernelHost<'_> {
         unsafe { arch_x86_64::port::outb(port, value) }
     }
 
+    // The core the calling task is running on right now, as an APIC id
+    // (`syslib.cpu_id`). A task is migratable, so this is the proof hook for
+    // distribution, not an affinity (ADR 0011).
+    fn cpu_id(&mut self) -> u64 {
+        u64::from(crate::smp::apic_id())
+    }
+
     fn spawn(&mut self, path: &[u8], args: &[u8], diag: &mut [u8]) -> Result<u64, Status> {
         repl::request_spawn(self.image, self.current, path, args, diag)
     }
@@ -145,6 +156,18 @@ impl Host for KernelHost<'_> {
         }
         if task::is_live(id) || repl::is_pending(id) {
             return WaitOutcome::Blocked;
+        }
+        // The child may have terminated between the two checks above. The exit
+        // record is written before the slot is released, so a second look
+        // finds it when the child is really gone.
+        if let Some((reason, diag)) = repl::take_exit(id) {
+            self.exit_diag_id = id;
+            self.exit_diag_ready = false;
+            if let Some(diag) = diag {
+                self.exit_diag = diag;
+                self.exit_diag_ready = true;
+            }
+            return WaitOutcome::Exited(reason);
         }
         WaitOutcome::Status(Status::NotFound)
     }
@@ -185,41 +208,86 @@ impl Host for KernelHost<'_> {
 /// the duration of the parse, and the returned [`Program`] borrows `code`, not
 /// the scratch.
 pub fn parse_program(code: &[u8]) -> Result<Program<'_>, Diagnostic> {
-    let mut verify = VERIFY.lock();
+    parse_program_on(smp::core_index(), code)
+}
+
+/// As [`parse_program`], on one core's scratch buffer.
+fn parse_program_on(core: usize, code: &[u8]) -> Result<Program<'_>, Diagnostic> {
+    let mut verify = VERIFY[core].lock();
     Program::parse(code, &mut verify[..])
 }
 
-/// The scheduler loop. Never returns.
+/// The ext2 mount the REPL service compiles from, published before the APs
+/// start (every core's loop needs it).
+static IMAGE: SpinLock<Option<&'static Ext2<'static>>> = SpinLock::new(None);
+
+/// Publishes the mount for the AP loops. Called once on the boot core, before
+/// the first SIPI.
+pub fn set_image(image: &Ext2<'_>) {
+    // SAFETY: the mount borrows the GRUB module's bytes, which the bootloader
+    // owns for the lifetime of the system; nothing unmaps or frees them (see
+    // `module::bytes`). Extending the borrow to 'static is what lets the AP
+    // loops share the read-only mount without an allocator.
+    let image: &'static Ext2<'static> = unsafe { core::mem::transmute(image) };
+    *IMAGE.lock() = Some(image);
+}
+
+/// The published mount, for a core that did not receive it as an argument.
+fn image() -> &'static Ext2<'static> {
+    match *IMAGE.lock() {
+        Some(image) => image,
+        None => {
+            println!("sched: no image published; this core halts");
+            arch_x86_64::halt();
+        }
+    }
+}
+
+/// The boot core's scheduler loop. Never returns.
 ///
-/// `image` is the read-only ext2 mount the service compiles requests from.
 /// The loop ends when no task is live and no request is pending: with no
 /// console input there is no other source of work, so it prints the summary and
 /// halts. A blocked task keeps the system alive (it will be woken by a child
 /// termination or a finished console line), so the check is "no live task", not
 /// "boot task finished".
 pub fn run_forever(image: &Ext2<'_>) -> ! {
+    loop_body(smp::core_index(), image)
+}
+
+/// An AP's scheduler loop: the same claim → quantum → release cycle over the
+/// same global runnable set (Sch1–Sch3). Any core may claim any task.
+pub fn run_secondary(core: usize) -> ! {
+    loop_body(core, image())
+}
+
+fn loop_body(core: usize, image: &Ext2<'_>) -> ! {
     loop {
+        // The service opportunity runs before every claim: at most one
+        // pending request is compiled and enqueued, on whichever core got
+        // here first (spec 0007, "Services and task creation").
         service(image);
 
+        // The atomic take under the slot lock is the claim (Sch2, Sch3).
         match task::claim() {
             Some(mut task) => {
                 let started = clock::now_ns();
-                let outcome = run_quantum(&mut task, image);
+                let outcome = run_quantum(core, &mut task, image);
                 let elapsed = clock::now_ns().saturating_sub(started);
 
                 task.budget_ns = task.budget_ns.saturating_add(elapsed);
                 task.claims += 1;
-                CLAIMS.fetch_add(1, Ordering::Relaxed);
+                CLAIMS[core].fetch_add(1, Ordering::Relaxed);
+
+                // A kill may have been requested while this core owned the
+                // task value (in the slot) or, for a running task, by another
+                // core through `KILL_FLAGS`. Both are honoured at this safe
+                // point (spec 0007, "Termination").
+                let killed = task.kill_requested || task::take_kill(task.slot);
 
                 match outcome {
-                    Outcome::Exited(reason) => terminate(task, reason),
+                    Outcome::Exited(reason) => terminate(core, task, reason),
+                    _ if killed => terminate(core, task, ExitReason::Killed),
                     Outcome::Blocked(kind) => {
-                        if task.kill_requested {
-                            // A kill that arrived while the task was blocked
-                            // must not be lost by blocking it again.
-                            terminate(task, ExitReason::Killed);
-                            continue;
-                        }
                         // The blocked task keeps its slot but stops being
                         // claimable. A child termination wakes `ChildExit`; a
                         // finished console line wakes `Console` (Sch9).
@@ -227,6 +295,12 @@ pub fn run_forever(image: &Ext2<'_>) -> ! {
                             WaitKind::ChildExit(child) => {
                                 println!("sched: task {} blocked on task {}", task.id, child);
                                 task::block(task, WaitFor::Child(child));
+                                // The child may have recorded its exit between
+                                // the failed `wait` and the block above; the
+                                // wake-up path then found nothing to wake.
+                                if repl::has_exit(child) {
+                                    task::wake(child);
+                                }
                             }
                             WaitKind::Console => {
                                 println!("sched: task {} blocked on console", task.id);
@@ -235,26 +309,22 @@ pub fn run_forever(image: &Ext2<'_>) -> ! {
                         }
                     }
                     Outcome::Yielded => {
-                        if task.kill_requested {
-                            // `core.kill` marks the task and requests a yield;
-                            // the next boundary is where it dies (spec 0007).
-                            terminate(task, ExitReason::Killed);
-                            continue;
-                        }
                         let expired = task.budget_ns >= TOTAL_BUDGET_NS
                             || task.machine.steps() >= TOTAL_BUDGET_STEPS;
                         if expired {
                             // Sch8: unconditional, no `fault` handler in ABI v1.
-                            terminate(task, ExitReason::Faulted(FaultCode::BudgetExceeded));
+                            terminate(core, task, ExitReason::Faulted(FaultCode::BudgetExceeded));
                         } else {
                             task.yields += 1;
-                            YIELDS.fetch_add(1, Ordering::Relaxed);
+                            YIELDS[core].fetch_add(1, Ordering::Relaxed);
+                            // Release re-enqueues; the release path kicks one
+                            // idle core so the task can migrate immediately.
                             task::release(task);
                         }
                     }
                 }
             }
-            None => idle(),
+            None => idle(core),
         }
     }
 }
@@ -265,7 +335,7 @@ pub fn run_forever(image: &Ext2<'_>) -> ! {
 /// bytes the task executes are the bytes the verifier checked, and nothing
 /// self-referential has to live inside the [`Task`]. Parsing is host-side work
 /// and is not charged to the quantum.
-fn run_quantum(task: &mut Task, image: &Ext2<'_>) -> Outcome {
+fn run_quantum(core: usize, task: &mut Task, image: &Ext2<'_>) -> Outcome {
     let Task {
         id,
         regions,
@@ -274,7 +344,7 @@ fn run_quantum(task: &mut Task, image: &Ext2<'_>) -> Outcome {
         ..
     } = task;
     let code = regions.code.as_slice();
-    let program = match parse_program(code) {
+    let program = match parse_program_on(core, code) {
         Ok(program) => program,
         Err(_) => {
             // The loader already validated this package; reaching here means
@@ -306,11 +376,11 @@ fn run_quantum(task: &mut Task, image: &Ext2<'_>) -> Outcome {
 /// is woken, in that order: the woken parent's retried `core.wait` must find
 /// the record. The regions are reclaimed here (Sch10); the id and reason
 /// survive in the ring until consumed or evicted.
-fn terminate(task: Task, reason: ExitReason) {
+fn terminate(core: usize, task: Task, reason: ExitReason) {
     let id = task.id;
     let claims = task.claims;
     let yields = task.yields;
-    EXITS.fetch_add(1, Ordering::Relaxed);
+    EXITS[core].fetch_add(1, Ordering::Relaxed);
 
     match reason {
         ExitReason::Ok => {
@@ -346,25 +416,103 @@ fn service(image: &Ext2<'_>) {
 }
 
 /// Nothing is runnable. Wait for the next interrupt and re-check, unless there
-/// is no live task and no pending request, in which case print the summary and
-/// halt.
+/// is no work anywhere, in which case the boot core prints the summary, stops
+/// the other cores and halts.
 ///
 /// A blocked task is live, so the system halts only after the last child and
 /// parent are gone — never while a wake-up is still possible.
-fn idle() {
-    if task::live_count() == 0 && !repl::has_pending() {
-        println!(
-            "scheduler: idle: {} claims, {} yields, {} exits, {} free frames",
-            CLAIMS.load(Ordering::Relaxed),
-            YIELDS.load(Ordering::Relaxed),
-            EXITS.load(Ordering::Relaxed),
-            frame::free_frames()
-        );
-        println!("halt: no console input");
-        arch_x86_64::halt();
+fn idle(core: usize) {
+    loop {
+        // Announce that this core is idle *before* checking for work: a
+        // producer publishes work first and then claims an idle core, so either
+        // the check below sees the work, or the producer's kick finds the flag
+        // and sends the IPI.
+        smp::mark_idle(core);
+
+        if smp::take_kick(core) {
+            smp::note_wake(core);
+        }
+
+        // Input is work, and this loop is the only place a halted core can
+        // notice it: the service opportunity that normally polls COM1/PS-2
+        // lives in the main loop, which an idle core does not reach. Polling
+        // here is what turns a typed line into a wake-up.
+        console::poll_input();
+
+        // Interrupts off for the check; `sti; hlt` is one atomic idle step, so
+        // an IPI that arrives after the check is pending when `hlt` runs.
+        arch_x86_64::disable_interrupts();
+        if smp::shutdown_requested() {
+            smp::note_stopped(core);
+            arch_x86_64::halt();
+        }
+        if task::has_runnable() || repl::has_pending() || console::has_line() {
+            arch_x86_64::enable_interrupts();
+            smp::mark_busy(core);
+            return;
+        }
+        if core == 0 {
+            try_shutdown();
+        }
+        arch_x86_64::wait_for_interrupt();
+    }
+}
+
+/// The system-wide idle decision: with no live task, no pending request and no
+/// console line anywhere, and every other core idle, the boot core stops them,
+/// prints the summary and halts.
+///
+/// Returns only when some work is still able to appear; once it decides to
+/// stop the machine it never returns.
+fn try_shutdown() {
+    if task::live_count() != 0 || repl::has_pending() || console::has_line() {
+        return;
+    }
+    if !smp::all_idle_except(0) {
+        return;
     }
 
-    // `sti; hlt`: the timer keeps the clock running, and a wake-up (a service
-    // request or a child termination) re-checks the set after this returns.
-    arch_x86_64::wait_for_interrupt();
+    // Waiting for the acknowledgements needs the clock, which advances in the
+    // boot core's timer interrupt; the idle loop called this with interrupts
+    // off.
+    arch_x86_64::enable_interrupts();
+    let (stopped, expected, acks) = smp::stop_all();
+    for (index, ack) in acks.iter().enumerate().take(smp::MAX_CORES) {
+        if index != 0 && smp::is_online(index) && !ack {
+            println!("smp: core {index} did not acknowledge the stop request");
+        }
+    }
+    println!("smp: {stopped} of {expected} APs stopped");
+
+    println!("scheduler: idle summary");
+    let (mut claims, mut yields, mut exits) = (0u64, 0u64, 0u64);
+    for index in 0..smp::MAX_CORES {
+        if !smp::is_online(index) {
+            continue;
+        }
+        let (c, y, e) = core_stats(index);
+        claims += c;
+        yields += y;
+        exits += e;
+        println!(
+            "  core {} (apic {}): {c} claims, {y} yields, {e} exits",
+            index,
+            smp::apic_id_of(index)
+        );
+    }
+    println!(
+        "  total: {claims} claims, {yields} yields, {exits} exits, {} free frames",
+        frame::free_frames()
+    );
+    println!("halt: no console input");
+    arch_x86_64::halt();
+}
+
+/// One core's loop counters.
+fn core_stats(index: usize) -> (u64, u64, u64) {
+    (
+        CLAIMS[index].load(Ordering::Relaxed),
+        YIELDS[index].load(Ordering::Relaxed),
+        EXITS[index].load(Ordering::Relaxed),
+    )
 }

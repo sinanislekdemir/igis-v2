@@ -11,6 +11,7 @@ mod mb2;
 mod module;
 mod repl;
 mod sched;
+mod smp;
 mod sync;
 mod task;
 
@@ -147,6 +148,10 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
     // SAFETY: the frames were just reserved, the guard is 4 KiB aligned and
     // below 4 GiB, and this runs before the boot stack is abandoned.
     let stack = unsafe { arch_x86_64::stack::install_guarded(guard) };
+    // The boot core's TSS should name its real kernel stack, not the static AP
+    // stack `gdt::init` put there (nothing runs at ring 3, but the field must
+    // describe reality).
+    gdt::set_kernel_stack(smp::core_index(), stack.top);
     println!(
         "stack: guard {:#x}, top {:#x}, {} KiB (higher-half alias: {})",
         stack.guard,
@@ -208,6 +213,14 @@ extern "C" fn kmain_on_stack(mb2_info: u64) -> ! {
                         Err(status) => println!("ext2: shell: {}", status.name()),
                     }
 
+                    // Publish the read-only mount for every core's scheduler
+                    // loop, then bring up the application processors: the boot
+                    // core's APIC, GDT/IDT and frame allocator are all ready and
+                    // the module memory is never unmapped. Absent ids simply do
+                    // not report.
+                    sched::set_image(&fs);
+                    smp::start();
+
                     // The REPL leaves the boot task in the runnable set; the
                     // scheduler loop owns it and the service queue from here.
                     let _boot_task = repl::boot(&fs);
@@ -233,6 +246,13 @@ extern "C" fn kmain_on_stack(mb2_info: u64) -> ! {
 pub extern "C" fn timer_tick() {
     apic::eoi();
     clock::advance_tick();
+}
+
+/// Called by the wake-IPI stub in `arch_x86_64`. The handler only acknowledges:
+/// the interrupted core re-checks the runnable set after `hlt` (spec 0007).
+#[no_mangle]
+pub extern "C" fn wake_ipi() {
+    apic::eoi();
 }
 
 /// Called by `arch_x86_64` for any architectural exception.

@@ -6,7 +6,7 @@
 - **Superseded by:** none
 - **ADRs:** 0003 (cooperative model, budget intent), 0006 (guard pages), 0011 (work
   stealing), 0016 (realtime class), 0018 (floating point)
-- **Updated:** 2026-11-13
+- **Updated:** 2026-11-15
 
 ## Context
 
@@ -305,10 +305,21 @@ There are no zombies. A terminated task leaves nothing behind.
 Each core has:
 
 - a kernel stack used by interrupt entry, `fault`/`exit` and the loop itself,
-  with a not-present guard frame below it (Q42; `arch/x86_64/src/stack.rs`),
+  with a not-present guard frame below it on the boot core (Q42;
+  `arch/x86_64/src/stack.rs`); an AP runs on a static 64 KiB `.bss` stack (guards
+  for AP stacks are future work),
 - a pointer to the currently claimed task (or none),
 - a quantum counter and the last budget check,
-- scratch space that must never hold application state across a release.
+- scratch space that must never hold application state across a release. The
+  verifier scratch buffer is one per core (`sched::VERIFY`), so two cores parse
+  at the same time without sharing a lock (Sch6),
+- its loop counters (claims, yields, exits), summed by the boot core in the
+  final summary.
+
+No lock is held across `Machine::run`. The only cross-core state is the runnable
+table (one spin lock per slot), the REPL request queue, the in-service request
+markers, the exit-reason ring, the console, the frame allocator and the per-core
+flags; each has its own lock or atomic and none nests.
 
 The SSE registers are not part of that scratch: they belong to the claimed task and are
 saved into its `fpu` region before the core looks for the next task.
@@ -317,19 +328,40 @@ There is no per-core ownership of any application region.
 
 ### SMP bring-up
 
-- The boot core initializes the GDT/IDT, paging, APIC and the scheduler, then enters the
-  loop.
-- APs are started with the standard INIT-SIPI-SIPI sequence through a real-mode trampoline
-  page placed in reserved memory below 1 MiB. The trampoline switches the AP to protected
-  mode, then to long mode with the shared page tables, and jumps into the kernel entry.
-- Per-core stacks and per-core state come from a fixed array sized by `MAX_CORES`, a
-  compile-time constant (16 in the first build). Nothing is allocated during bring-up.
-- The boot core waits for each AP with a bounded spin and a timeout. An AP that does not
-  arrive is logged as `IoError`; the boot core continues with fewer cores. The milestone is
-  not complete until bring-up works on the target.
-- All cores share the global runnable set and the same claim protocol.
-- AP bring-up is the second half of the first milestone; the single-core run is the same
-  code with one loop.
+- The boot core initializes the GDT/IDT, paging, APIC, frame allocator and the
+  scheduler, then enters the loop.
+- APs are started with the standard INIT-SIPI-SIPI sequence through a real-mode
+  trampoline page at physical `0x8000` (SIPI vector 8) beside a parameter page at
+  `0x9000`. The trampoline switches the AP to protected mode, then to long mode with the
+  shared PML4, and calls the kernel entry on that core's stack. Each AP claims a core
+  index from an atomic counter in the parameter page.
+- `MAX_CORES` is one constant, **8**. Core index 0 is the boot core; APs take
+  `1..MAX_CORES` as they come up. The index is internal; the APIC id is what software
+  sees (`syslib.cpu_id`). Per-core state and stacks come from fixed arrays; nothing is
+  allocated during bring-up.
+- Discovery is by attempt: the boot core sends INIT and two SIPIs to APIC ids
+  `1..MAX_CORES` (10 ms after INIT, ~200 µs between SIPIs) and waits a bounded 100 ms
+  for the online reports. An id that never reports is not online; `-smp 1` and `-smp 2`
+  boot cleanly and the milestone does not hang waiting for absent cores.
+- All cores share the global runnable set and the same claim protocol. The single-core
+  run is the same code with one loop (Sch11).
+
+### Idle, wake-up and shutdown
+
+- A core with nothing to run marks itself idle, polls console input once, checks the
+  runnable set and then executes one atomic `sti; hlt` step. Interrupts are disabled for
+  the check, so an IPI that arrives after it is pending when `hlt` executes and the core
+  wakes instead of sleeping. An idle core never spins.
+- A producer publishes work first and then claims an idle core: it clears that core's
+  idle flag, sets its `need_resched` flag and sends the wake IPI (vector `0x40`). The
+  handler only acknowledges with an EOI; the loop re-checks the runnable set after
+  `hlt` returns. Producers are `task::spawn`, `task::release`, `task::wake` and the REPL
+  enqueue.
+- With no live task, no pending/in-service request and no console line anywhere, and
+  every other online core idle, the boot core prints the summary, sets a shutdown flag,
+  broadcasts the IPI, waits bounded for each AP's acknowledgement and halts. Each AP
+  acknowledges from its idle loop and halts.
+
 
 ### Interrupts
 
@@ -385,12 +417,16 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | Parent terminates with live children | Children continue (ADR 0017 addendum 2) |
 | Compile fails in the REPL service | Request fails; `Faulted(IoError)` plus the diagnostic is recorded under the reserved id; a waiting parent wakes; no task created; `run` reports the diagnostic through `diag` |
 | Task blocks | Leaves the runnable set; no CPU consumed |
-| Wake with all cores halted | IPI to one core; `need_resched` set before the IPI |
+| Wake with all cores halted | IPI to one idle core; `need_resched` set before the IPI |
 | Task terminates while owning a stream endpoint | Endpoint closes; queued data discarded; peer sees `Closed` |
 | Two cores claim the same task | Must be impossible; a violation is a TCB defect (silent corruption) |
+| A claimed task's slot | Reserved by task id from `spawn` until `reclaim`, so a concurrent `spawn` cannot place a child where a running task will return |
+| `wait` on a child that is running, queued or being compiled | All three are "live", so the parent blocks and is woken by the exit record |
+| `kill` of a task another core has claimed | Recorded per slot; the owning core terminates it at its next quantum boundary |
 | Task never reaches a safe point | Core is stalled until the task reaches one; accepted liveness hole |
-| AP fails to start | Boot core logs and continues with fewer cores; the milestone is not complete until AP bring-up works |
-| Core idle | `hlt` until interrupt or IPI |
+| AP fails to start | Never reports; the boot core continues with fewer cores after the bounded wait |
+| Core idle | `sti; hlt` until an interrupt or IPI; no spinning |
+| No work anywhere | Boot core prints the summary, sets the stop flag, IPIs every online core, waits bounded for acknowledgements, halts |
 | Kernel panic on any core | Serial log, halt all cores (or reboot) |
 
 ## Open questions
@@ -398,7 +434,7 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | # | Question | Trigger / owner |
 |---|----------|-----------------|
 | 1 | ~~Quantum size (steps and time) and the total budget value~~ | **Resolved (provisional)** — 10 000 bytecodes per claim and a 10 s CPU budget with a 200 000 000-step cap; tune after measurement (see Quantum and Budget). |
-| 2 | Global queue vs per-core deques with stealing | Performance; claim semantics do not change. |
+| 2 | ~~Global queue vs per-core deques with stealing~~ | **Resolved** — one global table of slots with a per-slot lock; the atomic take is the claim. Per-core deques remain a performance option. |
 | 3 | Priority or deadline scheduling | Not planned; budgets are the only policy. |
 | 4 | ~~IPC mechanism: fixed-vector IPI vs APIC shorthand~~ | **Resolved** — one fixed vector (0x40), fixed delivery to a physical destination, all-excluding-self shorthand for any-core wakes. |
 | 5 | ~~Timer source: PIT, HPET or APIC timer~~ | **Resolved** — APIC timer for ticks, calibrated against the PIT/HPET at boot; one global nanosecond counter advanced by the boot core (see Time). |
@@ -424,3 +460,4 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 2026-11-13 | Spawn/wait implemented: a 1024-slot request queue serviced before every claim, a 64-entry exit ring, `Blocked(task exit)` with wake-on-termination, and `kill` for live tasks and queued requests. A blocked builtin returns without advancing `pc` or the operand stack, so the instruction is retried unchanged. |
 | 2026-11-13 | Console input implemented with a second blocking condition: the service opportunity polls COM1 and the PS/2 keyboard and wakes `Console` waiters when a finished line exists; staged line discipline in the kernel (spec 0005, Q44). |
 | 2026-11-14 | `core.run` implemented (spawn + wait); the exit ring also carries a 192-byte `Diagnostic` image for a failed request, so `run` reports a post-spawn compile error through `diag` while `wait` observes `Faulted(IoError)`. |
+| 2026-11-15 | Per-core schedulers: every online core runs the claim/quantum/release loop over the global set, per-core verifier scratch and loop counters, IPI wake for idle cores (`sti; hlt`, `need_resched` before the IPI), a boot-core shutdown that stops the APs and prints per-core totals, and a slot reservation plus an in-service marker so `wait` never races a spawn or a compile. |

@@ -125,7 +125,23 @@ constraints learned there.
   length and malformed class and `run utf8` runs in the kernel. The checked slice stays in
   `core` permanently: the destination capacity must be a call-site immediate, and without
   generics a `stdlib` helper could only serve one capacity (the `stdlib.substr_into` move
-  is withdrawn). The next pieces are APs, the realtime class and streams.
+  is withdrawn). Every online core now runs the scheduler: `smp::start()` brings the APs
+  up with INIT-SIPI-SIPI through a trampoline copied to physical `0x8000` beside a
+  parameter page at `0x9000`, one per-core TSS/IST set, one static 64 KiB kernel stack per
+  AP (the boot core keeps its guarded 256 KiB one), and a bounded 100 ms wait, so `-smp 1`
+  and `-smp 2` boot with fewer cores instead of hanging. Discovery is by attempt over APIC
+  ids `1..MAX_CORES` with `MAX_CORES` = 8; the core index is internal and the APIC id is
+  the identity software sees through `syslib.cpu_id()` (builtin 10). All cores run the
+  same claim → quantum → release loop over the global runnable set, with per-core verifier
+  scratch and per-core claim/yield/exit counters. An idle core does one `sti; hlt` step
+  after checking the set; producers (`task::spawn`, `release`, `wake`, the REPL enqueue)
+  set `need_resched` on one idle core and send the `0x40` IPI, whose handler only EOIs. A
+  claimed task's slot stays reserved by task id and a reserved request id stays live while
+  it compiles, so `core.wait` cannot race a spawn or a compile. The boot core's idle path
+  prints the per-core summary, sets a stop flag, IPIs the APs, waits bounded for their
+  acknowledgements and halts. `samples/apps/worker` and `cores` show six workers on
+  distinct APIC ids in a `-smp 4` run; `xtask run` passes `-smp 4` by default (`--cores N`).
+  The next pieces are the realtime class and streams.
 
 ## Ground rules
 
@@ -275,6 +291,10 @@ host tools are unaffected.
 | Rings: `ring[T, N]` is nominal in element and count, elements then `head`/`count`, `core.ring_push`/`pop`/`peek`/`full`/`empty` lowered by the compiler with no opcode; `Full`/`NotFound` leave the ring and out-parameter untouched | spec 0003, spec 0008 |
 | Maps: `map[K, V, N]` is nominal in key, value and count; `count` then `capacity` slots of state/hash/key/value; FNV-1a, linear probing, backward-shift deletion; `core.map_put`/`get`/`has`/`remove`/`count` are five `map_*` opcodes and `put` at `N` is `Full` | spec 0003, spec 0008 |
 | UTF-8: `core.substr_into` has four kind combinations and the destination kind decides (boundaries for `string`, strict validation for `bytes`→`string`, raw for a `bytes` destination); the source kind is the `SUBSTR` `b` field, no new opcode; the checked slice stays in `core` forever (destination capacity is a call-site immediate) | spec 0003, spec 0008 |
+| APs come up by attempt: INIT-SIPI-SIPI, trampoline at `0x8000` with a parameter page at `0x9000`, `MAX_CORES` = 8, per-core TSS/IST and 64 KiB stacks, bounded 100 ms wait; absent ids are not online | spec 0002 "SMP", spec 0007 |
+| Every online core runs the scheduler loop over the global set; an idle core does one `sti; hlt` step and producers set `need_resched` before the `0x40` IPI, whose handler only EOIs | spec 0007, ADR 0011 |
+| A claimed task's slot stays reserved by task id until reclaim; a request id stays live while it compiles; the boot core stops the APs and prints per-core totals | spec 0007 |
+| `syslib.cpu_id()` (builtin 10) reports the APIC id of the executing core; the core index is internal | spec 0003, spec 0008 |
 
 ## Open questions
 
@@ -332,3 +352,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-14 | Fixed-capacity rings: `ring[T, N]` (positive const N) in state, locals, records, sum payloads, arrays and `value`/`const`/`var` parameters; nominal in element and count; layout is the `N` elements at `align8(element size)` followed by `head: u64` and `count: u64`; whole-ring copies include the header. `core.ring_push`/`pop`/`peek`/`full`/`empty` are compiler-lowered over `ref_offset`/`load_ref`/`store_ref`/`copy_refs`/`ref_element`, `add_u`/`mod_u` and `eq`+`jz`, so the ABI v1 opcode table is unchanged. `push` on full returns `Full` and writes nothing; `pop`/`peek` on empty return `NotFound` and leave the out-parameter untouched; `push`/`pop` require a writable place, so `const` is rejected while a `value` copy is writable and private to the callee. The structural ring table is shared with `stdlib` (`drain_into` takes a `ring[int, 8]`); `samples/lang/ring.ig` covers FIFO order, peek, full/empty, wrap-around, whole copies and buffer/record/array/nested-ring elements. |
 | 2026-11-15 | Fixed-capacity maps: `map[K, V, N]` (`N` a positive const, `K` one of `int`, `string[M]`, `bytes[M]`) in state, locals, records, sum payloads, array and ring elements, and `value`/`const`/`var` parameters; nominal in `(K, V, N)`, no at-least-N, no comparison. Layout is `count: u64` then `capacity` (smallest power of two at least `2N`) slots of `state`/`hash`/key/value; the hash is FNV-1a over the eight little-endian bytes of an `int` key or the `[0..len)` bytes of a buffer key, probing is linear and deletion is backward-shift with no tombstones. `core.map_put`/`get`/`has`/`remove`/`count` are five new opcodes (`MAP_PUT` … `MAP_COUNT`, key and value kinds in the opcode word, `capacity`/`count`/`key_size`/`value_size` immediates), so the algorithm lives once in the interpreter; `put` at `N` entries returns `Full` and writes nothing, a missing key is `NotFound`/`false`, and `get` leaves its out-parameter untouched. One structural map table is shared with `stdlib` (`map_get_or` takes a `map[int, int, 8]`); `samples/lang/map.ig` covers collisions, backward shift, key 0, the empty buffer key, aggregate values, whole copies and the three parameter modes. |
 | 2026-11-15 | UTF-8: `core.substr_into` accepts all four destination/source kind combinations with the destination kind deciding (a `string` source keeps T4's boundary rule, a `bytes` source is validated as strict UTF-8, a `bytes` destination copies raw); the source kind is the `SUBSTR` `b` field, so no opcode was added and the ABI v1 table is unchanged. `stdlib` gains `utf8_decode_into` (T3), `utf8_len`, `utf8_decode` and `utf8_valid` as ordinary language code, `samples/lang/utf8.ig` covers 1-/2-/3-/4-byte code points and every malformed class, and `samples/apps/utf8` runs as `run utf8` in the shell. The `stdlib.substr_into` move is withdrawn: the destination capacity must be a call-site immediate and there are no generics. Also fixed a latent codegen bug where `dst := ""` left a destination reference on the operand stack. |
+| 2026-11-15 | SMP: `smp::start` brings the APs up by attempt (INIT-SIPI-SIPI through the `0x8000` trampoline and `0x9000` parameter page, `MAX_CORES` 8, per-core TSS/IST and 64 KiB stacks, bounded 100 ms), every online core runs the claim/quantum/release loop with per-core verifier scratch and counters, idle cores do one `sti; hlt` step woken by the `0x40` IPI, the boot core stops the APs and prints per-core totals, and `syslib.cpu_id()` (builtin 10) reports the APIC id. Fixed two SMP races: a claimed task's slot stays reserved by id, and a reserved request id stays live while it compiles. `samples/apps/worker` + `cores` prove distribution; `xtask run` defaults to `-smp 4` (`--cores N`). |

@@ -22,6 +22,8 @@
 //! Every buffer the queue, the compiler and the verifier need is static
 //! (`.bss`); no part of this path allocates (spec 0008, B11).
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use abi::layout;
 use abi::{
     ExitReason, FaultCode, ManifestHeader, Status, ABI_VERSION, MANIFEST_HEADER_SIZE,
@@ -153,6 +155,55 @@ impl Queue {
 
 static REQUESTS: SpinLock<Queue> = SpinLock::new(Queue::new());
 
+/// Reserved ids whose request is being compiled right now.
+///
+/// A request is popped from the queue before it is compiled, so between the
+/// pop and `task::spawn` its id is neither queued (`is_pending`) nor a task
+/// (`task::is_live`). A parent calling `core.wait` in that window used to see
+/// `NotFound`; the in-service table closes it. At most one request per core is
+/// being serviced, so `MAX_CORES` entries are enough.
+static IN_SERVICE: [AtomicU64; crate::smp::MAX_CORES] =
+    [const { AtomicU64::new(0) }; crate::smp::MAX_CORES];
+
+/// RAII marker for one in-service request.
+struct InService(usize);
+
+impl InService {
+    fn claim(id: u64) -> Self {
+        for (index, slot) in IN_SERVICE.iter().enumerate() {
+            if slot
+                .compare_exchange(0, id, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return InService(index);
+            }
+        }
+        // More cores servicing than `MAX_CORES` is impossible; keep the id
+        // visible anyway rather than losing the wait.
+        InService(usize::MAX)
+    }
+}
+
+impl Drop for InService {
+    fn drop(&mut self) {
+        if let Some(slot) = IN_SERVICE.get(self.0) {
+            slot.store(0, Ordering::Release);
+        }
+    }
+}
+
+fn in_service(id: u64) -> bool {
+    IN_SERVICE
+        .iter()
+        .any(|slot| slot.load(Ordering::Acquire) == id)
+}
+
+fn servicing_any() -> bool {
+    IN_SERVICE
+        .iter()
+        .any(|slot| slot.load(Ordering::Acquire) != 0)
+}
+
 /// Size of the `Diagnostic` record image carried by a failed request
 /// ([`layout::diagnostic::SIZE`] bytes).
 pub const DIAG_BYTES: usize = layout::diagnostic::SIZE as usize;
@@ -230,6 +281,10 @@ impl ExitRing {
             }
         }
         None
+    }
+
+    fn contains(&self, id: u64) -> bool {
+        self.entries.iter().any(|entry| entry.id == id)
     }
 }
 
@@ -354,6 +409,8 @@ pub fn request_spawn(
 
     layout::diagnostic::clear(diag);
     println!("repl: task {requester} requested `{path}` as task {id}");
+    // A queued request is work: wake one idle core so it services and runs it.
+    crate::smp::kick_one();
     Ok(id)
 }
 
@@ -363,6 +420,8 @@ pub fn service(image: &Ext2<'_>) {
     let Some(request) = request else {
         return;
     };
+    // The id stays visible to `core.wait` while the compile runs.
+    let _in_service = InService::claim(request.reserved_id);
 
     let name = match core::str::from_utf8(&request.path[..request.path_len as usize]) {
         Ok(name) => name,
@@ -420,9 +479,19 @@ pub fn take_exit(id: u64) -> Option<(ExitReason, Option<[u8; DIAG_BYTES]>)> {
     EXITS.lock().take(id)
 }
 
-/// True when `id` is reserved by a request that has not been serviced yet.
+/// True when an exit record for `id` is waiting, without consuming it.
+///
+/// The scheduler uses this after it puts a parent to sleep on `ChildExit`: a
+/// child may have terminated between the failed `wait` and the block, and the
+/// wake-up path would then have found nobody to wake.
+pub fn has_exit(id: u64) -> bool {
+    EXITS.lock().contains(id)
+}
+
+/// True when `id` is reserved by a request that has not been serviced yet, or
+/// is being compiled right now.
 pub fn is_pending(id: u64) -> bool {
-    REQUESTS.lock().contains(id)
+    REQUESTS.lock().contains(id) || in_service(id)
 }
 
 /// Cancels a queued request by reserved id (`core.kill` before it is serviced).
@@ -430,9 +499,9 @@ pub fn cancel_request(id: u64) -> bool {
     REQUESTS.lock().remove(id)
 }
 
-/// True when at least one request is waiting.
+/// True when at least one request is waiting or being compiled.
 pub fn has_pending() -> bool {
-    REQUESTS.lock().len != 0
+    REQUESTS.lock().len != 0 || servicing_any()
 }
 
 /// Reads, compiles, validates, places and enqueues one application under a

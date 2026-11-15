@@ -143,6 +143,7 @@ long_mode_high:
     jmp .Lhalt64
 
 .balign 4096
+.global pml4
 pml4:  .space 4096, 0
 pdpt0: .space 4096, 0
 pdpt1: .space 4096, 0

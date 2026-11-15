@@ -372,6 +372,10 @@ pub mod builtin {
     /// one byte and push `0`, or push `-4` (`Status::Invalid`) without writing
     /// when `value > 255`. The low 16 bits of the port number are used.
     pub const PORT_OUT8: u32 = 8;
+    /// `syslib.cpu_id()`: push the APIC id of the core executing the call as a
+    /// `uint`. This is the identity exposed to software (`0002` "SMP"), not a
+    /// task affinity: a task may be claimed by a different core next quantum.
+    pub const CPU_ID: u32 = 10;
 
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
@@ -385,6 +389,7 @@ pub mod builtin {
             LEN => Some((1, 1)),
             PORT_IN8 => Some((1, 1)),
             PORT_OUT8 => Some((2, 1)),
+            CPU_ID => Some((0, 1)),
             _ => None,
         }
     }
