@@ -457,6 +457,39 @@ pub mod builtin {
     /// operands and no result. It is a no-op for a normal (non-realtime) task,
     /// which keeps the normal total budget.
     pub const HEARTBEAT: u32 = 12;
+    /// `syslib.screen_width()`: push the shadow screen's width in pixels as a
+    /// `uint`, or `0` when graphics are disabled (spec 0009, G15).
+    pub const SCREEN_WIDTH: u32 = 13;
+    /// `syslib.screen_height()`: push the shadow screen's height in pixels as a
+    /// `uint`, or `0` when graphics are disabled.
+    pub const SCREEN_HEIGHT: u32 = 14;
+    /// `syslib.fill_rect(x, y, w, h, color) -> Status`: fill an extent of the
+    /// shadow. The rectangle is clipped to the clip region and the screen;
+    /// `w <= 0`, `h <= 0` or a colour above `0x00FF_FFFF` pushes
+    /// `Status::Invalid` (`4`) and draws nothing (spec 0009, G8/G9).
+    pub const FILL_RECT: u32 = 15;
+    /// `syslib.fill_dither(x, y, w, h, color) -> Status`: write `color` to every
+    /// pixel `(X, Y)` of the extent with `(X + Y)` even, leaving the others
+    /// untouched. Same clipping and error rules as `FILL_RECT` (G11).
+    pub const FILL_DITHER: u32 = 16;
+    /// `syslib.draw_rect(x, y, w, h, color) -> Status`: a one-pixel outline
+    /// inside the extent, interior untouched. Same error rules (G12).
+    pub const DRAW_RECT: u32 = 17;
+    /// `syslib.draw_text(x, y, text, color) -> Status`: pop a colour, a
+    /// `string` reference, `y` and `x`; draw 8×8 console-font glyphs with a
+    /// transparent background and no newline handling. Bytes outside
+    /// `0x00..=0x7F` are blank cells. Clipped (G13).
+    pub const DRAW_TEXT: u32 = 18;
+    /// `syslib.get_pixel(x, y) -> uint`: push the shadow pixel as
+    /// `0x00RRGGBB`, or `0` outside the screen. No error path (G9).
+    pub const GET_PIXEL: u32 = 19;
+    /// `syslib.present(x, y, w, h) -> Status`: copy the rectangle from the
+    /// shadow to the framebuffer row by row, using the pitch, clipped.
+    /// `w <= 0` or `h <= 0` pushes `Status::Invalid` (G5).
+    pub const PRESENT: u32 = 20;
+    /// `syslib.clear(color) -> Status`: fill the whole screen in the shadow and
+    /// present it. An over-wide colour pushes `Status::Invalid` (G6).
+    pub const CLEAR: u32 = 21;
 
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
@@ -473,6 +506,15 @@ pub mod builtin {
             CPU_ID => Some((0, 1)),
             REALTIME_ON => Some((0, 1)),
             HEARTBEAT => Some((0, 0)),
+            SCREEN_WIDTH => Some((0, 1)),
+            SCREEN_HEIGHT => Some((0, 1)),
+            FILL_RECT => Some((5, 1)),
+            FILL_DITHER => Some((5, 1)),
+            DRAW_RECT => Some((5, 1)),
+            DRAW_TEXT => Some((4, 1)),
+            GET_PIXEL => Some((2, 1)),
+            PRESENT => Some((4, 1)),
+            CLEAR => Some((1, 1)),
             _ => None,
         }
     }

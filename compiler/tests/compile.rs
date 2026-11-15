@@ -5041,3 +5041,152 @@ end;
         );
     }
 }
+
+// ---- syslib graphics (spec 0009) ------------------------------------------
+
+#[test]
+fn syslib_graphics_surface_is_accepted_and_emits_its_builtins() {
+    use abi::opcodes::{self, builtin};
+
+    let source = br#"
+unit t;
+
+uses core, syslib;
+
+var
+  status: Status;
+  pixel: uint;
+  width: uint;
+  height: uint;
+
+procedure main(args: const string[1024]);
+begin
+  width := syslib.screen_width();
+  height := syslib.screen_height();
+  status := syslib.fill_rect(1, 2, 3, 4, uint(0x123456));
+  status := syslib.fill_dither(1, 2, 3, 4, uint(0));
+  status := syslib.draw_rect(1, 2, 3, 4, uint(0));
+  status := syslib.draw_text(1, 2, "Hi", uint(0));
+  pixel := syslib.get_pixel(1, 2);
+  status := syslib.present(0, 0, 10, 10);
+  status := syslib.clear(uint(0));
+end;
+"#;
+    let package = compile(source, "t.ig").expect("the graphics surface compiles");
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+    let mut seen = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        if op == opcodes::BUILTIN {
+            seen.push(u32::from_le_bytes(
+                instructions[pc + 4..pc + 8].try_into().unwrap(),
+            ));
+        }
+        pc += words * 4;
+    }
+    assert_eq!(
+        seen,
+        vec![
+            builtin::SCREEN_WIDTH,
+            builtin::SCREEN_HEIGHT,
+            builtin::FILL_RECT,
+            builtin::FILL_DITHER,
+            builtin::DRAW_RECT,
+            builtin::DRAW_TEXT,
+            builtin::GET_PIXEL,
+            builtin::PRESENT,
+            builtin::CLEAR,
+        ]
+    );
+}
+
+#[test]
+fn syslib_graphics_argument_types_and_arity_are_checked() {
+    let cases = [
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.fill_rect(1, 2, 3, uint(0));
+end;
+"#,
+            "`syslib.fill_rect` expects 5 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.fill_rect(uint(1), 2, 3, 4, uint(0));
+end;
+"#,
+            "`syslib.fill_rect` expects an `int` x",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.draw_rect(1, 2, 3, 4, 0);
+end;
+"#,
+            "`syslib.draw_rect` expects a `uint` color",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var pixel: uint;
+procedure main(args: const string[1024]);
+begin
+  pixel := syslib.get_pixel(1);
+end;
+"#,
+            "`syslib.get_pixel` expects 2 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var width: uint;
+procedure main(args: const string[1024]);
+begin
+  width := syslib.screen_width(uint(1));
+end;
+"#,
+            "`syslib.screen_width` expects 0 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+var raw: bytes[8];
+procedure main(args: const string[1024]);
+begin
+  status := syslib.draw_text(1, 2, raw, uint(0));
+end;
+"#,
+            "expected `string`",
+        ),
+    ];
+    for (source, expected) in cases {
+        let error = compile(source.as_bytes(), "t.ig").expect_err("must be a compile error");
+        assert!(
+            error.message.contains(expected),
+            "expected `{expected}`, got `{}`",
+            error.message
+        );
+    }
+}

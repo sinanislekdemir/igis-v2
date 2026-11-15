@@ -5,7 +5,7 @@ Parked decisions for igis-v2. This is the working register; each spec's own
 resolved, record the answer in the relevant spec or in a new ADR, then remove it here.
 
 **Status:** implementation phase. Last updated: 2026-11-16.
-**Snapshot:** specs 0001–0008, ADRs 0001–0019.
+**Snapshot:** specs 0001–0009, ADRs 0001–0020.
 
 ## How to use
 
@@ -394,6 +394,31 @@ These are no longer open; they were recorded in specs and ADRs:
   nothing after `clear` (covered by `samples/lang/utf8.ig` and a `langhost` regression
   test).
 
+## Decided in the 2026-11-16 graphics session
+
+**Vision OQ 8 is reopened and in progress.** It was resolved as "linear framebuffer with
+a bitmap font; no windowing". The M2 desktop milestone replaces that with a kernel-owned
+shadow screen, a `syslib` drawing layer and a kernel window service (spec 0009, ADR 0020).
+
+**M2.1 (this slice) — drawing foundation.** `kernel/src/gfx.rs` keeps the multiboot2 mode
+and owns one full-screen shadow of `pitch * height` contiguous frames from the frame
+allocator (3 MiB / 768 frames at 1024×768×32, pitch 4096). Nine `syslib` primitives are
+host builtins (ids 13–21; ABI v1 stays 75 opcodes): `screen_width`/`screen_height`,
+`fill_rect`, `fill_dither`, `draw_rect`, `draw_text`, `get_pixel`, `present`, `clear`.
+Colours are `0x00RRGGBB`, coordinates are top-left pixels, `w <= 0`/`h <= 0`/an over-wide
+colour is `Invalid`, and drawing is clipped to a rectangular region and then to the screen
+— never faulted. The console draws through the shadow and presents each glyph cell; the
+direct framebuffer path (`kernel/src/fb.rs`) is gone. Graphics disable cleanly (missing
+tag, non-32-bpp, bad geometry, no memory): 0×0, `Invalid`, `get_pixel` 0, console on
+serial. `samples/apps/desktop` is the System 7.5-style demo and self-check.
+
+**What remains for M2.** (M2.2) PS/2 mouse input, a cursor and pointer state, and an
+event queue; the console stays a kernel device. (M2.3) the kernel window service:
+windows with frame/title bar/content rectangle and z-order, `expose` repaint under a
+narrowed clip, and the service's own present of the affected union. A clip set/reset pair
+for applications, dirty-rectangle tracking and a soft-versus-hardware cursor shape are
+M2.2/M2.3 decisions, not open here.
+
 ## Suggested next step
 
 Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Next:
@@ -540,3 +565,10 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
     `child: faulted StackOverflow` through the interpreter. Remaining: Q47 (per-task
     recovery from a hardware guard hit) and releasing a split table when its last guard
     goes away.
+26. ~~Graphics foundation and the desktop demo~~ — done (spec 0009, ADR 0020): the shadow
+    screen from the frame allocator, nine `syslib` primitives as host builtins, a
+    rectangular clip, the console drawing through the shadow, and `samples/apps/desktop`
+    (dither background, menu bar with a right-aligned clock, striped title-bar window,
+    nine-pixel self-check, `desktop: ok`). Graphics disable cleanly for a missing tag,
+    non-32-bpp mode, bad geometry or a failed shadow allocation. Next: M2.2 mouse and
+    events, then M2.3 windows and `expose`.

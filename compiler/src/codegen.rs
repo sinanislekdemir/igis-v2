@@ -5546,6 +5546,148 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::scalar(Kind::Int)))
             }
+            // `syslib` graphics (spec 0009). The primitives are host builtins,
+            // so there is no opcode and no rasterisation in bytecode. The
+            // compiler only checks the staged signatures: `int` coordinates,
+            // `uint` colour, and a `string` for the text. Runtime rules
+            // (non-positive extents, a colour above 0x00FF_FFFF, clipping)
+            // belong to the interpreter and the host.
+            "syslib.screen_width" | "syslib.screen_height" => {
+                if !args.is_empty() {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`{target}` expects 0 arguments, got {}", args.len()),
+                    ));
+                }
+                let id = if target == "syslib.screen_width" {
+                    builtin::SCREEN_WIDTH
+                } else {
+                    builtin::SCREEN_HEIGHT
+                };
+                self.one(opcodes::BUILTIN, id)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Uint)))
+            }
+            "syslib.fill_rect" | "syslib.fill_dither" | "syslib.draw_rect" => {
+                self.gfx_rect_operands(target, line, column, args)?;
+                let id = match target {
+                    "syslib.fill_rect" => builtin::FILL_RECT,
+                    "syslib.fill_dither" => builtin::FILL_DITHER,
+                    _ => builtin::DRAW_RECT,
+                };
+                self.one(opcodes::BUILTIN, id)?;
+                self.pop(5)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "syslib.draw_text" => {
+                if args.len() != 4 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`syslib.draw_text` expects 4 arguments, got {}", args.len()),
+                    ));
+                }
+                for (index, name) in ["x", "y"].iter().enumerate() {
+                    let value = self.expr_scalar(args[index])?;
+                    if value.kind != Kind::Int {
+                        return Err(self.err_at(
+                            args[index],
+                            format_args!(
+                                "`syslib.draw_text` expects an `int` {name}, found `{value}`"
+                            ),
+                        ));
+                    }
+                }
+                let text = self.emit_ref(args[2], Some(Kind::String))?;
+                if text.kind != Kind::String {
+                    let found = self.type_name(text);
+                    return Err(self.err_at(
+                        args[2],
+                        format_args!("`syslib.draw_text` expects a `string`, found `{found}`"),
+                    ));
+                }
+                let color = self.expr_scalar(args[3])?;
+                if color.kind != Kind::Uint {
+                    return Err(self.err_at(
+                        args[3],
+                        format_args!("`syslib.draw_text` expects a `uint` color, found `{color}`"),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::DRAW_TEXT)?;
+                self.pop(4)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "syslib.get_pixel" => {
+                if args.len() != 2 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`syslib.get_pixel` expects 2 arguments, got {}", args.len()),
+                    ));
+                }
+                for (index, name) in ["x", "y"].iter().enumerate() {
+                    let value = self.expr_scalar(args[index])?;
+                    if value.kind != Kind::Int {
+                        return Err(self.err_at(
+                            args[index],
+                            format_args!(
+                                "`syslib.get_pixel` expects an `int` {name}, found `{value}`"
+                            ),
+                        ));
+                    }
+                }
+                self.one(opcodes::BUILTIN, builtin::GET_PIXEL)?;
+                self.pop(2)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Uint)))
+            }
+            "syslib.present" => {
+                if args.len() != 4 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`syslib.present` expects 4 arguments, got {}", args.len()),
+                    ));
+                }
+                for (index, name) in ["x", "y", "w", "h"].iter().enumerate() {
+                    let value = self.expr_scalar(args[index])?;
+                    if value.kind != Kind::Int {
+                        return Err(self.err_at(
+                            args[index],
+                            format_args!(
+                                "`syslib.present` expects an `int` {name}, found `{value}`"
+                            ),
+                        ));
+                    }
+                }
+                self.one(opcodes::BUILTIN, builtin::PRESENT)?;
+                self.pop(4)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "syslib.clear" => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`syslib.clear` expects 1 argument, got {}", args.len()),
+                    ));
+                }
+                let color = self.expr_scalar(args[0])?;
+                if color.kind != Kind::Uint {
+                    return Err(self.err_at(
+                        args[0],
+                        format_args!("`syslib.clear` expects a `uint` color, found `{color}`"),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::CLEAR)?;
+                self.pop(1)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
             // Ring operations (spec 0003, "Rings") are compiler-recognised
             // built-in procedures, not host builtins: they lower to the
             // ordinary reference/copy/branch instructions over the ring's
@@ -6139,6 +6281,42 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             return Err(self.err_at(
                 expr,
                 format_args!("expected an `int` task id, found `{found}`"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Emits the five operands of a `syslib` rectangle primitive
+    /// (`fill_rect`, `fill_dither`, `draw_rect`) in declaration order and
+    /// checks their staged types (spec 0009, G10).
+    fn gfx_rect_operands(
+        &mut self,
+        what: &str,
+        line: u32,
+        column: u32,
+        args: &'a [&'a Expr<'a>],
+    ) -> Result<(), Diagnostic> {
+        if args.len() != 5 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`{what}` expects 5 arguments, got {}", args.len()),
+            ));
+        }
+        for (index, name) in ["x", "y", "w", "h"].iter().enumerate() {
+            let value = self.expr_scalar(args[index])?;
+            if value.kind != Kind::Int {
+                return Err(self.err_at(
+                    args[index],
+                    format_args!("`{what}` expects an `int` {name}, found `{value}`"),
+                ));
+            }
+        }
+        let color = self.expr_scalar(args[4])?;
+        if color.kind != Kind::Uint {
+            return Err(self.err_at(
+                args[4],
+                format_args!("`{what}` expects a `uint` color, found `{color}`"),
             ));
         }
         Ok(())

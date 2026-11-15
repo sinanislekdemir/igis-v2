@@ -417,10 +417,11 @@ R7).
 2. A 32-bit stub validates the multiboot2 information, builds identity and higher-half
    page tables, enables PAE, long mode and paging, and jumps to the 64-bit entry point in
    the higher half.
-3. Early kernel init: GDT/IDT, paging and direct map, framebuffer console from the
-   multiboot2 framebuffer tag, serial debug, frame allocator. The framebuffer tag is
-   mandatory: without it the kernel writes `no framebuffer` to serial and halts, because
-   the console is the only interface.
+3. Early kernel init: GDT/IDT, paging and direct map, serial debug, frame allocator,
+   framebuffer detection. The framebuffer tag is optional: with one the kernel allocates
+   the full-screen shadow from the frame allocator and attaches the console to it; without
+   one (or with an unsupported mode) graphics are disabled and the console stays on serial
+   (spec 0009, G15).
 4. Platform discovery: memory map, ACPI, APIC, timers, keyboard.
 5. Interpreter loop on the boot core; APs are brought up with INIT-SIPI-SIPI through a
    sub-1 MiB trampoline within the milestone (see "SMP": `MAX_CORES` 8, trampoline at
@@ -446,6 +447,23 @@ actually not-present.
 
 UEFI and real-hardware boot are out of scope (ADR 0014). The boot path lives entirely in
 `arch/x86_64`.
+
+## Graphics
+
+The framebuffer is a device the kernel owns, not a drawing surface applications touch
+directly (spec 0009, ADR 0020). At boot, after the frame allocator knows the memory map,
+`kernel/src/gfx.rs` keeps the multiboot2 mode (address, pitch, width, height, bpp, type)
+and allocates one **shadow screen** of `pitch * height` contiguous frames. The shadow is
+the single source of truth: every `syslib` drawing primitive, the text console and the
+future window service write there, and `present` copies a clipped rectangle to the real
+framebuffer row by row with the pitch. Only 32 bpp RGB is supported; any other mode, a
+missing tag, bad geometry or a failed allocation disables graphics and leaves the console
+on serial.
+
+The screen size is the bootloader's, never a compile-time constant. A rectangular clip
+region, initially the whole screen, narrows every primitive and is the seam the window
+service uses to repaint one window. The console loses its direct framebuffer path and
+presents each glyph cell from the shadow, so there is one image at all times.
 
 ## Fatal fault path
 
@@ -503,7 +521,8 @@ task; after that, shutdown.
 | Arena request cannot be satisfied at load | Application refused; no runtime out-of-memory path |
 | ext2 image missing or corrupt | Mount refused; no applications load; kernel still boots to a diagnostic |
 | ext2 image uses an unsupported feature or triple indirect | Mount refused with a diagnostic; no partial mount |
-| Multiboot2 framebuffer tag absent | `no framebuffer` on serial; halt |
+| Multiboot2 framebuffer tag absent | Graphics disabled; the console is serial-only; the kernel continues (spec 0009, G15) |
+| Framebuffer is not 32 bpp RGB, has bad geometry, or the shadow cannot be allocated | Graphics disabled; the boot line names the mode or size; the console is serial-only |
 | Request path malformed or not a regular file | `Status.Invalid`; no task created |
 | `shell` missing or fails to compile | Try `entrypoint`; if that also fails, write `no entry` and halt |
 | Spawn path not found | `Status.NotFound`; no task created |
@@ -547,3 +566,4 @@ task; after that, shutdown.
 | 2026-11-13 | Delivery fixed as source-only: the image never contains bytecode, and the manifest is a runtime value (ADR 0019). |
 | 2026-11-15 | APs are real: `MAX_CORES` 8, INIT-SIPI-SIPI through the `0x8000` trampoline, a `0x9000` parameter page, per-core TSS/IST/stacks, observation by attempt with a bounded wait, one IPI vector shared by every core. |
 | 2026-11-16 | H2 implemented for boot, AP and task stacks: a shared split-table cache and guard registry (`kernel/src/guard.rs`, `arch/x86_64/src/paging.rs`), a CR3 + wake-IPI TLB shootdown after every PTE change, AP guards installed before the SIPIs, one extra guard frame below each task stack, a boot PTE/free-frame self-check (`guards: boot 1, ap N, tables M`) and a `#PF` line naming the guard. The interpreter's `StackOverflow` check stays the legal path; a hardware guard hit halts (per-task recovery deferred, Q47). |
+| 2026-11-16 | Graphics moved to a kernel-owned shadow screen (spec 0009, ADR 0020): the multiboot2 mode lives in `kernel/src/gfx.rs`, the shadow is `pitch * height` contiguous frames allocated after the frame allocator, `present` blits clipped rows with the pitch, the console draws through the shadow, and a rectangular clip is the window-service seam. The framebuffer tag is now optional: a missing or unsupported mode disables graphics and leaves the console on serial instead of halting. |

@@ -205,6 +205,7 @@ fn stage_app_samples_compile_with_the_spawn_builtins() {
         "frame_out",
         "floats",
         "text",
+        "desktop",
     ] {
         let path = format!("{}/../samples/apps/{name}", env!("CARGO_MANIFEST_DIR"));
         let source = std::fs::read(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));

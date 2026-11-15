@@ -1,5 +1,10 @@
-//! Framebuffer text console. Every character is also mirrored to COM1, so a
+//! Shadow-screen text console. Every character is also mirrored to COM1, so a
 //! headless run still shows the same output.
+//!
+//! Glyphs are painted into the graphics module's shadow screen and each cell is
+//! presented, so the console and `syslib` applications share one image (spec
+//! 0009, G14). When graphics are disabled the screen dimensions are zero and
+//! only the serial mirror remains.
 //!
 //! # Staged input line discipline (spec 0005, Q44)
 //!
@@ -19,8 +24,7 @@ use core::fmt::{self, Write};
 
 use arch_x86_64::{keyboard, serial};
 
-use crate::font8x8::FONT8X8_BASIC;
-use crate::mb2::Framebuffer;
+use crate::gfx;
 use crate::sync::SpinLock;
 
 const SCALE: usize = 2;
@@ -35,7 +39,6 @@ pub const LINE_BYTES: usize = 256;
 pub const LINE_RING: usize = 4;
 
 pub struct Console {
-    fb: Option<Framebuffer>,
     cols: usize,
     rows: usize,
     col: usize,
@@ -45,31 +48,24 @@ pub struct Console {
 static CONSOLE: SpinLock<Option<Console>> = SpinLock::new(None);
 
 impl Console {
-    fn new(fb: Option<Framebuffer>) -> Self {
+    fn new() -> Self {
         let mut console = Self {
-            fb: None,
             cols: 0,
             rows: 0,
             col: 0,
             row: 0,
         };
 
-        if let Some(screen) = fb {
-            if screen.usable() {
-                screen.clear(BG);
-                console.cols = screen.width as usize / GLYPH;
-                console.rows = screen.height as usize / GLYPH;
-                console.fb = Some(screen);
-            }
-        }
-
+        let (width, height) = gfx::size();
+        console.cols = width as usize / GLYPH;
+        console.rows = height as usize / GLYPH;
         console
     }
 
     fn scroll(&mut self) {
-        if let Some(fb) = &self.fb {
-            fb.scroll_up(GLYPH, BG);
-        }
+        // The image lives in the shadow; the graphics module owns the move and
+        // presents the screen once (spec 0009, G14).
+        gfx::console_scroll(GLYPH, BG);
     }
 
     fn newline(&mut self) {
@@ -82,21 +78,14 @@ impl Console {
     }
 
     fn draw(&self, code: u8) {
-        let (Some(fb), true) = (&self.fb, code < 0x80) else {
+        if self.rows == 0 || code >= 0x80 {
             return;
-        };
+        }
 
-        let glyph = &FONT8X8_BASIC[code as usize];
         let x0 = self.col * GLYPH;
         let y0 = self.row * GLYPH;
-
-        for (row, bits) in glyph.iter().enumerate() {
-            for col in 0..8 {
-                let on = bits & (1 << col) != 0;
-                let color = if on { FG } else { BG };
-                fb.fill_rect(x0 + col * SCALE, y0 + row * SCALE, SCALE, SCALE, color);
-            }
-        }
+        // One call paints the cell (opaque background) and presents it.
+        let _ = gfx::console_glyph(x0, y0, code, FG, BG, SCALE);
     }
 
     fn put_byte(&mut self, byte: u8) {
@@ -143,8 +132,9 @@ impl Write for Console {
     }
 }
 
-pub fn init(fb: Option<Framebuffer>) {
-    *CONSOLE.lock() = Some(Console::new(fb));
+pub fn init() {
+    gfx::console_clear(BG);
+    *CONSOLE.lock() = Some(Console::new());
 }
 
 /// Entry point for the `print!`/`println!` macros.

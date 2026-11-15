@@ -220,6 +220,46 @@ impl Host for KernelHost<'_> {
         }
     }
 
+    // `syslib` graphics (spec 0009). The machine has already checked extents
+    // and colours; the kernel's `gfx` module clips to the clip region and the
+    // screen and serialises drawing with its own lock, so an application on any
+    // core sees one image.
+    fn screen_width(&mut self) -> u64 {
+        u64::from(crate::gfx::size().0)
+    }
+
+    fn screen_height(&mut self) -> u64 {
+        u64::from(crate::gfx::size().1)
+    }
+
+    fn fill_rect(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) -> Status {
+        crate::gfx::fill_rect(x, y, w, h, color)
+    }
+
+    fn fill_dither(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) -> Status {
+        crate::gfx::fill_dither(x, y, w, h, color)
+    }
+
+    fn draw_rect(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) -> Status {
+        crate::gfx::draw_rect(x, y, w, h, color)
+    }
+
+    fn draw_text(&mut self, x: i64, y: i64, text: &[u8], color: u32) -> Status {
+        crate::gfx::draw_text(x, y, text, color)
+    }
+
+    fn get_pixel(&mut self, x: i64, y: i64) -> u32 {
+        crate::gfx::get_pixel(x, y)
+    }
+
+    fn present(&mut self, x: i64, y: i64, w: i64, h: i64) -> Status {
+        crate::gfx::present(x, y, w, h)
+    }
+
+    fn clear(&mut self, color: u32) -> Status {
+        crate::gfx::clear(color)
+    }
+
     // Streams (spec 0006): the kernel table owns the buffer and the generation
     // check. The machine turns `WouldBlock` into a block for the blocking
     // opcodes and into a staged status for `try_*`; the host is always

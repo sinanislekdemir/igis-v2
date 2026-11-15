@@ -1015,6 +1015,35 @@ migratable, so it reports "where am I now", never an affinity (ADR 0011). `Port`
 names other than these three are compile errors for now. There is still no capability check
 (H4).
 
+**Staged graphics surface (spec 0009).** The desktop milestone adds the shadow-screen
+drawing primitives. They are the `syslib` namespace because they reach the machine's
+screen; all rasterisation happens in the kernel, so an application pays one builtin call
+per shape, not one per pixel.
+
+```text
+syslib.screen_width() -> uint            // 0 when graphics are disabled
+syslib.screen_height() -> uint           // 0 when graphics are disabled
+syslib.fill_rect(x: int, y: int, w: int, h: int, color: uint) -> Status
+syslib.fill_dither(x: int, y: int, w: int, h: int, color: uint) -> Status
+syslib.draw_rect(x: int, y: int, w: int, h: int, color: uint) -> Status
+syslib.draw_text(x: int, y: int, text: const string[0], color: uint) -> Status
+syslib.get_pixel(x: int, y: int) -> uint
+syslib.present(x: int, y: int, w: int, h: int) -> Status
+syslib.clear(color: uint) -> Status
+```
+
+Colours are `0x00RRGGBB`; coordinates are pixels with the origin at the top-left.
+`w <= 0`, `h <= 0` or a colour with a bit above bit 23 is `Status.Invalid` and draws
+nothing; coordinates outside the screen are clipped and are not an error. `fill_dither`
+writes `color` to every pixel `(X, Y)` with `(X + Y)` even and leaves the rest untouched;
+`draw_rect` is a one-pixel outline inside the extent; `draw_text` draws 8×8 glyphs from
+the console font with a transparent background, one byte per cell, no newline handling and
+a blank cell for a byte outside `0x00..=0x7F`; `get_pixel` returns `0` outside the screen;
+`present` copies the rectangle from the shadow to the framebuffer and `clear` fills the
+whole screen and presents it. Drawing primitives other than `clear` do not present. When
+graphics are disabled the size is `0x0`, every primitive is `Invalid` and `get_pixel` is
+`0` (spec 0009, G15).
+
 ## Constants and manifests
 
 `const` declarations are compile-time expressions over literals, other constants, and the
@@ -1290,3 +1319,4 @@ buffer indexing, adding no opcode.
 | 2026-11-15 | Realtime primitives implemented: `core.realtime_on() -> Status` (one-way; `Ok` or `Full`, no second slot on a repeat) and `core.heartbeat()` (no result; a no-op on a normal task). A realtime task must heartbeat once per second of non-blocked time or it is terminated with `FaultCode.WatchdogTimeout` (spec 0007, ADR 0016). |
 | 2026-11-16 | Fixed-point float text implemented. `core.format_f64_into(dst, value, frac_digits) -> int` writes an optional `-`, the integer part and exactly `frac_digits` (0–9) fraction digits rounded half away from zero with the carry applied; `NaN`/`±Inf` are `nan`/`inf`/`-inf`, `frac_digits > 9` and `\|value\| >= 2^63` are `-4`, and a result wider than the destination is `-6` with the length untouched. `stdlib.parse_f64_into(src, value) -> Status` accepts decimal text with an optional exponent (plus the formatter's `inf`/`-inf`/`nan`), rejects everything else with `Invalid`, and saturates overflow/underflow to `±Inf`/`±0` with `Ok`, preserving `-0.0`. Fixed-point precision; shortest round-trip formatting and exact IEEE parsing stay open (Q41), `f32` stays open (Q40). |
 | 2026-11-16 | Shortest round-trip float text implemented. `core.format_f64_short_into(dst, value) -> int` writes the fewest significant digits that parse back to exactly the same bits, positionally while `-6 < e10 + 1 <= 21` and in scientific form otherwise (`1e20` positional, `1e21` scientific, `1e-6` positional, `1e-7` scientific), with no width, no `2^63` bound and no trailing `.0`; `0`/`-0`, `nan`, `inf`/`-inf` are literal, an exact decimal tie rounds away from zero, and a result wider than the destination is `-6` with the length untouched. The digit search is pure interpreter code (`format_f64_short`): the value and both round-trip interval endpoints are expanded to exact `10^9`-limb integers, the shortest bracketing `n`-digit decimals are tested with integer comparisons, and the text is published with one copy. No allocation, no host call. Q41 narrows to correctly rounded decimal-to-binary parsing and its subnormal edges; `f32` stays open (Q40). |
+| 2026-11-16 | Staged graphics surface (spec 0009): `syslib.screen_width`/`screen_height`, `fill_rect`, `fill_dither`, `draw_rect`, `draw_text`, `get_pixel`, `present` and `clear`, with `int` coordinates, `uint` colours (`0x00RRGGBB`), a `const string[0]` text argument and `Status` results. `Invalid` covers `w <= 0`, `h <= 0` and a colour above `0x00FFFFFF`; off-screen coordinates are clipped, never faulted. The primitives are host builtins, not new opcodes, and the disabled-screen shape is `0x0` / `Invalid` / `0`. |

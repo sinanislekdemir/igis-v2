@@ -364,6 +364,17 @@ struct MockHost {
     realtime_status: u64,
     realtime_calls: usize,
     heartbeat_calls: usize,
+    screen_width_value: u64,
+    screen_height_value: u64,
+    gfx_ok: bool,
+    rects: Vec<(i64, i64, i64, i64, u32)>,
+    dithers: Vec<(i64, i64, i64, i64, u32)>,
+    outlines: Vec<(i64, i64, i64, i64, u32)>,
+    texts: Vec<(i64, i64, Vec<u8>, u32)>,
+    pixels: Vec<(i64, i64)>,
+    pixel_value: u32,
+    presents: Vec<(i64, i64, i64, i64)>,
+    clears: Vec<u32>,
 }
 
 impl Host for MockHost {
@@ -440,6 +451,77 @@ impl Host for MockHost {
 
     fn heartbeat(&mut self) {
         self.heartbeat_calls += 1;
+    }
+
+    // `syslib` graphics (spec 0009): record the calls and return the scripted
+    // status. `MockHost::default()` leaves the screen 0x0 and every call
+    // invalid, which is the same shape as the trait defaults.
+
+    fn screen_width(&mut self) -> u64 {
+        self.screen_width_value
+    }
+
+    fn screen_height(&mut self) -> u64 {
+        self.screen_height_value
+    }
+
+    fn fill_rect(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) -> Status {
+        self.rects.push((x, y, w, h, color));
+        if self.gfx_ok {
+            Status::Ok
+        } else {
+            Status::Invalid
+        }
+    }
+
+    fn fill_dither(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) -> Status {
+        self.dithers.push((x, y, w, h, color));
+        if self.gfx_ok {
+            Status::Ok
+        } else {
+            Status::Invalid
+        }
+    }
+
+    fn draw_rect(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) -> Status {
+        self.outlines.push((x, y, w, h, color));
+        if self.gfx_ok {
+            Status::Ok
+        } else {
+            Status::Invalid
+        }
+    }
+
+    fn draw_text(&mut self, x: i64, y: i64, text: &[u8], color: u32) -> Status {
+        self.texts.push((x, y, text.to_vec(), color));
+        if self.gfx_ok {
+            Status::Ok
+        } else {
+            Status::Invalid
+        }
+    }
+
+    fn get_pixel(&mut self, x: i64, y: i64) -> u32 {
+        self.pixels.push((x, y));
+        self.pixel_value
+    }
+
+    fn present(&mut self, x: i64, y: i64, w: i64, h: i64) -> Status {
+        self.presents.push((x, y, w, h));
+        if self.gfx_ok {
+            Status::Ok
+        } else {
+            Status::Invalid
+        }
+    }
+
+    fn clear(&mut self, color: u32) -> Status {
+        self.clears.push(color);
+        if self.gfx_ok {
+            Status::Ok
+        } else {
+            Status::Invalid
+        }
     }
 }
 
@@ -3277,4 +3359,270 @@ fn realtime_on_reports_full_without_changing_the_heartbeat_path() {
     );
     assert_eq!(host.realtime_calls, 1);
     assert_eq!(host.heartbeat_calls, 1);
+}
+
+// ---- syslib graphics (spec 0009) ------------------------------------------
+
+fn store_at(out: &mut Vec<u8>, offset: u32) {
+    op_imm(out, opcodes::STORE_STATE, offset);
+}
+
+#[test]
+fn graphics_primitives_route_through_the_host_in_declaration_order() {
+    let mut instructions = Vec::new();
+    op_const(&mut instructions, 10); // x
+    op_const(&mut instructions, 20); // y
+    op_const(&mut instructions, 30); // w
+    op_const(&mut instructions, 40); // h
+    op_const(&mut instructions, 0x12_3456); // color
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::FILL_RECT,
+    );
+    store_at(&mut instructions, 0);
+
+    op_const(&mut instructions, 1);
+    op_const(&mut instructions, 2);
+    op_const(&mut instructions, 3);
+    op_const(&mut instructions, 4);
+    op_const(&mut instructions, 0x00_00FF);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::FILL_DITHER,
+    );
+    store_at(&mut instructions, 8);
+
+    op_const(&mut instructions, 5);
+    op_const(&mut instructions, 6);
+    op_const(&mut instructions, 7);
+    op_const(&mut instructions, 8);
+    op_const(&mut instructions, 9);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::DRAW_RECT,
+    );
+    store_at(&mut instructions, 16);
+
+    op_const(&mut instructions, 1);
+    op_const(&mut instructions, 2);
+    op_imm(&mut instructions, opcodes::REF_CONST, 8);
+    op_const(&mut instructions, 0x00_FF00);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::DRAW_TEXT,
+    );
+    store_at(&mut instructions, 24);
+
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::SCREEN_WIDTH,
+    );
+    store_at(&mut instructions, 32);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::SCREEN_HEIGHT,
+    );
+    store_at(&mut instructions, 40);
+
+    op_const(&mut instructions, 7);
+    op_const(&mut instructions, 8);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::GET_PIXEL,
+    );
+    store_at(&mut instructions, 48);
+
+    op_const(&mut instructions, 0);
+    op_const(&mut instructions, 0);
+    op_const(&mut instructions, 1024);
+    op_const(&mut instructions, 768);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::PRESENT,
+    );
+    store_at(&mut instructions, 56);
+
+    op_const(&mut instructions, 0x00_FFFF);
+    op_imm(&mut instructions, opcodes::BUILTIN, opcodes::builtin::CLEAR);
+    store_at(&mut instructions, 64);
+    op(&mut instructions, opcodes::RET);
+
+    let constants = constant(b"Hi");
+    let spec = FnSpec {
+        frame_size: 128,
+        operand_off: 64,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &constants, 72, 128, 0);
+
+    let mut host = MockHost {
+        screen_width_value: 1024,
+        screen_height_value: 768,
+        gfx_ok: true,
+        pixel_value: 0x12_3456,
+        ..Default::default()
+    };
+    let mut state = vec![0u8; 72];
+    let mut stack = vec![0u8; 128];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 500);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+
+    assert_eq!(host.rects, vec![(10, 20, 30, 40, 0x12_3456)]);
+    assert_eq!(host.dithers, vec![(1, 2, 3, 4, 0x0000_00FF)]);
+    assert_eq!(host.outlines, vec![(5, 6, 7, 8, 9)]);
+    assert_eq!(host.texts, vec![(1, 2, b"Hi".to_vec(), 0x00_FF00)]);
+    assert_eq!(host.pixels, vec![(7, 8)]);
+    assert_eq!(host.presents, vec![(0, 0, 1024, 768)]);
+    assert_eq!(host.clears, vec![0x00_FFFF]);
+
+    let word = |offset: usize| u64::from_le_bytes(state[offset..offset + 8].try_into().unwrap());
+    for offset in [0, 8, 16, 24, 56, 64] {
+        assert_eq!(word(offset), Status::Ok as u64, "status at {offset}");
+    }
+    assert_eq!(word(32), 1024);
+    assert_eq!(word(40), 768);
+    assert_eq!(word(48), 0x12_3456);
+}
+
+#[test]
+fn graphics_reject_non_positive_extents_and_over_wide_colours_without_calling_the_host() {
+    let mut instructions = Vec::new();
+    // w = 0
+    for value in [1, 2, 0, 4] {
+        op_const(&mut instructions, value);
+    }
+    op_const(&mut instructions, 0);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::FILL_RECT,
+    );
+    store_at(&mut instructions, 0);
+    // h = -1
+    for value in [1, 2, 3, -1] {
+        op_const(&mut instructions, value);
+    }
+    op_const(&mut instructions, 0);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::FILL_DITHER,
+    );
+    store_at(&mut instructions, 8);
+    // A colour above 0x00FF_FFFF.
+    for value in [1, 2, 3, 4] {
+        op_const(&mut instructions, value);
+    }
+    op_const(&mut instructions, 0x0100_0000);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::DRAW_RECT,
+    );
+    store_at(&mut instructions, 16);
+    // A present with h = 0.
+    op_const(&mut instructions, 0);
+    op_const(&mut instructions, 0);
+    op_const(&mut instructions, 100);
+    op_const(&mut instructions, 0);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::PRESENT,
+    );
+    store_at(&mut instructions, 24);
+    // clear with an over-wide colour.
+    op_const(&mut instructions, 0xFFFF_FFFF);
+    op_imm(&mut instructions, opcodes::BUILTIN, opcodes::builtin::CLEAR);
+    store_at(&mut instructions, 32);
+    op(&mut instructions, opcodes::RET);
+
+    let spec = FnSpec {
+        frame_size: 96,
+        operand_off: 56,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &[], 40, 96, 0);
+    let mut host = MockHost {
+        gfx_ok: true,
+        ..Default::default()
+    };
+    let mut state = vec![0u8; 40];
+    let mut stack = vec![0u8; 96];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 500);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+
+    for offset in [0, 8, 16, 24, 32] {
+        let status = u64::from_le_bytes(state[offset..offset + 8].try_into().unwrap());
+        assert_eq!(status, Status::Invalid as u64, "status at {offset}");
+    }
+    assert!(host.rects.is_empty());
+    assert!(host.dithers.is_empty());
+    assert!(host.outlines.is_empty());
+    assert!(host.presents.is_empty());
+    assert!(host.clears.is_empty());
+}
+
+#[test]
+fn graphics_defaults_describe_a_disabled_screen() {
+    // No graphics overrides: the trait defaults are a 0x0 screen, `Invalid`
+    // for drawing and 0 for `get_pixel` (spec 0009, G15/G16).
+    let mut instructions = Vec::new();
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::SCREEN_WIDTH,
+    );
+    store_at(&mut instructions, 0);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::SCREEN_HEIGHT,
+    );
+    store_at(&mut instructions, 8);
+    for value in [0, 0, 10, 10] {
+        op_const(&mut instructions, value);
+    }
+    op_const(&mut instructions, 0x00_0000);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::FILL_RECT,
+    );
+    store_at(&mut instructions, 16);
+    op_const(&mut instructions, 4);
+    op_const(&mut instructions, 4);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::GET_PIXEL,
+    );
+    store_at(&mut instructions, 24);
+    op(&mut instructions, opcodes::RET);
+
+    let spec = FnSpec {
+        frame_size: 96,
+        operand_off: 56,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &[], 32, 96, 0);
+    let mut host = MockHost::default();
+    let mut state = vec![0u8; 32];
+    let mut stack = vec![0u8; 96];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+
+    let word = |offset: usize| u64::from_le_bytes(state[offset..offset + 8].try_into().unwrap());
+    assert_eq!(word(0), 0);
+    assert_eq!(word(8), 0);
+    assert_eq!(word(16), Status::Invalid as u64);
+    assert_eq!(word(24), 0);
 }

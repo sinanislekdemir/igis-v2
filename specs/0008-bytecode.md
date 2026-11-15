@@ -347,6 +347,38 @@ artifact:
 Aggregates are opcodes rather than monomorphised library code because the compiler, not
 the runtime, knows each layout; the opcode carries a layout descriptor index.
 
+### Host builtins
+
+`BUILTIN` (opcode `0x50`) carries a `u32` id. The verifier accepts an id only when
+`abi::opcodes::builtin::effect` names its operand count, and the interpreter dispatches
+on the same table; the machine, not the compiler, owns the runtime checks.
+
+| Id | Name | Operands → results | Notes |
+|----|------|--------------------|-------|
+| 1 | `write` | 1 → 0 | buffer reference |
+| 2 | `clock` | 0 → 1 | nanoseconds |
+| 3 | `spawn` | 4 → 1 | path, args, diag ref, id ref |
+| 4 | `wait` | 2 → 1 | id, reason ref; may block |
+| 5 | `kill` | 1 → 1 | task id |
+| 6 | `len` | 1 → 1 | buffer reference |
+| 7 | `port_in8` | 1 → 1 | `syslib` |
+| 8 | `port_out8` | 2 → 1 | `syslib` |
+| 9 | `run` | 4 → 1 | path, args, diag ref, reason ref; may block |
+| 10 | `cpu_id` | 0 → 1 | APIC id |
+| 11 | `realtime_on` | 0 → 1 | `Status` |
+| 12 | `heartbeat` | 0 → 0 | progress claim |
+| 13 | `screen_width` | 0 → 1 | `syslib`, pixels or 0 |
+| 14 | `screen_height` | 0 → 1 | `syslib`, pixels or 0 |
+| 15 | `fill_rect` | 5 → 1 | x, y, w, h, colour; `Status` |
+| 16 | `fill_dither` | 5 → 1 | `(X + Y)` checkerboard |
+| 17 | `draw_rect` | 5 → 1 | one-pixel outline |
+| 18 | `draw_text` | 4 → 1 | x, y, text reference, colour |
+| 19 | `get_pixel` | 2 → 1 | `0x00RRGGBB`, 0 outside |
+| 20 | `present` | 4 → 1 | x, y, w, h |
+| 21 | `clear` | 1 → 1 | colour; fills and presents |
+
+Graphics builtins add no opcode, so ABI v1 stays at **75** opcodes (spec 0009).
+
 ### Compiler / runtime split
 
 | Crate | Depends on | Runs on | Responsibility |
@@ -503,3 +535,4 @@ pub fn run(task: &mut Task);
 | 2026-11-15 | Streams add four opcodes: `stream_send`/`stream_try_send` (`[handle][data] -> Status`, no immediates) and `stream_recv`/`stream_try_recv` (`[handle][destination] -> int`, one destination-capacity immediate). A blocking opcode that would block restores its operands and pc and returns `Blocked(WaitKind::Stream(handle))`; the try variants push `WouldBlock`/`Closed` staged codes. The manifest lists endpoints in declaration order and handle `i` is at `state[i * 8]`, so `Endpoint`/`MANIFEST_HEADER_SIZE` are unchanged. ABI v1 grows from 69 to 73 opcodes. |
 | 2026-11-16 | Fixed-point float text adds one opcode: `format_f64` (`a` = destination buffer kind, a non-zero capacity immediate; destination/value/`frac_digits` on the stack, pops an `f64` bit pattern) pushes the byte count, or `-4` for a width above 9 or a magnitude at or above `2^63`, or `-6` when the result does not fit. The specials `nan`/`inf`/`-inf` are written literally. The formatter is pure interpreter code building into a local array, with no host call and no allocation. `stdlib.parse_f64_into` adds no opcode: it is ordinary language code over `core.len`, indexing and `f64` arithmetic. ABI v1 grows from 73 to 74 opcodes. |
 | 2026-11-16 | Shortest round-trip float text adds one opcode: `format_f64_short` (`a` = destination buffer kind, a non-zero capacity immediate, `b = c = 0`; destination reference and `f64` bit pattern on the stack, no width operand) pushes the byte count, or `-6` when the result does not fit. The digits are the shortest significant digits that round-trip, printed positionally while `-6 < e10 + 1 <= 21` and in scientific form otherwise; `nan`, `inf`/`-inf` and `0`/`-0` are literal. The search is pure interpreter code over exact base-`10^9` integers (value plus both round-trip interval endpoints), with no host call, no allocation and no data tables: the power-of-five factor is built by repeated multiplication by `5^27`, so the `.rodata` cost is a 72-byte `10^0..=10^8` table and the code is about 9.4 KiB of `.text` at `-O`. The table counted from `abi/src/opcodes.rs` now holds **75** opcodes (74 before this change: the earlier `73 to 74` entry above is the correct count, and the `71 to 72` figure once quoted in `AGENTS.md` was off by two). |
+| 2026-11-16 | Graphics builtins add no opcode (spec 0009): ids 13–21 are `screen_width`, `screen_height`, `fill_rect`, `fill_dither`, `draw_rect`, `draw_text`, `get_pixel`, `present` and `clear`, with effects `(0,1)`, `(0,1)`, `(5,1)`, `(5,1)`, `(5,1)`, `(4,1)`, `(2,1)`, `(4,1)` and `(1,1)`. The interpreter validates extents and colours and routes the rest through `Host` with disabled-screen defaults, so ABI v1 stays at **75** opcodes. |

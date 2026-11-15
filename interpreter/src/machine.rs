@@ -122,6 +122,66 @@ pub trait Host {
     /// no-op by default, so host mocks are unaffected (spec 0007, ADR 0016).
     fn heartbeat(&mut self) {}
 
+    // ---- `syslib` graphics (spec 0009) ---------------------------------
+    //
+    // The defaults model a machine with no screen: a 0x0 size, `Invalid` for
+    // every drawing primitive and 0 for `get_pixel`. That is also the kernel's
+    // state when the framebuffer is missing, is not 32 bpp, or the shadow
+    // allocation failed (G15), so the host mock, `langhost` and a disabled
+    // kernel all behave the same way.
+
+    /// Width of the shadow screen in pixels; 0 when graphics are disabled
+    /// (`syslib.screen_width`).
+    fn screen_width(&mut self) -> u64 {
+        0
+    }
+
+    /// Height of the shadow screen in pixels; 0 when graphics are disabled
+    /// (`syslib.screen_height`).
+    fn screen_height(&mut self) -> u64 {
+        0
+    }
+
+    /// Fills an extent of the shadow (`syslib.fill_rect`). The interpreter has
+    /// already rejected `w <= 0`, `h <= 0` and an over-wide colour; the host
+    /// clips to the screen and the clip region (G8, G9).
+    fn fill_rect(&mut self, _x: i64, _y: i64, _w: i64, _h: i64, _color: u32) -> Status {
+        Status::Invalid
+    }
+
+    /// Fills every other pixel of an extent (`syslib.fill_dither`, G11).
+    fn fill_dither(&mut self, _x: i64, _y: i64, _w: i64, _h: i64, _color: u32) -> Status {
+        Status::Invalid
+    }
+
+    /// Draws a one-pixel outline inside an extent (`syslib.draw_rect`, G12).
+    fn draw_rect(&mut self, _x: i64, _y: i64, _w: i64, _h: i64, _color: u32) -> Status {
+        Status::Invalid
+    }
+
+    /// Draws 8×8 text glyphs with a transparent background
+    /// (`syslib.draw_text`, G13). `text` is the resolved `string` bytes.
+    fn draw_text(&mut self, _x: i64, _y: i64, _text: &[u8], _color: u32) -> Status {
+        Status::Invalid
+    }
+
+    /// Reads one shadow pixel as `0x00RRGGBB`; 0 outside the screen
+    /// (`syslib.get_pixel`, G9).
+    fn get_pixel(&mut self, _x: i64, _y: i64) -> u32 {
+        0
+    }
+
+    /// Copies a rectangle from the shadow to the framebuffer
+    /// (`syslib.present`). The interpreter has rejected `w <= 0` and `h <= 0`.
+    fn present(&mut self, _x: i64, _y: i64, _w: i64, _h: i64) -> Status {
+        Status::Invalid
+    }
+
+    /// Fills the whole screen and presents it (`syslib.clear`, G6).
+    fn clear(&mut self, _color: u32) -> Status {
+        Status::Invalid
+    }
+
     /// Requests a new application instance (`core.spawn`).
     ///
     /// `path` and `args` are the bytes of the two `string` buffers. `diag` is a
@@ -1259,6 +1319,113 @@ impl Machine {
                         // A no-result progress claim; a normal task's host call
                         // is a no-op (spec 0007, ADR 0016).
                         host.heartbeat();
+                    }
+                    // `syslib` graphics (spec 0009). The runtime error rules
+                    // live here so every host (kernel, mock, `langhost`) agrees:
+                    // a non-positive extent or a colour above 0x00FF_FFFF is
+                    // `Status.Invalid` and the host is not called. Coordinates
+                    // are always legal; the host clips them (G8).
+                    builtin::SCREEN_WIDTH => {
+                        let width = host.screen_width();
+                        self.push(stack, width)?;
+                    }
+                    builtin::SCREEN_HEIGHT => {
+                        let height = host.screen_height();
+                        self.push(stack, height)?;
+                    }
+                    builtin::FILL_RECT => {
+                        let color = self.pop(stack)?;
+                        let h = self.pop(stack)?;
+                        let w = self.pop(stack)?;
+                        let y = self.pop(stack)?;
+                        let x = self.pop(stack)?;
+                        let status = if w as i64 <= 0 || h as i64 <= 0 || !valid_color(color) {
+                            Status::Invalid
+                        } else {
+                            host.fill_rect(x as i64, y as i64, w as i64, h as i64, color as u32)
+                        };
+                        self.push(stack, status as u64)?;
+                    }
+                    builtin::FILL_DITHER => {
+                        let color = self.pop(stack)?;
+                        let h = self.pop(stack)?;
+                        let w = self.pop(stack)?;
+                        let y = self.pop(stack)?;
+                        let x = self.pop(stack)?;
+                        let status = if w as i64 <= 0 || h as i64 <= 0 || !valid_color(color) {
+                            Status::Invalid
+                        } else {
+                            host.fill_dither(x as i64, y as i64, w as i64, h as i64, color as u32)
+                        };
+                        self.push(stack, status as u64)?;
+                    }
+                    builtin::DRAW_RECT => {
+                        let color = self.pop(stack)?;
+                        let h = self.pop(stack)?;
+                        let w = self.pop(stack)?;
+                        let y = self.pop(stack)?;
+                        let x = self.pop(stack)?;
+                        let status = if w as i64 <= 0 || h as i64 <= 0 || !valid_color(color) {
+                            Status::Invalid
+                        } else {
+                            host.draw_rect(x as i64, y as i64, w as i64, h as i64, color as u32)
+                        };
+                        self.push(stack, status as u64)?;
+                    }
+                    builtin::DRAW_TEXT => {
+                        // `x, y, text, color`: the colour and the text reference
+                        // are on top, in that order.
+                        let color = self.pop(stack)?;
+                        let text_bits = self.pop(stack)?;
+                        let y = self.pop(stack)?;
+                        let x = self.pop(stack)?;
+                        let status = if !valid_color(color) {
+                            Status::Invalid
+                        } else {
+                            let (region, offset) =
+                                self.resolve(text_bits, state, stack, constants, args)?;
+                            let length =
+                                self.buffer_len(region, offset, state, stack, constants, args)?;
+                            let end = offset.checked_add(length).ok_or(FaultCode::OutOfBounds)?;
+                            if end
+                                > region_len(region, state, stack, constants, args)
+                                    .ok_or(FaultCode::OutOfBounds)?
+                            {
+                                return Err(FaultCode::OutOfBounds);
+                            }
+                            let text = buffer_slice(
+                                region, offset, length, state, stack, constants, args,
+                            )?;
+                            host.draw_text(x as i64, y as i64, text, color as u32)
+                        };
+                        self.push(stack, status as u64)?;
+                    }
+                    builtin::GET_PIXEL => {
+                        let y = self.pop(stack)?;
+                        let x = self.pop(stack)?;
+                        let pixel = host.get_pixel(x as i64, y as i64);
+                        self.push(stack, u64::from(pixel))?;
+                    }
+                    builtin::PRESENT => {
+                        let h = self.pop(stack)?;
+                        let w = self.pop(stack)?;
+                        let y = self.pop(stack)?;
+                        let x = self.pop(stack)?;
+                        let status = if w as i64 <= 0 || h as i64 <= 0 {
+                            Status::Invalid
+                        } else {
+                            host.present(x as i64, y as i64, w as i64, h as i64)
+                        };
+                        self.push(stack, status as u64)?;
+                    }
+                    builtin::CLEAR => {
+                        let color = self.pop(stack)?;
+                        let status = if valid_color(color) {
+                            host.clear(color as u32)
+                        } else {
+                            Status::Invalid
+                        };
+                        self.push(stack, status as u64)?;
                     }
                     _ => return Err(FaultCode::IllegalOperation),
                 }
@@ -2970,6 +3137,12 @@ fn byte_at(
 /// encoding (spec 0005).
 fn status_code(status: Status) -> u64 {
     (-(status as i64)) as u64
+}
+
+/// Whether a `uint` colour argument fits `0x00RRGGBB` (spec 0009, G9). The top
+/// byte must be zero; a wider value is `Status.Invalid` rather than masked.
+fn valid_color(color: u64) -> bool {
+    color <= 0x00FF_FFFF
 }
 
 /// The bytes a buffer reference names, bounds-checked like `WRITE` does.

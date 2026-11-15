@@ -255,7 +255,7 @@ specified independently in `0005-host-interface.md`.
 | 5 | Is the system self-hosting for development (in-OS editor/REPL) or cross-developed? | **Resolved** — cross-developed; the in-system workflow is a REPL with no durable storage. A writable filesystem and an editor are future work. |
 | 6 | Should the kernel eventually be written in its own language? | **Resolved** — no; the language is an application language (ADR 0012). |
 | 7 | Is there logical isolation between applications (capabilities, builtin subsets)? | **Resolved** — no capability model; interpreter-enforced memory ownership only (R14). |
-| 8 | Text console only, or framebuffer graphics and a windowing model? | **Resolved** — linear framebuffer with a bitmap font; no windowing. |
+| 8 | Text console only, or framebuffer graphics and a windowing model? | **Reopened by M2** — the first milestone used a linear framebuffer with a bitmap font and no windowing. The desktop milestone adds a kernel-owned shadow screen and a kernel `syslib` window service (spec 0009, ADR 0020); the M2.1 drawing layer is implemented, mouse/events and windows remain. |
 | 9 | x86_64 under QEMU only, or eventual real-hardware boot? | **Resolved** — QEMU only for now; the platform layer keeps the door open. |
 | 10 | Language identity beyond "typed": syntax family, type system details, memory model details. | **Resolved** — Pascal-like, nominal types, no user generics; see `0003-language.md`. |
 | 11 | BIOS + multiboot2, or UEFI under QEMU? | **Resolved** — GRUB + multiboot2 on BIOS, hand-written long-mode transition (ADR 0014). |
@@ -281,3 +281,4 @@ specified independently in `0005-host-interface.md`.
 | 2026-11-12 | Added the realtime class: one-way promotion, no quantum preemption, admission by core count, one-second heartbeat and `WatchdogTimeout` (ADR 0016). |
 | 2026-11-12 | Added the REPL service and the spawn queue: the shell is an application, applications start others with `run`/`spawn`, and the kernel compiles and allocates (ADR 0017). |
 | 2026-11-12 | REPL details: `shell` then `entrypoint` boot fallback with `no entry` halt, fixed `string[1024]` arguments, queue capacity 1024, independent children (ADR 0017 addendum). |
+| 2026-11-16 | Reopened OQ 8 for the M2 desktop: a kernel-owned shadow screen, a `syslib` drawing layer and a kernel window service (spec 0009, ADR 0020). The first milestone's "no windowing" holds only for M1. |

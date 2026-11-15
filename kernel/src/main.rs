@@ -4,9 +4,9 @@
 mod clock;
 mod console;
 mod ext2;
-mod fb;
 mod font8x8;
 mod frame;
+mod gfx;
 mod guard;
 mod mb2;
 mod module;
@@ -29,7 +29,13 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
     keyboard::init();
 
     let fb = mb2::framebuffer(mb2_info as usize);
-    console::init(fb);
+
+    // The frame allocator needs only the memory map and the framebuffer range,
+    // so it runs before the console: the shadow screen is allocated from it at
+    // boot, and the console attaches once the shadow exists (spec 0009).
+    frame::init(mb2_info as usize, fb);
+    let graphics = gfx::init(fb);
+    console::init();
 
     println!();
     println!("igis-v2: long mode entered");
@@ -37,14 +43,44 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
 
     match fb {
         Some(info) => println!(
-            "framebuffer: {}x{} {}bpp type {} at {:#010x}",
-            info.width, info.height, info.bpp, info.kind, info.addr
+            "framebuffer: {}x{} {}bpp type {} at {:#010x} pitch {}",
+            info.width, info.height, info.bpp, info.kind, info.addr, info.pitch
         ),
-        None => {
-            println!("no framebuffer");
-            arch_x86_64::halt();
-        }
+        None => println!("framebuffer: none"),
     }
+    match graphics {
+        gfx::Init::Enabled(report) => println!(
+            "graphics: {}x{} {}bpp pitch {} shadow {:#x} ({} KiB, {} frames, free {} -> {})",
+            report.width,
+            report.height,
+            report.bpp,
+            report.pitch,
+            report.shadow,
+            report.shadow_bytes / 1024,
+            report.shadow_frames,
+            report.free_before,
+            report.free_after
+        ),
+        gfx::Init::Disabled(gfx::Disabled::NoFramebuffer) => {
+            println!("graphics: disabled (no framebuffer); console on serial");
+        }
+        gfx::Init::Disabled(gfx::Disabled::UnsupportedMode { bpp, kind }) => {
+            println!("graphics: disabled (mode {bpp}bpp type {kind}); console on serial")
+        }
+        gfx::Init::Disabled(gfx::Disabled::BadGeometry) => {
+            println!("graphics: disabled (bad geometry); console on serial");
+        }
+        gfx::Init::Disabled(gfx::Disabled::NoMemory { bytes, frames }) => println!(
+            "graphics: disabled (shadow {} KiB, {frames} frames); console on serial",
+            bytes / 1024
+        ),
+    }
+    println!(
+        "frames: {} free of {} ({} MiB usable)",
+        frame::free_frames(),
+        frame::total_frames(),
+        frame::free_frames() * frame::FRAME_SIZE / (1024 * 1024)
+    );
 
     // SAFETY: boot runs on one core with interrupts disabled; the GDT and TSS
     // are installed exactly once, before anything can fault.
@@ -57,11 +93,7 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
     match apic::init() {
         Some(apic) => {
             let ticks_per_ms = apic.calibrate();
-            println!(
-                "apic: id {}, {} ticks/ms",
-                apic.id(),
-                ticks_per_ms
-            );
+            println!("apic: id {}, {} ticks/ms", apic.id(), ticks_per_ms);
             apic.start_periodic(ticks_per_ms.max(1));
 
             // SAFETY: the IDT and the timer are installed; interrupts may run.
@@ -102,18 +134,7 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
             available_bytes = available_bytes.saturating_add(region.len);
         }
     });
-    println!(
-        "available: {} MiB",
-        available_bytes / (1024 * 1024)
-    );
-
-    frame::init(mb2_info as usize, fb);
-    println!(
-        "frames: {} free of {} ({} MiB usable)",
-        frame::free_frames(),
-        frame::total_frames(),
-        frame::free_frames() * frame::FRAME_SIZE / (1024 * 1024)
-    );
+    println!("available: {} MiB", available_bytes / (1024 * 1024));
 
     // Self-test: two frames, write and read one, release both.
     match (frame::alloc_frame(), frame::alloc_frame()) {

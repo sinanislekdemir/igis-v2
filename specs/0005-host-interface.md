@@ -283,6 +283,28 @@ This is a staging shape, not the ABI: the target API has opaque `Port`/`MmioRegi
 handles, `mmio_map/read/write` bounds-checked by the interface, and the DMA model above.
 `syslib` is still a distinct namespace with no capability check (H4).
 
+#### Staged syslib: graphics (spec 0009)
+
+The shadow-screen primitives are host builtins with a disabled-screen default, so the
+host mock and `langhost` need no framebuffer:
+
+| Primitive | Host method | Default |
+|-----------|-------------|---------|
+| `syslib.screen_width` / `screen_height` | `screen_width(&mut self) -> u64`, `screen_height(&mut self) -> u64` | `0`, `0` |
+| `syslib.fill_rect` | `fill_rect(x, y, w, h: i64, color: u32) -> Status` | `Invalid` |
+| `syslib.fill_dither` | `fill_dither(...) -> Status` | `Invalid` |
+| `syslib.draw_rect` | `draw_rect(...) -> Status` | `Invalid` |
+| `syslib.draw_text` | `draw_text(x, y: i64, text: &[u8], color: u32) -> Status` | `Invalid` |
+| `syslib.get_pixel` | `get_pixel(x, y: i64) -> u32` | `0` |
+| `syslib.present` | `present(x, y, w, h: i64) -> Status` | `Invalid` |
+| `syslib.clear` | `clear(color: u32) -> Status` | `Invalid` |
+
+The interpreter owns the error rules (`w <= 0`, `h <= 0`, a colour above `0x00FFFFFF` is
+`Status.Invalid` before the host is called); the host clips to the screen and its clip
+region. The kernel implements these over `kernel/src/gfx.rs`; the defaults are exactly the
+kernel's disabled state, so both paths agree (spec 0009, G15/G16). `draw_text` receives the
+resolved `string` bytes, so the host never sees a language reference.
+
 ### Host implementation
 
 The language track links the runtime against a host implementation that provides console
@@ -408,3 +430,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-14 | `core.run` implemented as spawn + wait (pending id in the `Machine`, no second spawn on a blocked retry). The request-completion path landed: the exit ring carries a 192-byte `Diagnostic` image for a load failure, `Host::diagnostic_for` (default `false`) copies it, and `run` fills its `diag` while `wait` still reports only `Faulted(IoError)`. Q43 now covers only a distinct `TaskId` type. |
 | 2026-11-15 | Realtime promotion and heartbeat implemented: `Host::realtime_on` (default `Ok`) and `Host::heartbeat` (default no-op), builtins 11 and 12, admission against the online core count, and `Faulted(WatchdogTimeout)` from a one-second non-blocked deadline. |
 | 2026-11-15 | Streams implemented: `Host::stream_send`/`Host::stream_recv` are non-blocking `Result<_, StreamError>` hooks with `Invalid` defaults. The interpreter turns `WouldBlock` into `Blocked(WaitKind::Stream(handle))` for `core.send`/`core.recv` and into staged `WouldBlock`/`Closed` results for `try_send`/`try_recv`. Endpoints are created and paired by the loader before the task is placed, so the host never sees an unopened handle. |
+| 2026-11-16 | Graphics host methods (spec 0009): `screen_width`/`screen_height` (0), `fill_rect`, `fill_dither`, `draw_rect`, `draw_text`, `present`, `clear` (`Invalid`), and `get_pixel` (0), all with disabled-screen defaults. The interpreter validates extents and colours, the host clips and rasterises; the kernel implements them over the shadow screen. |

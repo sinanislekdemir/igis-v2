@@ -15,6 +15,7 @@ revised as understanding improves, and their history lives in git.
 | 0006 | [Streams and inter-application IPC](0006-streams.md) | Accepted | mm, sched, core/stdlib, loader | 2026-11-13 |
 | 0007 | [Scheduler](0007-scheduler.md) | Accepted | sched, arch timer/IPI, interpreter | 2026-11-13 |
 | 0008 | [Bytecode format and the compiler/runtime split](0008-bytecode.md) | Accepted | abi, compiler, interpreter, repl | 2026-11-13 |
+| 0009 | [Graphics, the shadow screen and the window service](0009-graphics-and-windows.md) | Accepted | syslib, kernel gfx/console, compiler, interpreter | 2026-11-16 |
 
 ## Lifecycle
 
