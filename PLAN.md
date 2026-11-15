@@ -28,6 +28,36 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 - **Then:** M2.2.7 PS/2 aux IRQ12 (fixes the measured burst loss on the relative
   fallback), then M2.3 windows (`specs/0011`, z-order, focus, damage/`expose`).
 
+### Resuming from a fresh session (no chat history)
+
+Trust the repository, not a summary. On a fresh start:
+
+1. `git status --short` and `git log --oneline -8` — the tree should be clean and the top
+   commit should match the "Last commit" line above; if not, stop and reconcile first.
+2. `cargo test -q -p abi -p compiler -p interpreter -p langhost` — expect **291** tests
+   plus the doctest, all green at `93fedbf`.
+3. `cargo xtask build` — expect a clean kernel build.
+4. Read, in this order: this file, `AGENTS.md` (status paragraph + decisions table),
+   `specs/0009-graphics-and-windows.md`, `specs/0010-input-and-events.md`,
+   `adr/0020`, `adr/0021`, `adr/0022`.
+5. Baseline kernel checks (headless, no chat needed):
+   - `( sleep 6; printf 'run desktop\n'; sleep 4; printf 'exit\n' ) | timeout 120s \
+     qemu-system-x86_64 -cdrom build/igis.iso -m 256M -serial stdio -monitor none \
+     -no-reboot -no-shutdown -accel tcg -vga std -display none -smp 4`
+     → `desktop: ok`, `mouse: decoder ok`, `usb: tablet ...` when the device is present.
+   - `python3 scripts/tablet_qmp.py build/igis.iso` → `7/7 absolute cases passed`.
+   - `python3 scripts/tablet_qmp.py build/igis.iso --no-tablet` → `mouse: ok` fallback.
+6. The next slice is the M2.2.3/2.2.4/2.2.5 block above. Its touchpoints, so nothing has
+   to be rediscovered: `abi/src/{lib.rs,opcodes.rs}` (layout + builtin ids),
+   `compiler/src/codegen.rs` (predeclared types and `syslib` signatures),
+   `interpreter/src/machine.rs` (`Host`, builtin arms, `WaitKind`),
+   `kernel/src/{task.rs,sched.rs,gfx.rs,mouse.rs,console.rs,main.rs}` (queue, producers,
+   wake path), `arch/x86_64/src/keyboard.rs` (key events), `samples/apps/events`,
+   `specs/0003`, `specs/0008`, `specs/0010`.
+
+If anything in this file disagrees with the code or the specs, the code and specs win and
+this file must be corrected in the same commit.
+
 ## M1 — bootable system with source applications
 
 Complete. Boot/long mode, GDT/TSS/IDT, APIC timer, frame allocator, ext2 read-only,
