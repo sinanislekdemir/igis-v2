@@ -55,6 +55,23 @@ begin
   say("\n");
 end;
 
+// The shortest round-trip form (Q41): no width argument, no magnitude bound.
+procedure show_short(label: const string[0]; v: f64);
+begin
+  say(label);
+  say("=");
+  n := core.format_f64_short_into(text, v);
+  if n >= 0 then
+    say(text)
+  else
+  begin
+    say("status ");
+    n := core.format_int_into(text, n, uint(10), uint(0));
+    say(text);
+  end;
+  say("\n");
+end;
+
 procedure main(args: const string[1024]);
 begin
   show("zero", 0.0, uint(2));
@@ -74,6 +91,11 @@ begin
   show("big", 1.0e300, uint(0));
   show("width10", 1.0, uint(10));
   show_tiny();
+
+  show_short("s:third", 1.0 / 3.0);
+  show_short("s:1e21", 1.0e21);
+  show_short("s:tinysub", 5.0e-324);
+  show_short("s:max", 1.7976931348623157e308);
 
   if core.len(args) > uint(0) then
   begin

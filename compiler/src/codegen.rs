@@ -5416,6 +5416,42 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::scalar(Kind::Int)))
             }
+            // `core.format_f64_short_into(dst, value: f64) -> int`
+            // (spec 0003, Q41). The shortest round-trip text in a writable
+            // `string` or `bytes` buffer; no width, no magnitude bound, and no
+            // host call. The interpreter owns the digit search.
+            "core.format_f64_short_into" => {
+                if args.len() != 2 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`core.format_f64_short_into` expects 2 arguments, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                let destination = self.emit_var_buffer_ref(args[0])?;
+                let value = self.expr_scalar(args[1])?;
+                if value.kind != Kind::Float {
+                    return Err(self.err_at(
+                        args[1],
+                        format_args!(
+                            "`core.format_f64_short_into` expects an `f64` value, found `{value}`"
+                        ),
+                    ));
+                }
+                let kind = match destination.kind {
+                    Kind::String => opcodes::buffer_kind::STRING,
+                    Kind::Bytes => opcodes::buffer_kind::BYTES,
+                    _ => unreachable!("the destination is a buffer"),
+                };
+                self.word(opcodes::FORMAT_F64_SHORT, kind, 0, 0)?;
+                self.imm32(destination.cap)?;
+                self.pop(2)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Int)))
+            }
             // First `syslib` primitives: x86 port I/O (spec 0003, "Hardware
             // access"). `Port` is staged as a plain `uint` (Q45); the namespace
             // is still separate from `core`, so a hardware access stays

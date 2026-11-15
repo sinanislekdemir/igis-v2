@@ -1737,6 +1737,185 @@ fn format_f64_rejects_a_kind_or_capacity_out_of_range() {
     );
 }
 
+// ---- shortest round-trip floating-point text ------------------------------
+//
+// Same `state` layout as the fixed-point formatter: `state[0..8]` result,
+// `state[8..16]` length, `state[16..]` destination data.
+
+fn format_f64_short_package(kind: u8, capacity: u32, bits: u64, state_size: u32) -> Vec<u8> {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 16);
+    op_const(&mut instructions, bits as i64);
+    op_word(&mut instructions, opcodes::FORMAT_F64_SHORT, kind, 0, 0);
+    instructions.extend_from_slice(&capacity.to_le_bytes());
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op(&mut instructions, opcodes::RET);
+    let frame = FnSpec {
+        frame_size: 80,
+        ..BYTE_FRAME
+    };
+    build(&[frame], &instructions, &[], state_size, 96, 0)
+}
+
+/// Runs one `format_f64_short` and returns `(result, bytes, length)`. The
+/// destination starts with `initial`, so an untouched buffer is observable.
+fn run_format_f64_short(kind: u8, capacity: u32, bits: u64, initial: &[u8]) -> (i64, Vec<u8>, u64) {
+    let state_size = (16 + capacity as usize).max(16 + initial.len()).max(24);
+    let code = format_f64_short_package(kind, capacity, bits, state_size as u32);
+    let mut host = MockHost::default();
+    let mut state = vec![0u8; state_size];
+    state[8..16].copy_from_slice(&(initial.len() as u64).to_le_bytes());
+    state[16..16 + initial.len()].copy_from_slice(initial);
+    let mut stack = vec![0u8; 96];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    let result = i64::from_le_bytes(state[0..8].try_into().unwrap());
+    let length = u64::from_le_bytes(state[8..16].try_into().unwrap());
+    let bytes = state[16..16 + length as usize].to_vec();
+    (result, bytes, length)
+}
+
+fn format_f64_short(kind: u8, capacity: u32, value: f64) -> (i64, Vec<u8>, u64) {
+    run_format_f64_short(kind, capacity, value.to_bits(), b"")
+}
+
+#[test]
+fn format_f64_short_writes_the_shortest_round_trip() {
+    let string = opcodes::buffer_kind::STRING;
+    let bytes = opcodes::buffer_kind::BYTES;
+    // (value, text) pairs; the text is the spec's shape rule applied to the
+    // shortest digits, which the property test checks against Rust.
+    let cases: &[(f64, &[u8])] = &[
+        (0.0, b"0"),
+        (-0.0, b"-0"),
+        (1.0, b"1"),
+        (-1.0, b"-1"),
+        (0.1, b"0.1"),
+        (1.0 / 3.0, b"0.3333333333333333"),
+        (1.0e21, b"1e21"),
+        (1.0e20, b"100000000000000000000"),
+        (1.0e-6, b"0.000001"),
+        (1.0e-7, b"1e-7"),
+        (5.0e-324, b"5e-324"),
+        (f64::MAX, b"1.7976931348623157e308"),
+        (f64::MIN_POSITIVE, b"2.2250738585072014e-308"),
+        (9_007_199_254_740_992.0, b"9007199254740992"),
+        (9_007_199_254_740_994.0, b"9007199254740994"),
+        // 2^53 + 1 is not representable, so it formats as 2^53.
+        (9_007_199_254_740_993.0, b"9007199254740992"),
+        (0.30000000000000004, b"0.30000000000000004"),
+        (f64::NAN, b"nan"),
+        (f64::INFINITY, b"inf"),
+        (f64::NEG_INFINITY, b"-inf"),
+    ];
+    for (value, want) in cases {
+        assert_eq!(
+            format_f64_short(string, 64, *value),
+            (want.len() as i64, want.to_vec(), want.len() as u64),
+            "{value:?}"
+        );
+    }
+    // Both destination kinds accept the ASCII text.
+    assert_eq!(
+        format_f64_short(bytes, 64, 1.0e21),
+        (4, b"1e21".to_vec(), 4)
+    );
+    assert_eq!(
+        format_f64_short(bytes, 64, f64::NEG_INFINITY),
+        (4, b"-inf".to_vec(), 4)
+    );
+}
+
+#[test]
+fn format_f64_short_reports_capacity_and_leaves_the_length_alone() {
+    let string = opcodes::buffer_kind::STRING;
+    // "0.30000000000000004" is 19 bytes.
+    assert_eq!(
+        run_format_f64_short(string, 18, 0.30000000000000004f64.to_bits(), b"XYZ"),
+        (-6, b"XYZ".to_vec(), 3)
+    );
+    // "1.7976931348623157e308" is 22 bytes.
+    assert_eq!(
+        run_format_f64_short(string, 21, f64::MAX.to_bits(), b"XYZ"),
+        (-6, b"XYZ".to_vec(), 3)
+    );
+    // Even the shortest form needs room for its exponent.
+    assert_eq!(
+        run_format_f64_short(string, 3, 1.0e21f64.to_bits(), b"XYZ"),
+        (-6, b"XYZ".to_vec(), 3)
+    );
+    // A one-byte-short `-inf` fails too, in either kind.
+    assert_eq!(
+        run_format_f64_short(
+            opcodes::buffer_kind::BYTES,
+            3,
+            f64::NEG_INFINITY.to_bits(),
+            b"XYZ"
+        ),
+        (-6, b"XYZ".to_vec(), 3)
+    );
+    // Exactly enough room succeeds.
+    assert_eq!(
+        format_f64_short(string, 4, 1.0e21),
+        (4, b"1e21".to_vec(), 4)
+    );
+}
+
+#[test]
+fn format_f64_short_rejects_a_kind_capacity_or_reserved_field() {
+    let code = format_f64_short_package(2, 8, 0, 24);
+    let mut scratch = scratch_for(&code);
+    let error = interpreter::verify(&code, &mut scratch).expect_err("must be refused");
+    assert_eq!(error.status, Status::Invalid);
+    assert!(
+        error
+            .message
+            .contains("format_f64_short kind is out of range"),
+        "{}",
+        error.message
+    );
+
+    // A zero-capacity destination can never receive a digit.
+    let code = format_f64_short_package(opcodes::buffer_kind::STRING, 0, 0, 24);
+    let mut scratch = scratch_for(&code);
+    let error = interpreter::verify(&code, &mut scratch).expect_err("must be refused");
+    assert_eq!(error.status, Status::Invalid);
+    assert!(
+        error
+            .message
+            .contains("format_f64_short destination capacity is out of range"),
+        "{}",
+        error.message
+    );
+
+    // `b` and `c` are reserved and fold into the same kind check, as they do
+    // for `format_f64`.
+    for (b, c) in [(1u8, 0u8), (0, 1)] {
+        let mut instructions = Vec::new();
+        op_imm(&mut instructions, opcodes::REF_STATE, 16);
+        op_const(&mut instructions, 0);
+        op_word(&mut instructions, opcodes::FORMAT_F64_SHORT, 0, b, c);
+        instructions.extend_from_slice(&8u32.to_le_bytes());
+        op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+        op(&mut instructions, opcodes::RET);
+        let frame = FnSpec {
+            frame_size: 80,
+            ..BYTE_FRAME
+        };
+        let code = build(&[frame], &instructions, &[], 24, 96, 0);
+        let mut scratch = scratch_for(&code);
+        let error = interpreter::verify(&code, &mut scratch).expect_err("must be refused");
+        assert_eq!(error.status, Status::Invalid);
+        assert!(
+            error
+                .message
+                .contains("format_f64_short kind is out of range"),
+            "{}",
+            error.message
+        );
+    }
+}
+
 // ---- syslib port builtins -------------------------------------------------
 
 #[test]

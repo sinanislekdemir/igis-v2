@@ -888,6 +888,58 @@ end;
 }
 
 #[test]
+fn format_f64_short_into_prints_the_shortest_round_trip() {
+    let source = br#"
+unit f64short;
+
+uses core;
+
+var
+  text: string[32];
+  n: int;
+
+procedure show(label: const string[0]; v: f64);
+begin
+  core.write(label);
+  core.write("=");
+  n := core.format_f64_short_into(text, v);
+  if n < 0 then
+    core.write("failed")
+  else
+    core.write(text);
+  core.write("\n");
+end;
+
+procedure main(args: const string[1024]);
+begin
+  show("zero", 0.0);
+  show("negzero", -0.0);
+  show("tenth", 0.1);
+  show("third", 1.0 / 3.0);
+  show("1e20", 1.0e20);
+  show("1e21", 1.0e21);
+  show("1e-6", 1.0e-6);
+  show("1e-7", 1.0e-7);
+  show("minsub", 5.0e-324);
+  show("max", 1.7976931348623157e308);
+end;
+"#;
+    let package = langhost::compile(source, "f64short").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    // Round-tripping is proven against the host formatter and parser in
+    // `interpreter/tests/f64short.rs`; `stdlib.parse_f64_into` is still not
+    // correctly rounded (Q41), so it is not the oracle here.
+    assert_eq!(
+        result.output,
+        b"zero=0\nnegzero=-0\ntenth=0.1\nthird=0.3333333333333333\n\
+          1e20=100000000000000000000\n1e21=1e21\n1e-6=0.000001\n1e-7=1e-7\n\
+          minsub=5e-324\nmax=1.7976931348623157e308\n"
+            .to_vec()
+    );
+}
+
+#[test]
 fn format_f64_into_and_parse_f64_into_round_trip() {
     let source = br#"
 unit f64round;

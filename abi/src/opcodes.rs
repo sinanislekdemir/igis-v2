@@ -308,6 +308,22 @@ pub const BUILTIN: u8 = 0x50;
 /// (`Status::CapacityExceeded`) and leaves the destination length alone.
 pub const FORMAT_F64: u8 = 0x51;
 
+/// Pop an `f64` value and a destination reference, format the value as the
+/// shortest decimal text that parses back to the same bits, and push the byte
+/// count (`core.format_f64_short_into`, spec 0003, Q41).
+///
+/// `a` is the destination's buffer kind ([`buffer_kind`]); both kinds are
+/// accepted because the output is ASCII. Immediate: `capacity: u32`, the
+/// destination's declared capacity; it must be non-zero. `b` and `c` are
+/// reserved and must be zero. There is no width argument and no magnitude
+/// bound: the formatter picks the shortest significant-digit string that
+/// round-trips, in positional form while `-6 < e10 + 1 <= 21` and in
+/// scientific form otherwise. `NaN` is written as `nan`, `+Inf`/`-Inf` as
+/// `inf`/`-inf`, and a zero as `0`/`-0`. A result that does not fit `capacity`
+/// pushes `-6` (`Status::CapacityExceeded`) and leaves the destination length
+/// alone.
+pub const FORMAT_F64_SHORT: u8 = 0x52;
+
 /// IEEE-754 double addition.
 pub const FADD: u8 = 0x60;
 /// IEEE-754 double subtraction.
@@ -474,7 +490,8 @@ pub const fn instruction_words(op: u8) -> Option<u32> {
         CONST => Some(3),
         JMP | JZ | JNZ | CALL | LOAD_LOCAL | STORE_LOCAL | REF_LOCAL | LOAD_STATE | STORE_STATE
         | REF_STATE | REF_CONST | APPEND | READ_LINE | STORE_U8 | BUILTIN | SUBSTR | FORMAT_INT
-        | ENUM_CAST | REF_OFFSET | STREAM_RECV | STREAM_TRY_RECV | FORMAT_F64 => Some(2),
+        | ENUM_CAST | REF_OFFSET | STREAM_RECV | STREAM_TRY_RECV | FORMAT_F64
+        | FORMAT_F64_SHORT => Some(2),
         REF_ELEMENT => Some(3),
         MAP_PUT | MAP_GET | MAP_HAS | MAP_REMOVE => Some(5),
         MAP_COUNT => Some(1),
@@ -536,6 +553,7 @@ pub const fn mnemonic(op: u8) -> Option<&'static str> {
         SUBSTR => Some("substr"),
         FORMAT_INT => Some("format_int"),
         FORMAT_F64 => Some("format_f64"),
+        FORMAT_F64_SHORT => Some("format_f64_short"),
         ENUM_CAST => Some("enum_cast"),
         MAP_PUT => Some("map_put"),
         MAP_GET => Some("map_get"),

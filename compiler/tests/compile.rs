@@ -1389,6 +1389,139 @@ end;
     );
 }
 
+/// Returns `(kind, capacity)` for every `format_f64_short` instruction in
+/// order.
+fn format_f64_short_encodings(package: &Owned) -> Vec<(u8, u32)> {
+    use abi::opcodes;
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+    let mut seen = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        if op == opcodes::FORMAT_F64_SHORT {
+            let kind = instructions[pc + 1];
+            let capacity = u32::from_le_bytes(instructions[pc + 4..pc + 8].try_into().unwrap());
+            seen.push((kind, capacity));
+        }
+        pc += words * 4;
+    }
+    seen
+}
+
+#[test]
+fn format_f64_short_into_checks_types_and_encodes_the_destination() {
+    let source = br#"
+unit t;
+
+uses core;
+
+var
+  text: string[32];
+  raw: bytes[48];
+  n: int;
+  x: f64;
+
+procedure main(args: const string[1024]);
+begin
+  x := -1.5;
+  n := core.format_f64_short_into(text, x);
+  n := core.format_f64_short_into(raw, 1.0e300);
+  n := core.format_f64_short_into(text, 1.0 / 3.0);
+end;
+"#;
+    let package = compile(source, "t.ig").expect("compiles");
+    assert_eq!(
+        format_f64_short_encodings(&package),
+        vec![
+            (abi::opcodes::buffer_kind::STRING, 32),
+            (abi::opcodes::buffer_kind::BYTES, 48),
+            (abi::opcodes::buffer_kind::STRING, 32),
+        ]
+    );
+
+    let wrong_arity = br#"
+unit t;
+
+uses core;
+
+var
+  text: string[32];
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := core.format_f64_short_into(text, 1.5, uint(2));
+end;
+"#;
+    let error = compile(wrong_arity, "t.ig").expect_err("two arguments are required");
+    assert!(
+        error.message.contains("expects 2 arguments, got 3"),
+        "{}",
+        error.message
+    );
+
+    let wrong_value = br#"
+unit t;
+
+uses core;
+
+var
+  text: string[32];
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := core.format_f64_short_into(text, 1);
+end;
+"#;
+    let error = compile(wrong_value, "t.ig").expect_err("the value is an f64");
+    assert!(error.message.contains("`f64` value"), "{}", error.message);
+
+    let wrong_destination = br#"
+unit t;
+
+uses core;
+
+var
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := core.format_f64_short_into("abc", 1.5);
+end;
+"#;
+    let error = compile(wrong_destination, "t.ig").expect_err("the destination is var");
+    assert!(
+        error.message.contains("must be a variable or parameter"),
+        "{}",
+        error.message
+    );
+
+    let scalar_destination = br#"
+unit t;
+
+uses core;
+
+var
+  value: int;
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := core.format_f64_short_into(value, 1.5);
+end;
+"#;
+    let error = compile(scalar_destination, "t.ig").expect_err("an int is not a buffer");
+    assert!(
+        error.message.contains("not a buffer") || error.message.contains("buffer"),
+        "{}",
+        error.message
+    );
+}
+
 #[test]
 fn syslib_ports_are_accepted_and_emit_their_builtins() {
     use abi::opcodes::{self, builtin};

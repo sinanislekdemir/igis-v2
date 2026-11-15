@@ -31,6 +31,7 @@
 #[cfg(test)]
 extern crate std;
 
+mod f64short;
 mod machine;
 mod program;
 

@@ -4,7 +4,7 @@ Parked decisions for igis-v2. This is the working register; each spec's own
 "Open questions" section remains authoritative for that document. When an item is
 resolved, record the answer in the relevant spec or in a new ADR, then remove it here.
 
-**Status:** implementation phase. Last updated: 2026-11-15.
+**Status:** implementation phase. Last updated: 2026-11-16.
 **Snapshot:** specs 0001–0008, ADRs 0001–0019.
 
 ## How to use
@@ -42,7 +42,7 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | # | Question | Options / recommendation | Trigger |
 |---|----------|--------------------------|---------|
 | Q40 | `f32` support | not in M1; additive later, but it needs its own opcode and conversion rules | when single precision is needed |
-| Q41 | Float text beyond fixed decimal | **Narrowed 2026-11-16.** Fixed-point formatting and decimal parsing are implemented: `core.format_f64_into` (0–9 fraction digits, half away from zero, `nan`/`inf`/`-inf`, `-4` for a wider field or `\|value\| >= 2^63`, `-6` when the destination is short) and `stdlib.parse_f64_into` (decimal grammar with an optional exponent, `Invalid` for anything else, `±Inf`/`±0` on overflow/underflow with `Ok`). What remains is **shortest round-trip formatting** (the nine-digit cap, the `2^63` range bound that refuses `1e300` and every exponent form, and binary noise past ~15 significant digits) and **exact IEEE text parsing** (correctly rounded decimal → binary64, plus subnormal edge cases). Both are additive: a new formatter mode/opcode and a stricter parser, not a change to these semantics | when float output must round-trip losslessly or exactness is required |
+| Q41 | Float text beyond fixed decimal | **Narrowed 2026-11-16.** Fixed-point formatting, shortest round-trip formatting and decimal parsing are implemented: `core.format_f64_into` (0–9 fraction digits, half away from zero, `nan`/`inf`/`-inf`, `-4` for a wider field or `\|value\| >= 2^63`, `-6` when the destination is short), `core.format_f64_short_into` (the fewest significant digits that parse back to the same bits, positional while `-6 < e10 + 1 <= 21` and scientific otherwise, no width and no magnitude bound, `-6` when the destination is short) and `stdlib.parse_f64_into` (decimal grammar with an optional exponent, `Invalid` for anything else, `±Inf`/`±0` on overflow/underflow with `Ok`). What remains is **correctly rounded decimal → binary64 parsing** (the parser accumulates the mantissa as an `f64` and scales by repeated ×/÷10, so very long mantissas can differ from the IEEE result by an ulp) and its **subnormal edge cases** | when parsed text must match a correctly rounded reader bit for bit |
 | Q46 | Moving the checked slice into `stdlib` | **Blocked, not pending.** `core.substr_into` cannot move: the destination capacity must be a *call-site immediate* (the `SUBSTR` `capacity` field), while a `stdlib` helper declares concrete capacities and the language has no generics, so one helper could serve only one destination size (it would lose `split_once`'s `string[128]` head and every smaller destination). The future option is a buffer parameter that carries its **runtime capacity**, which would need a language change. Until then the checked slice stays in `core` and there is one slicing primitive, not two (spec 0003, "Slicing and search") | only if runtime-capacity buffer parameters are added |
 
 ## E. Fault handling

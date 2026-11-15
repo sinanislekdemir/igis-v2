@@ -949,6 +949,11 @@ impl Machine {
                 let capacity = read_u32(code, pc + 4)? as usize;
                 self.format_f64(kind, capacity, state, stack, constants, args)?;
             }
+            opcodes::FORMAT_F64_SHORT => {
+                let kind = a;
+                let capacity = read_u32(code, pc + 4)? as usize;
+                self.format_f64_short(kind, capacity, state, stack, constants, args)?;
+            }
             opcodes::ENUM_CAST => {
                 // `EnumName(int)` construction: the ordinal must name a variant.
                 // Anything else faults `Overflow`, so an invalid enum value
@@ -2781,6 +2786,83 @@ impl Machine {
                 }
             }
         }
+
+        if at > capacity {
+            self.push(stack, status_code(Status::CapacityExceeded))?;
+            return Ok(());
+        }
+
+        {
+            let out = &out[..at];
+            let destination = match destination_region {
+                refs::REGION_STATE => &mut state[destination..destination + at],
+                refs::REGION_STACK => &mut stack[destination..destination + at],
+                _ => return Err(FaultCode::IllegalOperation),
+            };
+            destination.copy_from_slice(out);
+        }
+
+        match destination_region {
+            refs::REGION_STATE => write_u64(state, destination - 8, at as u64)?,
+            refs::REGION_STACK => write_u64(stack, destination - 8, at as u64)?,
+            _ => return Err(FaultCode::IllegalOperation),
+        }
+        self.push(stack, at as u64)
+    }
+
+    /// `format_f64_short`: write an `f64` as the shortest decimal text that
+    /// parses back to the same bits (`core.format_f64_short_into`, spec 0003,
+    /// Q41).
+    ///
+    /// `kind` is [`opcodes::buffer_kind`]; both kinds accept the ASCII output.
+    /// There is no width argument and no magnitude bound: the digits are the
+    /// shortest round-trip sequence, printed positionally while the decimal
+    /// point stays inside the spec's window and in scientific form otherwise.
+    /// `nan`, `inf`/`-inf` and `0`/`-0` are written literally. A result that
+    /// does not fit `capacity` pushes `-6` (`Status::CapacityExceeded`) and
+    /// leaves the destination length untouched.
+    ///
+    /// The text is built in a local staging array and published with one copy,
+    /// so a rejected value never leaves a partial destination. The digit
+    /// search is exact integer arithmetic ([`crate::f64short`]); no allocation
+    /// and no host call.
+    fn format_f64_short(
+        &mut self,
+        kind: u8,
+        capacity: usize,
+        state: &mut [u8],
+        stack: &mut [u8],
+        code: &[u8],
+        args: &[u8],
+    ) -> Result<(), FaultCode> {
+        if kind != opcodes::buffer_kind::STRING && kind != opcodes::buffer_kind::BYTES {
+            return Err(FaultCode::IllegalOperation);
+        }
+        let value = f64::from_bits(self.pop(stack)?);
+        let destination_bits = self.pop(stack)?;
+
+        let (destination_region, destination) =
+            self.resolve(destination_bits, state, stack, code, args)?;
+        if destination_region != refs::REGION_STATE && destination_region != refs::REGION_STACK {
+            return Err(FaultCode::IllegalOperation);
+        }
+        if destination < 8 {
+            return Err(FaultCode::OutOfBounds);
+        }
+        let destination_end = destination
+            .checked_add(capacity)
+            .ok_or(FaultCode::OutOfBounds)?;
+        if destination_end
+            > region_len(destination_region, state, stack, code, args)
+                .ok_or(FaultCode::OutOfBounds)?
+        {
+            return Err(FaultCode::OutOfBounds);
+        }
+
+        // The longest accepted text is 25 bytes (a sign, `0.`, five zeros and
+        // 17 digits); the staging array is larger still.
+        let mut out = [0u8; crate::f64short::MAX_TEXT];
+        let at = crate::f64short::format(value, &mut out);
 
         if at > capacity {
             self.push(stack, status_code(Status::CapacityExceeded))?;
