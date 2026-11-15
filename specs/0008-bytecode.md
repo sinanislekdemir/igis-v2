@@ -376,8 +376,14 @@ on the same table; the machine, not the compiler, owns the runtime checks.
 | 19 | `get_pixel` | 2 → 1 | `0x00RRGGBB`, 0 outside |
 | 20 | `present` | 4 → 1 | x, y, w, h |
 | 21 | `clear` | 1 → 1 | colour; fills and presents |
+| 22 | `pointer_x` | 0 → 1 | pointer `x` in pixels |
+| 23 | `pointer_y` | 0 → 1 | pointer `y` in pixels |
+| 24 | `pointer_buttons` | 0 → 1 | bit 0 left, bit 1 right, bit 2 middle |
+| 25 | `inject_pointer` | 3 → 1 | dx, dy, buttons; debug-only; `buttons > 0b111` is `Invalid` |
 
-Graphics builtins add no opcode, so ABI v1 stays at **75** opcodes (spec 0009).
+Graphics builtins add no opcode, so ABI v1 stays at **75** opcodes (spec 0009). The input
+builtins (spec 0010) add none either; the interpreter owns the button-mask rule, the host
+owns the pointer state.
 
 ### Compiler / runtime split
 
@@ -536,3 +542,4 @@ pub fn run(task: &mut Task);
 | 2026-11-16 | Fixed-point float text adds one opcode: `format_f64` (`a` = destination buffer kind, a non-zero capacity immediate; destination/value/`frac_digits` on the stack, pops an `f64` bit pattern) pushes the byte count, or `-4` for a width above 9 or a magnitude at or above `2^63`, or `-6` when the result does not fit. The specials `nan`/`inf`/`-inf` are written literally. The formatter is pure interpreter code building into a local array, with no host call and no allocation. `stdlib.parse_f64_into` adds no opcode: it is ordinary language code over `core.len`, indexing and `f64` arithmetic. ABI v1 grows from 73 to 74 opcodes. |
 | 2026-11-16 | Shortest round-trip float text adds one opcode: `format_f64_short` (`a` = destination buffer kind, a non-zero capacity immediate, `b = c = 0`; destination reference and `f64` bit pattern on the stack, no width operand) pushes the byte count, or `-6` when the result does not fit. The digits are the shortest significant digits that round-trip, printed positionally while `-6 < e10 + 1 <= 21` and in scientific form otherwise; `nan`, `inf`/`-inf` and `0`/`-0` are literal. The search is pure interpreter code over exact base-`10^9` integers (value plus both round-trip interval endpoints), with no host call, no allocation and no data tables: the power-of-five factor is built by repeated multiplication by `5^27`, so the `.rodata` cost is a 72-byte `10^0..=10^8` table and the code is about 9.4 KiB of `.text` at `-O`. The table counted from `abi/src/opcodes.rs` now holds **75** opcodes (74 before this change: the earlier `73 to 74` entry above is the correct count, and the `71 to 72` figure once quoted in `AGENTS.md` was off by two). |
 | 2026-11-16 | Graphics builtins add no opcode (spec 0009): ids 13–21 are `screen_width`, `screen_height`, `fill_rect`, `fill_dither`, `draw_rect`, `draw_text`, `get_pixel`, `present` and `clear`, with effects `(0,1)`, `(0,1)`, `(5,1)`, `(5,1)`, `(5,1)`, `(4,1)`, `(2,1)`, `(4,1)` and `(1,1)`. The interpreter validates extents and colours and routes the rest through `Host` with disabled-screen defaults, so ABI v1 stays at **75** opcodes. |
+| 2026-11-16 | Input builtins add no opcode (spec 0010): ids 22–25 are `pointer_x`, `pointer_y`, `pointer_buttons` and the debug-only `inject_pointer`, with effects `(0,1)`, `(0,1)`, `(0,1)` and `(3,1)`. The interpreter rejects `buttons > 0b111` before calling the host; ABI v1 stays at **75** opcodes. |

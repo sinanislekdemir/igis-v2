@@ -5190,3 +5190,119 @@ end;
         );
     }
 }
+
+// ---- syslib pointer (spec 0010) -------------------------------------------
+
+#[test]
+fn syslib_pointer_surface_is_accepted_and_emits_its_builtins() {
+    use abi::opcodes::{self, builtin};
+
+    let source = br#"
+unit t;
+
+uses core, syslib;
+
+var
+  status: Status;
+  px: int;
+  py: int;
+  buttons: uint;
+
+procedure main(args: const string[1024]);
+begin
+  px := syslib.pointer_x();
+  py := syslib.pointer_y();
+  buttons := syslib.pointer_buttons();
+  status := syslib.inject_pointer(10, -20, uint(1));
+  status := syslib.inject_pointer(0, 0, uint(7));
+end;
+"#;
+    let package = compile(source, "t.ig").expect("the pointer surface compiles");
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+    let mut seen = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        if op == opcodes::BUILTIN {
+            seen.push(u32::from_le_bytes(
+                instructions[pc + 4..pc + 8].try_into().unwrap(),
+            ));
+        }
+        pc += words * 4;
+    }
+    assert_eq!(
+        seen,
+        vec![
+            builtin::POINTER_X,
+            builtin::POINTER_Y,
+            builtin::POINTER_BUTTONS,
+            builtin::INJECT_POINTER,
+            builtin::INJECT_POINTER,
+        ]
+    );
+}
+
+#[test]
+fn syslib_pointer_argument_types_and_arity_are_checked() {
+    let cases = [
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.inject_pointer(1, 2);
+end;
+"#,
+            "`syslib.inject_pointer` expects 3 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.inject_pointer(uint(1), 2, uint(0));
+end;
+"#,
+            "`syslib.inject_pointer` expects an `int` dx",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.inject_pointer(1, 2, 0);
+end;
+"#,
+            "`syslib.inject_pointer` expects a `uint` buttons",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var px: int;
+procedure main(args: const string[1024]);
+begin
+  px := syslib.pointer_x(uint(1));
+end;
+"#,
+            "`syslib.pointer_x` expects 0 arguments",
+        ),
+    ];
+    for (source, expected) in cases {
+        let error = compile(source.as_bytes(), "t.ig").expect_err("must be a compile error");
+        assert!(
+            error.message.contains(expected),
+            "expected `{expected}`, got `{}`",
+            error.message
+        );
+    }
+}

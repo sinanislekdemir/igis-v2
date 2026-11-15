@@ -15,6 +15,17 @@
 //! top-left. Drawing is clipped to a rectangular region (initially the whole
 //! screen) and then to the screen, and never faults: out-of-range extents and
 //! over-wide colours are rejected by the interpreter before they reach here.
+//!
+//! # Pointer and cursor (spec 0010, ADR 0021)
+//!
+//! The module also owns the machine-wide pointer state (`x`, `y`, buttons) and
+//! the software cursor, because the cursor is composited in [`present`]: the
+//! shadow rectangle is copied to the framebuffer first and the cursor pixels
+//! are written on top afterwards, **into the framebuffer**. The shadow never
+//! contains the cursor, so [`get_pixel`] always sees what an application drew.
+//!
+//! Keeping the pointer next to the shadow means `present` reads the position
+//! under the lock it already holds: no second lock, no lock-order question.
 
 use abi::Status;
 
@@ -25,6 +36,51 @@ use crate::sync::SpinLock;
 
 /// Largest accepted colour value: the top byte of `0x00RRGGBB` must be zero.
 pub const MAX_COLOR: u32 = 0x00FF_FFFF;
+
+/// Accepted pointer button mask: bit 0 left, bit 1 right, bit 2 middle
+/// (spec 0010, I10).
+pub const POINTER_BUTTONS_MASK: u32 = 0b111;
+
+/// Cursor extent in pixels; the hotspot is the top-left pixel (spec 0010, I6).
+const CURSOR_W: i64 = 16;
+const CURSOR_H: i64 = 16;
+const CURSOR_OUTLINE_COLOR: u32 = 0x0000_0000;
+const CURSOR_FILL_COLOR: u32 = 0x00FF_FFFF;
+
+/// Black outline of the 16x16 arrow; bit `x` of row `y` is the pixel at
+/// `(x, y)`. Hotspot `(0, 0)`.
+///
+/// ```text
+/// #...............
+/// ##..............
+/// #+#.............
+/// #++#............
+/// #+++#...........
+/// #++++#..........
+/// #+++++#.........
+/// #++++++#........
+/// #+++++###.......
+/// ##+++#..........
+/// #.#++#..........
+/// #..#+#..........
+/// #...##..........
+/// #...............
+/// ................
+/// ................
+/// ```
+///
+/// `#` is the outline, `+` is the white fill. The bit masks are precomputed so
+/// compositing is a table lookup, not a rasterisation (spec 0010, I7).
+const CURSOR_OUTLINE: [u16; 16] = [
+    0x0001, 0x0003, 0x0007, 0x000f, 0x001f, 0x003f, 0x007f, 0x00ff, 0x01ff, 0x003f, 0x003d, 0x0039,
+    0x0031, 0x0001, 0x0000, 0x0000,
+];
+
+/// White fill, a subset of [`CURSOR_OUTLINE`].
+const CURSOR_FILL: [u16; 16] = [
+    0x0000, 0x0000, 0x0002, 0x0006, 0x000e, 0x001e, 0x003e, 0x007e, 0x003e, 0x001c, 0x0018, 0x0010,
+    0x0000, 0x0000, 0x0000, 0x0000,
+];
 
 /// What `init` did, for the boot log.
 pub enum Init {
@@ -68,6 +124,18 @@ struct Rect {
     h: i32,
 }
 
+/// Pointer state, machine-wide (spec 0010, I4/I5).
+#[derive(Clone, Copy)]
+struct Pointer {
+    x: i32,
+    y: i32,
+    /// Bit 0 left, bit 1 right, bit 2 middle.
+    buttons: u8,
+    /// False until the pointer device initialises or the first injection
+    /// (spec 0010, I9).
+    visible: bool,
+}
+
 /// The screen image and the geometry needed to present it.
 struct Screen {
     width: usize,
@@ -80,6 +148,8 @@ struct Screen {
     shadow: &'static mut [u8],
     /// Rectangular clip, intersected with the screen (spec 0009, G7).
     clip: Rect,
+    /// The one pointer, and whether the cursor is composited (spec 0010).
+    pointer: Pointer,
 }
 
 static SCREEN: SpinLock<Option<Screen>> = SpinLock::new(None);
@@ -114,6 +184,67 @@ impl Screen {
         match self.shadow.get(offset..offset + 4) {
             Some(bytes) => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
             None => 0,
+        }
+    }
+
+    /// Writes one pixel straight to the framebuffer. Only the cursor overlay
+    /// uses this: every shadow pixel reaches the screen through `present`.
+    fn write_fb(&self, x: usize, y: usize, color: u32) {
+        let offset = y * self.pitch + x * 4;
+        let destination = (self.fb as usize + offset) as *mut u8;
+        let bytes = (color & MAX_COLOR).to_le_bytes();
+        // SAFETY: the framebuffer is identity-mapped for `pitch * height`
+        // bytes; `x`/`y` are inside the screen and the cursor overlay passes
+        // only columns of a row this `present` already copied.
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), destination, 4) };
+    }
+
+    /// The visible cursor rectangle, clipped to the screen, or `None` when the
+    /// cursor is hidden or entirely off screen.
+    fn cursor_rect(&self) -> Option<(i64, i64, i64, i64)> {
+        if !self.pointer.visible {
+            return None;
+        }
+        let x = self.pointer.x as i64;
+        let y = self.pointer.y as i64;
+        let x1 = x.saturating_add(CURSOR_W).min(self.width as i64);
+        let y1 = y.saturating_add(CURSOR_H).min(self.height as i64);
+        if x1 <= x || y1 <= y {
+            return None;
+        }
+        Some((x, y, x1 - x, y1 - y))
+    }
+
+    /// Overwrites the cursor pixels inside the rectangle `(x0..x1, y0..y1)` of
+    /// the framebuffer. The shadow is not touched (spec 0010, I7).
+    fn overlay_cursor(&self, x0: usize, y0: usize, x1: usize, y1: usize) {
+        if !self.pointer.visible {
+            return;
+        }
+        let cx = self.pointer.x as i64;
+        let cy = self.pointer.y as i64;
+        let start_x = (x0 as i64).max(cx);
+        let start_y = (y0 as i64).max(cy);
+        let end_x = (x1 as i64).min(cx + CURSOR_W);
+        let end_y = (y1 as i64).min(cy + CURSOR_H);
+        if start_x >= end_x || start_y >= end_y {
+            return;
+        }
+        for y in start_y..end_y {
+            let row = (y - cy) as usize;
+            let outline = CURSOR_OUTLINE[row];
+            let fill = CURSOR_FILL[row];
+            for x in start_x..end_x {
+                let bit = 1u16 << ((x - cx) as u32);
+                let color = if fill & bit != 0 {
+                    CURSOR_FILL_COLOR
+                } else if outline & bit != 0 {
+                    CURSOR_OUTLINE_COLOR
+                } else {
+                    continue;
+                };
+                self.write_fb(x as usize, y as usize, color);
+            }
         }
     }
 
@@ -193,7 +324,8 @@ impl Screen {
     }
 
     /// Copies a clipped rectangle from the shadow to the framebuffer, one row
-    /// at a time, using the pitch (spec 0009, G5).
+    /// at a time, using the pitch (spec 0009, G5), then composites the cursor
+    /// on top of it (spec 0010, I7).
     fn present(&mut self, x: i64, y: i64, w: i64, h: i64) {
         let Some((x0, y0, x1, y1)) = self.clipped(x, y, w, h) else {
             return;
@@ -216,6 +348,7 @@ impl Screen {
                 );
             }
         }
+        self.overlay_cursor(x0, y0, x1, y1);
     }
 
     /// Moves the image up by `pixels` scan lines and fills the exposed band.
@@ -290,6 +423,12 @@ pub fn init(framebuffer: Option<Framebuffer>) -> Init {
             w: width as i32,
             h: height as i32,
         },
+        pointer: Pointer {
+            x: 0,
+            y: 0,
+            buttons: 0,
+            visible: false,
+        },
     });
 
     Init::Enabled(Report {
@@ -311,6 +450,85 @@ pub fn size() -> (u32, u32) {
         Some(screen) => (screen.width as u32, screen.height as u32),
         None => (0, 0),
     }
+}
+
+/// Applies a pointer delta with clamping to the screen (spec 0010, I4).
+///
+/// `dy` is screen-oriented: positive moves down. A zero-sized screen clamps to
+/// `(0, 0)`. Pure, so the boot self-check uses the same arithmetic as the live
+/// path.
+pub fn apply_motion(x: i64, y: i64, dx: i64, dy: i64, width: i64, height: i64) -> (i64, i64) {
+    let max_x = (width - 1).max(0);
+    let max_y = (height - 1).max(0);
+    (
+        x.saturating_add(dx).clamp(0, max_x),
+        y.saturating_add(dy).clamp(0, max_y),
+    )
+}
+
+/// The machine-wide pointer state as `(x, y, buttons)` (spec 0010, I4).
+pub fn pointer() -> (i64, i64, u64) {
+    match &*SCREEN.lock() {
+        Some(screen) => (
+            screen.pointer.x as i64,
+            screen.pointer.y as i64,
+            u64::from(screen.pointer.buttons),
+        ),
+        None => (0, 0, 0),
+    }
+}
+
+/// Moves the pointer, sets the buttons and repaints only the old and new
+/// cursor rectangles (spec 0010, I4/I8). `dy` is screen-oriented: positive
+/// moves down.
+pub fn update_pointer(dx: i64, dy: i64, buttons: u32) -> Status {
+    if buttons > POINTER_BUTTONS_MASK {
+        return Status::Invalid;
+    }
+    let mut guard = SCREEN.lock();
+    let Some(screen) = guard.as_mut() else {
+        return Status::Invalid;
+    };
+    let old = screen.cursor_rect();
+    let (width, height) = (screen.width as i64, screen.height as i64);
+    let (x, y) = apply_motion(
+        screen.pointer.x as i64,
+        screen.pointer.y as i64,
+        dx,
+        dy,
+        width,
+        height,
+    );
+    screen.pointer.x = x as i32;
+    screen.pointer.y = y as i32;
+    screen.pointer.buttons = buttons as u8;
+    screen.pointer.visible = true;
+
+    let new = screen.cursor_rect();
+    if old != new {
+        if let Some((x, y, w, h)) = old {
+            screen.present(x, y, w, h);
+        }
+    }
+    if let Some((x, y, w, h)) = new {
+        screen.present(x, y, w, h);
+    }
+    Status::Ok
+}
+
+/// Makes the cursor visible and paints it where the pointer is (spec 0010,
+/// I9). Called when the pointer device initialises; returns false when
+/// graphics are disabled.
+pub fn show_cursor() -> bool {
+    let mut guard = SCREEN.lock();
+    let Some(screen) = guard.as_mut() else {
+        return false;
+    };
+    screen.pointer.visible = true;
+    if let Some((x, y, w, h)) = screen.cursor_rect() {
+        screen.present(x, y, w, h);
+    }
+    true
 }
 
 fn valid_rect(w: i64, h: i64, color: u32) -> bool {
@@ -412,7 +630,9 @@ pub fn clear(color: u32) -> Status {
 
 /// Paints one scaled 8x8 glyph cell with an opaque background and presents the
 /// cell. The text console uses this so it draws through the shadow too
-/// (spec 0009, G14).
+/// (spec 0009, G14). The present composites the cursor (spec 0010, I8), so a
+/// cell under the cursor is presented with the cursor on top of the glyph and
+/// no stale cursor is left behind.
 pub fn console_glyph(x: usize, y: usize, code: u8, fg: u32, bg: u32, scale: usize) -> bool {
     let mut guard = SCREEN.lock();
     let Some(screen) = guard.as_mut() else {

@@ -260,6 +260,26 @@ impl Host for KernelHost<'_> {
         crate::gfx::clear(color)
     }
 
+    // Input (spec 0010). The pointer is one machine-wide value; it lives in the
+    // graphics module because the cursor is composited at present time. These
+    // are the read-only views an application gets, plus the debug-only
+    // injection hook (I10–I12).
+    fn pointer_x(&mut self) -> i64 {
+        crate::gfx::pointer().0
+    }
+
+    fn pointer_y(&mut self) -> i64 {
+        crate::gfx::pointer().1
+    }
+
+    fn pointer_buttons(&mut self) -> u64 {
+        crate::gfx::pointer().2
+    }
+
+    fn inject_pointer(&mut self, dx: i64, dy: i64, buttons: u32) -> Status {
+        crate::mouse::inject(dx, dy, buttons)
+    }
+
     // Streams (spec 0006): the kernel table owns the buffer and the generation
     // check. The machine turns `WouldBlock` into a block for the blocking
     // opcodes and into a staged status for `try_*`; the host is always
@@ -661,6 +681,7 @@ fn terminate(core: usize, mut task: Task, reason: ExitReason) {
 /// wakes a task blocked in `core.read_line`.
 fn service(image: &Ext2<'_>) {
     console::poll_input();
+    crate::mouse::poll();
     if console::has_line() {
         task::wake_console();
     }
@@ -688,8 +709,10 @@ fn idle(core: usize) {
         // Input is work, and this loop is the only place a halted core can
         // notice it: the service opportunity that normally polls COM1/PS-2
         // lives in the main loop, which an idle core does not reach. Polling
-        // here is what turns a typed line into a wake-up.
+        // here is what turns a typed line into a wake-up, and what keeps the
+        // pointer moving while the system is otherwise idle (spec 0010, I14).
         console::poll_input();
+        crate::mouse::poll();
 
         // Interrupts off for the check; `sti; hlt` is one atomic idle step, so
         // an IPI that arrives after the check is pending when `hlt` runs.

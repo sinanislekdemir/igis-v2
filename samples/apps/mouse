@@ -1,0 +1,117 @@
+unit mouse;
+
+// M2.2 proof app: the pointer path and the software cursor.
+//
+//   run mouse
+//
+// Everything is injected through `syslib.inject_pointer`, the documented
+// debug-only hook, so the run is deterministic with no real mouse: a large
+// negative move clamps the pointer to (0, 0) and every step after that asserts
+// an absolute position. Clamping is proved at both edges, buttons are set and
+// cleared, and the last steps assert that `syslib.get_pixel` at (and inside)
+// the pointer returns the background colour. That is only true because the
+// cursor is composited at present time and never stored in the shadow
+// (spec 0010, I7).
+
+uses core, syslib;
+
+var
+  ok: bool;
+  status: Status;
+  x: int;
+  y: int;
+  w: int;
+  h: int;
+  buttons: uint;
+  background: uint;
+
+procedure say(line: const string[0]);
+begin
+  core.write(line);
+end;
+
+// One line per step; the first failure names the step and stops the checks.
+procedure check(label: const string[0]; passed: bool);
+begin
+  if ok then
+  begin
+    if passed then
+    begin
+      say("mouse: ");
+      say(label);
+      say(" ok\n");
+    end
+    else
+    begin
+      ok := false;
+      say("mouse: FAIL ");
+      say(label);
+      say("\n");
+    end;
+  end;
+end;
+
+procedure check_at(label: const string[0]; want_x: int; want_y: int);
+begin
+  x := syslib.pointer_x();
+  y := syslib.pointer_y();
+  check(label, x = want_x and y = want_y);
+end;
+
+procedure main(args: const string[1024]);
+begin
+  ok := true;
+  background := uint(0x204060);
+  w := int(syslib.screen_width());
+  h := int(syslib.screen_height());
+  status := syslib.clear(background);
+
+  // 1. A large negative move clamps at the top-left edge.
+  status := syslib.inject_pointer(-100000, -100000, uint(0));
+  check_at("clamp top-left", 0, 0);
+
+  // 2. Relative motion from a known origin.
+  status := syslib.inject_pointer(10, 20, uint(0));
+  check_at("move +10,+20", 10, 20);
+
+  status := syslib.inject_pointer(-3, 4, uint(0));
+  check_at("move -3,+4", 7, 24);
+
+  // 3. A large positive move clamps at the right edge, then the bottom.
+  status := syslib.inject_pointer(100000, 0, uint(0));
+  check_at("clamp right", w - 1, 24);
+
+  status := syslib.inject_pointer(0, 100000, uint(0));
+  check_at("clamp bottom", w - 1, h - 1);
+
+  // 4. Buttons: set, combine, clear, and one over-wide mask refused.
+  status := syslib.inject_pointer(0, 0, uint(1));
+  buttons := syslib.pointer_buttons();
+  check("left button", status = Ok and buttons = uint(1));
+
+  status := syslib.inject_pointer(0, 0, uint(5));
+  buttons := syslib.pointer_buttons();
+  check("left+middle", status = Ok and buttons = uint(5));
+
+  status := syslib.inject_pointer(0, 0, uint(0));
+  buttons := syslib.pointer_buttons();
+  check("buttons clear", status = Ok and buttons = uint(0));
+
+  status := syslib.inject_pointer(0, 0, uint(8));
+  buttons := syslib.pointer_buttons();
+  check("buttons above 0b111 refused", status = Invalid and buttons = uint(0));
+
+  // 5. The cursor is not in the shadow: at the pointer, at its top-left
+  //    corner, in its interior and near its lower-right edge the background
+  //    is exactly what `clear` wrote.
+  status := syslib.inject_pointer(-100000, -100000, uint(0));
+  status := syslib.inject_pointer(40, 60, uint(0));
+  check_at("cursor position", 40, 60);
+  check("cursor hotspot is background", syslib.get_pixel(40, 60) = background);
+  check("cursor interior is background", syslib.get_pixel(47, 66) = background);
+  check("cursor edge is background", syslib.get_pixel(48, 70) = background);
+  check("above cursor is background", syslib.get_pixel(41, 59) = background);
+
+  if ok then
+    say("mouse: ok\n");
+end;

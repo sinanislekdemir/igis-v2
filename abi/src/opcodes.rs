@@ -490,6 +490,22 @@ pub mod builtin {
     /// `syslib.clear(color) -> Status`: fill the whole screen in the shadow and
     /// present it. An over-wide colour pushes `Status::Invalid` (G6).
     pub const CLEAR: u32 = 21;
+    /// `syslib.pointer_x() -> int`: the pointer's screen `x` in pixels
+    /// (spec 0010, I10). `0` when there is no pointer device.
+    pub const POINTER_X: u32 = 22;
+    /// `syslib.pointer_y() -> int`: the pointer's screen `y` in pixels. `0`
+    /// when there is no pointer device.
+    pub const POINTER_Y: u32 = 23;
+    /// `syslib.pointer_buttons() -> uint`: the button mask, bit 0 left, bit 1
+    /// right, bit 2 middle. `0` when there is no pointer device.
+    pub const POINTER_BUTTONS: u32 = 24;
+    /// `syslib.inject_pointer(dx, dy, buttons) -> Status`: **debug-only** test
+    /// hook (spec 0010, I10/I12). Moves the pointer by `dx`/`dy` screen pixels
+    /// with the same clamping as a real report, sets the button mask and
+    /// repaints the cursor. `buttons > 0b111` pushes `-4` (`Status::Invalid`)
+    /// and changes nothing. M2.2.4 adds `inject_event` for keyboard and queue
+    /// tests.
+    pub const INJECT_POINTER: u32 = 25;
 
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
@@ -515,6 +531,10 @@ pub mod builtin {
             GET_PIXEL => Some((2, 1)),
             PRESENT => Some((4, 1)),
             CLEAR => Some((1, 1)),
+            POINTER_X => Some((0, 1)),
+            POINTER_Y => Some((0, 1)),
+            POINTER_BUTTONS => Some((0, 1)),
+            INJECT_POINTER => Some((3, 1)),
             _ => None,
         }
     }

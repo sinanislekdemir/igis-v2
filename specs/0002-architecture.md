@@ -4,8 +4,9 @@
 - **Scope:** kernel internals, runtime hosting, execution and memory model
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0001, 0002, 0003, 0004, 0006, 0011, 0012, 0013, 0014, 0015, 0016, 0018
-- **Updated:** 2026-11-15
+- **ADRs:** 0001, 0002, 0003, 0004, 0006, 0011, 0012, 0013, 0014, 0015, 0016, 0018,
+  0020, 0021
+- **Updated:** 2026-11-16
 
 ## Context
 
@@ -24,7 +25,7 @@ runtime embedded in the kernel.
 |-------|-----------|------------|----------------|
 | 1 | `arch/<isa>` | Rust + asm | Boot entry, long-mode transition, GDT/IDT/TSS, paging, stack switch, APIC/timer, SMP bring-up |
 | 1 | `platform/<machine>` | Rust | Memory map, ACPI parsing, device discovery, machine quirks |
-| 1 | `drivers` | Rust | Framebuffer console, keyboard, timer, block devices — in-kernel, monolithic |
+| 1 | `drivers` | Rust | Framebuffer console, keyboard, mouse, timer, block devices — in-kernel, monolithic |
 | 1 | `mm` | Rust | Frame allocator, application regions, kernel heap, stream buffers, guard pages |
 | 1 | `sched` | Rust | Per-core interpreter loops, global runnable set, claim/release, quantum, budgets, termination |
 | 1 | `vfs` / `fs` | Rust | Loader providers: read-only ext2 over `BlockDevice` first; writable filesystems later |
@@ -422,7 +423,8 @@ R7).
    the full-screen shadow from the frame allocator and attaches the console to it; without
    one (or with an unsupported mode) graphics are disabled and the console stays on serial
    (spec 0009, G15).
-4. Platform discovery: memory map, ACPI, APIC, timers, keyboard.
+4. Platform discovery: memory map, ACPI, APIC, timers, keyboard, and the PS/2 auxiliary
+   (mouse) device.
 5. Interpreter loop on the boot core; APs are brought up with INIT-SIPI-SIPI through a
    sub-1 MiB trampoline within the milestone (see "SMP": `MAX_CORES` 8, trampoline at
    `0x8000`, parameter page at `0x9000`, per-core TSS/IST/guarded stacks, bounded
@@ -464,6 +466,18 @@ The screen size is the bootloader's, never a compile-time constant. A rectangula
 region, initially the whole screen, narrows every primitive and is the seam the window
 service uses to repaint one window. The console loses its direct framebuffer path and
 presents each glyph cell from the shadow, so there is one image at all times.
+
+## Input
+
+Input is a kernel device, not a per-application resource (spec 0010, ADR 0021). The
+service opportunity that already polls COM1 and the PS/2 keyboard also drains the i8042
+auxiliary (mouse) device, decodes its 3-byte reports and updates one machine-wide pointer
+state (`x`, `y`, buttons). The cursor is a 16×16 monochrome arrow composited at present
+time into the framebuffer, never stored in the shadow, so `get_pixel` keeps reading
+uncomposited pixels. Applications see only `syslib.pointer_x`/`pointer_y`/
+`pointer_buttons` and the debug-only `syslib.inject_pointer`; the console keeps its byte
+stream and `core.read_line` for the shell. Keyboard key events and the event queue are
+later M2.2 slices.
 
 ## Fatal fault path
 
@@ -567,3 +581,4 @@ task; after that, shutdown.
 | 2026-11-15 | APs are real: `MAX_CORES` 8, INIT-SIPI-SIPI through the `0x8000` trampoline, a `0x9000` parameter page, per-core TSS/IST/stacks, observation by attempt with a bounded wait, one IPI vector shared by every core. |
 | 2026-11-16 | H2 implemented for boot, AP and task stacks: a shared split-table cache and guard registry (`kernel/src/guard.rs`, `arch/x86_64/src/paging.rs`), a CR3 + wake-IPI TLB shootdown after every PTE change, AP guards installed before the SIPIs, one extra guard frame below each task stack, a boot PTE/free-frame self-check (`guards: boot 1, ap N, tables M`) and a `#PF` line naming the guard. The interpreter's `StackOverflow` check stays the legal path; a hardware guard hit halts (per-task recovery deferred, Q47). |
 | 2026-11-16 | Graphics moved to a kernel-owned shadow screen (spec 0009, ADR 0020): the multiboot2 mode lives in `kernel/src/gfx.rs`, the shadow is `pitch * height` contiguous frames allocated after the frame allocator, `present` blits clipped rows with the pitch, the console draws through the shadow, and a rectangular clip is the window-service seam. The framebuffer tag is now optional: a missing or unsupported mode disables graphics and leaves the console on serial instead of halting. |
+| 2026-11-16 | Input added as a kernel device (spec 0010, ADR 0021): the i8042 auxiliary device is initialised at boot and polled in the service opportunity next to the keyboard, one machine-wide pointer state is owned by `kernel/src/gfx.rs`, the software cursor is composited at present time (never in the shadow), and applications reach input only through `syslib.pointer_x`/`pointer_y`/`pointer_buttons` and the debug-only `inject_pointer`. |

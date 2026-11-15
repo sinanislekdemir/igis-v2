@@ -54,6 +54,8 @@ grows down. Colours are `0x00RRGGBB`.
 - **G5 (MUST):** The shadow is the single source of truth. Drawing primitives write
   only the shadow; `present` copies a rectangle to the real framebuffer row by row,
   using the framebuffer pitch (not `width * 4`), and only within the clipped rectangle.
+  `present` then composites the software cursor on top of the framebuffer copy; the
+  cursor is never stored in the shadow (spec 0010, I7).
 - **G6 (MUST):** `syslib.clear(color)` fills the whole screen in the shadow and presents
   it. Other drawing primitives do not present.
 - **G7 (MUST):** Clipping is a rectangular region, initially the whole screen, applied
@@ -111,6 +113,11 @@ application ──syslib.fill_rect/...──▶ shadow (pitch × height, frame a
 - Every pixel write goes through one helper that bounds-checks against the screen and
   the current clip rectangle. `get_pixel` reads the same helper's storage, so the
   demo's self-check sees exactly what `present` will show.
+- `present` ends by compositing the software cursor into the framebuffer (spec 0010,
+  I7): black outline and white fill pixels are written straight to the framebuffer
+  inside the presented rectangle, never into the shadow. `get_pixel` therefore returns
+  uncomposited pixels, which is what keeps the self-check meaningful and headless
+  verification deterministic.
 - A full-screen shadow at 1024×768×32 is 3 MiB (768 frames at 4 KiB). Nothing else in
   the kernel allocates per-pixel storage.
 
@@ -139,7 +146,7 @@ line.
 
 | Slice | Content | Uses this slice |
 |-------|---------|-----------------|
-| M2.2 | PS/2 mouse, a cursor, pointer state and a simple event queue; the console stays a kernel device | shadow, `present`, clip |
+| M2.2 | PS/2 mouse, a composited cursor, pointer state and the `syslib` pointer surface (spec 0010); the console stays a kernel device | shadow, `present`, clip |
 | M2.3 | Kernel window service: windows with a frame, title bar, content rectangle and z-order; `expose` marks a window dirty; the service repaints from application-owned *content* drawn through the clipped `syslib` calls, presents the affected union | shadow, clip, `present` |
 
 The window service repaints on `expose`; it does not keep per-window canvases. An
@@ -167,6 +174,9 @@ The language signature is normative; the compiler enforces `int` coordinates, a 
 colour and a `string` text argument, and the interpreter enforces the runtime rules
 (G9). No opcode is added: each primitive is a `BUILTIN` call whose operands are on the
 operand stack in declaration order.
+
+The pointer surface (`pointer_x`, `pointer_y`, `pointer_buttons`, `inject_pointer`) is
+part of the desktop too but belongs to spec 0010; it adds no primitive here.
 
 ### Host contract
 
@@ -226,7 +236,7 @@ an `Info` (width, height, pitch, bpp, shadow address/size/frames, free-frame del
 | # | Question | Trigger / owner |
 |---|----------|-----------------|
 | 1 | Clip-region exposure to applications (`set_clip`/`reset_clip`) | M2.3, with the window service |
-| 2 | Cursor and pointer rendering: soft cursor in the shadow, or a hardware sprite | M2.2 |
+| 2 | ~~Cursor and pointer rendering: soft cursor in the shadow, or a hardware sprite~~ | Resolved: composited at present time, never in the shadow (spec 0010, ADR 0021) |
 | 3 | Dirty-rectangle accumulation for `present` | M2.3, with `expose` |
 | 4 | A second font or a proportional font | only if the desktop needs one |
 
@@ -235,3 +245,4 @@ an `Info` (width, height, pitch, bpp, shadow address/size/frames, free-frame del
 | Date | Change |
 |------|--------|
 | 2026-11-16 | Initial accepted version: shadow screen, clipping, the nine `syslib` primitives, console through the shadow, disabled-graphics rules, and forward references to M2.2/M2.3. |
+| 2026-11-16 | M2.2: `present` composites the software cursor into the framebuffer after the row copy (G5), so `get_pixel` stays uncomposited and headless self-checks stay deterministic; the cursor model itself is spec 0010. M2.2 row of the forward-reference table updated; cursor question resolved. |

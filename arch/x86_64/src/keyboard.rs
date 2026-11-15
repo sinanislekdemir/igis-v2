@@ -52,7 +52,8 @@ pub fn init() {
 }
 
 /// Drains controller bytes until one translates to a console byte, or the
-/// output buffer is empty. Mouse bytes and non-text keys are discarded.
+/// output buffer is empty. Aux (mouse) bytes are left for `mouse::poll`; keys
+/// that produce no console byte are discarded.
 pub fn try_read_byte() -> Option<u8> {
     let mut state = STATE.load(Ordering::Relaxed);
     let result = drain(&mut state);
@@ -67,11 +68,14 @@ fn drain(state: &mut u8) -> Option<u8> {
         if status & 0x01 == 0 {
             return None;
         }
-        let code = unsafe { inb(DATA_PORT) };
         if status & 0x20 != 0 {
-            // Auxiliary (mouse) byte: read to clear the buffer, then ignore.
-            continue;
+            // Auxiliary (mouse) byte: leave it for `mouse::poll`, which drains
+            // it in the same service opportunity and leaves keyboard bytes for
+            // this path (spec 0010, I15). Consuming it here would lose the
+            // pointer's packets.
+            return None;
         }
+        let code = unsafe { inb(DATA_PORT) };
         if let Some(byte) = translate(code, state) {
             return Some(byte);
         }

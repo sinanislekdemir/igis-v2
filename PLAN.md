@@ -36,15 +36,17 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
 
 ### M2.2 — input: mouse and keyboard events
 
-- [ ] **M2.2.0** Spec 0010 "Input and events" + ADR 0021 (event model, queue, blocking,
+- [x] **M2.2.0** Spec 0010 "Input and events" + ADR 0021 (event model, queue, blocking,
   routing). Requirements: pointer state, key events, event record, overflow policy,
-  focus-independent delivery until M2.3.
-- [ ] **M2.2.1** PS/2 AUX mouse driver: controller init, 3-byte packet stream, overflow and
+  focus-independent delivery until M2.3. Spec 0010, ADR 0021.
+- [x] **M2.2.1** PS/2 AUX mouse driver: controller init, 3-byte packet stream, overflow and
   resync handling, polling in the service opportunity next to the keyboard. Decoder as a
-  pure function with host unit tests; kernel log line with the first packet.
-- [ ] **M2.2.2** Pointer state + software cursor: 16×16 arrow, save-under/restore in the
-  shadow, clamping to the screen, `syslib.pointer_x/pointer_y`, present of the two dirty
-  rectangles only. Proof: `get_pixel` around a moved cursor.
+  pure function with a boot self-check; kernel log line with the first packet.
+  `kernel/src/mouse.rs`.
+- [x] **M2.2.2** Pointer state + software cursor: 16×16 arrow, composited at present time
+  (never in the shadow), clamping to the screen, `syslib.pointer_x/pointer_y`,
+  `pointer_buttons` and the debug-only `inject_pointer`, present of the two dirty cursor
+  rectangles only. Proof: `samples/apps/mouse` (`get_pixel` under a moved cursor).
 - [ ] **M2.2.3** Keyboard event layer: scancode set 1 → key code + ASCII (shift/ctrl/alt,
   caps lock), arrows and function keys, a bounded queue, no drops under fast typing; kept
   separate from the kernel line discipline (`core.read_line` stays for the shell).

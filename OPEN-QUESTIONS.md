@@ -5,7 +5,7 @@ Parked decisions for igis-v2. This is the working register; each spec's own
 resolved, record the answer in the relevant spec or in a new ADR, then remove it here.
 
 **Status:** implementation phase. Last updated: 2026-11-16.
-**Snapshot:** specs 0001–0009, ADRs 0001–0020.
+**Snapshot:** specs 0001–0010, ADRs 0001–0021.
 
 ## How to use
 
@@ -29,6 +29,7 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | Q43 | Distinct `TaskId` type | `core.run`, `spawn`, `wait` and `kill` are implemented; task ids are still `int` (0 invalid). Introduce a nominal `TaskId` when `stdlib` exposes these primitives, so an id cannot be confused with another integer (spec 0003, "Task ids"). The `stdlib` has started (text helpers only) and still exposes no task primitives | before `stdlib` exposes `run` |
 | Q44 | Staged kernel line discipline (`core.read_line`) | the kernel polls COM1/PS-2, echoes, assembles and stores lines in a 4-line ring; `core.read_line(var buf)` blocks until a line exists and truncates to the buffer. Replace with application-side editing when string length/truncate/insert operations exist: indexing alone reads and writes single bytes but cannot delete one (spec 0005, "Staged line discipline"). The first `stdlib` slice has no editing operations yet | when `stdlib` string editing exists |
 | Q45 | Staged `syslib` handles | `syslib.port_in8`/`port_out8` are implemented with `Port` as a plain scalar `uint` (low 16 bits used); there are no opaque `Port`/`MmioRegion` types, MMIO mapping, or DMA/block primitives yet. Replace with the handle model when MMIO or DMA lands (specs 0003, 0005) | first MMIO or DMA device |
+| Q48 | Pointer feel: acceleration, wheel, extra buttons | not in M2.2: motion is 1:1 (one count, one pixel) and only three buttons exist. Acceleration needs a tuning curve (and a clock or a count accumulator), a wheel adds a fourth axis, and both want a control to use them. `syslib.inject_pointer` takes only `dx`/`dy`/`buttons`, so a wider device surface would need a new primitive or a field on `Event` (spec 0010, open questions 1–2) | when a desktop application actually uses a real mouse, or a control needs scrolling (M2.4) |
 
 ## C. Streams
 

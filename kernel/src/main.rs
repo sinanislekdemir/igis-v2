@@ -10,6 +10,7 @@ mod gfx;
 mod guard;
 mod mb2;
 mod module;
+mod mouse;
 mod repl;
 mod sched;
 mod smp;
@@ -81,6 +82,11 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
         frame::total_frames(),
         frame::free_frames() * frame::FRAME_SIZE / (1024 * 1024)
     );
+
+    // The pointer device and the software cursor (spec 0010). This needs the
+    // shadow (screen size, cursor compositing) and the console (boot log), and
+    // it runs before the scheduler so the first claim sees a live pointer.
+    mouse::init();
 
     // SAFETY: boot runs on one core with interrupts disabled; the GDT and TSS
     // are installed exactly once, before anything can fault.

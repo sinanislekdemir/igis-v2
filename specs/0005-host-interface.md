@@ -4,8 +4,8 @@
 - **Scope:** `core`, `syslib`, interpreter, runtime, host-side language tooling
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0001, 0011, 0014, 0015
-- **Updated:** 2026-11-14
+- **ADRs:** 0001, 0011, 0014, 0015, 0021
+- **Updated:** 2026-11-16
 
 ## Context
 
@@ -305,6 +305,23 @@ region. The kernel implements these over `kernel/src/gfx.rs`; the defaults are e
 kernel's disabled state, so both paths agree (spec 0009, G15/G16). `draw_text` receives the
 resolved `string` bytes, so the host never sees a language reference.
 
+#### Staged syslib: input (spec 0010)
+
+The pointer is also a host builtin, with defaults that describe a machine with no pointer
+device:
+
+| Primitive | Host method | Default |
+|-----------|-------------|---------|
+| `syslib.pointer_x` / `pointer_y` | `pointer_x(&mut self) -> i64`, `pointer_y(&mut self) -> i64` | `0`, `0` |
+| `syslib.pointer_buttons` | `pointer_buttons(&mut self) -> u64` | `0` |
+| `syslib.inject_pointer` | `inject_pointer(dx, dy: i64, buttons: u32) -> Status` | `Invalid` |
+
+The pointer state itself is machine-wide and kernel-owned (`kernel/src/gfx.rs`, fed by
+`kernel/src/mouse.rs`); the host methods are read-only views plus the debug-only injection
+hook. The interpreter rejects `buttons > 0b111` with `Status.Invalid` before the host is
+called, mirroring the graphics error rules. `inject_pointer` is documented as a test hook,
+not a device abstraction (spec 0010, I12).
+
 ### Host implementation
 
 The language track links the runtime against a host implementation that provides console
@@ -431,3 +448,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-15 | Realtime promotion and heartbeat implemented: `Host::realtime_on` (default `Ok`) and `Host::heartbeat` (default no-op), builtins 11 and 12, admission against the online core count, and `Faulted(WatchdogTimeout)` from a one-second non-blocked deadline. |
 | 2026-11-15 | Streams implemented: `Host::stream_send`/`Host::stream_recv` are non-blocking `Result<_, StreamError>` hooks with `Invalid` defaults. The interpreter turns `WouldBlock` into `Blocked(WaitKind::Stream(handle))` for `core.send`/`core.recv` and into staged `WouldBlock`/`Closed` results for `try_send`/`try_recv`. Endpoints are created and paired by the loader before the task is placed, so the host never sees an unopened handle. |
 | 2026-11-16 | Graphics host methods (spec 0009): `screen_width`/`screen_height` (0), `fill_rect`, `fill_dither`, `draw_rect`, `draw_text`, `present`, `clear` (`Invalid`), and `get_pixel` (0), all with disabled-screen defaults. The interpreter validates extents and colours, the host clips and rasterises; the kernel implements them over the shadow screen. |
+| 2026-11-16 | Input host methods (spec 0010): `pointer_x`/`pointer_y` (`i64`, 0), `pointer_buttons` (`u64`, 0) and the debug-only `inject_pointer(dx, dy, buttons)` (`Invalid`). The pointer is one machine-wide value owned by the kernel graphics module; the interpreter rejects `buttons > 0b111` before the host is called, and `langhost`/host mocks see the no-device defaults. |

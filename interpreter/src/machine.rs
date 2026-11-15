@@ -182,6 +182,37 @@ pub trait Host {
         Status::Invalid
     }
 
+    // ---- input (spec 0010) ---------------------------------------------
+    //
+    // The defaults are a machine with no pointer device: the pointer sits at
+    // (0, 0), no button is down and an injection is refused. That is also the
+    // kernel's disabled-graphics state, so host mocks, `langhost` and a headless
+    // kernel agree.
+
+    /// The pointer's screen `x` in pixels (`syslib.pointer_x`); 0 without a
+    /// pointer device (spec 0010, I10).
+    fn pointer_x(&mut self) -> i64 {
+        0
+    }
+
+    /// The pointer's screen `y` in pixels (`syslib.pointer_y`).
+    fn pointer_y(&mut self) -> i64 {
+        0
+    }
+
+    /// The pointer button mask (`syslib.pointer_buttons`): bit 0 left, bit 1
+    /// right, bit 2 middle.
+    fn pointer_buttons(&mut self) -> u64 {
+        0
+    }
+
+    /// Applies a debug-only pointer injection (`syslib.inject_pointer`, spec
+    /// 0010, I10/I12). The machine has already rejected `buttons > 0b111`; the
+    /// default refuses because there is no pointer device.
+    fn inject_pointer(&mut self, _dx: i64, _dy: i64, _buttons: u32) -> Status {
+        Status::Invalid
+    }
+
     /// Requests a new application instance (`core.spawn`).
     ///
     /// `path` and `args` are the bytes of the two `string` buffers. `diag` is a
@@ -1424,6 +1455,32 @@ impl Machine {
                             host.clear(color as u32)
                         } else {
                             Status::Invalid
+                        };
+                        self.push(stack, status as u64)?;
+                    }
+                    // Input (spec 0010). The pointer is a read-only machine
+                    // value; injection is the debug-only write path and the
+                    // button-mask rule lives here so every host agrees.
+                    builtin::POINTER_X => {
+                        let x = host.pointer_x();
+                        self.push(stack, x as u64)?;
+                    }
+                    builtin::POINTER_Y => {
+                        let y = host.pointer_y();
+                        self.push(stack, y as u64)?;
+                    }
+                    builtin::POINTER_BUTTONS => {
+                        let buttons = host.pointer_buttons();
+                        self.push(stack, buttons)?;
+                    }
+                    builtin::INJECT_POINTER => {
+                        let buttons = self.pop(stack)?;
+                        let dy = self.pop(stack)?;
+                        let dx = self.pop(stack)?;
+                        let status = if buttons > POINTER_BUTTONS_MASK {
+                            Status::Invalid
+                        } else {
+                            host.inject_pointer(dx as i64, dy as i64, buttons as u32)
                         };
                         self.push(stack, status as u64)?;
                     }
@@ -3144,6 +3201,11 @@ fn status_code(status: Status) -> u64 {
 fn valid_color(color: u64) -> bool {
     color <= 0x00FF_FFFF
 }
+
+/// The highest pointer button mask an injection may name: bit 0 left, bit 1
+/// right, bit 2 middle (spec 0010, I10). A larger value is `Status::Invalid`
+/// and the host is not called.
+const POINTER_BUTTONS_MASK: u64 = 0b111;
 
 /// The bytes a buffer reference names, bounds-checked like `WRITE` does.
 fn buffer_slice<'a>(

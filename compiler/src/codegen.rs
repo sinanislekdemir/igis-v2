@@ -5688,6 +5688,63 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::enumeration(STATUS_ENUM)))
             }
+            // Input (spec 0010). The pointer is a read-only machine value:
+            // `int` screen coordinates and a `uint` button mask. Injection is
+            // the debug-only hook that moves the pointer by screen deltas; the
+            // runtime `buttons > 0b111` rule belongs to the interpreter.
+            "syslib.pointer_x" | "syslib.pointer_y" | "syslib.pointer_buttons" => {
+                if !args.is_empty() {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`{target}` expects 0 arguments, got {}", args.len()),
+                    ));
+                }
+                let (id, result) = match target {
+                    "syslib.pointer_x" => (builtin::POINTER_X, Kind::Int),
+                    "syslib.pointer_y" => (builtin::POINTER_Y, Kind::Int),
+                    _ => (builtin::POINTER_BUTTONS, Kind::Uint),
+                };
+                self.one(opcodes::BUILTIN, id)?;
+                self.push();
+                Ok(Some(Type::scalar(result)))
+            }
+            "syslib.inject_pointer" => {
+                if args.len() != 3 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`syslib.inject_pointer` expects 3 arguments, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                for (index, name) in ["dx", "dy"].iter().enumerate() {
+                    let value = self.expr_scalar(args[index])?;
+                    if value.kind != Kind::Int {
+                        return Err(self.err_at(
+                            args[index],
+                            format_args!(
+                                "`syslib.inject_pointer` expects an `int` {name}, found `{value}`"
+                            ),
+                        ));
+                    }
+                }
+                let buttons = self.expr_scalar(args[2])?;
+                if buttons.kind != Kind::Uint {
+                    return Err(self.err_at(
+                        args[2],
+                        format_args!(
+                            "`syslib.inject_pointer` expects a `uint` buttons, found `{buttons}`"
+                        ),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::INJECT_POINTER)?;
+                self.pop(3)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
             // Ring operations (spec 0003, "Rings") are compiler-recognised
             // built-in procedures, not host builtins: they lower to the
             // ordinary reference/copy/branch instructions over the ring's

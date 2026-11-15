@@ -375,6 +375,10 @@ struct MockHost {
     pixel_value: u32,
     presents: Vec<(i64, i64, i64, i64)>,
     clears: Vec<u32>,
+    pointer_x_value: i64,
+    pointer_y_value: i64,
+    pointer_buttons_value: u64,
+    injections: Vec<(i64, i64, u32)>,
 }
 
 impl Host for MockHost {
@@ -517,6 +521,30 @@ impl Host for MockHost {
 
     fn clear(&mut self, color: u32) -> Status {
         self.clears.push(color);
+        if self.gfx_ok {
+            Status::Ok
+        } else {
+            Status::Invalid
+        }
+    }
+
+    // Input (spec 0010): scripted pointer values, recorded injections. A host
+    // with `gfx_ok` false models graphics disabled, where injection is refused.
+
+    fn pointer_x(&mut self) -> i64 {
+        self.pointer_x_value
+    }
+
+    fn pointer_y(&mut self) -> i64 {
+        self.pointer_y_value
+    }
+
+    fn pointer_buttons(&mut self) -> u64 {
+        self.pointer_buttons_value
+    }
+
+    fn inject_pointer(&mut self, dx: i64, dy: i64, buttons: u32) -> Status {
+        self.injections.push((dx, dy, buttons));
         if self.gfx_ok {
             Status::Ok
         } else {
@@ -3625,4 +3653,128 @@ fn graphics_defaults_describe_a_disabled_screen() {
     assert_eq!(word(8), 0);
     assert_eq!(word(16), Status::Invalid as u64);
     assert_eq!(word(24), 0);
+}
+
+#[test]
+fn pointer_builtins_read_the_pointer_and_injection_rejects_wide_masks() {
+    let mut instructions = Vec::new();
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::POINTER_X,
+    );
+    store_at(&mut instructions, 0);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::POINTER_Y,
+    );
+    store_at(&mut instructions, 8);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::POINTER_BUTTONS,
+    );
+    store_at(&mut instructions, 16);
+    // A valid injection: dx, dy, buttons, in declaration order.
+    op_const(&mut instructions, 10);
+    op_const(&mut instructions, -20);
+    op_const(&mut instructions, 5);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::INJECT_POINTER,
+    );
+    store_at(&mut instructions, 24);
+    // buttons = 8 is above 0b111: `Invalid` and the host is not called.
+    op_const(&mut instructions, 0);
+    op_const(&mut instructions, 0);
+    op_const(&mut instructions, 8);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::INJECT_POINTER,
+    );
+    store_at(&mut instructions, 32);
+    op(&mut instructions, opcodes::RET);
+
+    let spec = FnSpec {
+        frame_size: 96,
+        operand_off: 56,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &[], 40, 96, 0);
+    let mut host = MockHost {
+        pointer_x_value: 640,
+        pointer_y_value: 480,
+        pointer_buttons_value: 5,
+        gfx_ok: true,
+        ..Default::default()
+    };
+    let mut state = vec![0u8; 40];
+    let mut stack = vec![0u8; 96];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 500);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+
+    let word = |offset: usize| u64::from_le_bytes(state[offset..offset + 8].try_into().unwrap());
+    assert_eq!(word(0), 640);
+    assert_eq!(word(8), 480);
+    assert_eq!(word(16), 5);
+    assert_eq!(word(24), Status::Ok as u64);
+    assert_eq!(word(32), Status::Invalid as u64);
+    assert_eq!(host.injections, vec![(10, -20, 5)]);
+}
+
+#[test]
+fn pointer_defaults_describe_no_device() {
+    // No overrides: the pointer is at (0, 0), no button is down and injection
+    // is refused, which is also the kernel's disabled-graphics state
+    // (spec 0010, I11).
+    let mut instructions = Vec::new();
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::POINTER_X,
+    );
+    store_at(&mut instructions, 0);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::POINTER_Y,
+    );
+    store_at(&mut instructions, 8);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::POINTER_BUTTONS,
+    );
+    store_at(&mut instructions, 16);
+    op_const(&mut instructions, 1);
+    op_const(&mut instructions, 1);
+    op_const(&mut instructions, 1);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::INJECT_POINTER,
+    );
+    store_at(&mut instructions, 24);
+    op(&mut instructions, opcodes::RET);
+
+    let spec = FnSpec {
+        frame_size: 96,
+        operand_off: 56,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &[], 32, 96, 0);
+    let mut host = MockHost::default();
+    let mut state = vec![0u8; 32];
+    let mut stack = vec![0u8; 96];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+
+    let word = |offset: usize| u64::from_le_bytes(state[offset..offset + 8].try_into().unwrap());
+    assert_eq!(word(0), 0);
+    assert_eq!(word(8), 0);
+    assert_eq!(word(16), 0);
+    assert_eq!(word(24), Status::Invalid as u64);
 }
