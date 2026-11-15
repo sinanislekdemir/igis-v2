@@ -1234,6 +1234,161 @@ end;
     );
 }
 
+/// Returns `(kind, capacity)` for every `format_f64` instruction in order.
+fn format_f64_encodings(package: &Owned) -> Vec<(u8, u32)> {
+    use abi::opcodes;
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+    let mut seen = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        if op == opcodes::FORMAT_F64 {
+            let kind = instructions[pc + 1];
+            let capacity = u32::from_le_bytes(instructions[pc + 4..pc + 8].try_into().unwrap());
+            seen.push((kind, capacity));
+        }
+        pc += words * 4;
+    }
+    seen
+}
+
+#[test]
+fn format_f64_into_checks_types_and_encodes_the_destination() {
+    let source = br#"
+unit t;
+
+uses core;
+
+var
+  text: string[32];
+  raw: bytes[64];
+  n: int;
+  x: f64;
+
+procedure main(args: const string[1024]);
+begin
+  x := -1.5;
+  n := core.format_f64_into(text, x, uint(2));
+  n := core.format_f64_into(raw, 2.5, uint(0));
+end;
+"#;
+    let package = compile(source, "t.ig").expect("compiles");
+    assert_eq!(
+        format_f64_encodings(&package),
+        vec![
+            (abi::opcodes::buffer_kind::STRING, 32),
+            (abi::opcodes::buffer_kind::BYTES, 64)
+        ]
+    );
+
+    let wrong_arity = br#"
+unit t;
+
+uses core;
+
+var
+  text: string[32];
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := core.format_f64_into(text, 1.5);
+end;
+"#;
+    let error = compile(wrong_arity, "t.ig").expect_err("three arguments are required");
+    assert!(
+        error.message.contains("expects 3 arguments, got 2"),
+        "{}",
+        error.message
+    );
+
+    let wrong_value = br#"
+unit t;
+
+uses core;
+
+var
+  text: string[32];
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := core.format_f64_into(text, 1, uint(2));
+end;
+"#;
+    let error = compile(wrong_value, "t.ig").expect_err("the value is an f64");
+    assert!(error.message.contains("`f64` value"), "{}", error.message);
+
+    let wrong_digits = br#"
+unit t;
+
+uses core;
+
+var
+  text: string[32];
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := core.format_f64_into(text, 1.5, 2);
+end;
+"#;
+    let error = compile(wrong_digits, "t.ig").expect_err("the width is a uint");
+    assert!(
+        error.message.contains("`uint` fraction width"),
+        "{}",
+        error.message
+    );
+
+    let wrong_destination = br#"
+unit t;
+
+uses core;
+
+var
+  n: int;
+  x: f64;
+
+procedure main(args: const string[1024]);
+begin
+  x := 1.5;
+  n := core.format_f64_into("abc", x, uint(2));
+end;
+"#;
+    let error = compile(wrong_destination, "t.ig").expect_err("the destination is var");
+    assert!(
+        error.message.contains("must be a variable or parameter"),
+        "{}",
+        error.message
+    );
+
+    let scalar_destination = br#"
+unit t;
+
+uses core;
+
+var
+  value: int;
+  n: int;
+  x: f64;
+
+procedure main(args: const string[1024]);
+begin
+  x := 1.5;
+  n := core.format_f64_into(value, x, uint(2));
+end;
+"#;
+    let error = compile(scalar_destination, "t.ig").expect_err("an int is not a buffer");
+    assert!(
+        error.message.contains("not a buffer") || error.message.contains("buffer"),
+        "{}",
+        error.message
+    );
+}
+
 #[test]
 fn syslib_ports_are_accepted_and_emit_their_builtins() {
     use abi::opcodes::{self, builtin};
@@ -2647,11 +2802,11 @@ fn the_embedded_stdlib_compiles_on_its_own() {
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(manifest_unit(&package), "stdlib");
     assert_eq!(
-        header.function_count, 20,
-        "trim_into, split_once, parse_int_into, starts_with, contains_byte, split_all, \
-         drain_into, map_get_or, utf8_decode_into, utf8_len, utf8_decode, utf8_valid, \
-         recv_exact, send_frame, recv_frame_into, send_line, recv_line_into, send_u64, \
-         recv_u64, send_bytes"
+        header.function_count, 21,
+        "trim_into, split_once, parse_int_into, parse_f64_into, starts_with, contains_byte, \
+         split_all, drain_into, map_get_or, utf8_decode_into, utf8_len, utf8_decode, \
+         utf8_valid, recv_exact, send_frame, recv_frame_into, send_line, recv_line_into, \
+         send_u64, recv_u64, send_bytes"
     );
     assert_eq!(header.entry, 0);
     assert_eq!(header.state_size, 0, "the stdlib declares no state");

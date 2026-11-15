@@ -1470,6 +1470,273 @@ fn format_int_rejects_unsupported_bases() {
     }
 }
 
+// ---- floating-point text --------------------------------------------------
+//
+// Same `state` layout as the integer formatter: `state[0..8]` result,
+// `state[8..16]` length, `state[16..]` destination data.
+
+fn format_f64_package(
+    kind: u8,
+    capacity: u32,
+    bits: u64,
+    frac_digits: u64,
+    state_size: u32,
+) -> Vec<u8> {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 16);
+    op_const(&mut instructions, bits as i64);
+    op_const(&mut instructions, frac_digits as i64);
+    op_word(&mut instructions, opcodes::FORMAT_F64, kind, 0, 0);
+    instructions.extend_from_slice(&capacity.to_le_bytes());
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op(&mut instructions, opcodes::RET);
+    let frame = FnSpec {
+        frame_size: 80,
+        ..BYTE_FRAME
+    };
+    build(&[frame], &instructions, &[], state_size, 96, 0)
+}
+
+/// Runs one `format_f64` and returns `(result, bytes, length)`. The destination
+/// starts with `initial`, so an untouched buffer is observable.
+fn run_format_f64(
+    kind: u8,
+    capacity: u32,
+    bits: u64,
+    frac_digits: u64,
+    initial: &[u8],
+) -> (i64, Vec<u8>, u64) {
+    let state_size = (16 + capacity as usize).max(16 + initial.len()).max(24);
+    let code = format_f64_package(kind, capacity, bits, frac_digits, state_size as u32);
+    let mut host = MockHost::default();
+    let mut state = vec![0u8; state_size];
+    state[8..16].copy_from_slice(&(initial.len() as u64).to_le_bytes());
+    state[16..16 + initial.len()].copy_from_slice(initial);
+    let mut stack = vec![0u8; 96];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    let result = i64::from_le_bytes(state[0..8].try_into().unwrap());
+    let length = u64::from_le_bytes(state[8..16].try_into().unwrap());
+    let bytes = state[16..16 + length as usize].to_vec();
+    (result, bytes, length)
+}
+
+fn format_f64(
+    kind: u8,
+    capacity: u32,
+    value: f64,
+    frac_digits: u64,
+    initial: &[u8],
+) -> (i64, Vec<u8>, u64) {
+    run_format_f64(kind, capacity, value.to_bits(), frac_digits, initial)
+}
+
+#[test]
+fn format_f64_writes_fixed_point_decimal() {
+    let string = opcodes::buffer_kind::STRING;
+    let bytes = opcodes::buffer_kind::BYTES;
+    assert_eq!(
+        format_f64(string, 16, 0.0, 2, b""),
+        (4, b"0.00".to_vec(), 4)
+    );
+    assert_eq!(format_f64(string, 16, 0.0, 0, b""), (1, b"0".to_vec(), 1));
+    assert_eq!(format_f64(string, 16, 1.5, 1, b""), (3, b"1.5".to_vec(), 3));
+    assert_eq!(
+        format_f64(string, 16, -1.5, 1, b""),
+        (4, b"-1.5".to_vec(), 4)
+    );
+    assert_eq!(
+        format_f64(string, 16, 42.25, 3, b""),
+        (6, b"42.250".to_vec(), 6)
+    );
+    // Both kinds accept the ASCII output, and the count is the length.
+    assert_eq!(
+        format_f64(bytes, 16, 2.5, 0, b""),
+        (1, b"3".to_vec(), 1),
+        "0 fraction digits rounds 2.5 up"
+    );
+    assert_eq!(
+        format_f64(bytes, 16, 1.0 / 3.0, 9, b""),
+        (11, b"0.333333333".to_vec(), 11)
+    );
+    // The integer part never carries a leading zero.
+    assert_eq!(
+        format_f64(string, 16, 7.0, 2, b""),
+        (4, b"7.00".to_vec(), 4)
+    );
+}
+
+#[test]
+fn format_f64_keeps_the_sign_of_negative_zero() {
+    assert_eq!(
+        format_f64(opcodes::buffer_kind::STRING, 16, -0.0, 3, b""),
+        (6, b"-0.000".to_vec(), 6)
+    );
+    assert_eq!(
+        format_f64(opcodes::buffer_kind::STRING, 16, -0.0, 0, b""),
+        (2, b"-0".to_vec(), 2)
+    );
+}
+
+#[test]
+fn format_f64_rounds_half_away_from_zero_and_carries() {
+    let string = opcodes::buffer_kind::STRING;
+    // Half away from zero, in both directions: 0.75 is exact in binary.
+    assert_eq!(
+        format_f64(string, 16, 0.75, 1, b""),
+        (3, b"0.8".to_vec(), 3)
+    );
+    assert_eq!(
+        format_f64(string, 16, -0.75, 1, b""),
+        (4, b"-0.8".to_vec(), 4)
+    );
+    assert_eq!(
+        format_f64(string, 16, 0.25, 1, b""),
+        (3, b"0.3".to_vec(), 3)
+    );
+    // Carry into the integer part.
+    assert_eq!(
+        format_f64(string, 16, 9.999, 2, b""),
+        (5, b"10.00".to_vec(), 5)
+    );
+    assert_eq!(
+        format_f64(string, 16, -9.999, 2, b""),
+        (6, b"-10.00".to_vec(), 6)
+    );
+    // Just below half rounds down.
+    assert_eq!(
+        format_f64(string, 32, 0.74, 1, b""),
+        (3, b"0.7".to_vec(), 3)
+    );
+    // Rounding to zero fraction digits can carry too.
+    assert_eq!(format_f64(string, 16, 0.5, 0, b""), (1, b"1".to_vec(), 1));
+    assert_eq!(format_f64(string, 16, 0.49, 0, b""), (1, b"0".to_vec(), 1));
+}
+
+#[test]
+fn format_f64_writes_specials_literally() {
+    for digits in [0u64, 3, 9] {
+        assert_eq!(
+            format_f64(opcodes::buffer_kind::STRING, 16, f64::NAN, digits, b""),
+            (3, b"nan".to_vec(), 3),
+            "{digits} digits"
+        );
+        assert_eq!(
+            format_f64(opcodes::buffer_kind::STRING, 16, f64::INFINITY, digits, b""),
+            (3, b"inf".to_vec(), 3)
+        );
+        assert_eq!(
+            format_f64(
+                opcodes::buffer_kind::STRING,
+                16,
+                f64::NEG_INFINITY,
+                digits,
+                b""
+            ),
+            (4, b"-inf".to_vec(), 4)
+        );
+    }
+}
+
+#[test]
+fn format_f64_rejects_an_unrepresentable_magnitude() {
+    let string = opcodes::buffer_kind::STRING;
+    // Exactly 2^63 and anything above it has no fixed-point integer part.
+    assert_eq!(
+        format_f64(string, 32, 9_223_372_036_854_775_808.0, 0, b"XYZ"),
+        (-4, b"XYZ".to_vec(), 3)
+    );
+    assert_eq!(
+        format_f64(string, 32, -9_223_372_036_854_775_808.0, 0, b"XYZ"),
+        (-4, b"XYZ".to_vec(), 3)
+    );
+    assert_eq!(
+        format_f64(string, 32, 1.0e300, 3, b"XYZ"),
+        (-4, b"XYZ".to_vec(), 3)
+    );
+    // The largest integer part below the bound still formats.
+    assert_eq!(
+        format_f64(string, 32, 9_223_372_036_854_774_784.0, 0, b""),
+        (19, b"9223372036854774784".to_vec(), 19)
+    );
+}
+
+#[test]
+fn format_f64_rejects_more_than_nine_fraction_digits() {
+    for digits in [10u64, 100, u64::MAX] {
+        assert_eq!(
+            format_f64(opcodes::buffer_kind::STRING, 16, 1.0, digits, b"XYZ"),
+            (-4, b"XYZ".to_vec(), 3),
+            "{digits} digits"
+        );
+    }
+    // The width bound applies before the specials: a 10-digit field is invalid
+    // even though `nan` would ignore the width.
+    assert_eq!(
+        format_f64(opcodes::buffer_kind::STRING, 16, f64::NAN, 10, b"XYZ"),
+        (-4, b"XYZ".to_vec(), 3)
+    );
+}
+
+#[test]
+fn format_f64_reports_capacity_and_leaves_the_length_alone() {
+    let string = opcodes::buffer_kind::STRING;
+    // "42.5" needs 4 bytes; 3 is one short.
+    assert_eq!(
+        format_f64(string, 3, 42.5, 1, b"XYZ"),
+        (-6, b"XYZ".to_vec(), 3)
+    );
+    assert_eq!(
+        format_f64(string, 4, 42.5, 1, b""),
+        (4, b"42.5".to_vec(), 4)
+    );
+    // The sign and the fraction digits count against the capacity.
+    assert_eq!(
+        format_f64(string, 3, -1.5, 1, b"XYZ"),
+        (-6, b"XYZ".to_vec(), 3)
+    );
+    assert_eq!(
+        format_f64(
+            opcodes::buffer_kind::BYTES,
+            10,
+            f64::NEG_INFINITY,
+            0,
+            b"XYZ"
+        ),
+        (4, b"-inf".to_vec(), 4)
+    );
+    assert_eq!(
+        format_f64(opcodes::buffer_kind::BYTES, 3, f64::NEG_INFINITY, 0, b"XYZ"),
+        (-6, b"XYZ".to_vec(), 3)
+    );
+}
+
+#[test]
+fn format_f64_rejects_a_kind_or_capacity_out_of_range() {
+    let code = format_f64_package(2, 8, 0, 0, 24);
+    let mut scratch = scratch_for(&code);
+    let error = interpreter::verify(&code, &mut scratch).expect_err("must be refused");
+    assert_eq!(error.status, Status::Invalid);
+    assert!(
+        error.message.contains("format_f64 kind is out of range"),
+        "{}",
+        error.message
+    );
+
+    // A zero-capacity destination can never receive a digit.
+    let code = format_f64_package(opcodes::buffer_kind::STRING, 0, 0, 0, 24);
+    let mut scratch = scratch_for(&code);
+    let error = interpreter::verify(&code, &mut scratch).expect_err("must be refused");
+    assert_eq!(error.status, Status::Invalid);
+    assert!(
+        error
+            .message
+            .contains("format_f64 destination capacity is out of range"),
+        "{}",
+        error.message
+    );
+}
+
 // ---- syslib port builtins -------------------------------------------------
 
 #[test]

@@ -203,6 +203,8 @@ fn stage_app_samples_compile_with_the_spawn_builtins() {
         "frames",
         "frame_in",
         "frame_out",
+        "floats",
+        "text",
     ] {
         let path = format!("{}/../samples/apps/{name}", env!("CARGO_MANIFEST_DIR"));
         let source = std::fs::read(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
@@ -772,4 +774,171 @@ fn a_value_ring_parameter_is_a_private_writable_copy() {
         "the callee mutates its copy; the caller is unchanged, including through a value record"
     );
     assert_eq!(result.reason, ExitReason::Ok);
+}
+
+#[test]
+fn parse_f64_into_accepts_decimal_forms_and_reports_invalid() {
+    let source = br#"
+unit f64parse;
+
+uses core, stdlib;
+
+var
+  text: string[32];
+  value: f64;
+  st: Status;
+
+procedure show(src: const string[0]);
+var
+  n: int;
+begin
+  st := stdlib.parse_f64_into(src, value);
+  if st <> Ok then
+    core.write("Invalid\n")
+  else
+  begin
+    n := core.format_f64_into(text, value, uint(3));
+    core.write("[");
+    core.write(text);
+    core.write("]\n");
+  end;
+end;
+
+procedure main(args: const string[1024]);
+begin
+  show("1");
+  show("-1.5");
+  show("+2.25");
+  show(".5");
+  show("1.");
+  show("1e3");
+  show("2.5e-3");
+  show("1E+2");
+  show("inf");
+  show("+inf");
+  show("-inf");
+  show("nan");
+  show("1e400");
+  show("-1e400");
+  show("1e-400");
+  show("-0.0");
+end;
+"#;
+    let package = langhost::compile(source, "f64parse").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(
+        result.output,
+        b"[1.000]\n[-1.500]\n[2.250]\n[0.500]\n[1.000]\n[1000.000]\n[0.003]\n\
+          [100.000]\n[inf]\n[inf]\n[-inf]\n[nan]\n[inf]\n[-inf]\n[0.000]\n[-0.000]\n"
+            .to_vec()
+    );
+}
+
+#[test]
+fn parse_f64_into_rejects_every_malformed_form() {
+    let source = br#"
+unit f64bad;
+
+uses core, stdlib;
+
+var
+  text: string[32];
+  value: f64;
+  st: Status;
+  ok: bool;
+  n: int;
+
+procedure check(src: const string[0]);
+begin
+  value := 7.5;
+  st := stdlib.parse_f64_into(src, value);
+  // A failure must write nothing: `value` stays 7.5.
+  n := core.format_f64_into(text, value, uint(1));
+  if st = Invalid and text = "7.5" then
+    core.write("bad ok\n")
+  else
+    core.write("BAD\n");
+end;
+
+procedure main(args: const string[1024]);
+begin
+  check("");
+  check("+");
+  check("-");
+  check(".");
+  check("1e");
+  check("1e+");
+  check("1e-");
+  check("1.2.3");
+  check("1 2");
+  check(" 1");
+  check("1 ");
+  check("e5");
+  check(".e5");
+  check("+nan");
+  check("INF");
+  check("1,5");
+end;
+"#;
+    let package = langhost::compile(source, "f64bad").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"bad ok\n".repeat(16));
+}
+
+#[test]
+fn format_f64_into_and_parse_f64_into_round_trip() {
+    let source = br#"
+unit f64round;
+
+uses core, stdlib;
+
+var
+  text: string[32];
+  value: f64;
+  back: f64;
+  st: Status;
+  n: int;
+
+procedure roundtrip(v: f64; digits: uint);
+begin
+  n := core.format_f64_into(text, v, digits);
+  core.write(text);
+  core.write(" -> ");
+  st := stdlib.parse_f64_into(text, back);
+  if st <> Ok then
+    core.write("Invalid")
+  else
+  begin
+    n := core.format_f64_into(text, back, digits);
+    if back = v then
+      core.write("equal ")
+    else
+      core.write("near ");
+    core.write(text);
+  end;
+  core.write("\n");
+end;
+
+procedure main(args: const string[1024]);
+begin
+  roundtrip(12.375, uint(3));
+  roundtrip(-0.0, uint(3));
+  roundtrip(0.0, uint(2));
+  roundtrip(-42.5, uint(1));
+  roundtrip(1.0 / 3.0, uint(9));
+  roundtrip(1.0e18, uint(0));
+end;
+"#;
+    let package = langhost::compile(source, "f64round").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(
+        result.output,
+        b"12.375 -> equal 12.375\n-0.000 -> equal -0.000\n0.00 -> equal 0.00\n\
+          -42.5 -> equal -42.5\n0.333333333 -> near 0.333333333\n\
+          1000000000000000000 -> equal 1000000000000000000\n"
+            .to_vec()
+    );
 }

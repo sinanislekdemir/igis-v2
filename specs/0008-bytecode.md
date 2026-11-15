@@ -8,7 +8,7 @@
 - **ADRs:** 0002 (interpreted applications), 0005 (internal bytecode, no JIT), 0007 (fully
   static placement), 0011 (work stealing), 0018 (floating point), 0019 (source-only
   delivery)
-- **Updated:** 2026-11-15
+- **Updated:** 2026-11-16
 
 ## Context
 
@@ -340,7 +340,7 @@ artifact:
 | Comparisons | `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `cmp_buffers` for buffers |
 | Conversions | `i2f`, `f2i` (truncate and range-check), `trunc8`, `sext`, `zext` |
 | Control flow | `jmp`, `jz`, `jnz`, `call`, `ret` |
-| Buffers and aggregates | `append` (capacity-checked), `load_u8`/`store_u8` (length- and capacity-checked), `find` (byte scan), `substr` (checked slice; `a` = destination kind, `b` = source kind), `format_int` (decimal/hex formatting), `enum_cast` (range-checked ordinal → enum), `ref_offset` (field reference), `ref_element` (array element reference, index-checked), `copy_refs` (record, sum, array, ring and `case` payload copies), `map_put`/`map_get`/`map_has`/`map_remove`/`map_count` (open-addressing map, layout in the immediates), `stream_send`/`stream_try_send`/`stream_recv`/`stream_try_recv` (kernel byte FIFO; receive carries the destination capacity) |
+| Buffers and aggregates | `append` (capacity-checked), `load_u8`/`store_u8` (length- and capacity-checked), `find` (byte scan), `substr` (checked slice; `a` = destination kind, `b` = source kind), `format_int` (decimal/hex formatting), `format_f64` (fixed-point float text: `a` = destination kind, a capacity immediate), `enum_cast` (range-checked ordinal → enum), `ref_offset` (field reference), `ref_element` (array element reference, index-checked), `copy_refs` (record, sum, array, ring and `case` payload copies), `map_put`/`map_get`/`map_has`/`map_remove`/`map_count` (open-addressing map, layout in the immediates), `stream_send`/`stream_try_send`/`stream_recv`/`stream_try_recv` (kernel byte FIFO; receive carries the destination capacity) |
 | Builtins | `call_builtin n` — host-interface and `core` primitives |
 | System | `safe` (explicit poll), `trap` (compiler-inserted fault) |
 
@@ -386,7 +386,10 @@ the bump arena, isolated in `compiler/src/arena.rs`.
 - Field validation is per opcode: a reserved field must be zero unless the opcode defines
   it. `substr` is the one buffer opcode with two kind fields — `a` is the destination kind
   and `b` the source kind, each `0..=1` (`string`, `bytes`) — so the verifier accepts both
-  and rejects anything else; the capacity immediate must fit a section.
+  and rejects anything else; the capacity immediate must fit a section. `format_int` and
+  `format_f64` carry one kind field (`a`, `0..=1`), require `b = c = 0`, and bound their
+  immediate to a section; `format_f64` additionally requires a non-zero capacity, because
+  no digit can ever be written into an empty destination.
 - Compile errors are reported through the same `Diagnostic` into the caller's buffer
   (spec 0005); compilation never writes to an application-visible region.
 
@@ -468,7 +471,7 @@ pub fn run(task: &mut Task);
 
 | # | Question | Trigger / owner |
 |---|----------|-----------------|
-| 1 | ~~Exact opcode table and operand encodings~~ | **Resolved** — ABI v1 is `abi::opcodes`: 71 opcodes, one 4-byte opcode word plus up to four immediate words (the `map_*` ops carry the layout), `i32` jump offsets in instruction words, 8-byte operand slots. The interpreter implements it. |
+| 1 | ~~Exact opcode table and operand encodings~~ | **Resolved** — ABI v1 is `abi::opcodes`: 74 opcodes, one 4-byte opcode word plus up to four immediate words (the `map_*` ops carry the layout), `i32` jump offsets in instruction words, 8-byte operand slots. The interpreter implements it. |
 | 2 | Stack machine vs a small register machine | Performance measurement after the first loops run. |
 | 3 | ~~Verifier depth: structural only, or limited control-flow and stack-depth checks~~ | **Resolved for v1** — structural checks plus one instruction-boundary bit per word for jump targets; operand-stack depth is enforced at run time against the frame's operand area, not by dataflow analysis. |
 | 4 | Line-table encoding and compaction | When packages grow past the first few units. |
@@ -496,4 +499,5 @@ pub fn run(task: &mut Task);
 | 2026-11-15 | `substr` gained a source kind: the reserved `b` field is now the source's `buffer_kind` while `a` stays the destination kind, so all four `string`/`bytes` combinations are legal with no new opcode. The verifier accepts `a`/`b` in `0..=1` and `c = 0`; the machine applies the destination-kind rule (boundary check for a `string` source, strict UTF-8 validation for a `bytes` source, raw copy for a `bytes` destination). |
 | 2026-11-15 | Builtin `cpu_id` (10): pushes the APIC id of the core executing the call; `Host::cpu_id` defaults to 0, so no opcode and no ABI version change. |
 | 2026-11-15 | Builtins `realtime_on` (11; pushes the `Status` ordinal, `Ok` or `Full`) and `heartbeat` (12; no operands, no result). `Host::realtime_on` defaults to `Ok` and `Host::heartbeat` to a no-op, so no opcode and no ABI version change; the scheduler side is spec 0007, ADR 0016. |
-| 2026-11-15 | Streams add four opcodes: `stream_send`/`stream_try_send` (`[handle][data] -> Status`, no immediates) and `stream_recv`/`stream_try_recv` (`[handle][destination] -> int`, one destination-capacity immediate). A blocking opcode that would block restores its operands and pc and returns `Blocked(WaitKind::Stream(handle))`; the try variants push `WouldBlock`/`Closed` staged codes. The manifest lists endpoints in declaration order and handle `i` is at `state[i * 8]`, so `Endpoint`/`MANIFEST_HEADER_SIZE` are unchanged. ABI v1 grows from 67 to 71 opcodes. |
+| 2026-11-15 | Streams add four opcodes: `stream_send`/`stream_try_send` (`[handle][data] -> Status`, no immediates) and `stream_recv`/`stream_try_recv` (`[handle][destination] -> int`, one destination-capacity immediate). A blocking opcode that would block restores its operands and pc and returns `Blocked(WaitKind::Stream(handle))`; the try variants push `WouldBlock`/`Closed` staged codes. The manifest lists endpoints in declaration order and handle `i` is at `state[i * 8]`, so `Endpoint`/`MANIFEST_HEADER_SIZE` are unchanged. ABI v1 grows from 69 to 73 opcodes. |
+| 2026-11-16 | Fixed-point float text adds one opcode: `format_f64` (`a` = destination buffer kind, a non-zero capacity immediate; destination/value/`frac_digits` on the stack, pops an `f64` bit pattern) pushes the byte count, or `-4` for a width above 9 or a magnitude at or above `2^63`, or `-6` when the result does not fit. The specials `nan`/`inf`/`-inf` are written literally. The formatter is pure interpreter code building into a local array, with no host call and no allocation. `stdlib.parse_f64_into` adds no opcode: it is ordinary language code over `core.len`, indexing and `f64` arithmetic. ABI v1 grows from 73 to 74 opcodes. |

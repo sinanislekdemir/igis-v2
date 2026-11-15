@@ -382,6 +382,10 @@ fn verify_instructions(
                 if a > opcodes::buffer_kind::BYTES || b != 0 || c != 0 {
                     return Err(invalid(base + pc, "format_int kind is out of range"));
                 }
+            } else if op == opcodes::FORMAT_F64 {
+                if a > opcodes::buffer_kind::BYTES || b != 0 || c != 0 {
+                    return Err(invalid(base + pc, "format_f64 kind is out of range"));
+                }
             } else if matches!(
                 op,
                 opcodes::MAP_PUT | opcodes::MAP_GET | opcodes::MAP_HAS | opcodes::MAP_REMOVE
@@ -488,6 +492,18 @@ fn verify_instructions(
                         .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;
                     if capacity > MAX_SECTION {
                         return Err(invalid(base + pc + 4, "buffer capacity is out of range"));
+                    }
+                }
+                opcodes::FORMAT_F64 => {
+                    let capacity = read_u32(instructions, pc + 4)
+                        .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;
+                    // A zero-capacity destination can never receive a digit,
+                    // so it is not a valid instruction.
+                    if capacity == 0 || capacity > MAX_SECTION {
+                        return Err(invalid(
+                            base + pc + 4,
+                            "format_f64 destination capacity is out of range",
+                        ));
                     }
                 }
                 opcodes::ENUM_CAST => {

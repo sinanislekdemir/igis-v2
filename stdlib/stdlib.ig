@@ -150,6 +150,179 @@ begin
   return Ok;
 end;
 
+// Parses decimal text into an `f64` (spec 0003, "Floating point"; Q41).
+//
+// Grammar: `[+-]? ( digits [ '.' digits? ] | '.' digits ) ( [eE] [+-]? digits )?`
+// with at least one mantissa digit. The exact strings `inf`, `+inf`, `-inf` and
+// `nan` — the formatter's own output — are accepted too, so a format→parse
+// round trip works. Anything else is Invalid and writes nothing.
+//
+// The mantissa is accumulated as an `f64` and the exponent applied by repeated
+// multiplication or division by 10. That is the milestone's fixed-point
+// precision, not correct rounding (Q41): shortest round-trip formatting and
+// exact IEEE parsing are deferred. A magnitude that overflows `f64` becomes
+// ±Inf and an underflow becomes ±0, both with Ok; the sign of `-0.0` is
+// preserved. No input faults, and a failure never touches `value`.
+function parse_f64_into(src: const string[0]; value: var f64): Status;
+var
+  at: int;
+  length: int;
+  negative: bool;
+  negative_exponent: bool;
+  seen_digit: bool;
+  digit: int;
+  exponent: int;
+  step: int;
+  mantissa: f64;
+  fraction: f64;
+  fraction_scale: f64;
+  seen_significant: bool;
+  taken: int;
+  zero: f64;
+begin
+  length := int(core.len(src));
+  if length = 0 then
+    return Invalid;
+  // The formatter's specials. There are no literals for `NaN` and the
+  // infinities (spec 0003, "Floating point"), so IEEE arithmetic produces
+  // them: `0.0 / 0.0` is `NaN`, `±1.0 / 0.0` is `±Inf`.
+  if src = "nan" then
+  begin
+    zero := 0.0;
+    value := zero / zero;
+    return Ok;
+  end;
+  if src = "inf" or src = "+inf" then
+  begin
+    zero := 0.0;
+    value := 1.0 / zero;
+    return Ok;
+  end;
+  if src = "-inf" then
+  begin
+    zero := 0.0;
+    value := -1.0 / zero;
+    return Ok;
+  end;
+
+  at := 0;
+  negative := false;
+  if src[at] = byte(43) then
+    at := at + 1
+  else if src[at] = byte(45) then
+  begin
+    negative := true;
+    at := at + 1;
+  end;
+  if at = length then
+    return Invalid;
+
+  mantissa := 0.0;
+  seen_digit := false;
+  while at < length and src[at] >= byte(48) and src[at] <= byte(57) do
+  begin
+    digit := int(src[at]) - 48;
+    mantissa := mantissa * 10.0 + f64(digit);
+    seen_digit := true;
+    at := at + 1;
+  end;
+  if at < length and src[at] = byte(46) then
+  begin
+    at := at + 1;
+    // Fraction digits are accumulated as an integer numerator over a power of
+    // ten, so `0.375` is exact where summing `3*0.1 + 7*0.01 + 5*0.001` would
+    // not be. Only 18 significant digits are kept: the rest are below `f64`
+    // resolution. Leading zeros only move the scale, so a tiny value such as
+    // `0.0000001` keeps its digits.
+    fraction := 0.0;
+    fraction_scale := 1.0;
+    seen_significant := false;
+    taken := 0;
+    while at < length and src[at] >= byte(48) and src[at] <= byte(57) do
+    begin
+      digit := int(src[at]) - 48;
+      if not seen_significant and digit = 0 then
+        fraction_scale := fraction_scale * 10.0
+      else
+      begin
+        seen_significant := true;
+        if taken < 18 then
+        begin
+          fraction := fraction * 10.0 + f64(digit);
+          fraction_scale := fraction_scale * 10.0;
+          taken := taken + 1;
+        end;
+      end;
+      seen_digit := true;
+      at := at + 1;
+    end;
+    if taken > 0 then
+      mantissa := mantissa + fraction / fraction_scale;
+  end;
+  if not seen_digit then
+    return Invalid;
+
+  exponent := 0;
+  negative_exponent := false;
+  if at < length and (src[at] = byte(101) or src[at] = byte(69)) then
+  begin
+    at := at + 1;
+    if at = length then
+      return Invalid;
+    if src[at] = byte(43) then
+      at := at + 1
+    else if src[at] = byte(45) then
+    begin
+      negative_exponent := true;
+      at := at + 1;
+    end;
+    if at = length then
+      return Invalid;
+    if src[at] < byte(48) or src[at] > byte(57) then
+      return Invalid;
+    while at < length and src[at] >= byte(48) and src[at] <= byte(57) do
+    begin
+      // The bound only keeps the `int` accumulator in range: the scaling
+      // below saturates long before it, so a larger exponent cannot change a
+      // result that is already ±Inf or ±0.
+      if exponent < 1000000 then
+        exponent := exponent * 10 + (int(src[at]) - 48);
+      at := at + 1;
+    end;
+  end;
+  if at <> length then
+    return Invalid;
+
+  // Apply the exponent. Both loops stop once the value has saturated, so the
+  // cost does not grow with the exponent the text names.
+  step := 0;
+  if negative_exponent then
+  begin
+    while step < exponent and mantissa <> 0.0 do
+    begin
+      mantissa := mantissa / 10.0;
+      step := step + 1;
+    end;
+  end
+  else
+  begin
+    while step < exponent and mantissa <> 0.0 and mantissa < 1.0e308 do
+    begin
+      mantissa := mantissa * 10.0;
+      step := step + 1;
+    end;
+    // The loop stopped above the largest finite value but with exponent left:
+    // one more multiplication overflows to `Inf`, which is the true result.
+    if step < exponent and mantissa <> 0.0 then
+      mantissa := mantissa * 10.0;
+  end;
+
+  if negative then
+    mantissa := -mantissa;
+  value := mantissa;
+  return Ok;
+end;
+
 // True when `src` begins with `prefix`. Both are read byte-wise, so this is a
 // byte-prefix test, not a code-point test.
 function starts_with(src: const string[0]; prefix: const string[0]): bool;

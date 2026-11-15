@@ -5371,6 +5371,51 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::scalar(Kind::Int)))
             }
+            // `core.format_f64_into(dst, value: f64, frac_digits: uint) -> int`
+            // (spec 0003, "Floating point"). Fixed-point text in a writable
+            // `string` or `bytes` buffer; the interpreter builds it, so no host
+            // call and no formatting library.
+            "core.format_f64_into" => {
+                if args.len() != 3 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`core.format_f64_into` expects 3 arguments, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                let destination = self.emit_var_buffer_ref(args[0])?;
+                let value = self.expr_scalar(args[1])?;
+                if value.kind != Kind::Float {
+                    return Err(self.err_at(
+                        args[1],
+                        format_args!(
+                            "`core.format_f64_into` expects an `f64` value, found `{value}`"
+                        ),
+                    ));
+                }
+                let frac_digits = self.expr_scalar(args[2])?;
+                if frac_digits.kind != Kind::Uint {
+                    return Err(self.err_at(
+                        args[2],
+                        format_args!(
+                            "`core.format_f64_into` expects a `uint` fraction width, found `{frac_digits}`"
+                        ),
+                    ));
+                }
+                let kind = match destination.kind {
+                    Kind::String => opcodes::buffer_kind::STRING,
+                    Kind::Bytes => opcodes::buffer_kind::BYTES,
+                    _ => unreachable!("the destination is a buffer"),
+                };
+                self.word(opcodes::FORMAT_F64, kind, 0, 0)?;
+                self.imm32(destination.cap)?;
+                self.pop(3)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Int)))
+            }
             // First `syslib` primitives: x86 port I/O (spec 0003, "Hardware
             // access"). `Port` is staged as a plain `uint` (Q45); the namespace
             // is still separate from `core`, so a hardware access stays

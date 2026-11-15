@@ -42,7 +42,7 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | # | Question | Options / recommendation | Trigger |
 |---|----------|--------------------------|---------|
 | Q40 | `f32` support | not in M1; additive later, but it needs its own opcode and conversion rules | when single precision is needed |
-| Q41 | Float text beyond fixed decimal | shortest round-trip formatting and full decimal parsing are deferred | when float output must round-trip losslessly |
+| Q41 | Float text beyond fixed decimal | **Narrowed 2026-11-16.** Fixed-point formatting and decimal parsing are implemented: `core.format_f64_into` (0–9 fraction digits, half away from zero, `nan`/`inf`/`-inf`, `-4` for a wider field or `\|value\| >= 2^63`, `-6` when the destination is short) and `stdlib.parse_f64_into` (decimal grammar with an optional exponent, `Invalid` for anything else, `±Inf`/`±0` on overflow/underflow with `Ok`). What remains is **shortest round-trip formatting** (the nine-digit cap, the `2^63` range bound that refuses `1e300` and every exponent form, and binary noise past ~15 significant digits) and **exact IEEE text parsing** (correctly rounded decimal → binary64, plus subnormal edge cases). Both are additive: a new formatter mode/opcode and a stricter parser, not a change to these semantics | when float output must round-trip losslessly or exactness is required |
 | Q46 | Moving the checked slice into `stdlib` | **Blocked, not pending.** `core.substr_into` cannot move: the destination capacity must be a *call-site immediate* (the `SUBSTR` `capacity` field), while a `stdlib` helper declares concrete capacities and the language has no generics, so one helper could serve only one destination size (it would lose `split_once`'s `string[128]` head and every smaller destination). The future option is a buffer parameter that carries its **runtime capacity**, which would need a language change. Until then the checked slice stays in `core` and there is one slicing primitive, not two (spec 0003, "Slicing and search") | only if runtime-capacity buffer parameters are added |
 
 ## E. Fault handling
@@ -200,8 +200,8 @@ hook, not an affinity.
 - Q5, Q6, Q7, Q11–Q13, Q15–Q38 and Q42 are resolved and removed from the table; Q1, Q2 and
   Q4 are now closed provisionally, so only the handler budget (Q3), the deferred
   debug/DMA items, explicit stream close (Q10), console-stream wiring (Q14), the staged
-  port handles (Q45), the two float follow-ups (Q40/Q41) and the blocked `substr_into`
-  move (Q46) remain.
+  port handles (Q45), the float-text refinements (Q40/Q41, narrowed on 2026-11-16) and the
+  blocked `substr_into` move (Q46) remain.
 
 ## Decided in the 2026-11-15 realtime session
 

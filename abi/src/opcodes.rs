@@ -289,6 +289,25 @@ pub const STREAM_TRY_RECV: u8 = 0x4F;
 /// Invoke a host builtin. Immediate: `builtin: u32` (see [`builtin`]).
 pub const BUILTIN: u8 = 0x50;
 
+/// Pop a fraction width, an `f64` value and a destination reference, format the
+/// value as fixed-point decimal text and push the byte count
+/// (`core.format_f64_into`).
+///
+/// `a` is the destination's buffer kind ([`buffer_kind`]); both kinds are
+/// accepted because the output is ASCII. Immediate: `capacity: u32`, the
+/// destination's declared capacity; it must be non-zero. The `f64` operand is
+/// its 64-bit IEEE pattern and `frac_digits` is a `u64`; at most 9 fraction
+/// digits are supported, and a larger width pushes `-4` (`Status::Invalid`)
+/// and writes nothing. `NaN` is written as `nan`, `+Inf`/`-Inf` as `inf`/
+/// `-inf`, literally and ignoring the width. A magnitude at or above `2^63`
+/// also pushes `-4`: its integer part does not fit the fixed-point form.
+/// Otherwise the output is an optional `-`, the integer part without leading
+/// zeros, and (when the width is non-zero) a `.` and exactly that many
+/// fraction digits, rounded half away from zero with the carry applied to the
+/// integer part. A result that does not fit `capacity` pushes `-6`
+/// (`Status::CapacityExceeded`) and leaves the destination length alone.
+pub const FORMAT_F64: u8 = 0x51;
+
 /// IEEE-754 double addition.
 pub const FADD: u8 = 0x60;
 /// IEEE-754 double subtraction.
@@ -455,7 +474,7 @@ pub const fn instruction_words(op: u8) -> Option<u32> {
         CONST => Some(3),
         JMP | JZ | JNZ | CALL | LOAD_LOCAL | STORE_LOCAL | REF_LOCAL | LOAD_STATE | STORE_STATE
         | REF_STATE | REF_CONST | APPEND | READ_LINE | STORE_U8 | BUILTIN | SUBSTR | FORMAT_INT
-        | ENUM_CAST | REF_OFFSET | STREAM_RECV | STREAM_TRY_RECV => Some(2),
+        | ENUM_CAST | REF_OFFSET | STREAM_RECV | STREAM_TRY_RECV | FORMAT_F64 => Some(2),
         REF_ELEMENT => Some(3),
         MAP_PUT | MAP_GET | MAP_HAS | MAP_REMOVE => Some(5),
         MAP_COUNT => Some(1),
@@ -516,6 +535,7 @@ pub const fn mnemonic(op: u8) -> Option<&'static str> {
         FIND => Some("find"),
         SUBSTR => Some("substr"),
         FORMAT_INT => Some("format_int"),
+        FORMAT_F64 => Some("format_f64"),
         ENUM_CAST => Some("enum_cast"),
         MAP_PUT => Some("map_put"),
         MAP_GET => Some("map_get"),

@@ -5,7 +5,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0002, 0004, 0005, 0007, 0010, 0011, 0016, 0018
-- **Updated:** 2026-11-15
+- **Updated:** 2026-11-16
 
 ## Context
 
@@ -148,8 +148,9 @@ f64(x)   int(x)   uint(x)   byte(x)
   therefore the same on any x86_64 core.
 - Text conversion is fixed-point in the first milestone:
   `core.format_f64_into(dst, value, frac_digits)` and `stdlib.parse_f64_into(text, var
-  value)`, which parses decimal text and returns `Status`. Shortest round-trip formatting
-  and full IEEE text parsing are deferred.
+  value)`, which parses decimal text and returns `Status`. See "Floating-point text
+  (implemented)" below for the rounding rule, error codes and parse grammar. Shortest
+  round-trip formatting and exact IEEE text parsing are deferred (Q41).
 - Transcendental and other math helpers (`sqrt`, `sin`, ...) live in `stdlib` and are
   written in the language; a helper moves to `core` only when measurement justifies it.
 - `f64` may appear in records, sum types, arrays, rings and map values. It is not a map
@@ -255,6 +256,60 @@ Rules:
 - This is a pure buffer operation in the interpreter, not a host call. It is a staged
   `core` primitive because `stdlib` formatting does not exist yet; the semantics do not
   change when it moves (spec 0008, `format_int`).
+
+### Floating-point text (implemented)
+
+- **`core.format_f64_into(dst: var string[N]; value: f64; frac_digits: uint) -> int`**
+  writes fixed-point decimal text into a writable `string` or `bytes` destination (the
+  output is ASCII) and returns the byte count. `bytes` is accepted because the output is
+  text, not because the formatter writes binary.
+- **Width bound.** At most 9 fraction digits are supported. `frac_digits > 9` returns `-4`
+  (`Status.Invalid`) and writes nothing, whatever the value. Nine digits is already below
+  the ~15–17 significant decimal digits an `f64` carries, so a wider field would only
+  print binary noise.
+- **Range.** The fixed-point form has no exponent, so a magnitude at or above `2^63`
+  (where the integer part stops fitting a 64-bit value) returns `-4` and writes nothing.
+  `NaN`, `+Inf` and `-Inf` are not in that class: they are written as `nan`, `inf` and
+  `-inf`, literally and ignoring `frac_digits`, and the result is their length.
+- **Shape.** Otherwise the output is an optional `-`, the integer part without leading
+  zeros (a single `0` when the integer part is zero), and — only when `frac_digits` is
+  non-zero — a `.` followed by exactly `frac_digits` digits. `-0.0` keeps its sign
+  (`-0.000` with three digits); the sign of a zero is the one piece of information a
+  magnitude-only formatter would lose.
+- **Rounding.** The fractional part is scaled by `10^frac_digits` and rounded half away
+  from zero; a rounded value equal to the scale carries into the integer part (`9.999`
+  with 2 digits → `10.00`, `-2.5` with 0 digits → `-3`, `0.5` with 0 digits → `1`). The
+  digits come from `f64` arithmetic plus integer digit extraction: no allocation, no
+  formatting library, and no decimal expansion of the binary value beyond what `f64`
+  itself carries. That is the milestone's fixed-point precision (Q41), so a value whose
+  decimal form is not exact in binary64 rounds from the binary value (`2.675` with 2
+  digits gives `2.67`, not the decimal reader's `2.68`).
+- **Capacity.** The whole result must fit `N`. If it does not, nothing is written, the
+  destination length is left untouched, and the result is `-6`
+  (`Status.CapacityExceeded`). On success the runtime length is the byte count and the
+  result is that count.
+- The formatter is a pure buffer operation in the interpreter (`format_f64`, spec 0008),
+  like `format_int`, not a host call: it builds the digits in a local staging array and
+  publishes them with one copy, so a rejected value never leaves a partial destination.
+- **`stdlib.parse_f64_into(src: const string[0]; value: var f64) -> Status`** parses
+  decimal text. The grammar is
+  `[+-]? ( digits [ '.' digits? ] | '.' digits ) ( [eE] [+-]? digits )?` with at least one
+  mantissa digit, plus the exact strings `inf`, `+inf`, `-inf` and `nan` (the formatter's
+  own output), so a format→parse round trip works. Everything else — empty text, a bare
+  sign, `.`, `1e`, `1e+`, `1.2.3`, an embedded or trailing space, `+nan`, `INF` — is
+  `Invalid`, writes nothing and never faults.
+- **Precision.** The mantissa is accumulated as an `f64`: the fraction as an integer
+  numerator over a power of ten (so `0.375` is exact, and only 18 significant digits are
+  kept), then the decimal exponent is applied by repeated multiplication or division by
+  10. Shortest round-trip formatting and exact IEEE text parsing stay deferred (Q41):
+  parsing lands on the `f64` value of the text, not on a correctly rounded one.
+- **Saturation, not errors.** A magnitude that overflows `f64` (e.g. `1e400`) becomes
+  `±Inf` with `Ok`; an underflow (e.g. `1e-400`) becomes `±0` with `Ok`. The sign of
+  `-0.0` is preserved, including from `-0.0`, `-0e5` and the formatter's `-0.000`. The
+  exponent loop stops once the value has saturated, so the cost does not grow with the
+  exponent the text names, and a mantissa with hundreds of integer digits saturates to
+  `±Inf` rather than being renormalised.
+- Parsing is ordinary language code (`stdlib`), not a new opcode or builtin.
 
 ### Compound and parametric types
 
@@ -1051,6 +1106,7 @@ declared capacities and the at-least-N rule applies to callers.
 | `function stdlib.trim_into(dst: var string[256]; src: const string[0]): int` | Copies `src` without leading or trailing space, tab, CR or LF. Returns the copied length, or `-6` (`Status.CapacityExceeded`) without writing when the trimmed result exceeds the destination capacity. |
 | `function stdlib.split_once(dst_head: var string[128]; dst_tail: var string[256]; src: const string[0]; sep: byte): int` | Splits at the first `sep`: returns `1` with both parts, or `0` with the whole source in `dst_head` and an empty `dst_tail`. A part that does not fit returns `-6` without a partial tail write. Uses `core.find` and `core.substr_into`. |
 | `function stdlib.parse_int_into(src: const string[0]; value: var int): Status` | Optional leading `-`, then decimal digits only. `Invalid` for empty text, a bare `-`, a `+` sign or any non-digit; `CapacityExceeded` when the magnitude does not fit an `int`; `-9223372036854775808` is accepted. Writes nothing on failure and never faults. |
+| `function stdlib.parse_f64_into(src: const string[0]; value: var f64): Status` | Decimal text in `[+-]? ( digits [ '.' digits? ] \| '.' digits ) ( [eE] [+-]? digits )?` form, or the exact strings `inf`, `+inf`, `-inf`, `nan`. `Invalid` (nothing written) for anything else; overflowing magnitudes become `±Inf` and underflows `±0`, both with `Ok`; `-0.0` keeps its sign. Fixed-point precision, repeated ×/÷10 scaling (Q41). |
 | `function stdlib.starts_with(src: const string[0]; prefix: const string[0]): bool` | Byte-wise prefix test (not a code-point test). |
 | `function stdlib.contains_byte(src: const string[0]; value: byte): bool` | True when `core.find` finds the byte. |
 | `function stdlib.drain_into(dst: var array[int, 8]; count: var int; src: var ring[int, 8]): Status` | Moves up to eight integers out of `src`, oldest first, and writes the moved count. `NotFound` (nothing written) when `src` is empty. The first helper whose signature carries a `ring`. |
@@ -1067,7 +1123,9 @@ declared capacities and the at-least-N rule applies to callers.
 | `function stdlib.recv_u64(ep: const in_stream[1]; value: var int): Status` | Reads exactly 8 little-endian bytes with `recv_exact` and stores the signed value. `Closed`/`CapacityExceeded` propagate and leave `value` untouched. |
 | `function stdlib.send_bytes(ep: const out_stream[1]; data: const bytes[0]): Status` | Sends any `bytes` buffer as one atomic send. The `const bytes[0]` capacity accepts a buffer of any size (at-least-N rule); the endpoint capacity still bounds the send. |
 
-Still missing for a complete standard library: `f64` formatting/parsing. The typed stream
+Still missing for a complete standard library: `f32` (Q40) and the deferred float-text
+work (Q41: shortest round-trip formatting and exact IEEE parsing); the fixed-point
+`core.format_f64_into`/`stdlib.parse_f64_into` pair landed. The typed stream
 views landed with the framing layer (`recv_exact`, `send_frame`, `recv_frame_into`,
 `send_line`, `recv_line_into`, `send_u64`, `recv_u64`, `send_bytes`). The `substr_into`
 move is withdrawn: the checked slice stays in `core` because the destination capacity must
@@ -1102,6 +1160,12 @@ buffer indexing, adding no opcode.
 | Integer division by zero | `fault(DivideByZero)` |
 | Float division by zero | `Inf`/`NaN` per IEEE-754; not a fault |
 | `int(f)`, `uint(f)` or `byte(f)` with `NaN` or out of range | `fault(Overflow)` |
+| `core.format_f64_into` with `frac_digits > 9` | `-4` (`Status.Invalid`); destination untouched |
+| `core.format_f64_into` with `\|value\| >= 2^63` | `-4`; destination untouched (the fixed-point form has no exponent) |
+| `core.format_f64_into` of `NaN`/`±Inf` | `nan`/`inf`/`-inf`, ignoring the fraction width |
+| `core.format_f64_into` result wider than the destination | `-6` (`Status.CapacityExceeded`); destination length untouched |
+| `stdlib.parse_f64_into` of malformed text | `Invalid`; `value` untouched; never faults |
+| `stdlib.parse_f64_into` of an overflowing or underflowing magnitude | `±Inf` or `±0` with `Ok`; not an error |
 | A map key that is not `int`, `string[M]` or `bytes[M]` (including `f64`) | Compile error |
 | Shift count outside `0..63` | `fault(IllegalOperation)` |
 | Duplicate or malformed stream name | Compile error |
@@ -1185,3 +1249,4 @@ buffer indexing, adding no opcode.
 | 2026-11-15 | UTF-8 slice implemented. `core.substr_into` accepts all four destination/source kind combinations: the destination kind decides the check (a `string` source keeps T4's code-point-boundary rule, a `bytes` source is validated as strict UTF-8, a `bytes` destination copies raw), encoded in the `SUBSTR` `b` field as the source kind with no new opcode. `stdlib` gains `utf8_decode_into` (T3, checked bytes→string), `utf8_len`, `utf8_decode` and `utf8_valid`. The `stdlib.substr_into` move is withdrawn: the destination capacity must be a call-site immediate, and without generics a library helper could only serve one capacity (recorded in `OPEN-QUESTIONS.md`). |
 | 2026-11-15 | `syslib.cpu_id() -> uint` added (builtin 10): the APIC id of the executing core, the proof hook for per-core scheduling. |
 | 2026-11-15 | Realtime primitives implemented: `core.realtime_on() -> Status` (one-way; `Ok` or `Full`, no second slot on a repeat) and `core.heartbeat()` (no result; a no-op on a normal task). A realtime task must heartbeat once per second of non-blocked time or it is terminated with `FaultCode.WatchdogTimeout` (spec 0007, ADR 0016). |
+| 2026-11-16 | Fixed-point float text implemented. `core.format_f64_into(dst, value, frac_digits) -> int` writes an optional `-`, the integer part and exactly `frac_digits` (0–9) fraction digits rounded half away from zero with the carry applied; `NaN`/`±Inf` are `nan`/`inf`/`-inf`, `frac_digits > 9` and `\|value\| >= 2^63` are `-4`, and a result wider than the destination is `-6` with the length untouched. `stdlib.parse_f64_into(src, value) -> Status` accepts decimal text with an optional exponent (plus the formatter's `inf`/`-inf`/`nan`), rejects everything else with `Invalid`, and saturates overflow/underflow to `±Inf`/`±0` with `Ok`, preserving `-0.0`. Fixed-point precision; shortest round-trip formatting and exact IEEE parsing stay open (Q41), `f32` stays open (Q40). |

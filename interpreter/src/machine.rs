@@ -231,6 +231,43 @@ enum Step {
 const FRAME_HEADER: usize = 32;
 const NO_PREVIOUS_FRAME: u64 = u64::MAX;
 
+/// The milestone bound on `core.format_f64_into`'s fraction width. Nine digits
+/// is already below the ~15–17 significant decimal digits an `f64` carries, so
+/// more would only print binary noise (spec 0003, "Floating point").
+const MAX_FRACTION_DIGITS: u64 = 9;
+
+/// `10^0 ..= 10^9` as `f64`, for scaling the fractional part. Every value is
+/// exact in binary64.
+const POW10_F64: [f64; 10] = [
+    1.0,
+    10.0,
+    100.0,
+    1_000.0,
+    10_000.0,
+    100_000.0,
+    1_000_000.0,
+    10_000_000.0,
+    100_000_000.0,
+    1_000_000_000.0,
+];
+
+/// `10^0 ..= 10^9` as `u64`, for extracting the fraction digits.
+const POW10_U64: [u64; 10] = [
+    1,
+    10,
+    100,
+    1_000,
+    10_000,
+    100_000,
+    1_000_000,
+    10_000_000,
+    100_000_000,
+    1_000_000_000,
+];
+
+/// `2^63` as `f64` (exact): the fixed-point integer part must be below this.
+const F64_INT_LIMIT: f64 = 9_223_372_036_854_775_808.0;
+
 /// A suspended or running bytecode task.
 #[derive(Debug)]
 pub struct Machine {
@@ -906,6 +943,11 @@ impl Machine {
                 let kind = a;
                 let capacity = read_u32(code, pc + 4)? as usize;
                 self.format_int(kind, capacity, state, stack, constants, args)?;
+            }
+            opcodes::FORMAT_F64 => {
+                let kind = a;
+                let capacity = read_u32(code, pc + 4)? as usize;
+                self.format_f64(kind, capacity, state, stack, constants, args)?;
             }
             opcodes::ENUM_CAST => {
                 // `EnumName(int)` construction: the ordinal must name a variant.
@@ -2609,6 +2651,158 @@ impl Machine {
             _ => return Err(FaultCode::IllegalOperation),
         }
         self.push(stack, total as u64)
+    }
+
+    /// `format_f64`: write an `f64` as fixed-point decimal text
+    /// (`core.format_f64_into`, spec 0003, "Floating point").
+    ///
+    /// `kind` is [`opcodes::buffer_kind`]; both kinds accept the ASCII output.
+    /// `frac_digits` must be at most [`MAX_FRACTION_DIGITS`]; a larger width
+    /// pushes `-4` (`Status::Invalid`) and writes nothing. `NaN` is `nan` and
+    /// the infinities are `inf`/`-inf`, written literally and ignoring the
+    /// width. A magnitude at or above `2^63` pushes `-4` too: its integer part
+    /// does not fit the fixed-point form. Otherwise the output is an optional
+    /// `-`, the integer part without leading zeros, and — when the width is
+    /// non-zero — a `.` and exactly that many fraction digits, rounded half
+    /// away from zero with the carry applied to the integer part. A result that
+    /// does not fit `capacity` pushes `-6` (`Status::CapacityExceeded`) and
+    /// leaves the destination length untouched.
+    ///
+    /// The digits are built in a local array and published with one copy, so a
+    /// rejected value never leaves a partial destination.
+    fn format_f64(
+        &mut self,
+        kind: u8,
+        capacity: usize,
+        state: &mut [u8],
+        stack: &mut [u8],
+        code: &[u8],
+        args: &[u8],
+    ) -> Result<(), FaultCode> {
+        if kind != opcodes::buffer_kind::STRING && kind != opcodes::buffer_kind::BYTES {
+            return Err(FaultCode::IllegalOperation);
+        }
+        let frac_digits = self.pop(stack)?;
+        let value = f64::from_bits(self.pop(stack)?);
+        let destination_bits = self.pop(stack)?;
+
+        let (destination_region, destination) =
+            self.resolve(destination_bits, state, stack, code, args)?;
+        if destination_region != refs::REGION_STATE && destination_region != refs::REGION_STACK {
+            return Err(FaultCode::IllegalOperation);
+        }
+        if destination < 8 {
+            return Err(FaultCode::OutOfBounds);
+        }
+        let destination_end = destination
+            .checked_add(capacity)
+            .ok_or(FaultCode::OutOfBounds)?;
+        if destination_end
+            > region_len(destination_region, state, stack, code, args)
+                .ok_or(FaultCode::OutOfBounds)?
+        {
+            return Err(FaultCode::OutOfBounds);
+        }
+
+        if frac_digits > MAX_FRACTION_DIGITS {
+            self.push(stack, status_code(Status::Invalid))?;
+            return Ok(());
+        }
+        let digits = frac_digits as usize;
+
+        // The widest result is `-9223372036854775807.123456789` (30 bytes), so
+        // the local staging array is far larger than any accepted output.
+        let mut out = [0u8; 64];
+        let mut at = 0;
+        if value.is_nan() {
+            out[..3].copy_from_slice(b"nan");
+            at = 3;
+        } else if value.is_infinite() {
+            if value.is_sign_negative() {
+                out[0] = b'-';
+                at = 1;
+            }
+            out[at..at + 3].copy_from_slice(b"inf");
+            at += 3;
+        } else {
+            // The fixed-point integer part does not fit `i64` beyond this
+            // bound, and the formatter has no exponent form.
+            if value.abs() >= F64_INT_LIMIT {
+                self.push(stack, status_code(Status::Invalid))?;
+                return Ok(());
+            }
+            if value.is_sign_negative() {
+                out[0] = b'-';
+                at = 1;
+            }
+            // Work on the magnitude: the guard above makes it finite. `f64`
+            // has no `trunc` in core, but the `u64` cast truncates toward
+            // zero, and every finite `f64` below `2^63` converts exactly.
+            let magnitude = value.abs();
+            let mut integer = magnitude as u64;
+            let fraction = magnitude - integer as f64;
+            // Round half away from zero on the fractional part. The scaled
+            // fraction is below `10^digits` (at most `10^9`), so it fits both
+            // an `f64` integer and a `u64`; a rounded value equal to the scale
+            // is a carry into the integer part.
+            let scale_f = POW10_F64[digits];
+            let scale = POW10_U64[digits];
+            let mut fraction_digits = (fraction * scale_f + 0.5) as u64;
+            if fraction_digits >= scale {
+                fraction_digits = 0;
+                integer += 1;
+            }
+
+            // Integer digits, least significant first, then reversed into the
+            // staging array; zero is a single `0`.
+            let mut rest = integer;
+            let mut buffer = [0u8; 20];
+            let mut cursor = buffer.len();
+            loop {
+                cursor -= 1;
+                buffer[cursor] = b'0' + (rest % 10) as u8;
+                rest /= 10;
+                if rest == 0 {
+                    break;
+                }
+            }
+            let written = buffer.len() - cursor;
+            out[at..at + written].copy_from_slice(&buffer[cursor..]);
+            at += written;
+            if digits > 0 {
+                out[at] = b'.';
+                at += 1;
+                // Exactly `digits` fraction digits, zero-padded on the left.
+                let mut index = digits;
+                while index > 0 {
+                    index -= 1;
+                    out[at] = b'0' + ((fraction_digits / POW10_U64[index]) % 10) as u8;
+                    at += 1;
+                }
+            }
+        }
+
+        if at > capacity {
+            self.push(stack, status_code(Status::CapacityExceeded))?;
+            return Ok(());
+        }
+
+        {
+            let out = &out[..at];
+            let destination = match destination_region {
+                refs::REGION_STATE => &mut state[destination..destination + at],
+                refs::REGION_STACK => &mut stack[destination..destination + at],
+                _ => return Err(FaultCode::IllegalOperation),
+            };
+            destination.copy_from_slice(out);
+        }
+
+        match destination_region {
+            refs::REGION_STATE => write_u64(state, destination - 8, at as u64)?,
+            refs::REGION_STACK => write_u64(stack, destination - 8, at as u64)?,
+            _ => return Err(FaultCode::IllegalOperation),
+        }
+        self.push(stack, at as u64)
     }
 }
 
