@@ -12,6 +12,22 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   possible: `syslib.get_pixel`, injected events, printed self-checks); `--cores 1` run;
   no regression in the existing samples; `AGENTS.md` status/log row; this file updated.
 
+## Resume point (update this when a session ends)
+
+- **Last commit:** `93fedbf` (scripts: `--no-tablet` PS/2 fallback proof). Tree clean.
+- **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
+  and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), plus the
+  `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`).
+- **Verified at that point:** 291 host tests; QMP absolute injection 7/7 exact pixels;
+  `pointer_source` 2 with the tablet and the `mouse: ok` PS/2 fallback without it.
+- **Next slice (not started):** M2.2.3 + M2.2.4 + M2.2.5 together — keyboard key events,
+  the predeclared `Event`/`EventKind` types with `syslib.next_event`/`poll_event`/
+  `inject_event`/`event_drops`/`event_flush`, `WaitFor::Input`, and
+  `samples/apps/events`. A subagent was launched for it and stopped before touching any
+  file (host restart), so there is nothing partial to clean up; start it fresh.
+- **Then:** M2.2.7 PS/2 aux IRQ12 (fixes the measured burst loss on the relative
+  fallback), then M2.3 windows (`specs/0011`, z-order, focus, damage/`expose`).
+
 ## M1 — bootable system with source applications
 
 Complete. Boot/long mode, GDT/TSS/IDT, APIC timer, frame allocator, ext2 read-only,
