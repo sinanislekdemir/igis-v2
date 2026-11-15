@@ -34,6 +34,18 @@ use crate::frame;
 use crate::mb2::Framebuffer;
 use crate::sync::SpinLock;
 
+/// Pointer source values reported by `syslib.pointer_source` (spec 0010, I20).
+pub const POINTER_SOURCE_NONE: u32 = 0;
+pub const POINTER_SOURCE_PS2: u32 = 1;
+pub const POINTER_SOURCE_TABLET: u32 = 2;
+
+/// The source that currently drives the machine-wide pointer. It is separate
+/// from [`SCREEN`] so it is defined even when graphics are disabled. The
+/// absolute USB tablet wins when it is ready; the PS/2 aux device is the
+/// fallback (spec 0010, I21).
+static POINTER_SOURCE: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(POINTER_SOURCE_NONE);
+
 /// Largest accepted colour value: the top byte of `0x00RRGGBB` must be zero.
 pub const MAX_COLOR: u32 = 0x00FF_FFFF;
 
@@ -529,6 +541,66 @@ pub fn show_cursor() -> bool {
         screen.present(x, y, w, h);
     }
     true
+}
+
+/// The source currently driving the pointer (spec 0010, I20): 0 none, 1 PS/2,
+/// 2 USB tablet. The value is independent of whether graphics are enabled.
+pub fn pointer_source() -> u32 {
+    POINTER_SOURCE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Records which device drives the pointer. Called by the device bring-up
+/// paths: PS/2 on a successful aux init, the tablet after enumeration, and
+/// back to PS/2 (or none) if the tablet fails (spec 0010, I21).
+pub fn set_pointer_source(source: u32) {
+    POINTER_SOURCE.store(source, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Sets the pointer to an absolute screen position, with clamping to the
+/// screen and only the old/new cursor rectangles repainted (spec 0010, I20).
+///
+/// This is the USB tablet path: the caller has already scaled the HID axis to
+/// screen pixels. A repeated report is idempotent — the same position and
+/// buttons repaint nothing — so a dropped or duplicated absolute report is
+/// harmless. `buttons` above `0b111` is `Status.Invalid` and changes nothing.
+pub fn set_pointer_absolute(x: i64, y: i64, buttons: u32) -> Status {
+    if buttons > POINTER_BUTTONS_MASK {
+        return Status::Invalid;
+    }
+    let mut guard = SCREEN.lock();
+    let Some(screen) = guard.as_mut() else {
+        return Status::Invalid;
+    };
+    let max_x = (screen.width as i64 - 1).max(0);
+    let max_y = (screen.height as i64 - 1).max(0);
+    let x = x.clamp(0, max_x) as i32;
+    let y = y.clamp(0, max_y) as i32;
+    let buttons = buttons as u8;
+
+    if screen.pointer.visible
+        && screen.pointer.x == x
+        && screen.pointer.y == y
+        && screen.pointer.buttons == buttons
+    {
+        return Status::Ok;
+    }
+
+    let old = screen.cursor_rect();
+    screen.pointer.x = x;
+    screen.pointer.y = y;
+    screen.pointer.buttons = buttons;
+    screen.pointer.visible = true;
+
+    let new = screen.cursor_rect();
+    if old != new {
+        if let Some((x, y, w, h)) = old {
+            screen.present(x, y, w, h);
+        }
+    }
+    if let Some((x, y, w, h)) = new {
+        screen.present(x, y, w, h);
+    }
+    Status::Ok
 }
 
 fn valid_rect(w: i64, h: i64, color: u32) -> bool {

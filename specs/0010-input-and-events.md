@@ -1,11 +1,12 @@
 # 0010: Input, the pointer and events
 
 - **Status:** Accepted
-- **Scope:** `kernel` (`mouse`, `gfx`, `console`, `sched`), `arch/x86_64` (i8042,
-  keyboard), `abi`, `compiler`, `interpreter`, `syslib`; M2.2 of the desktop milestone
+- **Scope:** `kernel` (`mouse`, `usb`, `pci`, `gfx`, `console`, `sched`),
+  `arch/x86_64` (i8042, keyboard, ports), `abi`, `compiler`, `interpreter`,
+  `syslib`; M2.2 of the desktop milestone
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0021
+- **ADRs:** 0021, 0022
 - **Updated:** 2026-11-16
 
 ## Context
@@ -28,6 +29,13 @@ This spec covers the first half of that work:
 - forward references for the two slices that follow: keyboard **key events** (M2.2.3) and
   the **event queue** with `next_event`/`poll_event` (M2.2.4).
 
+M2.2.6 adds a second pointer source, because relative PS/2 motion has two measured
+host-side failure modes (Q49): QEMU's PS/2 queue overflows in bursts between the kernel's
+1 ms drains, and relative motion is measured in host pixels, so a scaled display never
+reaches the guest edges. An **absolute** USB HID tablet (`usb-tablet`) reports the current
+position, so a dropped report is harmless and the position is independent of host scaling.
+The PS/2 device stays as the fallback for a machine with no USB tablet.
+
 Non-goals for this slice (deferred or rejected):
 
 - no event queue, no `Event` record, no `next_event`/`poll_event`, no `WaitFor::Input`;
@@ -38,6 +46,11 @@ Non-goals for this slice (deferred or rejected):
 - no window focus or routing: until M2.3, input is machine-wide and no application "owns"
   a window;
 - no new bytecode opcode: the input surface is host builtins behind `BUILTIN`.
+- no USB keyboard, mass storage, hub or IRQ12 in this slice (IRQ12 is M2.2.7); the UHCI
+  driver serves the interrupt-IN endpoint of one full-speed HID tablet.
+- no real-hardware control-pipe packetisation: the measured QEMU device returns a whole
+  descriptor in one data TD. A device with a smaller control pipe would short-transfer
+  and be refused as a descriptor error, never guessed at.
 
 ## Requirements
 
@@ -148,6 +161,54 @@ Buttons are a bit mask: bit 0 left, bit 1 right, bit 2 middle.
   event it is about to process. Delivery is machine-wide (focus-independent) until M2.3
   routes events to windows.
 
+### Absolute pointer (M2.2.6)
+
+- **I20 (MUST):** There are two pointer sources. The PS/2 auxiliary device is the
+  relative fallback (I1–I5). A USB HID tablet, when present, is the absolute source: one
+  report carries the current position, so a dropped report is harmless and no motion is
+  accumulated across reports.
+- **I21 (MUST):** The tablet takes precedence when it is ready. While it is the source,
+  decoded PS/2 motion is ignored (the bytes are still drained so the controller cannot
+  fill), and the tablet supplies both position and buttons. If the tablet is absent or
+  its bring-up fails, the source stays PS/2; if the PS/2 device did not initialise either,
+  the source is none.
+- **I22 (MUST):** Bring-up is bounded and allocation-free. The kernel scans PCI bus 0
+  (slots 0–31, functions 0–7), finds the class `0C.03` prog-if `00` UHCI controller,
+  enables its I/O space and bus mastering, and takes BAR4 as the 32-byte I/O region. The
+  schedule is one static 4 KiB-aligned 1024-entry frame list and static queue heads;
+  control and interrupt transfers use static 16-byte TDs. Every DMA structure lives in
+  `.bss`, is physically contiguous, and is handed to the controller as
+  `virtual - KERNEL_BASE` because the kernel is linked high and aliased into the identity
+  map.
+- **I23 (MUST):** Enumeration is `GET_DESCRIPTOR(Device)` → `SET_ADDRESS(1)` →
+  `GET_DESCRIPTOR(Configuration)` → `SET_CONFIGURATION(1)` → HID `SET_IDLE(0)`, with
+  `GET_DESCRIPTOR(HID Report)` used to verify the report shape. The configuration must be
+  one HID interface (class 3, subclass 0, protocol 0 — a boot mouse/keyboard is not the
+  absolute pointer) with one interrupt-IN endpoint. Every step has a timeout; a failure is
+  a boot log line and the PS/2 fallback, never a hang.
+- **I24 (MUST):** The accepted HID report is the QEMU tablet shape measured on 2026-11-16:
+  one buttons byte (bit 0 left, bit 1 right, bit 2 middle), X and Y as absolute 16-bit
+  little-endian values with logical range `0..=32767`, and a wheel byte. A descriptor that
+  does not declare that absolute 16-bit X/Y input is refused; the driver never guesses an
+  absolute mapping.
+- **I25 (MUST):** Axis scaling maps HID `0..=32767` to screen `0..=w-1` / `0..=h-1` with
+  round-to-nearest: `(2 * v * (w - 1) + 32767) / 65534`. So `0 → 0`,
+  `16384 → (w-1)/2` (512 at 1024, 384 at 768), and `32767 → w-1` / `h-1` (1023 / 767).
+  Y has the same top-left origin as the screen (no inversion, unlike the PS/2 relative
+  packet). The button byte is masked to `0b111`.
+- **I26 (MUST):** The interrupt-IN endpoint is **polled**, not interrupt-driven, from the
+  same service opportunity and idle loop as the PS/2 device. One TD is kept armed; a NAK
+  leaves it active. On completion the report is parsed, the pointer is set with
+  `gfx.set_pointer_absolute`, and the TD is rearmed with the next data toggle. A transfer
+  error disables the tablet and falls back to PS/2.
+- **I27 (MUST):** `syslib.pointer_source() -> uint` reports the current source: `0` none,
+  `1` PS/2, `2` tablet. It is a machine-wide read-only view. The debug-only
+  `inject_pointer` still moves the pointer regardless of source.
+- **I28 (MUST):** The boot log names the USB path: one `pci:` line per function found, the
+  UHCI I/O base with `USBSTS` and both `PORTSC`s, the device VID:PID and report descriptor
+  length, and either `usb: tablet ...` or `usb: no tablet (...); PS/2 only`. A machine
+  without a UHCI controller logs `usb: no UHCI; PS/2 only`.
+
 ## Design
 
 ### Data flow
@@ -158,13 +219,20 @@ i8042 ── status 0x64 / data 0x60 ──▶ keyboard (byte stream, console)
         └─ aux byte ──▶ mouse::Decoder (3-byte assembly)
                               │ Packet { dx, dy, buttons }
                               ▼
+PCI 0C.03 ──▶ UHCI ──▶ tablet HID report { buttons, x, y }
+                              │ absolute 0..=32767, scaled
+                              ▼
                         gfx pointer state ──▶ present() composites the cursor
                               ▲                        │
                               └── inject_pointer ──────┘   (debug hook)
 
-application ── syslib.pointer_x/y/buttons ──▶ pointer state (read only)
-application ── syslib.get_pixel ────────────▶ shadow (never the cursor)
+application ── syslib.pointer_x/y/buttons/source ──▶ pointer state (read only)
+application ── syslib.get_pixel ─────────────────────▶ shadow (never the cursor)
 ```
+
+The PS/2 path is the fallback; while the tablet is ready its reports are ignored (I21).
+Both paths are polled in the same service opportunity, so a report is applied at most a
+few milliseconds after it arrives.
 
 ### Controller initialisation
 
@@ -239,6 +307,50 @@ packet. It is the only deterministic input path in this slice and it is what the
 uses; it will be joined by `inject_event` in M2.2.4. The primitive is documented as
 debug-only in spec 0003 and in the boot log's `mouse:` line.
 
+### Absolute pointer bring-up (M2.2.6)
+
+The USB path is deliberately small: one full-speed HID tablet on the PIIX3 UHCI
+controller, polled with one interrupt TD, no interrupts and no allocation. `kernel/src/pci.rs`
+finds the controller and `kernel/src/usb.rs` owns the UHCI schedule. Both are x86-specific
+for now and move behind `arch`/`platform` when a second machine exists (ADR 0022).
+
+| Step | What | Bound |
+|------|------|-------|
+| PCI | scan bus 0, slots 0–31, functions 0–7; class `0C.03`, prog-if `00`; enable I/O + bus master; BAR4 | 256 functions |
+| UHCI | `USBCMD.HCRESET`, wait for self-clear; `USBSTS` clear; `FLBASEADD` = frame list; `FRNUM` 0; `USBCMD` run + configured + max packet 64 | 20 ms each |
+| Port | find `CCS` on port 1 or 2; drive `PR` 50 ms; clear; set `EN`; acknowledge change bits with `EN` set | 70 ms + read-back |
+| Enumeration | `GET_DESCRIPTOR(Device)` (18) → `SET_ADDRESS(1)` → `GET_DESCRIPTOR(Configuration)` (128) → `SET_CONFIGURATION(1)` → HID `SET_IDLE(0)` → `GET_DESCRIPTOR(HID Report)` (64) | 200 ms per transfer |
+| Interrupt | one TD, self-linked with depth-first; `Active` remains set across NAKs; rearm after completion | polled |
+
+The configuration is checked before the report descriptor is trusted: interface class 3,
+subclass 0, protocol 0, one interrupt-IN endpoint. That excludes a boot mouse (1/2) and a
+boot keyboard (1/1). No `SET_PROTOCOL` is sent: the tablet is a non-boot HID interface and
+QEMU stalls that request for it; `SET_IDLE(0)` is enough to keep reports flowing. The HID
+report descriptor must contain the absolute X/Y shape:
+`Usage X`/`Usage Y`, logical maximum `0x7fff`, report size 16, report count 2, and an
+`Input (Data,Var,Abs)` item, plus a one-byte five-button field. Anything else is
+`usb: no tablet (not an absolute tablet); PS/2 only`.
+
+The report layout measured through QMP `input-send-event` absolute injection:
+
+| Offset | Field | Notes |
+|--------|-------|-------|
+| 0 | buttons | bit 0 left, bit 1 right, bit 2 middle; bits 3–4 (side/extra) are masked off |
+| 1–2 | X | little-endian `u16`, `0..=32767`, 0 at the left edge |
+| 3–4 | Y | little-endian `u16`, `0..=32767`, 0 at the top edge (no inversion) |
+| 5 | wheel | unused; the endpoint packet is 8 bytes and the report is 6 |
+
+`gfx.set_pointer_absolute(x, y, buttons)` is separate from the relative
+`update_pointer`: it writes the position, clamps to the screen, and repaints only the old
+and new cursor rectangles. An identical report changes nothing, so a dropped or repeated
+report is idempotent. `syslib.pointer_source()` is the only new language surface; the
+three read views and `inject_pointer` are unchanged.
+
+The static DMA cost is 4096 bytes for the frame list plus 240 bytes for the two queue
+heads, four TDs, the 8-byte setup packet and the 128-byte data buffer (4336 bytes of
+`.bss`). The UHCI schedule takes physical addresses, computed as `virtual - KERNEL_BASE`;
+the frame list is 4 KiB aligned by its type and every TD/QH is 16-byte aligned.
+
 ## Interfaces
 
 ### Language surface (normative)
@@ -247,12 +359,13 @@ debug-only in spec 0003 and in the boot log's `mouse:` line.
 syslib.pointer_x() -> int
 syslib.pointer_y() -> int
 syslib.pointer_buttons() -> uint      // bit 0 left, bit 1 right, bit 2 middle
+syslib.pointer_source() -> uint       // 0 none, 1 PS/2, 2 tablet
 syslib.inject_pointer(dx: int, dy: int, buttons: uint) -> Status
 ```
 
-The compiler checks arity and the staged types (`int` deltas, `uint` buttons); the
-interpreter rejects `buttons > 0b111` with `Status.Invalid` before calling the host, like
-the drawing primitives reject a non-positive extent (spec 0009, G9).
+The compiler checks arity and the staged types (`int` deltas, `uint` buttons and source);
+the interpreter rejects `buttons > 0b111` with `Status.Invalid` before calling the host,
+like the drawing primitives reject a non-positive extent (spec 0009, G9).
 
 ### Host contract
 
@@ -260,11 +373,12 @@ the drawing primitives reject a non-positive extent (spec 0009, G9).
 fn pointer_x(&mut self) -> i64 { 0 }
 fn pointer_y(&mut self) -> i64 { 0 }
 fn pointer_buttons(&mut self) -> u64 { 0 }
+fn pointer_source(&mut self) -> u64 { 0 }   // 0 none, 1 PS/2, 2 tablet
 fn inject_pointer(&mut self, _dx: i64, _dy: i64, _buttons: u32) -> Status { Status::Invalid }
 ```
 
 The defaults are a machine with no pointer device and no screen (I11). The kernel
-implements them over `kernel/src/mouse.rs` and `kernel/src/gfx.rs`.
+implements them over `kernel/src/mouse.rs`, `kernel/src/usb.rs` and `kernel/src/gfx.rs`.
 
 ### Kernel contract
 
@@ -273,7 +387,9 @@ implements them over `kernel/src/mouse.rs` and `kernel/src/gfx.rs`.
 so the real pointer is untouched), logs `mouse: PS/2 aux ready` or `mouse: no aux device`,
 and prints `mouse: decoder ok` or halts loudly with the failing step. `mouse::poll()`
 drains the aux device; `gfx::update_pointer(dx, dy, buttons)` applies one move; `gfx`
-owns the pointer state and the cursor table.
+owns the pointer state and the cursor table. `pci::init()` scans bus 0 and returns the
+UHCI controller, `usb::init()` enumerates the tablet and arms the interrupt endpoint, and
+`usb::poll()` parses a completed report and calls `gfx::set_pointer_absolute`.
 
 ## Failure modes
 
@@ -287,10 +403,21 @@ owns the pointer state and the cursor table.
 | Pointer delta runs past an edge | Clamped to the edge; no wrap, no error |
 | `inject_pointer` with `buttons > 0b111` | `Status.Invalid`, position and buttons unchanged |
 | Graphics disabled (`screen_width == 0`) | Pointer primitives report 0/no buttons, `inject_pointer` is `Invalid`; the device is still polled, but there is nothing to clamp to and no cursor |
-| Two cores poll at once | The decoder lock serialises assembly and the update; the graphics lock serialises present |
+| Two cores poll at once | The decoder lock serialises assembly and the update; the graphics lock serialises present; the USB lock serialises the endpoint state machine |
 | Cursor over text | The cell is presented with the cursor on top; moving away restores the text from the shadow |
 | Application reads `get_pixel` under the cursor | It gets the uncomposited shadow pixel (I7) |
 | Application drives the i8042 through `syslib.port_out8` | Allowed (no capability model); the kernel does not promise input still works |
+| No PCI UHCI function | `usb: no UHCI; PS/2 only`; no tablet, PS/2 pointer keeps working |
+| No device on either UHCI port | `usb: no tablet (no device); PS/2 only` |
+| Port reset/enable fails, or the device is low-speed | `usb: no tablet (port enable)` / `low-speed device`; PS/2 fallback |
+| A control transfer times out or STALLs | `usb: no tablet (transfer timeout/error); PS/2 only`; no hang |
+| Descriptor is not an absolute HID tablet | `usb: no tablet (not an absolute tablet); PS/2 only`; never guessed |
+| HID report descriptor differs from the measured shape | Refused at enumeration; PS/2 fallback |
+| Interrupt-IN NAK | The TD stays Active and is retried by the controller next frame; no bus error |
+| Interrupt-IN completion with an error | `usb: tablet report error ...; PS/2 fallback`; the source returns to PS/2 |
+| Absolute report outside `0..=32767` | Clamped before scaling; the axis stops at the edge |
+| Repeated/duplicate absolute report | Idempotent: the same position and buttons repaint nothing |
+| Tablet ready, PS/2 packet arrives | Decoded and dropped (bytes drained); the tablet is authoritative |
 
 ## Alternatives considered
 
@@ -303,6 +430,10 @@ owns the pointer state and the cursor table.
 | Per-application cursors | No per-window ownership exists until M2.3 and the visual identity is the system's |
 | Acceleration in this slice | Needs tuning constants and a clock; 1:1 is enough to prove the path |
 | Reading the mouse from the timer interrupt | Input would then need a lock usable from interrupt context; polling in the service opportunity is already where the keyboard lives |
+| A PS/2 scale factor / acceleration | Relative motion is in host pixels and its loss is burst-dependent; a scale can never reach the guest edge and needs tuning per host window (Q49, ADR 0022) |
+| virtio-input / virtio-tablet | A second virtual device class and a queue protocol, while the historical PC machine already has UHCI; the goal is a plain USB tablet QEMU exposes (ADR 0022) |
+| A user-space USB driver over streams | The pointer state is machine-wide and the kernel already polls the device; a driver application would add a byte protocol and a copy per report (ADR 0021, ADR 0022) |
+| Relative-only pointer | Measured motion loss (+346 of 600 px) and host scaling leave the pointer short of the edges (Q49) |
 
 ## Open questions
 
@@ -313,9 +444,12 @@ owns the pointer state and the cursor table.
 | 3 | Event queue capacity and drop accounting | M2.2.4 |
 | 4 | A hardware cursor / double buffering if the present cost matters | M2.6.2 measurement |
 | 5 | Whether injection survives into a "debug build" flag | if `syslib.inject_pointer` is ever considered a production surface |
+| 6 | Multi-packet control stages on real hardware | the measured QEMU tablet returns a whole descriptor in one data TD; a device whose control pipe is smaller than 64 bytes would need chained data TDs and would currently be refused |
+| 7 | USB keyboard, hubs and mass storage | not in this slice; the UHCI driver serves one interrupt-IN endpoint and IRQ12 is M2.2.7 |
 
 ## Changelog
 
 | Date | Change |
 |------|--------|
 | 2026-11-16 | Initial accepted version: PS/2 aux init and decoding, machine-wide pointer state with clamping, cursor composited at present time, the four `syslib` pointer primitives, debug injection, polling ownership, and forward references for key events (M2.2.3) and the event queue (M2.2.4). |
+| 2026-11-16 | M2.2.6 absolute pointer (ADR 0022): PCI scan + UHCI + HID `usb-tablet` enumeration (`GET_DESCRIPTOR`/`SET_ADDRESS`/`SET_CONFIGURATION`/`SET_IDLE`), the measured report layout (buttons, absolute 16-bit LE X/Y, wheel), 0..=32767 → `0..=w-1` scaling with round-to-nearest, tablet-over-PS/2 precedence, the polled interrupt-IN endpoint, `syslib.pointer_source()` (builtin 26, no new opcode), and the `usb:` boot lines. Q49's burst loss and host-scale mismatch are fixed by the absolute report; IRQ12 remains M2.2.7. |

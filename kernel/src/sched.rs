@@ -280,6 +280,12 @@ impl Host for KernelHost<'_> {
         crate::mouse::inject(dx, dy, buttons)
     }
 
+    /// Which device currently drives the pointer (spec 0010, I27). The tablet
+    /// wins over the PS/2 fallback once enumeration succeeds.
+    fn pointer_source(&mut self) -> u64 {
+        u64::from(crate::gfx::pointer_source())
+    }
+
     // Streams (spec 0006): the kernel table owns the buffer and the generation
     // check. The machine turns `WouldBlock` into a block for the blocking
     // opcodes and into a staged status for `try_*`; the host is always
@@ -682,6 +688,7 @@ fn terminate(core: usize, mut task: Task, reason: ExitReason) {
 fn service(image: &Ext2<'_>) {
     console::poll_input();
     crate::mouse::poll();
+    crate::usb::poll();
     if console::has_line() {
         task::wake_console();
     }
@@ -713,6 +720,7 @@ fn idle(core: usize) {
         // pointer moving while the system is otherwise idle (spec 0010, I14).
         console::poll_input();
         crate::mouse::poll();
+        crate::usb::poll();
 
         // Interrupts off for the check; `sti; hlt` is one atomic idle step, so
         // an IPI that arrives after the check is pending when `hlt` runs.

@@ -5,7 +5,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0001, 0002, 0003, 0004, 0006, 0011, 0012, 0013, 0014, 0015, 0016, 0018,
-  0020, 0021
+  0020, 0021, 0022
 - **Updated:** 2026-11-16
 
 ## Context
@@ -423,8 +423,9 @@ R7).
    the full-screen shadow from the frame allocator and attaches the console to it; without
    one (or with an unsupported mode) graphics are disabled and the console stays on serial
    (spec 0009, G15).
-4. Platform discovery: memory map, ACPI, APIC, timers, keyboard, and the PS/2 auxiliary
-   (mouse) device.
+4. Platform discovery: memory map, ACPI, APIC, timers, keyboard, the PS/2 auxiliary
+   (mouse) device, and the PCI bus (the UHCI controller the optional USB tablet hangs
+   on).
 5. Interpreter loop on the boot core; APs are brought up with INIT-SIPI-SIPI through a
    sub-1 MiB trampoline within the milestone (see "SMP": `MAX_CORES` 8, trampoline at
    `0x8000`, parameter page at `0x9000`, per-core TSS/IST/guarded stacks, bounded
@@ -475,9 +476,18 @@ auxiliary (mouse) device, decodes its 3-byte reports and updates one machine-wid
 state (`x`, `y`, buttons). The cursor is a 16×16 monochrome arrow composited at present
 time into the framebuffer, never stored in the shadow, so `get_pixel` keeps reading
 uncomposited pixels. Applications see only `syslib.pointer_x`/`pointer_y`/
-`pointer_buttons` and the debug-only `syslib.inject_pointer`; the console keeps its byte
-stream and `core.read_line` for the shell. Keyboard key events and the event queue are
-later M2.2 slices.
+`pointer_buttons`/`pointer_source` and the debug-only `syslib.inject_pointer`; the console
+keeps its byte stream and `core.read_line` for the shell. Keyboard key events and the event
+queue are later M2.2 slices.
+
+The primary pointer is an **absolute USB HID tablet** when one is present (spec 0010,
+ADR 0022): `kernel/src/pci.rs` scans configuration space for the PIIX3 UHCI controller
+(class `0C.03`, prog-if `00`), `kernel/src/usb.rs` enumerates the tablet and polls one
+interrupt-IN endpoint, and the `0..=32767` axes are scaled to the screen. An absolute
+report restates the position, so a dropped report is harmless and the coordinate space does
+not depend on the host window scale (Q49). The PS/2 path remains the fallback and is
+ignored for motion while the tablet is ready. Both modules are x86/machine-specific for now
+and move behind `arch`/`platform` when a second machine exists (ADR 0013, ADR 0022).
 
 ## Fatal fault path
 
@@ -582,3 +592,4 @@ task; after that, shutdown.
 | 2026-11-16 | H2 implemented for boot, AP and task stacks: a shared split-table cache and guard registry (`kernel/src/guard.rs`, `arch/x86_64/src/paging.rs`), a CR3 + wake-IPI TLB shootdown after every PTE change, AP guards installed before the SIPIs, one extra guard frame below each task stack, a boot PTE/free-frame self-check (`guards: boot 1, ap N, tables M`) and a `#PF` line naming the guard. The interpreter's `StackOverflow` check stays the legal path; a hardware guard hit halts (per-task recovery deferred, Q47). |
 | 2026-11-16 | Graphics moved to a kernel-owned shadow screen (spec 0009, ADR 0020): the multiboot2 mode lives in `kernel/src/gfx.rs`, the shadow is `pitch * height` contiguous frames allocated after the frame allocator, `present` blits clipped rows with the pitch, the console draws through the shadow, and a rectangular clip is the window-service seam. The framebuffer tag is now optional: a missing or unsupported mode disables graphics and leaves the console on serial instead of halting. |
 | 2026-11-16 | Input added as a kernel device (spec 0010, ADR 0021): the i8042 auxiliary device is initialised at boot and polled in the service opportunity next to the keyboard, one machine-wide pointer state is owned by `kernel/src/gfx.rs`, the software cursor is composited at present time (never in the shadow), and applications reach input only through `syslib.pointer_x`/`pointer_y`/`pointer_buttons` and the debug-only `inject_pointer`. |
+| 2026-11-16 | The absolute USB tablet added as the primary pointer (spec 0010, ADR 0022): `kernel/src/pci.rs` scans bus 0 for the PIIX3 UHCI controller, `kernel/src/usb.rs` enumerates a HID tablet over control transfers and polls one interrupt-IN endpoint, static DMA structures in `.bss` are addressed physically, and `syslib.pointer_source()` reports none/PS/2/tablet. The PS/2 device remains the fallback; both modules are x86/machine-specific until the `arch`/`platform` split. |

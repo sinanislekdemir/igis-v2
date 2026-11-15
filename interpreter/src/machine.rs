@@ -213,6 +213,13 @@ pub trait Host {
         Status::Invalid
     }
 
+    /// The device currently driving the pointer (`syslib.pointer_source`, spec
+    /// 0010, I27): 0 none, 1 PS/2, 2 USB tablet. The default is a machine with
+    /// no pointer device.
+    fn pointer_source(&mut self) -> u64 {
+        0
+    }
+
     /// Requests a new application instance (`core.spawn`).
     ///
     /// `path` and `args` are the bytes of the two `string` buffers. `diag` is a
@@ -1483,6 +1490,10 @@ impl Machine {
                             host.inject_pointer(dx as i64, dy as i64, buttons as u32)
                         };
                         self.push(stack, status as u64)?;
+                    }
+                    builtin::POINTER_SOURCE => {
+                        let source = host.pointer_source();
+                        self.push(stack, source)?;
                     }
                     _ => return Err(FaultCode::IllegalOperation),
                 }

@@ -5692,7 +5692,10 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             // `int` screen coordinates and a `uint` button mask. Injection is
             // the debug-only hook that moves the pointer by screen deltas; the
             // runtime `buttons > 0b111` rule belongs to the interpreter.
-            "syslib.pointer_x" | "syslib.pointer_y" | "syslib.pointer_buttons" => {
+            "syslib.pointer_x"
+            | "syslib.pointer_y"
+            | "syslib.pointer_buttons"
+            | "syslib.pointer_source" => {
                 if !args.is_empty() {
                     return Err(self.err(
                         line,
@@ -5703,7 +5706,8 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 let (id, result) = match target {
                     "syslib.pointer_x" => (builtin::POINTER_X, Kind::Int),
                     "syslib.pointer_y" => (builtin::POINTER_Y, Kind::Int),
-                    _ => (builtin::POINTER_BUTTONS, Kind::Uint),
+                    "syslib.pointer_buttons" => (builtin::POINTER_BUTTONS, Kind::Uint),
+                    _ => (builtin::POINTER_SOURCE, Kind::Uint),
                 };
                 self.one(opcodes::BUILTIN, id)?;
                 self.push();

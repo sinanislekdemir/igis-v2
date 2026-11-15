@@ -314,13 +314,15 @@ device:
 |-----------|-------------|---------|
 | `syslib.pointer_x` / `pointer_y` | `pointer_x(&mut self) -> i64`, `pointer_y(&mut self) -> i64` | `0`, `0` |
 | `syslib.pointer_buttons` | `pointer_buttons(&mut self) -> u64` | `0` |
+| `syslib.pointer_source` | `pointer_source(&mut self) -> u64` | `0` |
 | `syslib.inject_pointer` | `inject_pointer(dx, dy: i64, buttons: u32) -> Status` | `Invalid` |
 
 The pointer state itself is machine-wide and kernel-owned (`kernel/src/gfx.rs`, fed by
-`kernel/src/mouse.rs`); the host methods are read-only views plus the debug-only injection
-hook. The interpreter rejects `buttons > 0b111` with `Status.Invalid` before the host is
-called, mirroring the graphics error rules. `inject_pointer` is documented as a test hook,
-not a device abstraction (spec 0010, I12).
+`kernel/src/mouse.rs` and `kernel/src/usb.rs`); the host methods are read-only views plus
+the debug-only injection hook. `pointer_source` names the active device (0 none, 1 PS/2,
+2 tablet). The interpreter rejects `buttons > 0b111` with `Status.Invalid` before the host
+is called, mirroring the graphics error rules. `inject_pointer` is documented as a test
+hook, not a device abstraction (spec 0010, I12).
 
 ### Host implementation
 
@@ -449,3 +451,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-15 | Streams implemented: `Host::stream_send`/`Host::stream_recv` are non-blocking `Result<_, StreamError>` hooks with `Invalid` defaults. The interpreter turns `WouldBlock` into `Blocked(WaitKind::Stream(handle))` for `core.send`/`core.recv` and into staged `WouldBlock`/`Closed` results for `try_send`/`try_recv`. Endpoints are created and paired by the loader before the task is placed, so the host never sees an unopened handle. |
 | 2026-11-16 | Graphics host methods (spec 0009): `screen_width`/`screen_height` (0), `fill_rect`, `fill_dither`, `draw_rect`, `draw_text`, `present`, `clear` (`Invalid`), and `get_pixel` (0), all with disabled-screen defaults. The interpreter validates extents and colours, the host clips and rasterises; the kernel implements them over the shadow screen. |
 | 2026-11-16 | Input host methods (spec 0010): `pointer_x`/`pointer_y` (`i64`, 0), `pointer_buttons` (`u64`, 0) and the debug-only `inject_pointer(dx, dy, buttons)` (`Invalid`). The pointer is one machine-wide value owned by the kernel graphics module; the interpreter rejects `buttons > 0b111` before the host is called, and `langhost`/host mocks see the no-device defaults. |
+| 2026-11-16 | `pointer_source(&mut self) -> u64` added (spec 0010, I27), default 0: the host reports which device drives the pointer (0 none, 1 PS/2, 2 tablet). It is a read-only view over the same machine-wide state; no other host method changes, so `langhost` and mocks keep the no-device default. |

@@ -16,7 +16,7 @@ revised as understanding improves, and their history lives in git.
 | 0007 | [Scheduler](0007-scheduler.md) | Accepted | sched, arch timer/IPI, interpreter | 2026-11-13 |
 | 0008 | [Bytecode format and the compiler/runtime split](0008-bytecode.md) | Accepted | abi, compiler, interpreter, repl | 2026-11-13 |
 | 0009 | [Graphics, the shadow screen and the window service](0009-graphics-and-windows.md) | Accepted | syslib, kernel gfx/console, compiler, interpreter | 2026-11-16 |
-| 0010 | [Input, the pointer and events](0010-input-and-events.md) | Accepted | syslib, kernel mouse/gfx/console/sched, arch i8042, compiler, interpreter | 2026-11-16 |
+| 0010 | [Input, the pointer and events](0010-input-and-events.md) | Accepted | syslib, kernel mouse/usb/pci/gfx/console/sched, arch i8042/ports, compiler, interpreter | 2026-11-16 |
 
 ## Lifecycle
 

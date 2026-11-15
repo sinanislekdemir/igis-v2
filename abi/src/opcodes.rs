@@ -507,6 +507,12 @@ pub mod builtin {
     /// tests.
     pub const INJECT_POINTER: u32 = 25;
 
+    /// `syslib.pointer_source() -> uint`: which device currently drives the
+    /// pointer (spec 0010, I27): `0` none, `1` PS/2 auxiliary device, `2`
+    /// absolute USB tablet. The value is machine-wide and does not change with
+    /// graphics enablement.
+    pub const POINTER_SOURCE: u32 = 26;
+
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
         match id {
@@ -535,6 +541,7 @@ pub mod builtin {
             POINTER_Y => Some((0, 1)),
             POINTER_BUTTONS => Some((0, 1)),
             INJECT_POINTER => Some((3, 1)),
+            POINTER_SOURCE => Some((0, 1)),
             _ => None,
         }
     }

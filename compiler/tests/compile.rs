@@ -5207,12 +5207,14 @@ var
   px: int;
   py: int;
   buttons: uint;
+  source: uint;
 
 procedure main(args: const string[1024]);
 begin
   px := syslib.pointer_x();
   py := syslib.pointer_y();
   buttons := syslib.pointer_buttons();
+  source := syslib.pointer_source();
   status := syslib.inject_pointer(10, -20, uint(1));
   status := syslib.inject_pointer(0, 0, uint(7));
 end;
@@ -5239,6 +5241,7 @@ end;
             builtin::POINTER_X,
             builtin::POINTER_Y,
             builtin::POINTER_BUTTONS,
+            builtin::POINTER_SOURCE,
             builtin::INJECT_POINTER,
             builtin::INJECT_POINTER,
         ]
@@ -5295,6 +5298,18 @@ begin
 end;
 "#,
             "`syslib.pointer_x` expects 0 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var source: uint;
+procedure main(args: const string[1024]);
+begin
+  source := syslib.pointer_source(uint(1));
+end;
+"#,
+            "`syslib.pointer_source` expects 0 arguments",
         ),
     ];
     for (source, expected) in cases {

@@ -11,12 +11,14 @@ mod guard;
 mod mb2;
 mod module;
 mod mouse;
+mod pci;
 mod repl;
 mod sched;
 mod smp;
 mod stream;
 mod sync;
 mod task;
+mod usb;
 
 use arch_x86_64::{apic, gdt, idt, keyboard, serial};
 
@@ -118,6 +120,13 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
         }
         None => println!("apic: not present; no timer"),
     }
+
+    // The absolute pointer (spec 0010, M2.2.6): scan PCI for the PIIX3 UHCI
+    // controller and enumerate the USB tablet. This runs after the APIC timer
+    // so the bounded port-reset and transfer waits use the running clock, and
+    // before the scheduler so the first claim sees the final pointer source.
+    let usb_controller = pci::init();
+    usb::init(usb_controller);
 
     println!("memory map:");
     let mut available_bytes = 0u64;

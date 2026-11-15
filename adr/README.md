@@ -46,3 +46,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0019 | [Applications are always compiled from source at load; no precompiled packages, ever](0019-source-only-delivery.md) | Accepted | 2026-11-13 |
 | 0020 | [The window server is a kernel `syslib` service over one shadow screen](0020-kernel-window-service.md) | Accepted | 2026-11-16 |
 | 0021 | [Input is one machine-wide pointer and event queue owned by the kernel, with a composited cursor](0021-input-event-model.md) | Accepted | 2026-11-16 |
+| 0022 | [Use an absolute USB HID tablet for the pointer, not a scaled relative mouse](0022-absolute-pointer-usb-tablet.md) | Accepted | 2026-11-16 |

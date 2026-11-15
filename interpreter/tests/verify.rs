@@ -378,6 +378,7 @@ struct MockHost {
     pointer_x_value: i64,
     pointer_y_value: i64,
     pointer_buttons_value: u64,
+    pointer_source_value: u64,
     injections: Vec<(i64, i64, u32)>,
 }
 
@@ -550,6 +551,10 @@ impl Host for MockHost {
         } else {
             Status::Invalid
         }
+    }
+
+    fn pointer_source(&mut self) -> u64 {
+        self.pointer_source_value
     }
 }
 
@@ -3696,6 +3701,13 @@ fn pointer_builtins_read_the_pointer_and_injection_rejects_wide_masks() {
         opcodes::builtin::INJECT_POINTER,
     );
     store_at(&mut instructions, 32);
+    // The source is a read-only machine value (0 none, 1 PS/2, 2 tablet).
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::POINTER_SOURCE,
+    );
+    store_at(&mut instructions, 40);
     op(&mut instructions, opcodes::RET);
 
     let spec = FnSpec {
@@ -3703,15 +3715,16 @@ fn pointer_builtins_read_the_pointer_and_injection_rejects_wide_masks() {
         operand_off: 56,
         ..MAIN
     };
-    let code = build(&[spec], &instructions, &[], 40, 96, 0);
+    let code = build(&[spec], &instructions, &[], 48, 96, 0);
     let mut host = MockHost {
         pointer_x_value: 640,
         pointer_y_value: 480,
         pointer_buttons_value: 5,
+        pointer_source_value: 2,
         gfx_ok: true,
         ..Default::default()
     };
-    let mut state = vec![0u8; 40];
+    let mut state = vec![0u8; 48];
     let mut stack = vec![0u8; 96];
     let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 500);
     assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
@@ -3722,6 +3735,7 @@ fn pointer_builtins_read_the_pointer_and_injection_rejects_wide_masks() {
     assert_eq!(word(16), 5);
     assert_eq!(word(24), Status::Ok as u64);
     assert_eq!(word(32), Status::Invalid as u64);
+    assert_eq!(word(40), 2);
     assert_eq!(host.injections, vec![(10, -20, 5)]);
 }
 

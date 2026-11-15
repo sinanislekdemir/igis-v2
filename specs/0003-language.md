@@ -1051,12 +1051,14 @@ handle. These are the only primitives an application has for it:
 syslib.pointer_x() -> int
 syslib.pointer_y() -> int
 syslib.pointer_buttons() -> uint      // bit 0 left, bit 1 right, bit 2 middle
+syslib.pointer_source() -> uint       // 0 none, 1 PS/2, 2 USB tablet
 syslib.inject_pointer(dx: int, dy: int, buttons: uint) -> Status
 ```
 
 `pointer_x`/`pointer_y` are screen pixels, origin top-left; `pointer_buttons` is the
-current mask. `inject_pointer` is **debug-only**: it is the deterministic test hook, it
-moves the pointer by screen deltas with the same clamping as a real report (`dy`
+current mask; `pointer_source` names the device currently driving the machine-wide
+pointer (spec 0010, I27). `inject_pointer` is **debug-only**: it is the deterministic test
+hook, it moves the pointer by screen deltas with the same clamping as a real report (`dy`
 positive moves down), sets the mask, and returns `Status.Invalid` without changing
 anything when `buttons > 0b111`. It does not expose the device, and there is no way for
 an application to read raw mouse or keyboard bytes. The keyboard still reaches an
@@ -1340,3 +1342,4 @@ buffer indexing, adding no opcode.
 | 2026-11-16 | Shortest round-trip float text implemented. `core.format_f64_short_into(dst, value) -> int` writes the fewest significant digits that parse back to exactly the same bits, positionally while `-6 < e10 + 1 <= 21` and in scientific form otherwise (`1e20` positional, `1e21` scientific, `1e-6` positional, `1e-7` scientific), with no width, no `2^63` bound and no trailing `.0`; `0`/`-0`, `nan`, `inf`/`-inf` are literal, an exact decimal tie rounds away from zero, and a result wider than the destination is `-6` with the length untouched. The digit search is pure interpreter code (`format_f64_short`): the value and both round-trip interval endpoints are expanded to exact `10^9`-limb integers, the shortest bracketing `n`-digit decimals are tested with integer comparisons, and the text is published with one copy. No allocation, no host call. Q41 narrows to correctly rounded decimal-to-binary parsing and its subnormal edges; `f32` stays open (Q40). |
 | 2026-11-16 | Staged graphics surface (spec 0009): `syslib.screen_width`/`screen_height`, `fill_rect`, `fill_dither`, `draw_rect`, `draw_text`, `get_pixel`, `present` and `clear`, with `int` coordinates, `uint` colours (`0x00RRGGBB`), a `const string[0]` text argument and `Status` results. `Invalid` covers `w <= 0`, `h <= 0` and a colour above `0x00FFFFFF`; off-screen coordinates are clipped, never faulted. The primitives are host builtins, not new opcodes, and the disabled-screen shape is `0x0` / `Invalid` / `0`. |
 | 2026-11-16 | Staged input surface (spec 0010): `syslib.pointer_x() -> int`, `pointer_y() -> int`, `pointer_buttons() -> uint` and the debug-only `inject_pointer(dx: int, dy: int, buttons: uint) -> Status`. The pointer is a machine-wide value read through the host, not a device handle; `inject_pointer` moves by screen deltas with the same clamping as a real report and returns `Invalid` above `0b111` without changing anything. Raw device bytes stay out of the language: the keyboard remains the console byte stream for `core.read_line`, and key events (M2.2.3) and the event queue (M2.2.4) are future slices. |
+| 2026-11-16 | `syslib.pointer_source() -> uint` added (spec 0010, I27): 0 none, 1 PS/2, 2 absolute USB tablet. It is a read-only machine value next to the pointer, a host builtin (id 26) with no new opcode, and `inject_pointer` keeps working regardless of source. |

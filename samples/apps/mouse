@@ -24,10 +24,18 @@ var
   h: int;
   buttons: uint;
   background: uint;
+  out: string[32];
+  used: int;
 
 procedure say(line: const string[0]);
 begin
   core.write(line);
+end;
+
+procedure say_int(value: int);
+begin
+  used := core.format_int_into(out, value, uint(10), uint(0));
+  core.write(out);
 end;
 
 // One line per step; the first failure names the step and stops the checks.
@@ -62,6 +70,9 @@ procedure main(args: const string[1024]);
 begin
   ok := true;
   background := uint(0x204060);
+  say("mouse: source ");
+  say_int(int(syslib.pointer_source()));
+  say("\n");
   w := int(syslib.screen_width());
   h := int(syslib.screen_height());
   status := syslib.clear(background);

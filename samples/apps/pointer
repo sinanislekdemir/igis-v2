@@ -45,6 +45,10 @@ end;
 
 procedure main(args: const string[1024]);
 begin
+  core.write("pointer: source ");
+  say_int(int(syslib.pointer_source()));
+  core.write("\n");
+
   x := syslib.pointer_x();
   y := syslib.pointer_y();
   buttons := syslib.pointer_buttons();

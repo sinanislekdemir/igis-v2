@@ -118,6 +118,15 @@ static DECODER: SpinLock<Decoder> = SpinLock::new(Decoder::new());
 /// Logs the first real packet of the boot, once (PLAN M2.2.1).
 static FIRST_PACKET: AtomicBool = AtomicBool::new(false);
 
+/// True when the PS/2 aux device answered during [`init`]. The USB bring-up
+/// uses it to decide whether the fallback source is PS/2 or none.
+static PS2_READY: AtomicBool = AtomicBool::new(false);
+
+/// Whether the PS/2 auxiliary device initialised successfully.
+pub fn ready() -> bool {
+    PS2_READY.load(Ordering::Relaxed)
+}
+
 /// Bounded controller waits. Under TCG a retry loop of this size is a few
 /// milliseconds; an absent device is reported, not waited for.
 const SPIN_LIMIT: u32 = 200_000;
@@ -384,6 +393,8 @@ pub fn init() {
     }
 
     if device {
+        PS2_READY.store(true, Ordering::Relaxed);
+        gfx::set_pointer_source(gfx::POINTER_SOURCE_PS2);
         gfx::show_cursor();
     }
 }
@@ -411,7 +422,16 @@ pub fn poll() {
 }
 
 /// Applies one decoded report to the machine-wide pointer (spec 0010, I3/I4).
+///
+/// When the absolute USB tablet is the source, relative PS/2 motion is
+/// ignored: the tablet is authoritative for both position and buttons, and a
+/// relative packet would move the cursor away from the last absolute report
+/// (spec 0010, I21). Bytes are still drained by [`poll`], so the controller
+/// buffer never fills.
 fn apply(packet: Packet) {
+    if gfx::pointer_source() == gfx::POINTER_SOURCE_TABLET {
+        return;
+    }
     if !FIRST_PACKET.swap(true, Ordering::Relaxed) {
         println!(
             "mouse: first packet dx={} dy={} buttons={}",

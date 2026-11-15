@@ -30,7 +30,7 @@ fn main() -> ExitCode {
         "clean" => clean(),
         other => {
             eprintln!("unknown command: {other}");
-            eprintln!("usage: cargo xtask <build|image|run [--headless] [--cores N]|clean>");
+            eprintln!("usage: cargo xtask <build|image|run [--headless] [--no-tablet] [--cores N]|clean>");
             ExitCode::FAILURE
         }
     }
@@ -197,6 +197,10 @@ fn run(args: &[String]) -> ExitCode {
     }
 
     let headless = args.iter().any(|arg| arg == "--headless");
+    // The absolute-pointer proof needs the USB tablet; `--no-tablet` boots the
+    // same image with the UHCI bus but no HID device, so the PS/2 fallback can
+    // be checked (spec 0010, M2.2.6).
+    let no_tablet = args.iter().any(|arg| arg == "--no-tablet");
     // Guest cores; the kernel brings up at most `MAX_CORES`. `-smp 1` is the
     // single-core path, `-smp 2` proves absent APIC ids are tolerated.
     let mut cores = 4u32;
@@ -229,7 +233,12 @@ fn run(args: &[String]) -> ExitCode {
         .arg("-accel")
         .arg("tcg")
         .arg("-vga")
-        .arg("std");
+        .arg("std")
+        .arg("-usb");
+
+    if !no_tablet {
+        qemu.arg("-device").arg("usb-tablet");
+    }
 
     if headless {
         qemu.arg("-display").arg("none");
