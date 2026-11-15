@@ -63,6 +63,21 @@ pub enum WaitFor {
     Console,
 }
 
+/// The scheduling class of a task (spec 0007, ADR 0016).
+///
+/// Promotion is one-way: a task starts `Normal` and becomes `Realtime` at the
+/// end of the quantum in which `core.realtime_on()` succeeded. The class is
+/// part of the task value, so it travels with the task across cores; it is not
+/// an affinity (a realtime task is still migratable at release).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskClass {
+    /// Fair, preemptive quantum and the total CPU budget.
+    Normal,
+    /// Claimed first, not released at quantum expiry, exempt from the total
+    /// budget, and bound by the one-second heartbeat deadline.
+    Realtime,
+}
+
 /// One physically contiguous task region.
 #[derive(Clone, Copy)]
 pub struct Region {
@@ -120,6 +135,18 @@ pub struct Task {
     pub state: TaskState,
     /// The condition this task is blocked on, if any.
     pub waiting: Option<WaitFor>,
+    /// Scheduling class (spec 0007, ADR 0016). Set once, at the end of the
+    /// quantum in which `core.realtime_on()` returned `Ok`.
+    pub class: TaskClass,
+    /// This task holds one of the global realtime admission slots. Released
+    /// exactly once, by [`crate::sched`] in `terminate`, never on block or
+    /// release, so a blocked realtime task keeps its slot.
+    pub admitted: bool,
+    /// Accumulated non-blocked time at which the next heartbeat is due
+    /// (`budget_ns + HEARTBEAT_NS` at promotion and after every heartbeat).
+    pub heartbeat_deadline_ns: u64,
+    /// Heartbeats observed so far, printed at termination.
+    pub heartbeats: u64,
     /// `core.kill` arrived; terminate at the next quantum boundary.
     pub kill_requested: bool,
     /// Claims so far, printed at termination.
@@ -168,6 +195,10 @@ impl Task {
             slot: usize::MAX,
             state: TaskState::Runnable,
             waiting: None,
+            class: TaskClass::Normal,
+            admitted: false,
+            heartbeat_deadline_ns: 0,
+            heartbeats: 0,
             kill_requested: false,
             claims: 0,
             yields: 0,
@@ -184,6 +215,10 @@ impl Task {
 
     /// Frees every region (Sch10) and releases the slot. Called once, when the
     /// task terminates or cannot be enqueued.
+    ///
+    /// The realtime admission slot is *not* released here: termination does it
+    /// before calling this, so a task that is reclaimed without ever being
+    /// admitted (a failed spawn, a stale slot) cannot double-release.
     pub fn reclaim(self) {
         self.regions.code.free();
         self.regions.state.free();
@@ -271,13 +306,22 @@ pub fn has_runnable() -> bool {
 /// task is removed from the set before the value is returned. No lock is held
 /// after this returns. A `Blocked` task stays in its slot and is skipped
 /// (Sch9); the wake-up path marks it `Runnable` again.
+///
+/// Realtime tasks are claimed before normal ones (Sch14): one full scan for
+/// each class. The class is read from the task value, so a task that was
+/// promoted while running is already claimable as realtime after its release.
 pub fn claim() -> Option<Task> {
+    claim_class(TaskClass::Realtime).or_else(|| claim_class(TaskClass::Normal))
+}
+
+/// Claims a runnable task of one class, scanning the whole table.
+fn claim_class(class: TaskClass) -> Option<Task> {
     for slot in SLOTS.iter() {
         let mut guard = slot.lock();
-        let runnable = guard
+        let wanted = guard
             .as_ref()
-            .is_some_and(|task| task.state == TaskState::Runnable);
-        if runnable {
+            .is_some_and(|task| task.state == TaskState::Runnable && task.class == class);
+        if wanted {
             return guard.take();
         }
     }

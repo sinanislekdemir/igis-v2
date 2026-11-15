@@ -41,6 +41,8 @@ begin
         say("Overflow")
       else if code = FaultCode.CapacityExceeded then
         say("CapacityExceeded")
+      else if code = FaultCode.WatchdogTimeout then
+        say("WatchdogTimeout")
       else if code = FaultCode.IoError then
         say("IoError")
       else

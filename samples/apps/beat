@@ -1,0 +1,33 @@
+unit beat;
+
+// The realtime child (spec 0007, ADR 0016). It tries to promote itself, prints
+// the status (`Full` when the single-core parent already holds the only slot),
+// runs a few heartbeat cycles and exits `Ok`.
+
+uses core;
+
+var
+  st: Status;
+  i: int;
+
+procedure say(text: const string[0]);
+begin
+  core.write(text);
+end;
+
+procedure main(args: const string[1024]);
+begin
+  st := core.realtime_on();
+  if st = Ok then
+    say("beat: promoted\n")
+  else
+    say("beat: realtime full\n");
+
+  i := 0;
+  while i < 50 do
+  begin
+    core.heartbeat();
+    i := i + 1;
+  end;
+  say("beat: bye\n");
+end;

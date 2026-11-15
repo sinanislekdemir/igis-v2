@@ -205,8 +205,9 @@ core.heartbeat()     // at least once per second of non-blocked time
   set cannot appear when it wakes. "Online" means online at admission time: an earlier
   `Status.Full` is not re-evaluated when an AP arrives later, and the caller retries. The
   online count never decreases in the first milestone.
-- **Priority.** The runnable set has a realtime queue and a normal queue; a core claims
-  from the realtime queue first.
+- **Priority.** The runnable set is scanned for the realtime class first, then for normal
+  tasks, so a core claims a runnable realtime task before any normal one. The class is
+  part of the task value, so no separate queue is needed.
 - **No quantum preemption.** A claimed realtime task is not released at quantum expiry.
   It releases on yield, block or termination, and then any core may claim it again. It is
   not pinned; it simply holds the core it was claimed on until it lets go.
@@ -226,6 +227,24 @@ core.heartbeat()     // at least once per second of non-blocked time
 
 This is soft realtime: no slices in the middle of a protocol, but interpretation, claim
 overhead and interrupt handling still add jitter.
+
+**Implemented slice.** `core.realtime_on()` (builtin 11) and `core.heartbeat()`
+(builtin 12) are in the kernel, with `Host::realtime_on`/`Host::heartbeat`
+defaults so host mocks are unaffected. Admission is one global `AtomicUsize`
+compared against `smp::online_count()` in a CAS loop, so two concurrent
+promotions cannot both take the last slot; a repeat `realtime_on` on an already
+realtime task is `Ok` and takes nothing, and `heartbeat` on a normal task is a
+no-op. `task::claim` scans the realtime class first, then the normal one. The
+kernel loop keeps the claimed value and runs further quanta on the same core
+until the task blocks, exits, is killed, or its deadline passes; the host records
+`promoted` and the heartbeat count and the loop applies them at the boundary,
+because the task value belongs to the core, not the host. The deadline is
+`budget_ns + HEARTBEAT_NS` (1 s), where `budget_ns` is the accumulated
+claim-to-release time and a block adds nothing; it is reset on promotion and
+after any quantum that contained a heartbeat. The admission slot is released
+only in `terminate`, never on block or release, and termination prints
+`, realtime, N heartbeats` in the per-task line. Starvation is unchanged and
+accepted: no core is reserved.
 
 ### Blocking and wake-up
 
@@ -440,7 +459,7 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 5 | ~~Timer source: PIT, HPET or APIC timer~~ | **Resolved** — APIC timer for ticks, calibrated against the PIT/HPET at boot; one global nanosecond counter advanced by the boot core (see Time). |
 | 6 | Whether a task can be pinned for debugging | A debug feature, not a scheduling model. |
 | 7 | ~~Whether to reserve one core for the REPL/system~~ | **Resolved** — no reservation; realtime may occupy every core (ADR 0016 addendum). |
-| 8 | Heartbeat interval (one second) and whether it is configurable per task | Detection latency versus overhead. |
+| 8 | ~~Heartbeat interval (one second) and whether it is configurable per task~~ | **Resolved** — one second of non-blocked time, a fixed compile-time constant (`HEARTBEAT_NS`); per-task configuration is out of scope for the first milestone (OPEN-QUESTIONS Q4). |
 | 9 | ~~Whether the service dispatcher runs before every claim or only when the runnable set is empty~~ | **Resolved** — before every claim, at most one request per opportunity. |
 | 10 | ~~Exit-reason ring size (64?) and whether `run` may block on a full queue~~ | **Resolved** — ring default 64; a full request queue returns `Status.Full`. |
 | 11 | ~~Whether the argument string is `core.arguments` or a `main` parameter~~ | **Resolved** — `main(args: const string[1024])`. |
@@ -461,3 +480,4 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 2026-11-13 | Console input implemented with a second blocking condition: the service opportunity polls COM1 and the PS/2 keyboard and wakes `Console` waiters when a finished line exists; staged line discipline in the kernel (spec 0005, Q44). |
 | 2026-11-14 | `core.run` implemented (spawn + wait); the exit ring also carries a 192-byte `Diagnostic` image for a failed request, so `run` reports a post-spawn compile error through `diag` while `wait` observes `Faulted(IoError)`. |
 | 2026-11-15 | Per-core schedulers: every online core runs the claim/quantum/release loop over the global set, per-core verifier scratch and loop counters, IPI wake for idle cores (`sti; hlt`, `need_resched` before the IPI), a boot-core shutdown that stops the APs and prints per-core totals, and a slot reservation plus an in-service marker so `wait` never races a spawn or a compile. |
+| 2026-11-15 | Realtime class implemented: `core.realtime_on`/`core.heartbeat` (builtins 11/12), admission by a CAS counter against the online core count, realtime-first claim, an inner per-core quantum loop that does not release a realtime task, a one-second deadline in non-blocked time (`HEARTBEAT_NS`), `Faulted(WatchdogTimeout)` at the boundary, and the admission slot released only at termination. `samples/apps/{realtime,beat,spin}` exercise promotion, `Full` on a single core, and the watchdog. |

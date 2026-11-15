@@ -361,6 +361,9 @@ struct MockHost {
     port_value: u8,
     port_reads: Vec<u16>,
     port_writes: Vec<(u16, u8)>,
+    realtime_status: u64,
+    realtime_calls: usize,
+    heartbeat_calls: usize,
 }
 
 impl Host for MockHost {
@@ -428,6 +431,15 @@ impl Host for MockHost {
     fn kill(&mut self, id: u64) -> Status {
         self.killed.push(id);
         Status::Ok
+    }
+
+    fn realtime_on(&mut self) -> u64 {
+        self.realtime_calls += 1;
+        self.realtime_status
+    }
+
+    fn heartbeat(&mut self) {
+        self.heartbeat_calls += 1;
     }
 }
 
@@ -2762,4 +2774,61 @@ fn the_verifier_rejects_bad_map_immediates() {
             error.message
         );
     }
+}
+
+// ---- realtime promotion and heartbeat -------------------------------------
+
+/// `state[0..8]` receives the `Status` pushed by `realtime_on`; `heartbeat`
+/// takes no operand and pushes none, so it is a bare statement between the two.
+fn realtime_package() -> Vec<u8> {
+    let mut instructions = Vec::new();
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::REALTIME_ON,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::HEARTBEAT,
+    );
+    op(&mut instructions, opcodes::RET);
+    let spec = FnSpec {
+        frame_size: 48,
+        ..MAIN
+    };
+    build(&[spec], &instructions, &[], 8, 64, 0)
+}
+
+#[test]
+fn realtime_on_pushes_the_host_status_and_heartbeat_is_a_no_op_result() {
+    let code = realtime_package();
+    let mut host = MockHost::default();
+    let mut state = vec![0u8; 8];
+    let mut stack = vec![0u8; 64];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(u64::from_le_bytes(state[..8].try_into().unwrap()), 0);
+    assert_eq!(host.realtime_calls, 1);
+    assert_eq!(host.heartbeat_calls, 1);
+}
+
+#[test]
+fn realtime_on_reports_full_without_changing_the_heartbeat_path() {
+    let code = realtime_package();
+    let mut host = MockHost {
+        realtime_status: Status::Full as u64,
+        ..Default::default()
+    };
+    let mut state = vec![0u8; 8];
+    let mut stack = vec![0u8; 64];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(
+        u64::from_le_bytes(state[..8].try_into().unwrap()),
+        Status::Full as u64
+    );
+    assert_eq!(host.realtime_calls, 1);
+    assert_eq!(host.heartbeat_calls, 1);
 }

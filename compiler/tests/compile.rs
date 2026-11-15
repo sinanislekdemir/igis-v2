@@ -4357,3 +4357,91 @@ end;
         "map[int, int, 4] is 8 + 8 slots of 32"
     );
 }
+
+#[test]
+fn realtime_on_and_heartbeat_emit_their_builtin_ids() {
+    use abi::opcodes::{self, builtin};
+
+    let source = br#"
+unit t;
+
+uses core;
+
+var
+  st: Status;
+  i: int;
+
+procedure main(args: const string[1024]);
+begin
+  st := core.realtime_on();
+  i := 0;
+  while i < 3 do
+  begin
+    core.heartbeat();
+    i := i + 1;
+  end;
+end;
+"#;
+    let package = compile(source, "t.ig").expect("realtime primitives are known");
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+
+    let mut seen = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        if op == opcodes::BUILTIN {
+            seen.push(u32::from_le_bytes(
+                instructions[pc + 4..pc + 8].try_into().unwrap(),
+            ));
+        }
+        pc += words * 4;
+    }
+    assert_eq!(seen, vec![builtin::REALTIME_ON, builtin::HEARTBEAT]);
+}
+
+#[test]
+fn realtime_primitives_reject_arguments() {
+    let realtime = br#"
+unit t;
+
+uses core;
+
+var
+  st: Status;
+
+procedure main(args: const string[1024]);
+begin
+  st := core.realtime_on(1);
+end;
+"#;
+    let error = compile(realtime, "t.ig").expect_err("realtime_on takes no argument");
+    assert!(
+        error
+            .message
+            .contains("`core.realtime_on` expects 0 arguments"),
+        "{}",
+        error.message
+    );
+
+    let heartbeat = br#"
+unit t;
+
+uses core;
+
+procedure main(args: const string[1024]);
+begin
+  core.heartbeat(1);
+end;
+"#;
+    let error = compile(heartbeat, "t.ig").expect_err("heartbeat takes no argument");
+    assert!(
+        error
+            .message
+            .contains("`core.heartbeat` expects 0 arguments"),
+        "{}",
+        error.message
+    );
+}

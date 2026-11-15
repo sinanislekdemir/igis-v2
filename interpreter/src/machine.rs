@@ -86,6 +86,24 @@ pub trait Host {
         0
     }
 
+    /// Promotes the calling task to the realtime class (`core.realtime_on`).
+    ///
+    /// Returns the `Status` ordinal to push: [`Status::Ok`] when the task is or
+    /// becomes realtime, and [`Status::Full`] when every online core already
+    /// holds a realtime task (spec 0007, Sch13). The default is `Ok` so a host
+    /// mock or a test needs no scheduler; the kernel's host performs the
+    /// admission against the online core count.
+    fn realtime_on(&mut self) -> u64 {
+        Status::Ok as u64
+    }
+
+    /// Records one progress heartbeat (`core.heartbeat`).
+    ///
+    /// The kernel's host notes the call and the scheduler resets the task's
+    /// one-second deadline after the quantum. A no-op for a normal task, and a
+    /// no-op by default, so host mocks are unaffected (spec 0007, ADR 0016).
+    fn heartbeat(&mut self) {}
+
     /// Requests a new application instance (`core.spawn`).
     ///
     /// `path` and `args` are the bytes of the two `string` buffers. `diag` is a
@@ -1054,6 +1072,17 @@ impl Machine {
                     builtin::CPU_ID => {
                         let id = host.cpu_id();
                         self.push(stack, id)?;
+                    }
+                    builtin::REALTIME_ON => {
+                        // No operands: the call names no path, id or buffer, so
+                        // there is nothing to resolve. The host owns admission.
+                        let status = host.realtime_on();
+                        self.push(stack, status)?;
+                    }
+                    builtin::HEARTBEAT => {
+                        // A no-result progress claim; a normal task's host call
+                        // is a no-op (spec 0007, ADR 0016).
+                        host.heartbeat();
                     }
                     _ => return Err(FaultCode::IllegalOperation),
                 }

@@ -22,6 +22,16 @@
 //!   the clock is finer than the quantum, the step cap is the watchdog of
 //!   record and the time budget is the backstop for slow builtins.
 //!
+//! # Realtime
+//!
+//! `core.realtime_on()` admits the task to the realtime class through
+//! [`admit_realtime`]: one realtime task per online core, never preempted at
+//! quantum expiry, and exempt from the total budget. The replacement watchdog
+//! is the one-second heartbeat ([`HEARTBEAT_NS`]) measured in non-blocked time;
+//! a task whose accumulated claim-to-release time passes its deadline is
+//! terminated with `Faulted(WatchdogTimeout)`. The admission slot is released
+//! only in `terminate`, so a blocked realtime task keeps it (ADR 0016).
+//!
 //! # Interrupts
 //!
 //! Interrupts stay enabled: the timer tick only advances the global clock and
@@ -31,7 +41,7 @@
 //! verifier scratch lock is dropped after parsing, and the console lock is
 //! taken and released inside the host's `console_write`.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use abi::{ExitReason, FaultCode, Status};
 use interpreter::{Diagnostic, Host, Outcome, Program, WaitKind, WaitOutcome};
@@ -44,7 +54,7 @@ use crate::println;
 use crate::repl;
 use crate::smp;
 use crate::sync::SpinLock;
-use crate::task::{self, Task, WaitFor};
+use crate::task::{self, Task, TaskClass, WaitFor};
 
 /// Bytecodes executed per claim (spec 0007 Q1, provisional).
 ///
@@ -54,7 +64,8 @@ pub const QUANTUM_STEPS: u64 = 10_000;
 
 /// Total CPU time a task may consume before it is terminated (spec 0007 Q2,
 /// provisional). Blocked time is not counted; a task that never reaches a safe
-/// point cannot be killed (accepted cooperative liveness hole).
+/// point cannot be killed (accepted cooperative liveness hole). Not applied to
+/// the realtime class, where the heartbeat replaces it.
 pub const TOTAL_BUDGET_NS: u64 = 10_000_000_000;
 
 /// Hard ceiling on total bytecodes per task.
@@ -62,8 +73,50 @@ pub const TOTAL_BUDGET_NS: u64 = 10_000_000_000;
 /// The 1 ms clock cannot resolve sub-millisecond quanta, so most claims add
 /// 0 ns to [`TOTAL_BUDGET_NS`]. This cap is the watchdog that actually fires
 /// in the first milestone; 200 000 000 steps is the same order of magnitude as
-/// ten seconds at interpreter speed.
+/// ten seconds at interpreter speed. Not applied to the realtime class.
 pub const TOTAL_BUDGET_STEPS: u64 = 200_000_000;
+
+/// One second of non-blocked realtime time between heartbeats (spec 0007,
+/// ADR 0016). A fixed compile-time constant; OPEN-QUESTIONS Q4 closed on it.
+pub const HEARTBEAT_NS: u64 = 1_000_000_000;
+
+/// Realtime tasks admitted machine-wide (spec 0007, Sch13).
+///
+/// The cap is [`smp::online_count`] at admission time; it never decreases in
+/// this milestone. A blocked realtime task keeps its slot, so the count does
+/// not fall when a controller waits on a device.
+static REALTIME_ADMITTED: AtomicUsize = AtomicUsize::new(0);
+
+/// Reserves one realtime admission slot, or refuses with `Status::Full`.
+///
+/// The CAS loop makes concurrent promotions on different cores safe: two tasks
+/// cannot both observe room for the last slot. The online count is sampled per
+/// attempt; an earlier `Full` is not re-evaluated when an AP arrives later, so
+/// the caller retries.
+pub fn admit_realtime() -> Status {
+    let capacity = smp::online_count().max(1);
+    let mut admitted = REALTIME_ADMITTED.load(Ordering::Acquire);
+    loop {
+        if admitted >= capacity {
+            return Status::Full;
+        }
+        match REALTIME_ADMITTED.compare_exchange_weak(
+            admitted,
+            admitted + 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return Status::Ok,
+            Err(observed) => admitted = observed,
+        }
+    }
+}
+
+/// Releases an admission slot. Called exactly once, from `terminate`, for a
+/// task whose `admitted` flag is still set; never on block or release.
+fn release_realtime() {
+    REALTIME_ADMITTED.fetch_sub(1, Ordering::AcqRel);
+}
 
 /// Verifier scratch: one bit per 4-byte instruction word. Shared by the loader
 /// (initial validation) and the loop (re-parse per quantum). One buffer per
@@ -87,6 +140,17 @@ static EXITS: [AtomicU64; smp::MAX_CORES] = [const { AtomicU64::new(0) }; smp::M
 struct KernelHost<'a> {
     image: &'a Ext2<'a>,
     current: u64,
+    /// The task's class at quantum start. A `realtime_on` on an already
+    /// realtime task is a no-op that consumes no second admission slot.
+    class: TaskClass,
+    /// `realtime_on` succeeded during this quantum. The task value is owned by
+    /// the core, not the host, so the loop applies the promotion afterwards.
+    promoted: bool,
+    /// Heartbeats observed in this quantum. The loop resets the deadline from
+    /// the accumulated non-blocked time after adding this quantum's elapsed
+    /// time; a heartbeat in the middle of a quantum is therefore honoured at
+    /// the next boundary.
+    heartbeats: u64,
     /// The diagnostic image carried by the exit record `wait` most recently
     /// served, and its id. `core.run` calls `diagnostic_for` right after that
     /// wait in the same builtin step, so a per-quantum cache is enough; the
@@ -132,6 +196,28 @@ impl Host for KernelHost<'_> {
     // distribution, not an affinity (ADR 0011).
     fn cpu_id(&mut self) -> u64 {
         u64::from(crate::smp::apic_id())
+    }
+
+    // Realtime promotion and heartbeat (spec 0007, ADR 0016). Admission is a
+    // machine-wide budget of one realtime task per online core; the task value
+    // stays with the core, so the host only records what the loop must apply.
+    fn realtime_on(&mut self) -> u64 {
+        if self.class == TaskClass::Realtime || self.promoted {
+            // One-way promotion: a repeat call is `Ok` and takes no slot.
+            return Status::Ok as u64;
+        }
+        let status = admit_realtime();
+        if status == Status::Ok {
+            self.promoted = true;
+        }
+        status as u64
+    }
+
+    fn heartbeat(&mut self) {
+        // A normal task's heartbeat is a no-op (its total budget still applies).
+        if self.class == TaskClass::Realtime || self.promoted {
+            self.heartbeats += 1;
+        }
     }
 
     fn spawn(&mut self, path: &[u8], args: &[u8], diag: &mut [u8]) -> Result<u64, Status> {
@@ -270,56 +356,112 @@ fn loop_body(core: usize, image: &Ext2<'_>) -> ! {
         // The atomic take under the slot lock is the claim (Sch2, Sch3).
         match task::claim() {
             Some(mut task) => {
-                let started = clock::now_ns();
-                let outcome = run_quantum(core, &mut task, image);
-                let elapsed = clock::now_ns().saturating_sub(started);
+                // A realtime task is not released at quantum expiry: this inner
+                // loop runs further quanta on the same core until it blocks,
+                // exits, observes a kill, or misses its heartbeat deadline. A
+                // normal task always leaves after one quantum.
+                loop {
+                    let started = clock::now_ns();
+                    let quantum = run_quantum(core, &mut task, image);
+                    let elapsed = clock::now_ns().saturating_sub(started);
 
-                task.budget_ns = task.budget_ns.saturating_add(elapsed);
-                task.claims += 1;
-                CLAIMS[core].fetch_add(1, Ordering::Relaxed);
+                    task.budget_ns = task.budget_ns.saturating_add(elapsed);
+                    task.claims += 1;
+                    CLAIMS[core].fetch_add(1, Ordering::Relaxed);
 
-                // A kill may have been requested while this core owned the
-                // task value (in the slot) or, for a running task, by another
-                // core through `KILL_FLAGS`. Both are honoured at this safe
-                // point (spec 0007, "Termination").
-                let killed = task.kill_requested || task::take_kill(task.slot);
-
-                match outcome {
-                    Outcome::Exited(reason) => terminate(core, task, reason),
-                    _ if killed => terminate(core, task, ExitReason::Killed),
-                    Outcome::Blocked(kind) => {
-                        // The blocked task keeps its slot but stops being
-                        // claimable. A child termination wakes `ChildExit`; a
-                        // finished console line wakes `Console` (Sch9).
-                        match kind {
-                            WaitKind::ChildExit(child) => {
-                                println!("sched: task {} blocked on task {}", task.id, child);
-                                task::block(task, WaitFor::Child(child));
-                                // The child may have recorded its exit between
-                                // the failed `wait` and the block above; the
-                                // wake-up path then found nothing to wake.
-                                if repl::has_exit(child) {
-                                    task::wake(child);
-                                }
-                            }
-                            WaitKind::Console => {
-                                println!("sched: task {} blocked on console", task.id);
-                                task::block(task, WaitFor::Console);
-                            }
+                    // Apply what the host observed. Promotion is one-way and
+                    // takes effect at this boundary, when the core still owns
+                    // the task value. The deadline is measured in the
+                    // accumulated claim-to-release time, which never includes
+                    // blocked time.
+                    if quantum.promoted {
+                        task.class = TaskClass::Realtime;
+                        task.admitted = true;
+                        task.heartbeat_deadline_ns = task.budget_ns.saturating_add(HEARTBEAT_NS);
+                    }
+                    if task.class == TaskClass::Realtime {
+                        task.heartbeats += quantum.heartbeats;
+                        if quantum.heartbeats > 0 {
+                            task.heartbeat_deadline_ns =
+                                task.budget_ns.saturating_add(HEARTBEAT_NS);
                         }
                     }
-                    Outcome::Yielded => {
-                        let expired = task.budget_ns >= TOTAL_BUDGET_NS
-                            || task.machine.steps() >= TOTAL_BUDGET_STEPS;
-                        if expired {
-                            // Sch8: unconditional, no `fault` handler in ABI v1.
-                            terminate(core, task, ExitReason::Faulted(FaultCode::BudgetExceeded));
-                        } else {
+
+                    // A kill may have been requested while this core owned the
+                    // task value (in the slot) or, for a running task, by
+                    // another core through `KILL_FLAGS`. Both are honoured at
+                    // this safe point (spec 0007, "Termination").
+                    let killed = task.kill_requested || task::take_kill(task.slot);
+
+                    match quantum.outcome {
+                        Outcome::Exited(reason) => {
+                            terminate(core, task, reason);
+                            break;
+                        }
+                        _ if killed => {
+                            terminate(core, task, ExitReason::Killed);
+                            break;
+                        }
+                        Outcome::Blocked(kind) => {
+                            // The blocked task keeps its slot but stops being
+                            // claimable; a realtime task also keeps its
+                            // admission slot while blocked. A child termination
+                            // wakes `ChildExit`; a finished console line wakes
+                            // `Console` (Sch9).
+                            match kind {
+                                WaitKind::ChildExit(child) => {
+                                    println!("sched: task {} blocked on task {}", task.id, child);
+                                    task::block(task, WaitFor::Child(child));
+                                    // The child may have recorded its exit
+                                    // between the failed `wait` and the block
+                                    // above; the wake-up path then found nothing
+                                    // to wake.
+                                    if repl::has_exit(child) {
+                                        task::wake(child);
+                                    }
+                                }
+                                WaitKind::Console => {
+                                    println!("sched: task {} blocked on console", task.id);
+                                    task::block(task, WaitFor::Console);
+                                }
+                            }
+                            break;
+                        }
+                        Outcome::Yielded if task.class == TaskClass::Realtime => {
+                            // No quantum preemption (Sch14): the quantum still
+                            // expires so the core can observe the kill flag and
+                            // the heartbeat deadline, but the task is not
+                            // released. The total CPU budget does not apply.
+                            if task.budget_ns >= task.heartbeat_deadline_ns {
+                                terminate(
+                                    core,
+                                    task,
+                                    ExitReason::Faulted(FaultCode::WatchdogTimeout),
+                                );
+                                break;
+                            }
                             task.yields += 1;
                             YIELDS[core].fetch_add(1, Ordering::Relaxed);
-                            // Release re-enqueues; the release path kicks one
-                            // idle core so the task can migrate immediately.
-                            task::release(task);
+                        }
+                        Outcome::Yielded => {
+                            let expired = task.budget_ns >= TOTAL_BUDGET_NS
+                                || task.machine.steps() >= TOTAL_BUDGET_STEPS;
+                            if expired {
+                                // Sch8: unconditional, no `fault` handler in ABI v1.
+                                terminate(
+                                    core,
+                                    task,
+                                    ExitReason::Faulted(FaultCode::BudgetExceeded),
+                                );
+                            } else {
+                                task.yields += 1;
+                                YIELDS[core].fetch_add(1, Ordering::Relaxed);
+                                // Release re-enqueues; the release path kicks
+                                // one idle core so the task can migrate
+                                // immediately.
+                                task::release(task);
+                            }
+                            break;
                         }
                     }
                 }
@@ -329,15 +471,26 @@ fn loop_body(core: usize, image: &Ext2<'_>) -> ! {
     }
 }
 
+/// What the host observed during one quantum. The task value belongs to the
+/// core, so the host cannot change the class or the deadline itself; it records
+/// the promotion and the heartbeat count here and the loop applies them at the
+/// quantum boundary, when the core still owns the value.
+struct Quantum {
+    outcome: Outcome,
+    promoted: bool,
+    heartbeats: u64,
+}
+
 /// Advances a claimed task by one quantum.
 ///
 /// The package is re-parsed from the placed code region on every claim: the
 /// bytes the task executes are the bytes the verifier checked, and nothing
 /// self-referential has to live inside the [`Task`]. Parsing is host-side work
 /// and is not charged to the quantum.
-fn run_quantum(core: usize, task: &mut Task, image: &Ext2<'_>) -> Outcome {
+fn run_quantum(core: usize, task: &mut Task, image: &Ext2<'_>) -> Quantum {
     let Task {
         id,
+        class,
         regions,
         machine,
         args,
@@ -349,25 +502,37 @@ fn run_quantum(core: usize, task: &mut Task, image: &Ext2<'_>) -> Outcome {
         Err(_) => {
             // The loader already validated this package; reaching here means
             // the code region changed under the task. Terminate, do not retry.
-            return Outcome::Exited(ExitReason::Faulted(FaultCode::IllegalOperation));
+            return Quantum {
+                outcome: Outcome::Exited(ExitReason::Faulted(FaultCode::IllegalOperation)),
+                promoted: false,
+                heartbeats: 0,
+            };
         }
     };
 
     let mut host = KernelHost {
         image,
         current: *id,
+        class: *class,
+        promoted: false,
+        heartbeats: 0,
         exit_diag: [0u8; repl::DIAG_BYTES],
         exit_diag_id: 0,
         exit_diag_ready: false,
     };
-    machine.run(
+    let outcome = machine.run(
         &program,
         &mut host,
         regions.state.as_slice_mut(),
         regions.stack.as_slice_mut(),
         &args[..],
         QUANTUM_STEPS,
-    )
+    );
+    Quantum {
+        outcome,
+        promoted: host.promoted,
+        heartbeats: host.heartbeats,
+    }
 }
 
 /// Reports, records and reclaims a terminated task.
@@ -376,19 +541,40 @@ fn run_quantum(core: usize, task: &mut Task, image: &Ext2<'_>) -> Outcome {
 /// is woken, in that order: the woken parent's retried `core.wait` must find
 /// the record. The regions are reclaimed here (Sch10); the id and reason
 /// survive in the ring until consumed or evicted.
-fn terminate(core: usize, task: Task, reason: ExitReason) {
+///
+/// A realtime task releases its admission slot exactly once here, before its
+/// regions are reclaimed. A block or a release never reaches this function, so
+/// a blocked controller keeps its slot (spec 0007, Sch13).
+fn terminate(core: usize, mut task: Task, reason: ExitReason) {
     let id = task.id;
     let claims = task.claims;
     let yields = task.yields;
+    let heartbeats = task.heartbeats;
+    let realtime = task.class == TaskClass::Realtime;
     EXITS[core].fetch_add(1, Ordering::Relaxed);
 
+    if task.admitted {
+        task.admitted = false;
+        release_realtime();
+    }
+
     match reason {
+        ExitReason::Ok if realtime => println!(
+            "task {id}: exit Ok after {claims} claims ({yields} yields, realtime, {heartbeats} heartbeats)"
+        ),
         ExitReason::Ok => {
             println!("task {id}: exit Ok after {claims} claims ({yields} yields)")
         }
+        ExitReason::Killed if realtime => println!(
+            "task {id}: exit Killed after {claims} claims ({yields} yields, realtime, {heartbeats} heartbeats)"
+        ),
         ExitReason::Killed => {
             println!("task {id}: exit Killed after {claims} claims ({yields} yields)")
         }
+        ExitReason::Faulted(code) if realtime => println!(
+            "task {id}: exit Faulted({}) after {claims} claims ({yields} yields, realtime, {heartbeats} heartbeats)",
+            code.name()
+        ),
         ExitReason::Faulted(code) => println!(
             "task {id}: exit Faulted({}) after {claims} claims ({yields} yields)",
             code.name()

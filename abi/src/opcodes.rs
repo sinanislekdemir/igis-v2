@@ -376,6 +376,17 @@ pub mod builtin {
     /// `uint`. This is the identity exposed to software (`0002` "SMP"), not a
     /// task affinity: a task may be claimed by a different core next quantum.
     pub const CPU_ID: u32 = 10;
+    /// `core.realtime_on()`: promote the calling task to the realtime class
+    /// (spec 0007, ADR 0016). Pushes `Status`: `Ok` when the task is promoted,
+    /// or when it is already realtime (no second admission slot), and `Full`
+    /// when every online core already holds one realtime task. Promotion is
+    /// one-way; there is no `realtime_off`.
+    pub const REALTIME_ON: u32 = 11;
+    /// `core.heartbeat()`: reset the calling task's one-second heartbeat
+    /// deadline measured in non-blocked time (spec 0007, ADR 0016). No
+    /// operands and no result. It is a no-op for a normal (non-realtime) task,
+    /// which keeps the normal total budget.
+    pub const HEARTBEAT: u32 = 12;
 
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
@@ -390,6 +401,8 @@ pub mod builtin {
             PORT_IN8 => Some((1, 1)),
             PORT_OUT8 => Some((2, 1)),
             CPU_ID => Some((0, 1)),
+            REALTIME_ON => Some((0, 1)),
+            HEARTBEAT => Some((0, 0)),
             _ => None,
         }
     }

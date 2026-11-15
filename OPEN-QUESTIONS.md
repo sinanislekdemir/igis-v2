@@ -18,7 +18,6 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | # | Question | Options / recommendation | Trigger |
 |---|----------|--------------------------|---------|
 | Q3 | Handler emergency budget | 1 ms or 10 000 steps for `fault`/`exit` | fault/exit implementation |
-| Q4 | Realtime heartbeat interval | 1 s default; configurable per task? | realtime implementation |
 
 ## B. Host interface and I/O
 
@@ -157,10 +156,26 @@ hook, not an affinity.
   is finer. Tune after measurement (spec 0007, "Quantum" and "Budget").
 - **Already decided, removed from the table:** Q25 (timer source, closed by Q6), Q28 and
   Q29 (ADR 0017 addendum), Q34 (children continue), Q35 (64-entry exit ring).
-- Q5, Q6, Q7, Q11–Q13, Q15–Q38 and Q42 are resolved and removed from the table; Q1 and Q2
-  are now closed provisionally, so only the handler budget and heartbeat (Q3/Q4), the
-  deferred debug/DMA/streams items, the staged port handles (Q45), the two float
-  follow-ups (Q40/Q41) and the blocked `substr_into` move (Q46) remain.
+- Q5, Q6, Q7, Q11–Q13, Q15–Q38 and Q42 are resolved and removed from the table; Q1, Q2 and
+  Q4 are now closed provisionally, so only the handler budget (Q3), the deferred
+  debug/DMA/streams items, the staged port handles (Q45), the two float follow-ups
+  (Q40/Q41) and the blocked `substr_into` move (Q46) remain.
+
+## Decided in the 2026-11-15 realtime session
+
+**Q4 — the heartbeat interval is fixed at one second.** A realtime task must call
+`core.heartbeat()` at least once per second of non-blocked time. The interval is a
+compile-time constant (`sched::HEARTBEAT_NS`, 1 000 000 000 ns); there is no per-task
+configuration in the first milestone. The deadline is measured in the accumulated
+claim-to-release time, so a blocked controller is not frozen, and a missed deadline
+terminates the task with `Faulted(WatchdogTimeout)` at the next quantum boundary. The
+admission slot stays held while a realtime task is blocked and is released only when the
+task terminates, so the class never oversubscribes the machine.
+
+**Time-sliced realtime beyond the core count is out of scope.** Admission allows at most
+one realtime task per online core, and no core is reserved for normal tasks or the REPL
+(ADR 0016 addendum). If more controllers must run than there are cores, the model needs a
+different admission rule (realtime time slicing), which is a new decision.
 
 ## Decided in the 2026-11-12 session
 

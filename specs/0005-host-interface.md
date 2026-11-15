@@ -174,6 +174,28 @@ a record and a sum value at the fixed `abi::layout` offsets.
   `diag`. `core.wait` keeps its spec signature: it observes `Faulted(IoError)`
   with no diagnostic, while `run` callers see both.
 
+#### Implemented ABI: realtime promotion and heartbeat
+
+`core.realtime_on()` (builtin 11) and `core.heartbeat()` (builtin 12) are
+implemented with the shapes above:
+
+| Primitive | Implemented signature | Result |
+|-----------|-----------------------|--------|
+| `core.realtime_on` | `() -> Status` | `Ok` when the task is or becomes realtime; `Full` when every online core already holds a realtime task. A repeat call on a realtime task is `Ok` and takes no second slot |
+| `core.heartbeat` | `()` | no result; resets the caller's one-second deadline. A no-op on a normal task |
+
+- `Host::realtime_on(&mut self) -> u64` defaults to `Status::Ok` and
+  `Host::heartbeat(&mut self)` defaults to a no-op, so host mocks and tests need
+  no scheduler. The kernel's host calls `sched::admit_realtime()` — a CAS loop
+  against `smp::online_count()` — and records the promotion and heartbeat count
+  for the loop to apply at the next quantum boundary.
+- The heartbeat deadline is one second of non-blocked time (`HEARTBEAT_NS`, a
+  compile-time constant; OPEN-QUESTIONS Q4 closed). The kernel accumulates
+  claim-to-release time in `Task::budget_ns`, and a block adds nothing. A missed
+  deadline terminates with `Faulted(WatchdogTimeout)`; the admission slot is
+  released only at termination, so a blocked controller keeps its place. See
+  `0007-scheduler.md`, "Realtime tasks".
+
 #### Staged line discipline: `core.read_line`
 
 The target rule above stands: `console_read` is a byte stream, the kernel does not echo
@@ -358,3 +380,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-14 | Record-based REPL ABI: `core.spawn(path, args, var diag: Diagnostic, var id: int)` and `core.wait(id, var reason: ExitReason)` replace the staged out-parameters. `Host::spawn` gains a record-shaped `&mut [u8]` `diag` slice (filled on a synchronous failure, cleared on success); `wait` writes `kind`/`code` through the record. A compile failure the service discovers after `spawn` returned still prints to the kernel console and records `Faulted(IoError)`; `TaskId` stays an `int` and `core.run` is not exposed (Q43 narrowed to sum types and `core.run`). |
 | 2026-11-14 | `ExitReason` is now the predeclared sum type `Ok | Killed | Faulted(code: FaultCode)`, so `core.wait` writes a tag (0/1/2) at offset 0 and the `FaultCode` ordinal at offset 8, exactly the previous 16-byte image under new names (`TAG_OFFSET`/`PAYLOAD_OFFSET`). Applications match the reason with an exhaustive `case`; `reason.kind`/`reason.code` no longer exist. `FaultCode` is a predeclared enum with qualified variant names. Q43 is now `core.run`, `TaskId` and the request-completion diagnostic path. |
 | 2026-11-14 | `core.run` implemented as spawn + wait (pending id in the `Machine`, no second spawn on a blocked retry). The request-completion path landed: the exit ring carries a 192-byte `Diagnostic` image for a load failure, `Host::diagnostic_for` (default `false`) copies it, and `run` fills its `diag` while `wait` still reports only `Faulted(IoError)`. Q43 now covers only a distinct `TaskId` type. |
+| 2026-11-15 | Realtime promotion and heartbeat implemented: `Host::realtime_on` (default `Ok`) and `Host::heartbeat` (default no-op), builtins 11 and 12, admission against the online core count, and `Faulted(WatchdogTimeout)` from a one-second non-blocked deadline. |

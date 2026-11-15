@@ -5148,6 +5148,33 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::scalar(Kind::Uint)))
             }
+            // The realtime class (spec 0007, ADR 0016). `realtime_on` is a
+            // one-way promotion that returns `Status`; `heartbeat` is a bare
+            // progress claim with no operands and no result. Neither has a
+            // host-visible parameter, so the only compile-time check is arity.
+            "core.realtime_on" => {
+                if !args.is_empty() {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.realtime_on` expects 0 arguments, got {}", args.len()),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::REALTIME_ON)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "core.heartbeat" => {
+                if !args.is_empty() {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.heartbeat` expects 0 arguments, got {}", args.len()),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::HEARTBEAT)?;
+                Ok(None)
+            }
             "syslib.port_in8" => {
                 if args.len() != 1 {
                     return Err(self.err(
