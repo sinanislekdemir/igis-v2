@@ -34,6 +34,24 @@ use abi::{refs, ExitReason, FaultCode, Status};
 
 use crate::program::Program;
 
+/// Why a stream operation did not complete (spec 0006).
+///
+/// `WouldBlock` is a request to sleep and retry; the machine turns it into
+/// [`Outcome::Blocked`] for `core.send`/`core.recv` and into the staged status
+/// code for the `try_*` variants. The other variants are terminal for this
+/// call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamError {
+    /// The queue is full (send) or empty (receive); retry later.
+    WouldBlock,
+    /// The peer endpoint is closed.
+    Closed,
+    /// The handle is stale or the caller does not own that direction.
+    Invalid,
+    /// The buffer is larger than the stream capacity (send only).
+    CapacityExceeded,
+}
+
 /// The host interface as far as this slice needs it (spec 0005).
 ///
 /// The kernel implements this over its own console, clock and REPL service;
@@ -141,6 +159,26 @@ pub trait Host {
     fn diagnostic_for(&mut self, _id: u64, _diag: &mut [u8]) -> bool {
         false
     }
+
+    /// Attempts one non-blocking stream send (`core.send`/`core.try_send`).
+    ///
+    /// The machine calls this with the endpoint handle the loader wrote into
+    /// `state` and the whole buffer image. `Ok(())` means every byte was
+    /// copied atomically; `Err(StreamError::WouldBlock)` means nothing was
+    /// copied and the caller may block and retry. The default refuses, so a
+    /// test host that does not implement streams keeps compiling.
+    fn stream_send(&mut self, _handle: u64, _bytes: &[u8]) -> Result<(), StreamError> {
+        Err(StreamError::Invalid)
+    }
+
+    /// Attempts one non-blocking stream receive (`core.recv`/`core.try_recv`).
+    ///
+    /// On success returns the copied byte count (`>= 1`). `dst` is the
+    /// destination's declared capacity; the host must not write past it, and
+    /// must not modify `dst` when it returns `WouldBlock` or `Closed`.
+    fn stream_recv(&mut self, _handle: u64, _dst: &mut [u8]) -> Result<usize, StreamError> {
+        Err(StreamError::Invalid)
+    }
 }
 
 /// What a blocked builtin is waiting for. The scheduler records the condition
@@ -151,6 +189,9 @@ pub enum WaitKind {
     ChildExit(u64),
     /// Wait for one finished console line (`core.read_line`).
     Console,
+    /// Wait for space/data/close on the stream with this endpoint handle
+    /// (`core.send`/`core.recv`).
+    Stream(u64),
 }
 
 /// Result of [`Host::wait`].
@@ -653,6 +694,94 @@ impl Machine {
                     }
                 };
                 self.push_bool(stack, equal)?;
+            }
+
+            opcodes::STREAM_SEND | opcodes::STREAM_TRY_SEND => {
+                let blocking = op == opcodes::STREAM_SEND;
+                let data_bits = self.pop(stack)?;
+                let handle = self.pop(stack)?;
+                let (region, offset) = self.resolve(data_bits, state, stack, constants, args)?;
+                let length = self.buffer_len(region, offset, state, stack, constants, args)?;
+                let end = offset.checked_add(length).ok_or(FaultCode::OutOfBounds)?;
+                if end
+                    > region_len(region, state, stack, constants, args)
+                        .ok_or(FaultCode::OutOfBounds)?
+                {
+                    return Err(FaultCode::OutOfBounds);
+                }
+                let result = match region {
+                    refs::REGION_STATE => host.stream_send(handle, &state[offset..end]),
+                    refs::REGION_STACK => host.stream_send(handle, &stack[offset..end]),
+                    refs::REGION_CODE => host.stream_send(handle, &constants[offset..end]),
+                    refs::REGION_ARGS => host.stream_send(handle, &args[offset..end]),
+                    _ => return Err(FaultCode::OutOfBounds),
+                };
+                match result {
+                    Ok(()) => self.push(stack, Status::Ok as u64)?,
+                    Err(StreamError::WouldBlock) if blocking => {
+                        // Nothing was copied. Point at the same instruction
+                        // with the operands restored, so the retry repeats the
+                        // same atomic send (spec 0006, S4).
+                        self.pc = pc;
+                        self.sp = saved_sp;
+                        return Ok(Step::Blocked(WaitKind::Stream(handle)));
+                    }
+                    Err(StreamError::WouldBlock) => self.push(stack, Status::WouldBlock as u64)?,
+                    Err(StreamError::CapacityExceeded) => {
+                        self.push(stack, Status::CapacityExceeded as u64)?
+                    }
+                    Err(StreamError::Closed) => self.push(stack, Status::Closed as u64)?,
+                    Err(StreamError::Invalid) => self.push(stack, Status::Invalid as u64)?,
+                }
+            }
+            opcodes::STREAM_RECV | opcodes::STREAM_TRY_RECV => {
+                let blocking = op == opcodes::STREAM_RECV;
+                let capacity = read_u32(code, pc + 4)? as usize;
+                let destination_bits = self.pop(stack)?;
+                let handle = self.pop(stack)?;
+                let (region, offset) =
+                    self.resolve(destination_bits, state, stack, constants, args)?;
+                if region != refs::REGION_STATE && region != refs::REGION_STACK {
+                    return Err(FaultCode::IllegalOperation);
+                }
+                if offset < 8 || capacity == 0 {
+                    return Err(FaultCode::OutOfBounds);
+                }
+                let end = offset.checked_add(capacity).ok_or(FaultCode::OutOfBounds)?;
+                if end
+                    > region_len(region, state, stack, constants, args)
+                        .ok_or(FaultCode::OutOfBounds)?
+                {
+                    return Err(FaultCode::OutOfBounds);
+                }
+                let result = match region {
+                    refs::REGION_STATE => host.stream_recv(handle, &mut state[offset..end]),
+                    refs::REGION_STACK => host.stream_recv(handle, &mut stack[offset..end]),
+                    _ => return Err(FaultCode::IllegalOperation),
+                };
+                match result {
+                    Ok(copied) => {
+                        if copied == 0 || copied > capacity {
+                            return Err(FaultCode::IllegalOperation);
+                        }
+                        match region {
+                            refs::REGION_STATE => write_u64(state, offset - 8, copied as u64)?,
+                            refs::REGION_STACK => write_u64(stack, offset - 8, copied as u64)?,
+                            _ => return Err(FaultCode::IllegalOperation),
+                        }
+                        self.push(stack, copied as u64)?;
+                    }
+                    Err(StreamError::WouldBlock) if blocking => {
+                        self.pc = pc;
+                        self.sp = saved_sp;
+                        return Ok(Step::Blocked(WaitKind::Stream(handle)));
+                    }
+                    Err(StreamError::WouldBlock) => {
+                        self.push(stack, status_code(Status::WouldBlock))?
+                    }
+                    Err(StreamError::Closed) => self.push(stack, status_code(Status::Closed))?,
+                    Err(_) => self.push(stack, status_code(Status::Invalid))?,
+                }
             }
 
             opcodes::ADD => self.signed(stack, |a, b| a.checked_add(b))?,

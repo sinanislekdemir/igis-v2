@@ -1,0 +1,48 @@
+unit pipe_in;
+
+// Consumer half of the stream sample (spec 0006). `report` is an `in_stream`
+// endpoint; the loader creates it when this task loads even though no sender
+// exists yet, so the first `core.recv` blocks instead of failing. Every chunk
+// is written as soon as it arrives, which is what lets the blocked producer
+// resume as the queue drains. The loop ends when the producer terminates and
+// the stream reports `Closed`.
+
+uses core;
+
+var
+  report: in_stream[64];
+  chunk: bytes[64];
+  digits: string[16];
+  formatted: int;
+  total: int;
+
+procedure say(text: const string[0]);
+begin
+  core.write(text);
+end;
+
+procedure show(value: int);
+begin
+  formatted := core.format_int_into(digits, value, uint(10), uint(0));
+  core.write(digits);
+end;
+
+procedure main(args: const string[1024]);
+var
+  got: int;
+begin
+  total := 0;
+  got := 1;
+  while got > 0 do
+  begin
+    got := core.recv(report, chunk);
+    if got > 0 then
+    begin
+      core.write(chunk);
+      total := total + got;
+    end;
+  end;
+  say("pipe_in: closed after ");
+  show(total);
+  say(" bytes\n");
+end;

@@ -271,7 +271,7 @@ Rules:
 - **Maps (implemented):** `map[K, V, N]` — at most `N` entries, open addressing,
   no growth. `K` is restricted to `int`, `bytes[N]` or `string[N]`. See "Maps" below
   for the layout, hashing, probing and deletion rules.
-- **Stream endpoints:** `in_stream[N]` (receive only) and `out_stream[N]` (send only),
+- **Stream endpoints (implemented):** `in_stream[N]` (receive only) and `out_stream[N]` (send only),
   N bytes of queue capacity. Distinct nominal types, so a receive endpoint cannot be sent
   to. The declaration's variable name is the stream name: at most 31 bytes matching
   `[a-z][a-z0-9_]*`, case-sensitive, and unique across the whole application. `N` is a
@@ -557,6 +557,50 @@ var
   call-scoped references. A library signature may carry a map: the structural map
   table is shared by the application and `stdlib`.
 - Iteration order is not specified, and this slice has no iteration operation.
+
+#### Streams (implemented)
+
+```text
+var
+  events_out: out_stream[4096];   // stream "events_out", send side
+  config_in:  in_stream[256];      // stream "config_in", receive side
+```
+
+- `in_stream[N]`/`out_stream[N]` are distinct nominal types; the value is one opaque
+  8-byte kernel handle. Sending on an `in_stream` (or receiving on an `out_stream`) is a
+  compile error. `N` is a compile-time constant in `1..=65536`.
+- A stream endpoint may be declared **only** as a top-level `var` of the application
+  unit. The variable name is the stream name: at most 31 bytes matching
+  `[a-z][a-z0-9_]*`, unique application-wide across both units (S11/S12). Locals,
+  record fields, sum payloads, arrays, rings, maps and `value`/`var` parameters are
+  compile errors. A `const in_stream`/`const out_stream` parameter is allowed and
+  accepts any capacity of the same direction (it borrows the caller's handle); this is
+  how future `stdlib` framing helpers will take an endpoint.
+- Stream handles occupy the first `8 * endpoint_count` bytes of `state`, in declaration
+  order; the manifest descriptors are emitted in the same order (spec 0008). The loader
+  writes handle `i` at `state[i * 8]` before the task starts.
+- Assignment, comparison, copying and any other use as a value are compile errors: an
+  endpoint is not data.
+- `core.send(ep, data) -> Status` copies a whole `string`/`bytes` buffer (literal or
+  variable) atomically into the stream. It returns `Ok`, `CapacityExceeded` when the
+  buffer is larger than the stream capacity (never blocks), `Closed` when the peer is
+  gone, or blocks while the queue has less free space than the buffer needs.
+- `core.try_send(ep, data) -> Status` is the same but returns `WouldBlock` instead of
+  blocking.
+- `core.recv(ep, dst) -> int` copies up to `dst`'s capacity bytes from the stream into a
+  writable `bytes[N]`, returns the copied count (`>= 1`), or blocks while the queue is
+  empty. `dst` must be `bytes`; a `string` destination is a compile error because a
+  partial read could split a code point. A closed, empty stream returns `-2`; a negative
+  result is a staged status code (`-1` `WouldBlock`, `-2` `Closed`, `-4` `Invalid`).
+- `core.try_recv(ep, dst) -> int` is the same but returns `-1` instead of blocking.
+- Blocking is the scheduler's ordinary block: the task stops consuming CPU and is woken
+  by a send, by a receive that frees space, or by a close. The task owns the direction
+  its type names; the kernel also checks this on every call.
+- The compiler's failure table adds: a stream type outside a top-level `var` or `const`
+  parameter, a name outside `[a-z][a-z0-9_]*`, a capacity outside `1..=65536`, a
+  same-direction or same-name duplicate, an assignment/comparison of an endpoint,
+  `send` on an `in_stream`, `recv` on an `out_stream`, and a non-`bytes` receive
+  destination.
 
 #### Predeclared records and sum type
 
@@ -1066,6 +1110,13 @@ table (spec 0003, "Maps"); the UTF-8 helpers landed as ordinary language code ov
 | Arithmetic on an enum | Compile error |
 | `EnumName(x)` with `x` outside `0..variant_count` | `fault(Overflow)`; no invalid enum value can exist |
 | Stream capacity outside `1..=65536` | Compile error |
+| Stream name outside `[a-z][a-z0-9_]*` or longer than 31 bytes | Compile error |
+| Stream type outside a top-level `var` or a `const` parameter | Compile error |
+| `send` larger than the stream capacity | `Status.CapacityExceeded`; writes nothing, never blocks |
+| `try_send` on a full stream | `Status.WouldBlock` |
+| `recv` into a `string`, or `recv` on an `out_stream` | Compile error |
+| `recv` on an empty stream | Blocks; `try_recv` returns `-1` |
+| `recv` on a closed, empty stream | `-2` (`Status.Closed`) |
 | Path longer than 256 bytes | `Status.CapacityExceeded` |
 | Recursion past the declared stack | Guard-page fault; `fault(StackOverflow)` |
 | Send on a receive endpoint | Compile error (distinct types) |
@@ -1108,6 +1159,7 @@ table (spec 0003, "Maps"); the UTF-8 helpers landed as ordinary language code ov
 | 2026-11-13 | `Diagnostic` gained a `message: string[96]` field and is caller-owned; `core.run`/`core.spawn` take a `var diag` out-parameter filled on compile errors (spec 0005, whose OQ 7 is now closed). |
 | 2026-11-13 | Stream endpoint names are application-wide unique (spec 0006, S11); `stdlib` framing defaults to a length prefix with newline-delimited helpers for text. |
 | 2026-11-13 | Floating point added to the first milestone: `f64` only, IEEE-754, per-task 512-byte FXSAVE region (ADR 0018); explicit `T(x)` casts, IEEE float semantics; every top-level declaration is public with no visibility modifiers; FNV-1a maps with linear probing; comparisons bind tighter than `and`/`or` and bitwise operations are `core` functions; `Diagnostic` only, no stack trace; stream names are `string[32]` and capacities are `1..=65536`; `run`/`spawn` paths are limited to 256 bytes. |
+| 2026-11-15 | Stream endpoints implemented: `in_stream[N]`/`out_stream[N]` top-level state variables with the name as the stream name, `const` endpoints as parameters, `core.send`/`try_send` (atomic, `CapacityExceeded`/`WouldBlock`/`Closed`) and `core.recv`/`try_recv` (bytes destination only, staged `-1`/`-2` codes). Handles occupy the `state` prefix and the manifest lists the descriptors in the same order. Dynamic loading and its load errors are spec 0006. |
 | 2026-11-13 | `ExitReason` gained `Killed`; `kill` cancels a queued request and runs `exit(Killed)` on a live task; request paths are validated as relative with no `..` and must name regular files. |
 | 2026-11-13 | Buffer indexing, comparison and length: `buf[i]` yields a `byte` (raw for `string`, T4); writes are `bytes`-only and extend the length to `index + 1`, zero-filling the gap; reads check the runtime length and writes the declared capacity; `=`/`<>` compare buffers of the same kind across capacities; `core.len(buf) -> uint`. |
 | 2026-11-14 | Staged slicing and search: `core.substr_into(dst, src, start, len) -> int` (same kind, negative → `-4`, past-end → 0, clamped copy, UTF-8 boundary check for `string`) and `core.find(buf, byte) -> int` (first index or `-1`, `0..len`, both kinds). Both are `core` opcodes until `stdlib.substr_into` exists (T4 staging). |

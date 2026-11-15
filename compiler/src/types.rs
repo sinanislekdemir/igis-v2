@@ -60,6 +60,13 @@ pub enum Kind {
     /// map table; [`Type::cap`] carries the total size in bytes, header
     /// included (spec 0003, "Maps").
     Map(u16),
+    /// A receive stream endpoint (`in_stream[N]`). The value is an opaque
+    /// 8-byte kernel handle; [`Type::cap`] carries the queue capacity in bytes
+    /// (spec 0006).
+    InStream,
+    /// A send stream endpoint (`out_stream[N]`). Distinct from
+    /// [`Kind::InStream`], so sending on a receive endpoint is a compile error.
+    OutStream,
 }
 
 impl Kind {
@@ -79,6 +86,8 @@ impl Kind {
             Kind::Array(_) => "array",
             Kind::Ring(_) => "ring",
             Kind::Map(_) => "map",
+            Kind::InStream => "in_stream",
+            Kind::OutStream => "out_stream",
         }
     }
 
@@ -110,6 +119,11 @@ impl Kind {
     /// Returns true for a fixed-capacity map type.
     pub const fn is_map(self) -> bool {
         matches!(self, Kind::Map(_))
+    }
+
+    /// Returns true for a stream endpoint type.
+    pub const fn is_stream(self) -> bool {
+        matches!(self, Kind::InStream | Kind::OutStream)
     }
 }
 
@@ -181,6 +195,15 @@ impl Type {
         }
     }
 
+    /// A stream endpoint of `kind` (`InStream` or `OutStream`) with a queue
+    /// capacity in bytes.
+    pub const fn stream(kind: Kind, capacity: u32) -> Self {
+        Type {
+            kind,
+            cap: capacity,
+        }
+    }
+
     /// True for `string`/`bytes`.
     pub const fn is_buffer(self) -> bool {
         self.kind.is_buffer()
@@ -211,6 +234,11 @@ impl Type {
         self.kind.is_map()
     }
 
+    /// True for a stream endpoint.
+    pub const fn is_stream(self) -> bool {
+        self.kind.is_stream()
+    }
+
     /// True for every aggregate value: a record, sum, array, ring or map.
     pub const fn is_aggregate(self) -> bool {
         self.kind.is_record()
@@ -220,10 +248,10 @@ impl Type {
             || self.kind.is_map()
     }
 
-    /// True for every scalar kind (not a buffer, record, sum, array, ring or
-    /// map).
+    /// True for every scalar kind (not a buffer, record, sum, array, ring,
+    /// map or stream endpoint).
     pub const fn is_scalar(self) -> bool {
-        !self.kind.is_buffer() && !self.is_aggregate()
+        !self.kind.is_buffer() && !self.is_aggregate() && !self.kind.is_stream()
     }
 
     /// Number of bytes this type occupies in `state` or in a frame, including
@@ -236,6 +264,7 @@ impl Type {
             Kind::Record(_) | Kind::Sum(_) | Kind::Array(_) | Kind::Ring(_) | Kind::Map(_) => {
                 self.cap
             }
+            // A stream endpoint is one opaque 8-byte handle.
             _ => 8,
         }
     }
@@ -256,7 +285,9 @@ impl Type {
             | Kind::Sum(_)
             | Kind::Array(_)
             | Kind::Ring(_)
-            | Kind::Map(_) => None,
+            | Kind::Map(_)
+            | Kind::InStream
+            | Kind::OutStream => None,
         }
     }
 }
@@ -273,6 +304,7 @@ impl fmt::Display for Type {
             Kind::Record(_) | Kind::Sum(_) | Kind::Array(_) | Kind::Ring(_) | Kind::Map(_) => {
                 f.write_str(self.kind.name())
             }
+            Kind::InStream | Kind::OutStream => write!(f, "{}[{}]", self.kind.name(), self.cap),
             _ => f.write_str(self.kind.name()),
         }
     }

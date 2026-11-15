@@ -56,6 +56,27 @@ pub const FRAME_HEADER: u32 = 32;
 /// has room even when a caller's operand stack is not the deepest one.
 const STACK_MARGIN: u32 = 128;
 
+/// Most stream endpoints one application may declare. It matches the kernel's
+/// static stream table (spec 0006): a package that declared more could never
+/// be loaded, so the compiler reports it instead.
+pub const MAX_STREAM_ENDPOINTS: usize = 32;
+
+/// Longest stream name, matching spec 0006 S12 and the manifest's fixed
+/// `string[32]` image.
+const MAX_STREAM_NAME: usize = 31;
+
+/// True when `name` is a valid stream name: `[a-z][a-z0-9_]*`, at most
+/// [`MAX_STREAM_NAME`] bytes.
+fn valid_stream_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= MAX_STREAM_NAME
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
+}
+
 fn arena_full(path: &str, unit: &str, line: u32, column: u32) -> Diagnostic {
     out_of_space(path, unit, line, column, Resource::Arena)
 }
@@ -300,6 +321,19 @@ struct StateVar<'a> {
     name: &'a str,
     ty: Type,
     off: u32,
+}
+
+/// One declared stream endpoint, in `state` declaration order. The manifest is
+/// emitted from this list, so the descriptor order and the handle offsets
+/// (`state[i * 8]`) always agree (spec 0006, spec 0008).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EndpointDecl<'a> {
+    pub(crate) name: &'a str,
+    /// `abi::direction::IN` or `abi::direction::OUT`.
+    pub(crate) direction: u8,
+    pub(crate) capacity: u32,
+    pub(crate) line: u32,
+    pub(crate) column: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -764,7 +798,18 @@ fn has_variant(enums: &[EnumDef<'_>], name: &str) -> bool {
 fn is_builtin_type_name(name: &str) -> bool {
     matches!(
         name,
-        "int" | "uint" | "byte" | "bool" | "f64" | "string" | "bytes" | "array" | "ring" | "map"
+        "int"
+            | "uint"
+            | "byte"
+            | "bool"
+            | "f64"
+            | "string"
+            | "bytes"
+            | "array"
+            | "ring"
+            | "map"
+            | "in_stream"
+            | "out_stream"
     )
 }
 
@@ -779,6 +824,9 @@ struct UnitTables<'a> {
     sums: &'a [SumDef<'a>],
     state_vars: &'a [StateVar<'a>],
     state_size: u32,
+    /// Stream endpoints declared by this unit, in declaration order. Only an
+    /// application may declare stream variables.
+    endpoints: &'a [EndpointDecl<'a>],
     sigs: &'a [Sig<'a>],
 }
 
@@ -813,6 +861,7 @@ fn check_uses<'a>(unit: &Unit<'a>, path: &'a str, is_application: bool) -> Resul
 fn build_tables<'a>(
     unit: &Unit<'a>,
     path: &'a str,
+    allow_streams: bool,
     bump: &Bump<'a>,
     arrays: &mut SliceVec<'a, '_, ArrayDef>,
     rings: &mut SliceVec<'a, '_, RingDef>,
@@ -1175,7 +1224,33 @@ fn build_tables<'a>(
 
     let mut state_vars =
         SliceVec::<StateVar<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
-    let mut state_size = 0u32;
+    let mut endpoints =
+        SliceVec::<EndpointDecl<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
+    // Stream handles occupy the first `8 * endpoint_count` bytes of `state`,
+    // in declaration order; every other state variable follows. The syntactic
+    // name check is enough to reserve the prefix: `resolve_type` rejects every
+    // other spelling of a stream type.
+    let stream_count = unit
+        .vars
+        .iter()
+        .filter(|decl| matches!(decl.ty.name, "in_stream" | "out_stream"))
+        .count();
+    if stream_count > MAX_STREAM_ENDPOINTS {
+        return Err(diag(
+            path,
+            name,
+            1,
+            1,
+            format_args!(
+                "an application may declare at most {MAX_STREAM_ENDPOINTS} stream endpoints, found {stream_count}"
+            ),
+        ));
+    }
+    let state_prefix = u32::try_from(stream_count)
+        .ok()
+        .and_then(|count| count.checked_mul(8))
+        .ok_or_else(|| diag(path, name, 1, 1, format_args!("state region is too large")))?;
+    let mut state_size = state_prefix;
     for decl in unit.vars {
         if find_const(consts.as_slice(), decl.name).is_some()
             || find_state(state_vars.as_slice(), decl.name).is_some()
@@ -1193,7 +1268,7 @@ fn build_tables<'a>(
                 format_args!("duplicate declaration of `{}`", decl.name),
             ));
         }
-        let ty = resolve_type(
+        let ty = resolve_type_with(
             &decl.ty,
             consts.as_slice(),
             enums.as_slice(),
@@ -1202,6 +1277,7 @@ fn build_tables<'a>(
             arrays,
             rings,
             maps,
+            allow_streams,
             path,
             name,
         )?;
@@ -1217,16 +1293,59 @@ fn build_tables<'a>(
                 ),
             ));
         }
-        let off = align8(state_size);
-        state_size = off.checked_add(ty.size()).ok_or_else(|| {
-            diag(
-                path,
-                name,
-                decl.line,
-                decl.column,
-                format_args!("state region is too large"),
-            )
-        })?;
+        let off = if ty.is_stream() {
+            if !valid_stream_name(decl.name) {
+                return Err(diag(
+                    path,
+                    name,
+                    decl.line,
+                    decl.column,
+                    format_args!(
+                        "stream name `{}` must match `[a-z][a-z0-9_]*` and be at most {MAX_STREAM_NAME} bytes",
+                        decl.name
+                    ),
+                ));
+            }
+            let off = u32::try_from(endpoints.len())
+                .ok()
+                .and_then(|index| index.checked_mul(8))
+                .ok_or_else(|| {
+                    diag(
+                        path,
+                        name,
+                        decl.line,
+                        decl.column,
+                        format_args!("state region is too large"),
+                    )
+                })?;
+            let direction = match ty.kind {
+                Kind::InStream => abi::direction::IN,
+                Kind::OutStream => abi::direction::OUT,
+                _ => unreachable!("only stream types enter this branch"),
+            };
+            endpoints
+                .push(EndpointDecl {
+                    name: decl.name,
+                    direction,
+                    capacity: ty.cap,
+                    line: decl.line,
+                    column: decl.column,
+                })
+                .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
+            off
+        } else {
+            let off = align8(state_size);
+            state_size = off.checked_add(ty.size()).ok_or_else(|| {
+                diag(
+                    path,
+                    name,
+                    decl.line,
+                    decl.column,
+                    format_args!("state region is too large"),
+                )
+            })?;
+            off
+        };
         if state_size > MAX_CAPACITY {
             return Err(diag(
                 path,
@@ -1285,7 +1404,7 @@ fn build_tables<'a>(
                     format_args!("duplicate parameter `{}`", param.name),
                 ));
             }
-            let ty = resolve_type(
+            let ty = resolve_type_with(
                 &param.ty,
                 consts.as_slice(),
                 enums.as_slice(),
@@ -1294,9 +1413,22 @@ fn build_tables<'a>(
                 arrays,
                 rings,
                 maps,
+                true,
                 path,
                 name,
             )?;
+            if ty.is_stream() && param.mode != ParamMode::Const {
+                return Err(diag(
+                    path,
+                    name,
+                    param.line,
+                    param.column,
+                    format_args!(
+                        "stream parameter `{}` must be declared `const`; a `value` copy or a `var` reference to an endpoint is not meaningful",
+                        param.name
+                    ),
+                ));
+            }
             if ty.is_buffer() {
                 if param.mode == ParamMode::Value {
                     return Err(diag(
@@ -1380,6 +1512,7 @@ fn build_tables<'a>(
         sums: sums.into_slice(),
         state_vars: state_vars.into_slice(),
         state_size,
+        endpoints: endpoints.into_slice(),
         sigs: sigs.into_slice(),
     })
 }
@@ -1571,17 +1704,23 @@ fn assemble_units<'a>(
     let app = build_tables(
         application,
         application_path,
+        is_application,
         bump,
         &mut arrays,
         &mut rings,
         &mut maps,
     )?;
+    // A library unit may not declare a stream endpoint: the endpoint name is
+    // application-wide and the handle belongs in the application's state
+    // prefix. `const in_stream`/`out_stream` parameters are allowed for
+    // framing helpers.
     let lib = match library {
         Some(unit) => {
             check_uses(unit, library_path, false)?;
             Some(build_tables(
                 unit,
                 library_path,
+                false,
                 bump,
                 &mut arrays,
                 &mut rings,
@@ -1753,6 +1892,7 @@ fn assemble_units<'a>(
         instructions.as_slice(),
         pool.data.as_slice(),
         lines.as_slice(),
+        app.endpoints,
         state_size,
         stack_size,
         entry,
@@ -1774,6 +1914,67 @@ fn resolve_type<'a>(
     path: &'a str,
     unit: &'a str,
 ) -> Result<Type, Diagnostic> {
+    resolve_type_with(
+        ty, consts, enums, records, sums, arrays, rings, maps, false, path, unit,
+    )
+}
+
+/// Resolves a type. `allow_stream` is true only for a top-level `var` of an
+/// application and for a parameter declaration; every other context rejects a
+/// stream endpoint, because the handle is meaningful only in `state`.
+#[allow(clippy::too_many_arguments)]
+fn resolve_type_with<'a>(
+    ty: &TypeRef<'a>,
+    consts: &[Const<'a>],
+    enums: &[EnumDef<'a>],
+    records: &[RecordDef<'a>],
+    sums: &[SumDef<'a>],
+    arrays: &mut SliceVec<'a, '_, ArrayDef>,
+    rings: &mut SliceVec<'a, '_, RingDef>,
+    maps: &mut SliceVec<'a, '_, MapDef>,
+    allow_stream: bool,
+    path: &'a str,
+    unit: &'a str,
+) -> Result<Type, Diagnostic> {
+    if ty.name == "in_stream" || ty.name == "out_stream" {
+        if !allow_stream {
+            return Err(diag(
+                path,
+                unit,
+                ty.line,
+                ty.column,
+                format_args!(
+                    "`{}` is a stream endpoint; it may only be declared as a top-level `var` or a `const` parameter",
+                    ty.name
+                ),
+            ));
+        }
+        let Some(expr) = ty.cap else {
+            return Err(diag(
+                path,
+                unit,
+                ty.line,
+                ty.column,
+                format_args!("`{}` needs a capacity, e.g. `{}[64]`", ty.name, ty.name),
+            ));
+        };
+        let value = eval_const(expr, consts, path, unit, 0)?;
+        if !(1..=65536).contains(&value) {
+            return Err(diag(
+                path,
+                unit,
+                expr.line,
+                expr.column,
+                format_args!("stream capacity must be between 1 and 65536 bytes, found {value}"),
+            ));
+        }
+        let kind = if ty.name == "in_stream" {
+            Kind::InStream
+        } else {
+            Kind::OutStream
+        };
+        return Ok(Type::stream(kind, value as u32));
+    }
     if ty.name == "map" {
         let Some(key_ref) = ty.elem else {
             return Err(diag(
@@ -2475,6 +2676,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 || param.ty.is_map();
             let is_ref = param.mode == ParamMode::Var
                 || param.ty.is_buffer()
+                || param.ty.is_stream()
                 || (aggregate && param.mode != ParamMode::Value);
             let mut slot_base = base;
             if aggregate && param.mode == ParamMode::Value {
@@ -3312,6 +3514,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
 
     fn resolve_target(&self, name: &str, line: u32, column: u32) -> Result<Target, Diagnostic> {
         if let Some(slot) = self.slot(name) {
+            if slot.ty.is_stream() {
+                return Err(self.err(
+                    line,
+                    column,
+                    format_args!(
+                        "stream endpoint `{name}` cannot be assigned; it is an opaque handle"
+                    ),
+                ));
+            }
             if !slot.writable {
                 return Err(self.err(
                     line,
@@ -3364,6 +3575,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             });
         }
         if let Some(var) = find_state(self.state_vars, name) {
+            if var.ty.is_stream() {
+                return Err(self.err(
+                    line,
+                    column,
+                    format_args!(
+                        "stream endpoint `{name}` cannot be assigned; it is an opaque handle"
+                    ),
+                ));
+            }
             return Ok(if var.ty.is_buffer() {
                 Target::StateBuffer {
                     off: var.off,
@@ -4364,6 +4584,14 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             self.pop(1)?;
             return Ok(Type::scalar(Kind::Byte));
         }
+        if place.ty.is_stream() {
+            return Err(self.err_at(
+                expr,
+                format_args!(
+                    "stream endpoint `{base}` cannot be used as a value; pass it to `core.send`/`core.recv`"
+                ),
+            ));
+        }
         if place.ty.is_buffer() {
             return Err(self.err_at(
                 expr,
@@ -4426,6 +4654,14 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             return Ok(Type::scalar(Kind::Int));
         }
         if let Some(slot) = self.slot(name) {
+            if slot.ty.is_stream() {
+                return Err(self.err_at(
+                    expr,
+                    format_args!(
+                        "stream endpoint `{name}` cannot be used as a value; pass it to `core.send`/`core.recv`"
+                    ),
+                ));
+            }
             if slot.ty.is_buffer() {
                 return Err(self.err_at(
                     expr,
@@ -4487,6 +4723,14 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             return Ok(slot.ty);
         }
         if let Some(var) = find_state(self.state_vars, name) {
+            if var.ty.is_stream() {
+                return Err(self.err_at(
+                    expr,
+                    format_args!(
+                        "stream endpoint `{name}` cannot be used as a value; pass it to `core.send`/`core.recv`"
+                    ),
+                ));
+            }
             if var.ty.is_buffer() {
                 return Err(self.err_at(
                     expr,
@@ -4885,9 +5129,8 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 BinOp::And | BinOp::Or => unreachable!(),
             },
             Kind::String | Kind::Bytes => unreachable!(),
-            Kind::Record(_) | Kind::Sum(_) | Kind::Array(_) | Kind::Ring(_) | Kind::Map(_) => {
-                unreachable!()
-            }
+            Kind::Record(_) | Kind::Sum(_) | Kind::Array(_) | Kind::Ring(_) | Kind::Map(_)
+            | Kind::InStream | Kind::OutStream => unreachable!(),
             Kind::Enum(_) => match op {
                 // Ordinals are non-negative, so unsigned ordering is the
                 // declaration order (spec 0003, "Enums").
@@ -5427,6 +5670,61 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::scalar(Kind::Int)))
             }
+            // Stream endpoints (spec 0006). A send copies a whole buffer
+            // atomically; a receive fills a `bytes` destination and returns
+            // the copied count. `try_*` never blocks. All four return the
+            // predeclared `Status`/`int` staged result described in spec 0006.
+            "core.send" | "core.try_send" => {
+                if args.len() != 2 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`{target}` expects 2 arguments, got {}", args.len()),
+                    ));
+                }
+                self.emit_stream_handle(args[0], Kind::OutStream, target)?;
+                // Any buffer kind is valid data; `emit_ref` also accepts a
+                // literal, which is typed by its destination here.
+                self.emit_ref(args[1], None)?;
+                let op = if target == "core.send" {
+                    opcodes::STREAM_SEND
+                } else {
+                    opcodes::STREAM_TRY_SEND
+                };
+                self.simple(op)?;
+                self.pop(2)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "core.recv" | "core.try_recv" => {
+                if args.len() != 2 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`{target}` expects 2 arguments, got {}", args.len()),
+                    ));
+                }
+                self.emit_stream_handle(args[0], Kind::InStream, target)?;
+                let destination = self.emit_var_buffer_ref(args[1])?;
+                if destination.kind != Kind::Bytes || destination.cap == 0 {
+                    let found = self.type_name(destination);
+                    return Err(self.err_at(
+                        args[1],
+                        format_args!(
+                            "`{target}` needs a writable `var bytes[N]` destination, found `{found}`; a partial read into a `string` could split a code point"
+                        ),
+                    ));
+                }
+                let op = if target == "core.recv" {
+                    opcodes::STREAM_RECV
+                } else {
+                    opcodes::STREAM_TRY_RECV
+                };
+                self.one(op, destination.cap)?;
+                self.pop(2)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Int)))
+            }
             // `Spawn`/`wait`/`kill` return the predeclared `Status` enum and
             // write their results through `var` out-parameters (spec 0003,
             // E1; spec 0005). `Status` ordinals are the `abi::Status`
@@ -5669,6 +5967,18 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         param: &Param<'a>,
         position: usize,
     ) -> Result<(), Diagnostic> {
+        if param.ty.is_stream() {
+            let found = self.emit_stream_ref(arg)?;
+            if found.kind != param.ty.kind {
+                let expected = self.type_name(param.ty);
+                let found = self.type_name(found);
+                return Err(self.err_at(
+                    arg,
+                    format_args!("argument {position} expects `{expected}`, found `{found}`"),
+                ));
+            }
+            return Ok(());
+        }
         if param.ty.is_aggregate() {
             let writable = param.mode == ParamMode::Var;
             let found = self.emit_aggregate_ref(arg, writable, "argument")?;
@@ -5814,6 +6124,65 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
     fn emit_var_buffer_ref(&mut self, expr: &'a Expr<'a>) -> Result<Type, Diagnostic> {
         let place = self.var_buffer_place(expr)?;
         self.push_buffer_data_ref(&place)?;
+        Ok(place.ty)
+    }
+
+    /// Resolves a stream endpoint designator without emitting code.
+    fn stream_place(&self, expr: &'a Expr<'a>, what: &str) -> Result<Place<'a>, Diagnostic> {
+        let Some(designator) = Self::designator(expr) else {
+            return Err(self.err_at(
+                expr,
+                format_args!("`{what}` expects a stream endpoint as its first argument"),
+            ));
+        };
+        let place = self.place(designator.base, designator.path, expr.line, expr.column)?;
+        if !place.ty.is_stream() {
+            let found = self.type_name(place.ty);
+            return Err(self.err_at(
+                expr,
+                format_args!("`{what}` expects a stream endpoint, found `{found}`"),
+            ));
+        }
+        if !place.path.is_empty() {
+            return Err(self.err_at(
+                expr,
+                format_args!("a stream endpoint has no fields or elements"),
+            ));
+        }
+        Ok(place)
+    }
+
+    /// Pushes a reference to a stream endpoint's handle. This is how a `const`
+    /// stream parameter is passed: the callee borrows the caller's handle.
+    fn emit_stream_ref(&mut self, expr: &'a Expr<'a>) -> Result<Type, Diagnostic> {
+        let place = self.stream_place(expr, "a stream argument")?;
+        self.push_value_ref(&place)?;
+        Ok(place.ty)
+    }
+
+    /// Pushes the endpoint handle value, checking that the operation uses the
+    /// endpoint in its own direction. The compiler's distinct nominal types
+    /// already guarantee this; the check keeps the diagnostic specific.
+    fn emit_stream_handle(
+        &mut self,
+        expr: &'a Expr<'a>,
+        want: Kind,
+        what: &str,
+    ) -> Result<Type, Diagnostic> {
+        let place = self.stream_place(expr, what)?;
+        if place.ty.kind != want {
+            let direction = if want == Kind::OutStream {
+                "`core.send`/`core.try_send` need an `out_stream`"
+            } else {
+                "`core.recv`/`core.try_recv` need an `in_stream`"
+            };
+            let found = self.type_name(place.ty);
+            return Err(self.err_at(expr, format_args!("{direction}, found `{found}`")));
+        }
+        self.push_value_ref(&place)?;
+        // The reference names the 8-byte handle; `load_ref` replaces it with
+        // the value the kernel wrote at load time.
+        self.simple(opcodes::LOAD_REF)?;
         Ok(place.ty)
     }
 

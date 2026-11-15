@@ -61,6 +61,9 @@ pub enum WaitFor {
     Child(u64),
     /// One finished console line (`core.read_line`).
     Console,
+    /// Space, data or `Closed` on the stream with this endpoint handle
+    /// (`core.send`/`core.recv`).
+    Stream(u64),
 }
 
 /// The scheduling class of a task (spec 0007, ADR 0016).
@@ -220,6 +223,12 @@ impl Task {
     /// before calling this, so a task that is reclaimed without ever being
     /// admitted (a failed spawn, a stale slot) cannot double-release.
     pub fn reclaim(self) {
+        // Every path that destroys a task goes through here (normal exit,
+        // kill, fault, a failed spawn and a stale-slot eviction), so this is
+        // the one place that guarantees no stream endpoint is left behind
+        // (spec 0006, S7). Close wakes blocked peers after dropping the
+        // stream lock.
+        crate::stream::close_task(self.id);
         self.regions.code.free();
         self.regions.state.free();
         self.regions.stack.free();
@@ -350,6 +359,16 @@ pub fn wake(child: u64) {
 /// Makes every task blocked on the console runnable again.
 pub fn wake_console() {
     wake_matching(|wait| wait == WaitFor::Console);
+}
+
+/// Makes every task blocked on `handle` runnable again.
+///
+/// A send wakes a blocked receiver, a receive that frees space wakes a blocked
+/// sender, and a close wakes both. The caller must have dropped the stream
+/// lock first: this takes the slot locks, and the stream path never nests the
+/// two.
+pub fn wake_stream(handle: u64) {
+    wake_matching(|wait| wait == WaitFor::Stream(handle));
 }
 
 fn wake_matching(matches: impl Fn(WaitFor) -> bool) {

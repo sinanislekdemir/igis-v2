@@ -22,17 +22,19 @@
 //! Every buffer the queue, the compiler and the verifier need is static
 //! (`.bss`); no part of this path allocates (spec 0008, B11).
 
+use core::fmt::Write as _;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use abi::layout;
 use abi::{
-    ExitReason, FaultCode, ManifestHeader, Status, ABI_VERSION, MANIFEST_HEADER_SIZE,
-    MANIFEST_MAGIC, PROFILE_X86_64_LE,
+    direction, Endpoint, ExitReason, FaultCode, ManifestHeader, Status, ABI_VERSION,
+    MANIFEST_HEADER_SIZE, MANIFEST_MAGIC, PROFILE_X86_64_LE,
 };
 
 use crate::ext2::Ext2;
 use crate::println;
 use crate::sched;
+use crate::stream;
 use crate::sync::SpinLock;
 use crate::task::{self, Task, ARGS_BYTES};
 
@@ -64,6 +66,41 @@ static COMPILER_LOCK: SpinLock<()> = SpinLock::new(());
 /// Largest `state` or `stack` region a manifest may request (matching the
 /// compiler/verifier section cap).
 const MAX_REGION_BYTES: usize = 1 << 20;
+
+/// One endpoint descriptor decoded from the manifest. The name is copied out
+/// of the manifest buffer so the loader can hold it while it places the task.
+#[derive(Clone, Copy)]
+struct ManifestEndpoint {
+    name: [u8; 32],
+    name_len: u8,
+    direction: u8,
+    capacity: u32,
+}
+
+const EMPTY_ENDPOINT: ManifestEndpoint = ManifestEndpoint {
+    name: [0; 32],
+    name_len: 0,
+    direction: direction::IN,
+    capacity: 0,
+};
+
+impl ManifestEndpoint {
+    fn name(&self) -> &[u8] {
+        &self.name[..self.name_len as usize]
+    }
+}
+
+/// True for a stream name the compiler accepts (`[a-z][a-z0-9_]*`, at most
+/// 31 bytes). The loader repeats the check so a malformed manifest cannot
+/// create a stream the language could not name.
+fn valid_stream_name(name: &[u8]) -> bool {
+    !name.is_empty()
+        && name.len() <= 31
+        && name[0].is_ascii_lowercase()
+        && name
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
+}
 
 /// One pending compile-and-run request (spec 0007, "Services and task
 /// creation"). `args` is the child's `string[1024]` image, length prefix
@@ -592,16 +629,99 @@ fn load(image: &Ext2<'_>, name: &str, id: u64, args: &[u8], diag: &mut [u8]) -> 
         return Err(());
     }
 
+    // Stream endpoints are created *before* placement (spec 0006, "Dynamic
+    // loading"): a new stream allocates its buffer now, a matching live peer
+    // is paired now, and the handles are written into the state region below.
+    // A failure closes whatever this load already created.
+    let (endpoints, endpoint_count) = match manifest_endpoints(package.manifest, &header) {
+        Ok(decoded) => decoded,
+        Err(status) => {
+            println!("repl: {name}: bad endpoint manifest ({})", status.name());
+            describe(diag, b"bad stream endpoint manifest");
+            return Err(());
+        }
+    };
+    if endpoint_count * abi::ENDPOINT_SIZE > state_size {
+        println!("repl: {name}: stream handles do not fit the state region");
+        describe(diag, b"stream handles do not fit the state region");
+        return Err(());
+    }
+    let mut handles = [0u64; stream::MAX_STREAMS];
+    for (index, endpoint) in endpoints[..endpoint_count].iter().enumerate() {
+        match stream::open(id, endpoint.name(), endpoint.direction, endpoint.capacity) {
+            Ok(handle) => handles[index] = handle,
+            Err(error) => {
+                let mut text = compiler::FixedBuf::<96>::new();
+                match error {
+                    stream::OpenError::SenderExists => {
+                        let _ = write!(
+                            text,
+                            "a sender named `{}` already exists",
+                            core::str::from_utf8(endpoint.name()).unwrap_or("?")
+                        );
+                    }
+                    stream::OpenError::ReceiverExists => {
+                        let _ = write!(
+                            text,
+                            "a receiver named `{}` already exists",
+                            core::str::from_utf8(endpoint.name()).unwrap_or("?")
+                        );
+                    }
+                    stream::OpenError::CapacityMismatch {
+                        existing,
+                        requested,
+                    } => {
+                        let _ = write!(
+                            text,
+                            "stream `{}` capacity {requested} does not match the live peer's {existing}",
+                            core::str::from_utf8(endpoint.name()).unwrap_or("?")
+                        );
+                    }
+                    stream::OpenError::Closed => {
+                        let _ = write!(
+                            text,
+                            "stream `{}` is closed",
+                            core::str::from_utf8(endpoint.name()).unwrap_or("?")
+                        );
+                    }
+                    stream::OpenError::TableFull => {
+                        let _ = write!(text, "the stream table is full");
+                    }
+                    stream::OpenError::ArenaFull => {
+                        let _ = write!(text, "the stream buffer budget is exhausted");
+                    }
+                    stream::OpenError::Invalid => {
+                        let _ = write!(text, "invalid stream endpoint");
+                    }
+                }
+                println!("repl: {name}: {}", text.as_str());
+                layout::diagnostic::write(diag, b"", text.as_str().as_bytes(), 0, 0);
+                stream::close_owner(id);
+                return Err(());
+            }
+        }
+    }
+
     let code_len = package.code.len();
     let mut task = match Task::place(code_len, state_size, stack_size, id) {
         Ok(task) => task,
         Err(status) => {
             println!("repl: {name}: cannot place regions ({})", status.name());
             describe(diag, b"cannot place application regions");
+            stream::close_owner(id);
             return Err(());
         }
     };
     task.regions.code.as_slice_mut()[..code_len].copy_from_slice(package.code);
+    // The state prefix is `8 * endpoint_count` bytes; descriptor `i` pairs with
+    // `state[i * 8]` (spec 0008).
+    {
+        let state = task.regions.state.as_slice_mut();
+        for (index, handle) in handles[..endpoint_count].iter().enumerate() {
+            state[index * abi::ENDPOINT_SIZE..(index + 1) * abi::ENDPOINT_SIZE]
+                .copy_from_slice(&handle.to_le_bytes());
+        }
+    }
     let copied = args.len().min(task.args.len());
     task.args[..copied].copy_from_slice(&args[..copied]);
 
@@ -667,10 +787,46 @@ fn manifest_header(bytes: &[u8]) -> Result<ManifestHeader, Status> {
     {
         return Err(Status::Invalid);
     }
-    // ABI v1 declares no stream endpoints; a manifest that does is from a
-    // newer compiler than this kernel.
-    if header.endpoint_count != 0 {
+    if usize::from(header.endpoint_count) > stream::MAX_STREAMS {
         return Err(Status::Invalid);
     }
     Ok(header)
+}
+
+/// Decodes the endpoint descriptors that follow the unit name (spec 0008).
+///
+/// Descriptor `i` corresponds to `state[i * 8]`; the loader relies on that
+/// order, not on any offset stored in the manifest.
+fn manifest_endpoints(
+    bytes: &[u8],
+    header: &ManifestHeader,
+) -> Result<([ManifestEndpoint; stream::MAX_STREAMS], usize), Status> {
+    let count = usize::from(header.endpoint_count);
+    if count > stream::MAX_STREAMS {
+        return Err(Status::Invalid);
+    }
+    let mut endpoints = [EMPTY_ENDPOINT; stream::MAX_STREAMS];
+    let mut offset = MANIFEST_HEADER_SIZE
+        .checked_add(usize::from(header.unit_name_len))
+        .ok_or(Status::Invalid)?;
+    for endpoint in endpoints.iter_mut().take(count) {
+        let descriptor = bytes
+            .get(offset..offset + abi::ENDPOINT_SIZE)
+            .and_then(Endpoint::from_bytes)
+            .ok_or(Status::Invalid)?;
+        offset += abi::ENDPOINT_SIZE;
+        let name_len = usize::from(descriptor.name_len);
+        let name = bytes
+            .get(offset..offset + name_len)
+            .ok_or(Status::Invalid)?;
+        offset += name_len;
+        if !valid_stream_name(name) || descriptor.capacity == 0 || descriptor.capacity > 65_536 {
+            return Err(Status::Invalid);
+        }
+        endpoint.name[..name_len].copy_from_slice(name);
+        endpoint.name_len = descriptor.name_len as u8;
+        endpoint.direction = descriptor.direction;
+        endpoint.capacity = descriptor.capacity;
+    }
+    Ok((endpoints, count))
 }

@@ -110,7 +110,9 @@ An application that says `uses stdlib;` is compiled together with the embedded l
 - **Line table.** Each entry carries a unit id: `0` application, `1` embedded `stdlib`.
   The verifier accepts unit ids `0..=1`. Compile diagnostics name the failing unit and path
   (`stdlib/stdlib.ig:line:col: ...`), so a broken library is an ordinary `Diagnostic`.
-- **Manifest.** It keeps the application's unit name and entry point.
+- **Manifest.** It keeps the application's unit name and entry point, plus the stream
+  endpoint descriptors in declaration order (name, direction, capacity). Handle `i` is
+  written at `state[i * 8]`; no offset is stored in the descriptor.
 - **Types.** Type ids are compiler-local per unit. A library signature may use scalars,
   buffers, `Status` and `FaultCode`; a record, sum or user enum crossing the unit boundary
   is a compile error until a shared type table exists.
@@ -136,7 +138,7 @@ particular core count or quantum size.
 | sum type | 8-byte tag at offset 0, then the largest variant payload at offset 8; size rounded to 8 (spec 0003) |
 | `ring[T,N]` | `N` elements at `stride = align8(size_of(T))`, then `head: u64` and `count: u64`; size `align8(N*stride + 16)` (spec 0003) |
 | `map[K,V,N]` | `count: u64` at 0, then `capacity` (next power of two ≥ 2N) slots of `state: u64`, `hash: u64`, key image and value image; FNV-1a hashing (spec 0003) |
-| endpoint | 8-byte handle, direction checked by the type checker |
+| endpoint | 8-byte opaque handle (generation + table index), direction checked by the type checker; endpoint `i` lives at `state[i * 8]` |
 | `TaskId` | 8-byte integer; zero is invalid |
 | reference | 64-bit `(region:2, offset:62)` |
 
@@ -232,6 +234,35 @@ compile-time image size, header included. The compiler interns `(key, value, cou
 in one structural map table shared by the application and `stdlib`, so a map crosses
 the unit boundary with one id.
 
+### Streams and endpoints
+
+Stream endpoints add four opcodes, `stream_send`, `stream_try_send`, `stream_recv` and
+`stream_try_recv`. The handle is an ordinary 8-byte operand loaded from `state`; the
+kernel owns the queue and the application never sees its bytes except through the copy
+the opcode performs (spec 0006, S2/S6).
+
+Operands are `[handle][data reference] -> Status` for a send and
+`[handle][destination reference] -> int` for a receive. `stream_send`/`stream_try_send`
+have no immediates. `stream_recv`/`stream_try_recv` carry one `capacity` immediate: the
+destination's declared `bytes[N]` capacity, which bounds the write and is checked against
+the region. A receive sets the destination's length word to the copied count; a failed
+receive leaves the destination untouched.
+
+A blocking opcode that cannot proceed (`WouldBlock` from the host) restores the operand
+stack and the program counter and returns `Outcome::Blocked(WaitKind::Stream(handle))`,
+so the same instruction is retried after a wake. The `try_*` variants push the staged
+status instead: `Status::WouldBlock` (ordinal `1`) for a send and `-1` for a receive. A
+closed stream pushes `Status::Closed` (send) or `-2` (receive). Sending a buffer larger
+than the capacity pushes `Status::CapacityExceeded` without blocking or copying.
+
+The manifest lists one `Endpoint` descriptor (direction, capacity, name length) plus the
+name bytes per endpoint, in declaration order. Handles occupy the first
+`8 * endpoint_count` bytes of `state`, in the same order; the loader creates or pairs the
+endpoints before the task is placed and writes handle `i` at `state[i * 8]`. There is no
+offset field in the descriptor: the state offset is derived from the index, so
+`ENDPOINT_SIZE` and `MANIFEST_HEADER_SIZE` stay unchanged. Dynamic loading, waiting and
+the load errors are spec 0006, "Dynamic loading".
+
 ### `substr` (mixed kinds)
 
 `substr` is one opcode and no new one was needed for mixed-kind slicing. Its opcode
@@ -309,7 +340,7 @@ artifact:
 | Comparisons | `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `cmp_buffers` for buffers |
 | Conversions | `i2f`, `f2i` (truncate and range-check), `trunc8`, `sext`, `zext` |
 | Control flow | `jmp`, `jz`, `jnz`, `call`, `ret` |
-| Buffers and aggregates | `append` (capacity-checked), `load_u8`/`store_u8` (length- and capacity-checked), `find` (byte scan), `substr` (checked slice; `a` = destination kind, `b` = source kind), `format_int` (decimal/hex formatting), `enum_cast` (range-checked ordinal → enum), `ref_offset` (field reference), `ref_element` (array element reference, index-checked), `copy_refs` (record, sum, array, ring and `case` payload copies), `map_put`/`map_get`/`map_has`/`map_remove`/`map_count` (open-addressing map, layout in the immediates) |
+| Buffers and aggregates | `append` (capacity-checked), `load_u8`/`store_u8` (length- and capacity-checked), `find` (byte scan), `substr` (checked slice; `a` = destination kind, `b` = source kind), `format_int` (decimal/hex formatting), `enum_cast` (range-checked ordinal → enum), `ref_offset` (field reference), `ref_element` (array element reference, index-checked), `copy_refs` (record, sum, array, ring and `case` payload copies), `map_put`/`map_get`/`map_has`/`map_remove`/`map_count` (open-addressing map, layout in the immediates), `stream_send`/`stream_try_send`/`stream_recv`/`stream_try_recv` (kernel byte FIFO; receive carries the destination capacity) |
 | Builtins | `call_builtin n` — host-interface and `core` primitives |
 | System | `safe` (explicit poll), `trap` (compiler-inserted fault) |
 
@@ -437,7 +468,7 @@ pub fn run(task: &mut Task);
 
 | # | Question | Trigger / owner |
 |---|----------|-----------------|
-| 1 | ~~Exact opcode table and operand encodings~~ | **Resolved** — ABI v1 is `abi::opcodes`: 67 opcodes, one 4-byte opcode word plus up to four immediate words (the `map_*` ops carry the layout), `i32` jump offsets in instruction words, 8-byte operand slots. The interpreter implements it. |
+| 1 | ~~Exact opcode table and operand encodings~~ | **Resolved** — ABI v1 is `abi::opcodes`: 71 opcodes, one 4-byte opcode word plus up to four immediate words (the `map_*` ops carry the layout), `i32` jump offsets in instruction words, 8-byte operand slots. The interpreter implements it. |
 | 2 | Stack machine vs a small register machine | Performance measurement after the first loops run. |
 | 3 | ~~Verifier depth: structural only, or limited control-flow and stack-depth checks~~ | **Resolved for v1** — structural checks plus one instruction-boundary bit per word for jump targets; operand-stack depth is enforced at run time against the frame's operand area, not by dataflow analysis. |
 | 4 | Line-table encoding and compaction | When packages grow past the first few units. |
@@ -465,3 +496,4 @@ pub fn run(task: &mut Task);
 | 2026-11-15 | `substr` gained a source kind: the reserved `b` field is now the source's `buffer_kind` while `a` stays the destination kind, so all four `string`/`bytes` combinations are legal with no new opcode. The verifier accepts `a`/`b` in `0..=1` and `c = 0`; the machine applies the destination-kind rule (boundary check for a `string` source, strict UTF-8 validation for a `bytes` source, raw copy for a `bytes` destination). |
 | 2026-11-15 | Builtin `cpu_id` (10): pushes the APIC id of the core executing the call; `Host::cpu_id` defaults to 0, so no opcode and no ABI version change. |
 | 2026-11-15 | Builtins `realtime_on` (11; pushes the `Status` ordinal, `Ok` or `Full`) and `heartbeat` (12; no operands, no result). `Host::realtime_on` defaults to `Ok` and `Host::heartbeat` to a no-op, so no opcode and no ABI version change; the scheduler side is spec 0007, ADR 0016. |
+| 2026-11-15 | Streams add four opcodes: `stream_send`/`stream_try_send` (`[handle][data] -> Status`, no immediates) and `stream_recv`/`stream_try_recv` (`[handle][destination] -> int`, one destination-capacity immediate). A blocking opcode that would block restores its operands and pc and returns `Blocked(WaitKind::Stream(handle))`; the try variants push `WouldBlock`/`Closed` staged codes. The manifest lists endpoints in declaration order and handle `i` is at `state[i * 8]`, so `Endpoint`/`MANIFEST_HEADER_SIZE` are unchanged. ABI v1 grows from 67 to 71 opcodes. |

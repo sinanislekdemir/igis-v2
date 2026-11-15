@@ -196,6 +196,32 @@ implemented with the shapes above:
   released only at termination, so a blocked controller keeps its place. See
   `0007-scheduler.md`, "Realtime tasks".
 
+#### Implemented ABI: stream send/receive
+
+The four stream operations are implemented with the `Status`/staged-result shapes
+above (spec 0006, spec 0008):
+
+| Primitive | Implemented signature | Result |
+|-----------|-----------------------|--------|
+| `core.send` | `(ep: out_stream[N], data: const string/bytes) -> Status` | `Ok` after copying the whole buffer atomically; `CapacityExceeded` when `len(data) > N`; `Closed`; blocks while the free space is smaller than the buffer |
+| `core.try_send` | same | `WouldBlock` instead of blocking |
+| `core.recv` | `(ep: in_stream[N], var dst: bytes[M]) -> int` | copied count (`>= 1`), or `-1` `WouldBlock` (try) / `-2` `Closed`; blocks on an empty queue. A `string` destination is a compile error |
+| `core.try_recv` | same | `-1` instead of blocking |
+
+- `Host::stream_send(handle: u64, bytes: &[u8]) -> Result<(), StreamError>` and
+  `Host::stream_recv(handle: u64, dst: &mut [u8]) -> Result<usize, StreamError>` are the
+  non-blocking host hooks. `StreamError` is `WouldBlock`, `Closed`, `Invalid` or
+  `CapacityExceeded`; both default to `Invalid`, so a host that does not implement streams
+  still compiles. The interpreter turns `WouldBlock` into
+  `Outcome::Blocked(WaitKind::Stream(handle))` for `core.send`/`core.recv`, and into the
+  staged status for the `try_*` variants. On a block it restores the operands and `pc`, so
+  the retry sees the same instruction and no bytes are copied twice.
+- The kernel's host calls the stream table; every operation validates the 8-byte handle
+  (generation and index) and that the calling task owns that endpoint direction. The
+  table, its arena and its lock ordering are spec 0006, "Dynamic loading".
+- The loader, not the host, creates or pairs the endpoints before the task is placed, so
+  `stream_send`/`stream_recv` never see an unopened endpoint.
+
 #### Staged line discipline: `core.read_line`
 
 The target rule above stands: `console_read` is a byte stream, the kernel does not echo
@@ -284,10 +310,10 @@ trait Host {
     fn console_read(&mut self, buf: &mut [u8]) -> usize;
     fn read_line(&mut self, buf: &mut [u8]) -> Option<usize>;
     fn yield_now(&mut self);
-    fn send(&mut self, ep: Endpoint, bytes: &[u8]) -> Status;
-    fn try_send(&mut self, ep: Endpoint, bytes: &[u8]) -> Status;
-    fn receive(&mut self, ep: Endpoint, buf: &mut [u8]) -> Result<usize, Status>;
-    fn try_receive(&mut self, ep: Endpoint, buf: &mut [u8]) -> Result<usize, Status>;
+    // Non-blocking in the host; the interpreter blocks on WouldBlock for the
+    // blocking opcodes and maps it to the staged status for try_*.
+    fn stream_send(&mut self, handle: u64, bytes: &[u8]) -> Result<(), StreamError>;
+    fn stream_recv(&mut self, handle: u64, dst: &mut [u8]) -> Result<usize, StreamError>;
     fn monotonic_ns(&self) -> u64;
     fn sleep_until(&mut self, deadline_ns: u64);
     fn realtime_on(&mut self) -> Status;
@@ -381,3 +407,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-14 | `ExitReason` is now the predeclared sum type `Ok | Killed | Faulted(code: FaultCode)`, so `core.wait` writes a tag (0/1/2) at offset 0 and the `FaultCode` ordinal at offset 8, exactly the previous 16-byte image under new names (`TAG_OFFSET`/`PAYLOAD_OFFSET`). Applications match the reason with an exhaustive `case`; `reason.kind`/`reason.code` no longer exist. `FaultCode` is a predeclared enum with qualified variant names. Q43 is now `core.run`, `TaskId` and the request-completion diagnostic path. |
 | 2026-11-14 | `core.run` implemented as spawn + wait (pending id in the `Machine`, no second spawn on a blocked retry). The request-completion path landed: the exit ring carries a 192-byte `Diagnostic` image for a load failure, `Host::diagnostic_for` (default `false`) copies it, and `run` fills its `diag` while `wait` still reports only `Faulted(IoError)`. Q43 now covers only a distinct `TaskId` type. |
 | 2026-11-15 | Realtime promotion and heartbeat implemented: `Host::realtime_on` (default `Ok`) and `Host::heartbeat` (default no-op), builtins 11 and 12, admission against the online core count, and `Faulted(WatchdogTimeout)` from a one-second non-blocked deadline. |
+| 2026-11-15 | Streams implemented: `Host::stream_send`/`Host::stream_recv` are non-blocking `Result<_, StreamError>` hooks with `Invalid` defaults. The interpreter turns `WouldBlock` into `Blocked(WaitKind::Stream(handle))` for `core.send`/`core.recv` and into staged `WouldBlock`/`Closed` results for `try_send`/`try_recv`. Endpoints are created and paired by the loader before the task is placed, so the host never sees an unopened handle. |

@@ -251,6 +251,41 @@ pub const MAP_REMOVE: u8 = 0x4A;
 /// `count` word is the first 8 bytes of the value, so there are no immediates.
 pub const MAP_COUNT: u8 = 0x4B;
 
+// ---- streams ------------------------------------------------------------
+//
+// A stream endpoint is an 8-byte opaque handle in application `state`
+// ([`crate::Endpoint`], spec 0006). Data is copied through the kernel; no
+// application-visible pointer into the queue exists. The handle carries a
+// generation and a table index, so a stale handle cannot reach a recycled
+// stream (spec 0006, "Dynamic loading").
+//
+// Operand stack order:
+//   stream_send / stream_try_send: [handle][data reference] -> Status
+//   stream_recv / stream_try_recv: [handle][destination reference] -> int
+//
+// A blocking send/receive that cannot proceed leaves the instruction
+// unexecuted and blocks the task (`WaitKind::Stream`); the try variant pushes
+// `Status::WouldBlock` (send) or `-1` (receive). A closed stream pushes
+// `Status::Closed` (send) or `-2` (receive).
+
+/// `core.send(ep, data) -> Status`: copy the whole buffer atomically into the
+/// stream, blocking while the queue has less free space than the buffer needs.
+/// A buffer larger than the stream capacity is `Status::CapacityExceeded`
+/// immediately and never blocks (spec 0006, S4/S5).
+pub const STREAM_SEND: u8 = 0x4C;
+/// `core.try_send(ep, data) -> Status`: as [`STREAM_SEND`], but a full queue is
+/// `Status::WouldBlock` instead of a block.
+pub const STREAM_TRY_SEND: u8 = 0x4D;
+/// `core.recv(ep, var dst) -> int`: copy up to `dst`'s capacity bytes from the
+/// queue, blocking while it is empty. Pushes the copied count (`>= 1`) or a
+/// negative status: `-2` (`Status::Closed`) when the peer has closed and the
+/// queue is empty. Immediate: `capacity: u32`, the destination's declared
+/// `bytes[N]` capacity.
+pub const STREAM_RECV: u8 = 0x4E;
+/// `core.try_recv(ep, var dst) -> int`: as [`STREAM_RECV`], but an empty queue
+/// pushes `-1` (`Status::WouldBlock`) instead of blocking.
+pub const STREAM_TRY_RECV: u8 = 0x4F;
+
 /// Invoke a host builtin. Immediate: `builtin: u32` (see [`builtin`]).
 pub const BUILTIN: u8 = 0x50;
 
@@ -416,11 +451,11 @@ pub const fn instruction_words(op: u8) -> Option<u32> {
         | FNEG | FEQ | FNE | FLT | FLE | FGT | FGE => Some(1),
         ADD | SUB | MUL | DIV | MOD | NEG | ADD_U | SUB_U | MUL_U | DIV_U | MOD_U | EQ | NE
         | LT | LE | GT | GE | LT_U | LE_U | GT_U | GE_U | LOAD_U8 | CMP_BUFFERS | FIND
-        | COPY_REFS => Some(1),
+        | COPY_REFS | STREAM_SEND | STREAM_TRY_SEND => Some(1),
         CONST => Some(3),
         JMP | JZ | JNZ | CALL | LOAD_LOCAL | STORE_LOCAL | REF_LOCAL | LOAD_STATE | STORE_STATE
         | REF_STATE | REF_CONST | APPEND | READ_LINE | STORE_U8 | BUILTIN | SUBSTR | FORMAT_INT
-        | ENUM_CAST | REF_OFFSET => Some(2),
+        | ENUM_CAST | REF_OFFSET | STREAM_RECV | STREAM_TRY_RECV => Some(2),
         REF_ELEMENT => Some(3),
         MAP_PUT | MAP_GET | MAP_HAS | MAP_REMOVE => Some(5),
         MAP_COUNT => Some(1),
@@ -487,6 +522,10 @@ pub const fn mnemonic(op: u8) -> Option<&'static str> {
         MAP_HAS => Some("map_has"),
         MAP_REMOVE => Some("map_remove"),
         MAP_COUNT => Some("map_count"),
+        STREAM_SEND => Some("stream_send"),
+        STREAM_TRY_SEND => Some("stream_try_send"),
+        STREAM_RECV => Some("stream_recv"),
+        STREAM_TRY_RECV => Some("stream_try_recv"),
         BUILTIN => Some("builtin"),
         FADD => Some("fadd"),
         FSUB => Some("fsub"),

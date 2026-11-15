@@ -4,9 +4,9 @@
 //! slice: `unit`/`uses`, top-level `const`/`var`/`procedure`/`function`, a `var`
 //! section inside a subprogram, `begin`/`end`, `if`/`else`, `while`, `case`,
 //! assignment, calls, `return` and expressions. Records, enums, sum types,
-//! fixed-size arrays, rings and functions are implemented; maps, streams and
-//! handlers are rejected by syntax, which is what "not implemented" should
-//! look like.
+//! fixed-size arrays, rings, maps, stream endpoint declarations and functions
+//! are implemented; handlers are rejected by syntax, which is what "not
+//! implemented" should look like.
 //!
 //! Nodes and sibling lists are allocated in the caller's arena and borrow the
 //! token stream; the parser owns nothing.
@@ -555,8 +555,8 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             count = Some(self.expression()?);
             self.expect(&TokenKind::RBracket, "`]`")?;
-        } else if matches!(name, "string" | "bytes") {
-            self.expect(&TokenKind::LBracket, "`[` after `string`/`bytes`")?;
+        } else if matches!(name, "string" | "bytes" | "in_stream" | "out_stream") {
+            self.expect(&TokenKind::LBracket, "`[` after a buffer or stream type")?;
             cap = Some(self.expression()?);
             self.expect(&TokenKind::RBracket, "`]`")?;
         }

@@ -464,6 +464,18 @@ fn verify_instructions(
                         return Err(invalid(base + pc + 4, "buffer capacity is out of range"));
                     }
                 }
+                opcodes::STREAM_RECV | opcodes::STREAM_TRY_RECV => {
+                    let capacity = read_u32(instructions, pc + 4)
+                        .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;
+                    // A zero-capacity destination can never receive a byte, so
+                    // it is not a valid instruction.
+                    if capacity == 0 || capacity > MAX_SECTION {
+                        return Err(invalid(
+                            base + pc + 4,
+                            "stream destination capacity is out of range",
+                        ));
+                    }
+                }
                 opcodes::SUBSTR => {
                     let capacity = read_u32(instructions, pc + 4)
                         .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;

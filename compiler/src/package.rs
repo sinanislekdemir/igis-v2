@@ -10,11 +10,12 @@
 //! package is returned.
 
 use abi::{
-    CodeHeader, Function, ManifestHeader, ABI_VERSION, CODE_MAGIC, LINE_ENTRY_SIZE, MANIFEST_MAGIC,
-    NO_DIAGNOSTIC, PROFILE_X86_64_LE,
+    CodeHeader, Endpoint, Function, ManifestHeader, ABI_VERSION, CODE_MAGIC, LINE_ENTRY_SIZE,
+    MANIFEST_MAGIC, NO_DIAGNOSTIC, PROFILE_X86_64_LE,
 };
 
 use crate::arena::OutOfSpace;
+use crate::codegen::EndpointDecl;
 use crate::{diag, out_of_space, Diagnostic, Package, Resource};
 
 /// Sections must stay under the verifier's per-section cap, so the compiler
@@ -96,6 +97,7 @@ pub(crate) fn assemble<'a>(
     instructions: &[u8],
     constants: &[u8],
     lines: &[LineEntry],
+    endpoints: &[EndpointDecl<'_>],
     state_size: u32,
     stack_size: u32,
     entry: u32,
@@ -109,6 +111,15 @@ pub(crate) fn assemble<'a>(
             1,
             1,
             format_args!("unit name is too long"),
+        ));
+    }
+    if endpoints.len() > u16::MAX as usize {
+        return Err(diag(
+            path,
+            unit_name,
+            1,
+            1,
+            format_args!("too many stream endpoints"),
         ));
     }
     for (length, what) in [
@@ -171,7 +182,7 @@ pub(crate) fn assemble<'a>(
         abi_version: ABI_VERSION,
         profile: PROFILE_X86_64_LE,
         unit_name_len: unit_name.len() as u16,
-        endpoint_count: 0,
+        endpoint_count: endpoints.len() as u16,
         code_len,
         state_size,
         stack_size,
@@ -185,6 +196,31 @@ pub(crate) fn assemble<'a>(
     manifest
         .put(unit_name.as_bytes())
         .map_err(|_| full_manifest())?;
+    // Descriptor order is the state-prefix order: endpoint `i`'s 8-byte handle
+    // lives at `state[i * 8]` (spec 0006, spec 0008).
+    for endpoint in endpoints {
+        if endpoint.name.len() > u16::MAX as usize {
+            return Err(diag(
+                path,
+                unit_name,
+                endpoint.line,
+                endpoint.column,
+                format_args!("stream name is too long"),
+            ));
+        }
+        let descriptor = Endpoint {
+            name_len: endpoint.name.len() as u16,
+            direction: endpoint.direction,
+            _reserved: 0,
+            capacity: endpoint.capacity,
+        };
+        manifest
+            .put(&descriptor.to_bytes())
+            .map_err(|_| full_manifest())?;
+        manifest
+            .put(endpoint.name.as_bytes())
+            .map_err(|_| full_manifest())?;
+    }
     let manifest: &'a [u8] = manifest.into_written();
 
     Ok(Package { manifest, code })

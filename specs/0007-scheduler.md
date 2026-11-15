@@ -250,17 +250,24 @@ accepted: no core is reserved.
 
 - A blocking primitive sets `Blocked(reason)`, records the wait condition, and returns to
   the loop without re-enqueueing.
-- The first milestone has two blocking conditions: `core.wait(child)` and the staged
-  `core.read_line` (`Console`). A blocked task stays in its slot with `state = Blocked`
-  and a `WaitFor` condition (`Child(id)` or `Console`); `claim` skips blocked slots and
-  the wake-up path clears the condition in place, so the task's regions and machine never
-  move. A `Blocked` task counts as live, so the system does not halt.
+- The blocking conditions are `core.wait(child)`, the staged `core.read_line` (`Console`)
+  and a stream send/receive (`Stream(handle)`). A blocked task stays in its slot with
+  `state = Blocked` and a `WaitFor` condition (`Child(id)`, `Console` or `Stream(handle)`);
+  `claim` skips blocked slots and the wake-up path clears the condition in place, so the
+  task's regions and machine never move. A `Blocked` task counts as live, so the system
+  does not halt.
 - A blocking builtin that cannot complete returns `Blocked` from the interpreter without
   advancing `pc` or the operand stack; the instruction is retried after the wake-up, so a
   retry sees the same frame. The service dispatcher still runs before every claim (and
   polls console input), so a queued child is compiled even while its parent is blocked.
-- A child termination wakes `Child(id)`; a finished console line wakes `Console`. The
-  condition enqueues the task and marks it `Runnable`.
+- A child termination wakes `Child(id)`; a finished console line wakes `Console`. A send
+  wakes a receiver blocked on `Stream(handle)`, a receive that frees space wakes a sender,
+  and a stream close wakes both. The condition enqueues the task and marks it `Runnable`.
+- After `task::block` the scheduler rechecks the condition (`repl::has_exit` for a child,
+  `stream::ready_for` for a stream): it may have become true between the failed attempt
+  and the block, and the wake-up path would then have found nobody to wake. The stream
+  check takes the stream lock and releases it before `task::wake_stream` takes any slot
+  lock.
 - If every core is halted, the enqueuing core sends an IPI to one of them. A per-core
   `need_resched` flag is set before the IPI; the woken core checks it after `hlt`.
 
@@ -481,3 +488,4 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 2026-11-14 | `core.run` implemented (spawn + wait); the exit ring also carries a 192-byte `Diagnostic` image for a failed request, so `run` reports a post-spawn compile error through `diag` while `wait` observes `Faulted(IoError)`. |
 | 2026-11-15 | Per-core schedulers: every online core runs the claim/quantum/release loop over the global set, per-core verifier scratch and loop counters, IPI wake for idle cores (`sti; hlt`, `need_resched` before the IPI), a boot-core shutdown that stops the APs and prints per-core totals, and a slot reservation plus an in-service marker so `wait` never races a spawn or a compile. |
 | 2026-11-15 | Realtime class implemented: `core.realtime_on`/`core.heartbeat` (builtins 11/12), admission by a CAS counter against the online core count, realtime-first claim, an inner per-core quantum loop that does not release a realtime task, a one-second deadline in non-blocked time (`HEARTBEAT_NS`), `Faulted(WatchdogTimeout)` at the boundary, and the admission slot released only at termination. `samples/apps/{realtime,beat,spin}` exercise promotion, `Full` on a single core, and the watchdog. |
+| 2026-11-15 | Stream blocking added as a third `WaitFor`: `WaitFor::Stream(handle)` with `task::wake_stream`, sender/receiver/close wake rules and a post-block `stream::ready_for` recheck that closes the failed-attempt-to-block race. Sends and receives take the stream lock without any slot lock and wake after releasing it. |

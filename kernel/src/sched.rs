@@ -44,7 +44,7 @@
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use abi::{ExitReason, FaultCode, Status};
-use interpreter::{Diagnostic, Host, Outcome, Program, WaitKind, WaitOutcome};
+use interpreter::{Diagnostic, Host, Outcome, Program, StreamError, WaitKind, WaitOutcome};
 
 use crate::clock;
 use crate::console;
@@ -218,6 +218,18 @@ impl Host for KernelHost<'_> {
         if self.class == TaskClass::Realtime || self.promoted {
             self.heartbeats += 1;
         }
+    }
+
+    // Streams (spec 0006): the kernel table owns the buffer and the generation
+    // check. The machine turns `WouldBlock` into a block for the blocking
+    // opcodes and into a staged status for `try_*`; the host is always
+    // non-blocking so it can be called from any core.
+    fn stream_send(&mut self, handle: u64, bytes: &[u8]) -> Result<(), StreamError> {
+        crate::stream::send(self.current, handle, bytes)
+    }
+
+    fn stream_recv(&mut self, handle: u64, dst: &mut [u8]) -> Result<usize, StreamError> {
+        crate::stream::recv(self.current, handle, dst)
     }
 
     fn spawn(&mut self, path: &[u8], args: &[u8], diag: &mut [u8]) -> Result<u64, Status> {
@@ -423,6 +435,20 @@ fn loop_body(core: usize, image: &Ext2<'_>) -> ! {
                                 WaitKind::Console => {
                                     println!("sched: task {} blocked on console", task.id);
                                     task::block(task, WaitFor::Console);
+                                }
+                                WaitKind::Stream(handle) => {
+                                    println!(
+                                        "sched: task {} blocked on stream {handle:#x}",
+                                        task.id
+                                    );
+                                    let id = task.id;
+                                    task::block(task, WaitFor::Stream(handle));
+                                    // Space/data/close may have arrived between
+                                    // the failed attempt and the block; the
+                                    // wake path then found nobody to wake.
+                                    if crate::stream::ready_for(id, handle) {
+                                        task::wake_stream(handle);
+                                    }
                                 }
                             }
                             break;

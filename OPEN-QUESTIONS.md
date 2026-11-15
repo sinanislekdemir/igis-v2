@@ -34,7 +34,7 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 
 | # | Question | Options / recommendation | Trigger |
 |---|----------|--------------------------|---------|
-| Q10 | Explicit close | deferred to streams v2; closed state is independent of owner lifetime; `close` drains then reports `Closed`, task death still discards | streams v2 |
+| Q10 | Explicit close | streams are implemented with close-on-termination only; explicit `close` stays v2. Closed state is independent of owner lifetime and `close` will drain before reporting `Closed`, while task death keeps discarding queued bytes | streams v2 |
 | Q14 | Auto-wire a console stream for REPL apps | no in M1; applications use `core.console_*`; wiring needs a console application and an ownership rule | when a console application exists |
 
 ## D. Language
@@ -158,8 +158,9 @@ hook, not an affinity.
   Q29 (ADR 0017 addendum), Q34 (children continue), Q35 (64-entry exit ring).
 - Q5, Q6, Q7, Q11–Q13, Q15–Q38 and Q42 are resolved and removed from the table; Q1, Q2 and
   Q4 are now closed provisionally, so only the handler budget (Q3), the deferred
-  debug/DMA/streams items, the staged port handles (Q45), the two float follow-ups
-  (Q40/Q41) and the blocked `substr_into` move (Q46) remain.
+  debug/DMA items, explicit stream close (Q10), console-stream wiring (Q14), the staged
+  port handles (Q45), the two float follow-ups (Q40/Q41) and the blocked `substr_into`
+  move (Q46) remain.
 
 ## Decided in the 2026-11-15 realtime session
 
@@ -176,6 +177,35 @@ task terminates, so the class never oversubscribes the machine.
 one realtime task per online core, and no core is reserved for normal tasks or the REPL
 (ADR 0016 addendum). If more controllers must run than there are cores, the model needs a
 different admission rule (realtime time slicing), which is a new decision.
+
+## Decided in the 2026-11-15 streams session
+
+- **Dynamic loading (spec 0006 amendment).** A stream endpoint is created when the task
+  that declares it loads, before placement. With no live peer the stream *waits*: the
+  buffer exists, a sender may fill it to capacity and a receiver blocks on it. A peer that
+  arrives later with the same name and the opposite direction pairs; a second endpoint
+  with the same name and direction, a capacity mismatch against a live peer, or a
+  declaration against a closed stream is a load error (reported through `core.run`'s
+  `diag`). This replaces S8's static "unmatched declaration is a load error" rule, which
+  cannot work when tasks are created at run time. The failure table and the "Dynamic
+  loading" subsection in spec 0006 are normative.
+- **Handles and state layout.** The handle is `(generation << 8) | table_index`; a stale
+  handle cannot reach a recycled stream. Endpoint `i` is at `state[i * 8]`, and the
+  manifest lists descriptors in declaration order, so `abi::Endpoint` needs no offset
+  field and `ENDPOINT_SIZE`/`MANIFEST_HEADER_SIZE` are unchanged.
+- **Kernel storage.** One 32-record table over a static 256 KiB arena with a first-fit
+  free list; buffers are kernel-owned and every send/receive copies. The table lock is
+  never held while a slot lock is taken: operations record that a wake is needed, drop
+  the stream lock, then call `task::wake_stream`.
+- **Close means task death in this milestone.** `Task::reclaim` closes the owner's sides,
+  discards queued bytes immediately (S7), wakes blocked peers with `Closed` and returns
+  the buffer to the arena at the close; the record stays reserved by a surviving endpoint
+  until its owner ends and never pairs again. Explicit `close` (Q10) and `stdlib`
+  framing on top of streams remain future work; the closed state is already independent
+  of owner lifetime, so the queue does not need reworking.
+- **`stdlib` may not declare stream variables** (a library endpoint name would be shared
+  by every application) but may take a `const` stream parameter; that is what the future
+  framing helpers will use.
 
 ## Decided in the 2026-11-12 session
 
@@ -391,3 +421,14 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
     `stdlib.substr_into` move is withdrawn (Q46). Next: APs (INIT-SIPI-SIPI and the
     per-core interpreter loops), then the realtime class and streams. Remaining on the
     language/host track: `f64` text conversion and the cross-unit type table.
+23. ~~Streams~~ — done (spec 0006, amended): `in_stream[N]`/`out_stream[N]` top-level
+    state variables with handles in the `state` prefix and manifest descriptors in
+    declaration order; load-time create-or-pair with waiting semantics; a 32-record
+    kernel table over a 256 KiB first-fit arena; four `stream_*` opcodes; blocking via
+    `WaitFor::Stream(handle)` with send/receive/close wake-ups; termination discards
+    queued bytes and frees the buffer when no side remains. `samples/apps/streams`
+    (`pipe_in` + `pipe_out`) proves in-order delivery, sender blocking and `Closed`;
+    `streams_bad` proves the duplicate-direction and capacity-mismatch load errors; the
+    `bad_send`/`bad_recv`/`bad_name` samples prove the compile errors. Next: `stdlib`
+    framing helpers (`send_line`, `recv_line_into`, length-prefixed frames) on top of the
+    new primitives, then explicit close (Q10), `f64` text, and per-task stack guards.

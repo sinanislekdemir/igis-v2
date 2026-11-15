@@ -1,0 +1,61 @@
+unit streams;
+
+// Driver for the cross-application stream sample (spec 0006). The consumer is
+// spawned without waiting, so it can load (creating the waiting `report`
+// receiver) while the producer runs. `core.run` then starts the producer and
+// blocks; the producer fills the 64-byte queue and blocks until the consumer
+// drains it. Finally the driver waits for the consumer, which exits on
+// `Closed` after the producer terminates.
+
+uses core;
+
+var
+  st: Status;
+  consumer: int;
+  diag: Diagnostic;
+  reason: ExitReason;
+
+procedure say(text: const string[0]);
+begin
+  core.write(text);
+end;
+
+procedure report(what: const string[0]; why: const ExitReason);
+begin
+  say(what);
+  case why of
+    Ok: say("ok\n")
+    Killed: say("killed\n")
+    Faulted(code): say("faulted\n")
+  end;
+end;
+
+procedure main(args: const string[1024]);
+begin
+  st := core.spawn("pipe_in", "", diag, consumer);
+  if st <> Ok then
+  begin
+    say("streams: spawn pipe_in failed: ");
+    say(diag.message);
+    say("\n");
+  end
+  else
+  begin
+    st := core.run("pipe_out", "", diag, reason);
+    if st = Ok then
+      report("streams: producer ", reason)
+    else
+    begin
+      say("streams: run pipe_out failed: ");
+      say(diag.message);
+      say("\n");
+    end;
+
+    st := core.wait(consumer, reason);
+    if st = Ok then
+      report("streams: consumer ", reason)
+    else
+      say("streams: wait for consumer failed\n");
+    say("streams: done\n");
+  end;
+end;

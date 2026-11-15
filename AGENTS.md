@@ -151,7 +151,23 @@ constraints learned there.
   controller keeps it. Starvation is accepted (no reserved core). `samples/apps/realtime`
   promotes, beats through 200 control cycles and runs a `beat` child that reports `Full`
   on `-smp 1`; `samples/apps/spin` loops without a heartbeat and is killed after about a
-  second. The next pieces are streams and per-task stack guards.
+  second. Streams now run: `in_stream[N]`/`out_stream[N]` are top-level state variables
+  whose names are the stream identifiers, the compiler puts their 8-byte handles in the
+  `state` prefix and lists the endpoints in the manifest, and the loader creates or pairs
+  each endpoint before placing the task. A new endpoint whose peer is not live *waits*:
+  a sender may fill it to capacity and a receiver blocks on it. A same-direction
+  duplicate, a capacity mismatch against a live peer, and a declaration against a closed
+  stream are load errors reported through `core.run`'s `diag`. `core.send`/`try_send`
+  copy a whole buffer atomically (blocking, `WouldBlock`, `CapacityExceeded`, `Closed`);
+  `core.recv`/`try_recv` fill a writable `bytes[N]` and return the count or a staged
+  `-1`/`-2` (`string` destinations are rejected because a partial read could split a code
+  point). Blocking uses `WaitFor::Stream(handle)`, a send wakes a receiver, a receive that
+  frees space wakes a sender, and termination closes the owner's sides, discards queued
+  bytes and frees the buffer at the close (the record stays until the surviving endpoint
+  ends). `samples/apps/streams` (consumer
+  `pipe_in`, producer `pipe_out`) proves in-order delivery through a blocking sender and
+  the `Closed` exit; `streams_bad` proves both load errors. The next pieces are `stdlib`
+  framing on top of streams and per-task stack guards; explicit close is v2.
 
 ## Ground rules
 
@@ -306,6 +322,7 @@ host tools are unaffected.
 | A claimed task's slot stays reserved by task id until reclaim; a request id stays live while it compiles; the boot core stops the APs and prints per-core totals | spec 0007 |
 | `syslib.cpu_id()` (builtin 10) reports the APIC id of the executing core; the core index is internal | spec 0003, spec 0008 |
 | Realtime: one-way `core.realtime_on()` (builtin 11) admitted by a CAS counter against online cores, `core.heartbeat()` (builtin 12) with a fixed 1 s non-blocked deadline, realtime-first claim, no quantum preemption, no total budget, `WatchdogTimeout`, admission released only at termination | spec 0007, ADR 0016 |
+| Streams: top-level `in_stream[N]`/`out_stream[N]` state variables, handles in the `state` prefix in manifest order, dynamic load-time pairing with a waiting peer, same-direction/mismatch/closed load errors, four `stream_*` opcodes, `WaitFor::Stream` block/wake, kernel arena with first-fit free list, close-on-termination discards queued bytes | spec 0006 (amended), spec 0008 |
 
 ## Open questions
 
@@ -365,3 +382,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-15 | UTF-8: `core.substr_into` accepts all four destination/source kind combinations with the destination kind deciding (a `string` source keeps T4's boundary rule, a `bytes` source is validated as strict UTF-8, a `bytes` destination copies raw); the source kind is the `SUBSTR` `b` field, so no opcode was added and the ABI v1 table is unchanged. `stdlib` gains `utf8_decode_into` (T3), `utf8_len`, `utf8_decode` and `utf8_valid` as ordinary language code, `samples/lang/utf8.ig` covers 1-/2-/3-/4-byte code points and every malformed class, and `samples/apps/utf8` runs as `run utf8` in the shell. The `stdlib.substr_into` move is withdrawn: the destination capacity must be a call-site immediate and there are no generics. Also fixed a latent codegen bug where `dst := ""` left a destination reference on the operand stack. |
 | 2026-11-15 | SMP: `smp::start` brings the APs up by attempt (INIT-SIPI-SIPI through the `0x8000` trampoline and `0x9000` parameter page, `MAX_CORES` 8, per-core TSS/IST and 64 KiB stacks, bounded 100 ms), every online core runs the claim/quantum/release loop with per-core verifier scratch and counters, idle cores do one `sti; hlt` step woken by the `0x40` IPI, the boot core stops the APs and prints per-core totals, and `syslib.cpu_id()` (builtin 10) reports the APIC id. Fixed two SMP races: a claimed task's slot stays reserved by id, and a reserved request id stays live while it compiles. `samples/apps/worker` + `cores` prove distribution; `xtask run` defaults to `-smp 4` (`--cores N`). |
 | 2026-11-15 | Realtime class implemented (ADR 0016): `core.realtime_on()`/`core.heartbeat()` (builtins 11/12) through `Host::realtime_on`/`Host::heartbeat` defaults, admission by a CAS counter against `smp::online_count()`, realtime-first claim, no quantum preemption (an inner per-core loop keeps the claimed value), no total budget, a one-second deadline in non-blocked `budget_ns` (`HEARTBEAT_NS`) terminated as `Faulted(WatchdogTimeout)`, and admission released only in `terminate`. `samples/apps/{realtime,beat,spin}` prove promotion, `Full` on `-smp 1`, and the watchdog; the shell reports `WatchdogTimeout`. |
+| 2026-11-15 | Streams implemented (spec 0006, amended): `in_stream[N]`/`out_stream[N]` top-level state variables whose name is the stream name; handles occupy the first `8 * endpoint_count` state bytes and the manifest lists descriptors in declaration order. The loader opens or pairs endpoints before placement (waiting semantics for an absent peer; same-direction duplicate, capacity mismatch and closed-stream declarations are load errors), writes handles into `state`, and rolls back on failure. A kernel table of 32 records over a 256 KiB static arena with a first-fit free list holds the buffers; handles are `(generation, index)`. `core.send`/`try_send` and `core.recv`/`try_recv` are four new opcodes; blocking is `WaitFor::Stream(handle)` with sends waking receivers, receives waking senders and close waking both. `samples/apps/{streams,pipe_in,pipe_out}` prove in-order delivery and `Closed`; `streams_bad` proves the two load errors; `bad_send`/`bad_recv`/`bad_name` cover the compile errors. |

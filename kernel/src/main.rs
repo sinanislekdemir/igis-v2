@@ -12,6 +12,7 @@ mod module;
 mod repl;
 mod sched;
 mod smp;
+mod stream;
 mod sync;
 mod task;
 
@@ -219,6 +220,7 @@ extern "C" fn kmain_on_stack(mb2_info: u64) -> ! {
                     // the module memory is never unmapped. Absent ids simply do
                     // not report.
                     sched::set_image(&fs);
+                    stream::init();
                     smp::start();
 
                     // The REPL leaves the boot task in the runnable set; the

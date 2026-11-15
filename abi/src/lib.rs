@@ -327,9 +327,12 @@ pub mod direction {
     pub const OUT: u8 = 1;
 }
 
-/// One declared stream endpoint in the manifest. ABI v1 never declares any;
-/// the type exists so the manifest does not need a version bump when streams
-/// arrive.
+/// One declared stream endpoint in the manifest (spec 0006).
+///
+/// The loader creates and pairs the endpoints in descriptor order before the
+/// task is placed, then writes endpoint `i`'s 8-byte handle at
+/// `state[i * ENDPOINT_SIZE]`. The handle is opaque; see spec 0008,
+/// "Streams and endpoints".
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Endpoint {
@@ -376,7 +379,8 @@ impl Endpoint {
 ///
 /// Manifest layout: this header, then `unit_name_len` bytes of unit name, then
 /// `endpoint_count` times (`Endpoint` descriptor followed by `name_len` bytes
-/// of name).
+/// of name). Descriptors are in declaration order, and the loader writes
+/// endpoint `i`'s handle at `state[i * ENDPOINT_SIZE]` (spec 0008).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ManifestHeader {

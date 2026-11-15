@@ -4445,3 +4445,221 @@ end;
         error.message
     );
 }
+
+// ---- streams (spec 0006) ------------------------------------------------
+
+/// Decodes the manifest's endpoint descriptors.
+fn endpoints(package: &Owned) -> Vec<(String, u8, u32)> {
+    let header = ManifestHeader::from_bytes(&package.manifest[..32]).expect("manifest header");
+    let mut offset = 32 + header.unit_name_len as usize;
+    let mut out = Vec::new();
+    for _ in 0..header.endpoint_count {
+        let descriptor = abi::Endpoint::from_bytes(&package.manifest[offset..offset + 8])
+            .expect("endpoint descriptor");
+        offset += 8;
+        let name = &package.manifest[offset..offset + descriptor.name_len as usize];
+        offset += descriptor.name_len as usize;
+        out.push((
+            String::from_utf8(name.to_vec()).expect("UTF-8 name"),
+            descriptor.direction,
+            descriptor.capacity,
+        ));
+    }
+    out
+}
+
+#[test]
+fn stream_endpoints_are_emitted_in_declaration_order_with_handles_first() {
+    let source = br#"
+unit t;
+
+uses core;
+
+var
+  events_out: out_stream[128];
+  counter: int;
+  commands_in: in_stream[64];
+
+procedure main(args: const string[1024]);
+begin
+  counter := 0;
+end;
+"#;
+    let package = compile(source, "t.ig").expect("compiles");
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("code header");
+    // Two 8-byte handles at the front, then the `int` state variable.
+    assert_eq!(header.state_size, 24);
+    assert_eq!(
+        endpoints(&package),
+        vec![
+            ("events_out".to_string(), abi::direction::OUT, 128),
+            ("commands_in".to_string(), abi::direction::IN, 64),
+        ]
+    );
+}
+
+#[test]
+fn a_stream_may_be_a_const_parameter_with_any_capacity() {
+    let source = br#"
+unit t;
+
+uses core;
+
+var
+  events_out: out_stream[128];
+
+procedure send_it(ep: const out_stream[64]; text: const string[0]);
+begin
+  core.send(ep, text);
+end;
+
+procedure main(args: const string[1024]);
+begin
+  send_it(events_out, "x");
+end;
+"#;
+    compile(source, "t.ig").expect("a const stream parameter borrows the caller's handle");
+}
+
+#[test]
+fn stream_type_rules_are_compile_errors() {
+    let cases: &[(&str, &str)] = &[
+        (
+            "var s: in_stream[0];",
+            "stream capacity must be between 1 and 65536",
+        ),
+        (
+            "var s: out_stream[65537];",
+            "stream capacity must be between 1 and 65536",
+        ),
+        (
+            "type R = record s: out_stream[8]; end;",
+            "is a stream endpoint; it may only be declared",
+        ),
+        (
+            "var xs: array[out_stream[8], 2];",
+            "is a stream endpoint; it may only be declared",
+        ),
+        (
+            "var Bad_name: out_stream[8];",
+            "must match `[a-z][a-z0-9_]*`",
+        ),
+        (
+            "var s: out_stream[8]; var s: in_stream[8];",
+            "duplicate declaration",
+        ),
+    ];
+    for (declaration, expected) in cases {
+        let source = format!(
+            "unit t;\n\nuses core;\n\n{declaration}\n\nprocedure main(args: const string[1024]);\nbegin\nend;\n"
+        );
+        let error =
+            compile(source.as_bytes(), "t.ig").expect_err("declaration must be a compile error");
+        assert!(
+            error.message.contains(expected),
+            "{declaration}: expected `{expected}`, got `{}`",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn a_stream_local_is_rejected() {
+    let source = br#"
+unit t;
+
+uses core;
+
+procedure main(args: const string[1024]);
+var
+  local_s: out_stream[8];
+begin
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("a stream local must not compile");
+    assert!(
+        error
+            .message
+            .contains("is a stream endpoint; it may only be declared"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn stream_parameters_and_values_are_checked() {
+    let cases: &[(&str, &str)] = &[
+        (
+            r#"
+unit t;
+uses core;
+var s: out_stream[8];
+procedure p(ep: out_stream[8]);
+begin
+end;
+procedure main(args: const string[1024]);
+begin
+end;
+"#,
+            "stream parameter `ep` must be declared `const`",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var s: out_stream[8];
+procedure main(args: const string[1024]);
+begin
+  s := s;
+end;
+"#,
+            "stream endpoint `s` cannot be assigned",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var s: out_stream[8];
+procedure main(args: const string[1024]);
+begin
+  if s = s then
+    core.write("x");
+end;
+"#,
+            "cannot be used as a value",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var s: in_stream[8];
+procedure main(args: const string[1024]);
+begin
+  core.send(s, "x");
+end;
+"#,
+            "need an `out_stream`",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var s: in_stream[8];
+var text: string[8];
+procedure main(args: const string[1024]);
+begin
+  core.recv(s, text);
+end;
+"#,
+            "needs a writable `var bytes[N]` destination",
+        ),
+    ];
+    for (source, expected) in cases {
+        let error = compile(source.as_bytes(), "t.ig").expect_err("must be a compile error");
+        assert!(
+            error.message.contains(expected),
+            "expected `{expected}`, got `{}`",
+            error.message
+        );
+    }
+}

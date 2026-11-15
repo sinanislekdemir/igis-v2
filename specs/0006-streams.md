@@ -5,7 +5,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0004, 0011, 0015
-- **Updated:** 2026-11-13
+- **Updated:** 2026-11-15
 
 ## Context
 
@@ -39,8 +39,10 @@ types. A byte FIFO is one implementation for every payload; the type system and 
 - **S7 (MUST):** When a task terminates, its endpoints close. The peer observes `Closed`;
   queued data is discarded immediately, not drained.
 - **S8 (MUST):** Endpoints are declared in the manifest by name and direction. The loader
-  creates and pairs them before any task starts; an unmatched or conflicting declaration
-  is a load error.
+  creates an endpoint when its task loads, pairing it immediately with a live peer of the
+  opposite direction or leaving it waiting for a peer that appears later. A second
+  endpoint with the same name and direction, a capacity mismatch between peers, or a
+  declaration against a closed stream is a load error (see "Dynamic loading").
 - **S9 (MUST):** A task blocked on a stream is woken when data or space becomes available,
   or when the peer closes.
 - **S10 (MUST):** The kernel has no notion of message boundaries, types or framing. Typed
@@ -160,9 +162,39 @@ var
 - A stream name is an application-wide identifier. Two units may not declare the same
   name, even with different directions: the compiler sees every unit of the application
   and rejects the duplicate, so the loader never has to guess which declaration was meant.
-- An unmatched declaration, a name with two senders, or a name with two receivers is a
-  load error. There is no "maybe connected" state.
-- Pairing happens before the first task runs. There is no runtime connect/disconnect.
+- A name with two senders, or a name with two receivers, is a load error. Pairing happens
+  when a task loads; there is no runtime connect/disconnect.
+- A capacity is fixed when the first endpoint of a name is created. A peer that arrives
+  later must declare the same capacity; otherwise its load is refused and the existing
+  stream is untouched.
+
+#### Dynamic loading
+
+Tasks are created at run time, so two peers can never be loaded in the same operation. The
+loader therefore creates each declared endpoint when its task loads, before the task is
+placed:
+
+- If no stream with that name exists, the endpoint is created and the stream is **waiting**
+  for its peer. Its buffer exists from this moment.
+- If a live peer of the opposite direction exists, the endpoint pairs with it immediately.
+  The capacities must match.
+- If an endpoint with the same name and the same direction is already live, the arriving
+  task's load is an error ("a sender named `x` already exists" / "a receiver named
+  `x` already exists"). The existing stream is untouched.
+- A capacity mismatch is a load error for the arriving task, naming both capacities; the
+  existing stream is untouched.
+- Sending into a waiting stream is allowed up to its capacity: the buffer exists. Receiving
+  from an empty waiting stream blocks exactly as it does from an empty paired stream.
+  Blocking on a peer that never arrives is the documented "blocked forever on a live peer"
+  case; the task consumes no CPU.
+- A stream whose owner terminates becomes closed and never pairs again. Its surviving peer
+  observes `Closed`; a new declaration of that name is a load error until the surviving
+  endpoint closes too.
+- If placement or spawning fails after endpoints were created, the loader closes them and
+  frees their buffers, exactly as task termination would.
+
+The compiler still enforces application-wide unique names, the name grammar and the
+capacity range (S11/S12), so the loader never sees two declarations in one package.
 
 ### Capacity and backpressure
 
@@ -209,11 +241,13 @@ fn try_receive(ep: Endpoint, buf: &mut [u8]) -> Result<usize, Status>;
 | Send on a full queue | Blocks; `try_send` returns `WouldBlock` |
 | Receive on an empty queue | Blocks; `try_receive` returns `WouldBlock` |
 | Peer task terminates | Queue discarded; surviving endpoint returns `Closed` |
-| Both endpoints closed | Release the buffer at the last close |
+| A stream closes (one owner terminates) | Closing is terminal for both logical sides: discard queued bytes, release the buffer, wake the peer with `Closed`. The table record stays until the surviving endpoint's owner ends |
 | Blocked peer at close | Wakes with `Closed` |
-| Unmatched endpoint in a manifest | Load error, before any task starts |
-| Two senders for one name | Load error |
-| Capacity mismatch between peers | Load error |
+| Endpoint with no live peer yet | Created and waiting; sends fill up to capacity, receives block on empty |
+| Two senders (or two receivers) for one name | Load error for the arriving task; the existing stream is untouched |
+| Capacity mismatch between peers | Load error for the arriving task, naming both capacities; the existing stream is untouched |
+| Declaration against a closed stream | Load error until the surviving endpoint closes |
+| Placement or spawn fails after endpoints exist | Endpoints closed and buffers freed by the loader |
 | Send on a receive endpoint | Compile error (distinct types) |
 | Task blocked forever on a live peer | Remains `Blocked`; no CPU consumed |
 
@@ -234,3 +268,4 @@ fn try_receive(ep: Endpoint, buf: &mut [u8]) -> Result<usize, Status>;
 | 2026-11-12 | Initial draft: byte FIFO, kernel-owned and copied, atomic sends, blocking plus try variants, immediate discard on peer death, manifest-based pairing, typed views in `stdlib`. |
 | 2026-11-13 | Stream names are unique application-wide (S11); one sender and one receiver are fixed, a shared type would be a separate addition; `stdlib` framing uses length prefixes by default and newline delimiters for text; explicit close is deferred to v2 with the constraint that closed state is independent of owner lifetime. |
 | 2026-11-13 | Stream names are `string[32]` matching `[a-z][a-z0-9_]*` and capacities are `1..=65536` bytes (S12). |
+| 2026-11-15 | Implemented. Dynamic loading replaces the static "unmatched is a load error" rule (S8): an endpoint is created when its task loads and waits for a later peer, so a sender may fill a waiting stream and a receiver blocks on it. A same-direction duplicate, a capacity mismatch, or a declaration against a closed stream is the load error. Handles are `(generation, index)`; termination closes the owner's sides, discards queued bytes and frees the buffer when no side remains. Explicit close is still v2. |
