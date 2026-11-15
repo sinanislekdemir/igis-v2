@@ -200,6 +200,18 @@ def main():
         qmp = Qmp(socket_path, timeout=args.timeout)
         # The shell echoes `shell> ` once its child is done.
         serial.wait_for(r"shell> ", timeout=args.timeout)
+
+        if args.no_tablet:
+            # No absolute device: prove the PS/2 fallback drives the pointer.
+            process.stdin.write(b"run mouse\n")
+            process.stdin.flush()
+            serial.wait_for(r"mouse: ok", timeout=60)
+            process.stdin.write(b"exit\n")
+            process.stdin.flush()
+            serial.wait_for(r"bye", timeout=20)
+            print("\n[harness] no tablet: PS/2 fallback proved (mouse: ok)")
+            return 0
+
         process.stdin.write(b"run tablet\n")
         process.stdin.flush()
 
