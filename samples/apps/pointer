@@ -1,0 +1,81 @@
+unit pointer;
+
+// Diagnostic app (M2.2): prints the machine-wide pointer position whenever it
+// changes, so a host-side script can compare injected motion with the guest's.
+//
+//   run pointer
+//
+// It samples for about ten seconds and then exits `Ok`. Output is one line per
+// change: `pointer: x y buttons`.
+
+uses core, syslib;
+
+const
+  RunMs = 10000;
+
+var
+  out: string[32];
+  x: int;
+  y: int;
+  buttons: uint;
+  last_x: int;
+  last_y: int;
+  last_buttons: uint;
+  started: uint;
+  now: uint;
+  elapsed_ms: uint;
+  used: int;
+
+procedure say_int(value: int);
+begin
+  used := core.format_int_into(out, value, uint(10), uint(0));
+  core.write(out);
+end;
+
+procedure report();
+begin
+  core.write("pointer: ");
+  say_int(x);
+  core.write(" ");
+  say_int(y);
+  core.write(" ");
+  say_int(int(buttons));
+  core.write("\n");
+end;
+
+procedure main(args: const string[1024]);
+begin
+  x := syslib.pointer_x();
+  y := syslib.pointer_y();
+  buttons := syslib.pointer_buttons();
+  report();
+  last_x := x;
+  last_y := y;
+  last_buttons := buttons;
+
+  started := core.clock();
+  elapsed_ms := uint(0);
+  while elapsed_ms < uint(RunMs) do
+  begin
+    x := syslib.pointer_x();
+    y := syslib.pointer_y();
+    buttons := syslib.pointer_buttons();
+    if x <> last_x or y <> last_y or buttons <> last_buttons then
+    begin
+      report();
+      last_x := x;
+      last_y := y;
+      last_buttons := buttons;
+    end;
+
+    // Sample about once per millisecond: spin until the clock ticks. The
+    // scheduler preempts at the quantum, and the shell is blocked on this task.
+    now := core.clock();
+    while core.clock() = now do
+      used := 0;
+    now := core.clock();
+    elapsed_ms := (now - started) div uint(1000000);
+  end;
+
+  core.write("pointer: done\n");
+end;

@@ -56,6 +56,15 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
   deterministic `syslib.inject_event` for headless tests (documented as debug-only).
 - [ ] **M2.2.5** Proof app `samples/apps/events`: injected pointer moves and clicks and a
   few keys, printed in one claim, with `get_pixel` cursor assertions.
+- [ ] **M2.2.6** Absolute pointer: PCI config-space scan, UHCI host controller, HID
+  `usb-tablet` (SET_ADDRESS/SET_CONFIGURATION, boot protocol, absolute X/Y scaled to the
+  screen), QEMU `-usb -device usb-tablet`, PS/2 kept as the fallback, `syslib.pointer_source()`
+  and a boot line. Fixes lost motion in bursts and the host-window scale mismatch, because
+  an absolute report carries the current position. Proof: QMP `abs` events land on exact
+  pixels headless. (Chosen 2026-11-16; see Q49.)
+- [ ] **M2.2.7** PS/2 aux IRQ12: drain on interrupt instead of 1 kHz polling, so the
+  relative fallback stops dropping packets in bursts (Q49 measured 346 of 600 px with the
+  burst test); re-run the burst test to confirm one-for-one.
 
 ### M2.3 — window service
 
