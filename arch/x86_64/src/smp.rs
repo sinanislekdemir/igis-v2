@@ -9,6 +9,11 @@
 //!
 //! Nothing here allocates. The per-core stacks are static `.bss`, so an AP can
 //! start within a few microseconds of its SIPI and needs no allocator.
+//!
+//! Each [`ApStack`] is a not-present guard frame followed by the stack body
+//! (ADR 0006, spec 0002 H2). The boot core clears the guard's PTE — through
+//! `kernel::guard` over [`crate::paging`] — before the SIPIs are sent; the
+//! trampoline and the TSS use the top of the body, never the guard.
 
 use core::ptr::addr_of;
 
@@ -17,8 +22,9 @@ use core::ptr::addr_of;
 /// is the identity software sees (`syslib.cpu_id`).
 pub const MAX_CORES: usize = 8;
 
-/// Kernel stack an AP runs on, per core. Static and unguarded; the boot core
-/// keeps its guarded 256 KiB stack (`stack.rs`).
+/// Kernel stack an AP runs on, per core. Static; the boot core keeps its
+/// guarded 256 KiB stack (`stack.rs`), and every AP stack has its own guard
+/// frame ahead of the body (below).
 ///
 /// It must cover the compiler: every core services the request queue before a
 /// claim (spec 0007, "Services and task creation"), so any core can compile an
@@ -52,22 +58,47 @@ extern "C" {
     static pml4: u8;
 }
 
+/// One AP kernel stack: a not-present guard frame, then the body. `repr(C)`
+/// fixes the guard at offset 0 and the body immediately above it; the runtime
+/// addresses are taken with `addr_of!`, never by forming a reference.
 #[repr(C, align(4096))]
-struct ApStack([u8; AP_STACK_BYTES]);
+struct ApStack {
+    guard: [u8; 4096],
+    body: [u8; AP_STACK_BYTES],
+}
 
 /// One kernel stack per core, including the boot core's unused entry (index 0
 /// keeps the table trivially indexable by core index).
-static mut AP_STACKS: [ApStack; MAX_CORES] = [const { ApStack([0; AP_STACK_BYTES]) }; MAX_CORES];
+static mut AP_STACKS: [ApStack; MAX_CORES] = [const {
+    ApStack {
+        guard: [0; 4096],
+        body: [0; AP_STACK_BYTES],
+    }
+}; MAX_CORES];
 
 /// The vector a SIPI must carry to start an AP at [`AP_TRAMPOLINE`].
 pub const fn trampoline_vector() -> u8 {
     (AP_TRAMPOLINE >> 12) as u8
 }
 
-/// Top of the AP kernel stack for `index`, 16-byte aligned.
+/// The guard frame below `index`'s stack, 4 KiB aligned.
+///
+/// The boot core makes it not present before the SIPIs are sent, so an AP stack
+/// overflow is a `#PF` on the guard instead of a silent write into the previous
+/// core's stack. Index 0 is the boot core's unused static entry; its real stack
+/// comes from the frame allocator.
+pub fn guard_frame(index: usize) -> u64 {
+    // SAFETY: `addr_of!` forms no reference; the address of a static is stable
+    // for the lifetime of the system, and `index < MAX_CORES` at both call
+    // sites (the AP entry and the boot core's bring-up).
+    unsafe { addr_of!(AP_STACKS[index].guard) as *const u8 as u64 }
+}
+
+/// Top of the AP kernel stack body for `index`, 16-byte aligned.
 pub fn stack_top(index: usize) -> u64 {
-    let base = addr_of!(AP_STACKS) as *const u8 as u64;
-    (base + ((index + 1) * AP_STACK_BYTES) as u64) & !0xf
+    // SAFETY: as above; `addr_of!` does not materialise a `&mut`.
+    let base = unsafe { addr_of!(AP_STACKS[index].body) as *const u8 as u64 };
+    (base + AP_STACK_BYTES as u64) & !0xf
 }
 
 /// Copies the trampoline and fills the parameter page.

@@ -279,7 +279,9 @@ On budget expiry or an unrecovered fault:
    the current core owns it).
 2. `fault` runs, then `exit`, on the current core's kernel stack under emergency budgets.
 3. Stream endpoints close; queued data is discarded (`0006-streams.md`).
-4. `code`, `state`, `stack` and the guard page are returned to `mm` as a unit.
+4. The guard page's present bit is restored, then `code`, `state`, `stack` and the guard
+   page are returned to `mm` as a unit (a frame freed while still unmapped would fault on
+   the first touch of its next life).
 5. The task record is freed to the kernel pool.
 
 There are no zombies. A terminated task leaves nothing behind.
@@ -296,8 +298,9 @@ There are no zombies. A terminated task leaves nothing behind.
   service a queued request. Only one core compiles at a time — a core claims a request by
   taking the service lock, and other cores skip the opportunity.
 - A request creates a task: the service resolves the path in ext2, reads the source,
-  compiles it, allocates `code`/`state`/`stack`/`fpu`, builds the task record, and enqueues
-  it as `Runnable`.
+  compiles it, allocates `code`/`state`/`stack` plus the stack's guard frame/`fpu`, builds
+  the task record, and enqueues it as `Runnable`. The guard is installed before the task
+  can be claimed by any core.
 - A request path is validated before the image is searched. It must be relative to the
   image root, at most 256 bytes, with no leading `/`, no empty component, no trailing `/`
   and no `..` component. A malformed path returns `Status.Invalid`; a well-formed path that
@@ -332,9 +335,9 @@ Each core has:
 
 - a kernel stack used by interrupt entry, `fault`/`exit`, the service opportunity and the
   loop itself: 256 KiB on every core, with a not-present guard frame below the boot
-  core's (Q42; `arch/x86_64/src/stack.rs`). An AP's static `.bss` stack matches the size
-  because any core may compile a request and the compiler's bounded recursion needs up to
-  ~200 KiB. Guards for AP stacks are future work,
+  core's (Q42) and below every AP's static `.bss` stack (installed before the SIPIs;
+  `kernel/src/guard.rs`). An AP stack matches the boot core's size because any core may
+  compile a request and the compiler's bounded recursion needs up to ~200 KiB,
 - a pointer to the currently claimed task (or none),
 - a quantum counter and the last budget check,
 - scratch space that must never hold application state across a release. The
@@ -490,3 +493,4 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 2026-11-15 | Per-core schedulers: every online core runs the claim/quantum/release loop over the global set, per-core verifier scratch and loop counters, IPI wake for idle cores (`sti; hlt`, `need_resched` before the IPI), a boot-core shutdown that stops the APs and prints per-core totals, and a slot reservation plus an in-service marker so `wait` never races a spawn or a compile. |
 | 2026-11-15 | Realtime class implemented: `core.realtime_on`/`core.heartbeat` (builtins 11/12), admission by a CAS counter against the online core count, realtime-first claim, an inner per-core quantum loop that does not release a realtime task, a one-second deadline in non-blocked time (`HEARTBEAT_NS`), `Faulted(WatchdogTimeout)` at the boundary, and the admission slot released only at termination. `samples/apps/{realtime,beat,spin}` exercise promotion, `Full` on a single core, and the watchdog. |
 | 2026-11-15 | Stream blocking added as a third `WaitFor`: `WaitFor::Stream(handle)` with `task::wake_stream`, sender/receiver/close wake rules and a post-block `stream::ready_for` recheck that closes the failed-attempt-to-block race. Sends and receives take the stream lock without any slot lock and wake after releasing it. |
+| 2026-11-16 | Per-task stack guards: placement takes `stack_len + 4096` contiguous frames, the lowest is unmapped and excluded from the region, and reclaim restores it before returning guard and stack as one unit on every destruction path (failed spawn, verifier rejection, exit, kill, fault, stale eviction). Every PTE change is followed by a CR3 reload and an IPI shootdown to all online cores. |

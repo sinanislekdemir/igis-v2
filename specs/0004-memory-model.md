@@ -78,7 +78,7 @@ A task owns a small, fixed set of regions rather than one undifferentiated arena
 | `code` | read-only, NX | task | bytecode and constants; one copy per instance in the first milestone |
 | `state` | read-write, NX | task | all top-level variables at static offsets |
 | `stack` | read-write, NX | task | native stack for interpreter frames and locals |
-| guard page | not present | task | one page below the stack's growing end |
+| guard page | not present | task | one extra frame immediately below `stack`; allocated with it, excluded from the region, restored before free |
 | `fpu` | kernel-only | task | 512-byte FXSAVE image of the task's SSE state; the application never names it |
 | stream buffers | kernel-only | endpoint | byte FIFO storage; the app sees only endpoint handles |
 | `syslib` regions | kernel-only | mapping or buffer | MMIO windows and DMA buffers, accessed through typed handles |
@@ -247,6 +247,16 @@ Each task gets a native stack, sized in the manifest, with a guard page at the l
 depth is bounded by the declared stack size, and overflow terminates the task rather than
 corrupting memory.
 
+The guard is one **extra** frame, not part of the declared size: allocation is
+`stack_len + 4096` contiguous frames, the lowest frame is unmapped, and `stack.start` is
+`allocation_base + 4096` with `len = stack_len` exactly. The interpreter's frame-extent
+check against `stack.len` is therefore unchanged and is the legal overflow path; the guard
+only catches a kernel bug that writes below the region. Reclaim returns guard and stack as
+one unit (spec 0007): the guard's present bit is restored before the frames are returned
+to the allocator, on every path that destroys a task (normal exit, kill, fault, failed
+`spawn`, verifier rejection, stale-slot eviction). A task that cannot get the extra
+contiguous frame fails placement with `Status.Full`, as any other region would.
+
 An explicit, kernel-allocated frame stack is the alternative; it would allow precise depth
 accounting and resumable tasks, at the cost of a second stack abstraction. Not proposed
 for v1.
@@ -324,6 +334,7 @@ milestone. Raw physical addresses never reach application-visible values.
 | D15 | Exact per-type alignment rules | Compiler detail; documented with the layout algorithm. |
 | D16 | Whether `code` sharing ever returns | Future optimisation; requires a read-only shared region and a lifetime rule. |
 | D17 | Where the floating-point context lives | **Resolved** — a kernel-owned 512-byte FXSAVE region per task, saved on release and restored on claim (ADR 0018). |
+| D18 | Whether the guard frame belongs to the stack region | **Resolved** — one extra frame below the region, excluded from `stack.len`, present-bit restored before free (C6). |
 
 ## Changelog
 
@@ -334,3 +345,4 @@ milestone. Raw physical addresses never reach application-visible values.
 | 2026-11-03 | Destination-form construction specified: `dst := a + b` compiles to `concat_into`, with static capacity proof and no temporaries. |
 | 2026-11-12 | Resolved D2-D14: no first-class slices, one `state` region, per-instance code, frames for large locals, compiler-computed alignment, `syslib`-owned MMIO/DMA, build-parameter capacities, `bytes`/`string` split, at-least-N parameters. Added task-level ownership for work stealing (ADR 0011) and ext2 delivery (ADR 0015). |
 | 2026-11-13 | Added the `fpu` region: a kernel-owned 512-byte FXSAVE image per task, outside the application's nameable regions; C9 now includes SSE state (ADR 0018, D17). |
+| 2026-11-16 | C6 implemented: the guard is one extra frame below the declared stack, excluded from `stack.start`/`stack.len`, allocated as `stack_len + 4096` and restored on every free path (D18). |

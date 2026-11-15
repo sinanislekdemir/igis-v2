@@ -1,5 +1,7 @@
-//! A tiny spin lock. The kernel is single-core today, but the console and the
-//! interrupt path already share state, and SMP arrives later.
+//! A tiny spin lock for shared kernel state (console, runnable table, service
+//! queue, frame allocator, guard tables). No interrupt handler that could
+//! interrupt a holder may take one: the fault path uses [`SpinLock::try_lock`]
+//! so a reporting fault cannot wait on its own interrupted code.
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
@@ -34,6 +36,17 @@ impl<T> SpinLock<T> {
             core::hint::spin_loop();
         }
         SpinLockGuard { lock: self }
+    }
+
+    /// Takes the lock only if it is free.
+    ///
+    /// The fault path uses this: a `#PF` may have interrupted code that holds
+    /// the lock, and the handler must report and halt rather than wait forever.
+    pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
+        self.locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| SpinLockGuard { lock: self })
     }
 }
 

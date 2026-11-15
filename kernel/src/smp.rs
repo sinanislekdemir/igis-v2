@@ -13,9 +13,10 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
-use arch_x86_64::{apic, gdt, idt, pit, smp as arch};
+use arch_x86_64::{apic, gdt, idt, paging, pit, smp as arch};
 
 use crate::clock;
+use crate::guard::{self, GuardKind};
 use crate::println;
 
 /// Largest number of cores, from the architecture layer.
@@ -26,6 +27,21 @@ const ONLINE_WAIT_NS: u64 = 100_000_000;
 
 /// How long the boot core waits for stop acknowledgements.
 const STOP_WAIT_NS: u64 = 1_000_000_000;
+
+/// How long a guard PTE change waits for the other online cores to flush
+/// (ADR 0006, spec 0002 H2).
+///
+/// Every target core reloads CR3 from its wake-IPI handler, which runs with
+/// interrupts enabled; the wait is a liveness bound, not a correctness grace.
+/// A core that never acknowledges is a wedged core, and the boot self-check
+/// still names what was installed.
+const FLUSH_WAIT_NS: u64 = 100_000_000;
+
+/// Published generation of the most recent TLB shootdown.
+static FLUSH_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// The last generation each core has flushed.
+static FLUSH_SEEN: [AtomicU64; MAX_CORES] = [const { AtomicU64::new(0) }; MAX_CORES];
 
 /// Per-core state. `idle` and `need_resched` are the wake-up protocol: a
 /// producer publishes work first, then claims an idle core by clearing `idle`
@@ -134,6 +150,108 @@ pub fn take_kick(index: usize) -> bool {
     CORES[index].need_resched.swap(false, Ordering::SeqCst)
 }
 
+/// Flushes every online core's TLB after a guard PTE change.
+///
+/// The caller has already written the entry; this reloads the local CR3 and
+/// asks every other online core to do the same through the existing wake IPI.
+/// [`on_ipi`] is the receiving half. A guard frame may carry a stale present
+/// translation on another core from an earlier life as a task stack: clearing
+/// the PTE locally is not enough, because that core would still be allowed to
+/// write the not-present frame. The same applies in reverse to [`guard`]'s
+/// `unguard`, where a stale not-present entry would fault on a frame the
+/// allocator has just handed out again.
+///
+/// Called from `kernel::guard` with no guard lock held. Sending an IPI does not
+/// take any lock the handler needs, so two cores flushing concurrently simply
+/// acknowledge each other.
+pub fn flush_all() {
+    let generation = FLUSH_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    paging::reload_cr3();
+    let self_index = core_index();
+    FLUSH_SEEN[self_index].store(generation, Ordering::SeqCst);
+
+    // Snapshot the targets before sending: a core that comes online after this
+    // point loaded CR3 in the trampoline and has no stale translation to flush,
+    // so waiting for it would only stall for the deadline.
+    let mut targets = [false; MAX_CORES];
+    let mut outstanding = 0usize;
+    for index in 0..MAX_CORES {
+        if index == self_index || !is_online(index) {
+            continue;
+        }
+        targets[index] = true;
+        outstanding += 1;
+        apic::send_ipi(apic_id_of(index), apic::WAKE_VECTOR);
+    }
+    if outstanding == 0 {
+        return;
+    }
+
+    let deadline = clock::now_ns().saturating_add(FLUSH_WAIT_NS);
+    loop {
+        let done = (0..MAX_CORES).all(|index| {
+            !targets[index] || FLUSH_SEEN[index].load(Ordering::SeqCst) >= generation
+        });
+        if done || clock::now_ns() >= deadline {
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// The wake-IPI handler's guard half: reload CR3 when a newer flush is pending.
+///
+/// Runs on every wake IPI, including ordinary scheduling kicks, and is
+/// idempotent: a generation already seen costs one atomic load and no flush.
+pub fn on_ipi() {
+    let core = core_index();
+    let generation = FLUSH_GEN.load(Ordering::SeqCst);
+    if FLUSH_SEEN[core].load(Ordering::SeqCst) < generation {
+        paging::reload_cr3();
+        FLUSH_SEEN[core].store(generation, Ordering::SeqCst);
+    }
+}
+
+/// Installs and verifies one guard frame below each possible AP stack.
+///
+/// All `MAX_CORES - 1` static AP stacks are guarded before the SIPIs are sent,
+/// whether or not the matching APIC id reports online: an id that never reports
+/// simply leaves its guard unused. The check reads the PTEs back and proves the
+/// allocator did not change (guards are static `.bss`, so they must not consume
+/// frames). Any mismatch halts with a message rather than leaving a stack
+/// silently unguarded.
+fn install_ap_guards() {
+    let free_before = crate::frame::free_frames();
+    for index in 1..MAX_CORES {
+        let frame = arch::guard_frame(index);
+        if !guard::guard(frame, GuardKind::ApCore, index as u64) {
+            println!("guards: cannot unmap the guard below AP core {index}; halting");
+            arch_x86_64::halt();
+        }
+        if !guard::is_guarded(frame) || !guard::check(frame) {
+            println!("guards: AP core {index} guard self-check failed; halting");
+            arch_x86_64::halt();
+        }
+    }
+
+    if !guard::boot_guard().is_some_and(|info| guard::check(info.frame)) {
+        println!("guards: boot core guard self-check failed; halting");
+        arch_x86_64::halt();
+    }
+    let free_after = crate::frame::free_frames();
+    if free_after != free_before {
+        println!("guards: self-check failed: free frames {free_before} -> {free_after}; halting");
+        arch_x86_64::halt();
+    }
+
+    println!(
+        "guards: boot {}, ap {}, tables {}",
+        guard::count_of(GuardKind::BootCore),
+        guard::count_of(GuardKind::ApCore),
+        guard::table_count()
+    );
+}
+
 /// Counts one observed wake-up on `index`.
 pub fn note_wake(index: usize) {
     CORES[index].wakes.fetch_add(1, Ordering::SeqCst);
@@ -200,6 +318,13 @@ pub fn start() -> usize {
     if online_count() >= MAX_CORES {
         return online_count();
     }
+
+    // Every AP stack's guard is installed before the SIPIs: an AP starts within
+    // microseconds on its static stack, so the frame must already be unmapped
+    // when it arrives (ADR 0006, spec 0002 H2). The self-check inside the
+    // function reads the PTEs back and halts on a mismatch.
+    install_ap_guards();
+
     // SAFETY: paging is on, the low 1 MiB is reserved by the frame allocator,
     // and nothing else has written the trampoline or parameter pages.
     if !unsafe { arch::upload(ap_entry) } {

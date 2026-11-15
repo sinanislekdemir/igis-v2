@@ -3,7 +3,7 @@
 Operational guide for humans and coding agents working in this repository.
 Keep this file short and current. It points at documents; it does not duplicate them.
 
-**Last updated:** 2026-11-15
+**Last updated:** 2026-11-16
 
 ## What this is
 
@@ -180,8 +180,20 @@ constraints learned there.
   stream so the producer exits only after the consumer drained) proves the length prefix,
   the typed `u64` view, both `CapacityExceeded` paths and the close. Every core's kernel
   stack is now 256 KiB: a compile on an AP overflowed the old 64 KiB stack into the
-  neighbouring `.bss`. The next pieces are per-task stack guards and `f64` text; explicit
-  close is v2.
+  neighbouring `.bss`. Stack guards are now complete (`kernel/src/guard.rs` over
+  `arch/x86_64/src/paging.rs`): the boot stack, all seven AP `.bss` stacks and every task
+  stack have a not-present 4 KiB frame. A cache of 32 4 KiB tables splits each 2 MiB page
+  once and keeps the neighbouring pages present, so several guards share one table; a
+  96-entry registry lets `#PF` print `stack guard: task N` / `ap core N` / `boot core`.
+  Every PTE change is followed by a local CR3 reload and an IPI TLB shootdown to all online
+  cores, because a frame may carry a stale translation from an earlier life on another
+  core. A task stack is `stack_len + 4096` contiguous frames: the lowest frame is the
+  guard, `regions.stack` starts one frame above it with exactly the manifest length, so the
+  interpreter's `StackOverflow` check is unchanged; `reclaim` restores the guard and
+  returns guard + stack as one unit on every destruction path. `samples/apps/deep` proves
+  `run deep` reports `child: faulted StackOverflow`; a hardware guard hit is a hard backstop
+  that halts with the guard named. The next pieces are `f64` text and recovery from a
+  hardware guard hit (Q47); explicit close is v2.
 
 ## Ground rules
 
@@ -323,6 +335,8 @@ host tools are unaffected.
 | `core.spawn`/`wait`/`kill` return `Status`; `spawn` takes `var diag: Diagnostic` and `wait` takes `var reason: ExitReason` | spec 0005, Q43 |
 | `core.run` is spawn + wait with the pending id in the `Machine`; a failed request carries its `Diagnostic` in the exit ring for `run`, while `wait` sees `Faulted(IoError)` | specs 0003, 0005, 0007 |
 | Compiler nesting limit 32; post-boot kernel stack is 256 KiB with a guard frame | Q42, spec 0002, `arch/x86_64/src/stack.rs` |
+| Stack guards for boot, AP and task stacks: 32-table cache, 96-frame registry, CR3 + IPI TLB shootdown after every PTE change | ADR 0006, spec 0002 H2, spec 0004 C6, `kernel/src/guard.rs`, `arch/x86_64/src/paging.rs` |
+| Task stack allocation is `stack_len + 1` frame: guard excluded from the region, present bit restored before free, reclaim returns guard + stack as one unit | specs 0004, 0007 |
 | Records: nominal, declaration-order layout with every field aligned to 8; `Diagnostic` predeclared at fixed `abi::layout` offsets | spec 0003, spec 0008 |
 | Sum types: nominal, 8-byte tag at 0 plus the largest payload at 8 (rounded); destination-driven construction; exhaustive `case` with by-value arm-local payload bindings; `ExitReason` is `Ok | Killed | Faulted(code: FaultCode)`; `FaultCode` variants are qualified | spec 0003, spec 0008 |
 | `stdlib` is embedded source (`stdlib/stdlib.ig`), compiled into the application's package; `stdlib.*` is qualified, the function table is library-first, line-table unit ids are 0 (app) / 1 (stdlib) | spec 0003, spec 0008 |
@@ -399,3 +413,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-15 | Realtime class implemented (ADR 0016): `core.realtime_on()`/`core.heartbeat()` (builtins 11/12) through `Host::realtime_on`/`Host::heartbeat` defaults, admission by a CAS counter against `smp::online_count()`, realtime-first claim, no quantum preemption (an inner per-core loop keeps the claimed value), no total budget, a one-second deadline in non-blocked `budget_ns` (`HEARTBEAT_NS`) terminated as `Faulted(WatchdogTimeout)`, and admission released only in `terminate`. `samples/apps/{realtime,beat,spin}` prove promotion, `Full` on `-smp 1`, and the watchdog; the shell reports `WatchdogTimeout`. |
 | 2026-11-15 | Streams implemented (spec 0006, amended): `in_stream[N]`/`out_stream[N]` top-level state variables whose name is the stream name; handles occupy the first `8 * endpoint_count` state bytes and the manifest lists descriptors in declaration order. The loader opens or pairs endpoints before placement (waiting semantics for an absent peer; same-direction duplicate, capacity mismatch and closed-stream declarations are load errors), writes handles into `state`, and rolls back on failure. A kernel table of 32 records over a 256 KiB static arena with a first-fit free list holds the buffers; handles are `(generation, index)`. `core.send`/`try_send` and `core.recv`/`try_recv` are four new opcodes; blocking is `WaitFor::Stream(handle)` with sends waking receivers, receives waking senders and close waking both. `samples/apps/{streams,pipe_in,pipe_out}` prove in-order delivery and `Closed`; `streams_bad` proves the two load errors; `bad_send`/`bad_recv`/`bad_name` cover the compile errors. |
 | 2026-11-15 | `stdlib` framing layer (spec 0006, "Receive" and "Interfaces"): `recv_exact`, `send_frame`, `recv_frame_into`, `send_line`, `recv_line_into`, `send_u64`, `recv_u64` and `send_bytes` as ordinary language code over `const in_stream[1]`/`const out_stream[1]` parameters (the declared capacity of a stream parameter is not checked, so one helper serves every capacity). Each helper stages into a local `bytes[256]` and publishes the value with one copy, so a failure leaves the destination untouched; `send_frame`/`send_line`/`send_u64` build the whole message and send it atomically; `recv_line_into` strips CRLF and keeps consuming an overlong line to stay synchronised. Receives are one byte wide: `core.recv` returns up to the destination capacity and there is no pushback, so a wider chunk would steal the peer's next message (the spec's original loop was corrected). `pipe_out`/`pipe_in` now use `send_line`/`recv_line_into`; `samples/apps/frames` (`frame_in` + `frame_out` on `frames`/`frames_ack`) proves the length prefix, the `u64` view, both `CapacityExceeded` paths and the close, and the host `ConsoleHost` has a loopback FIFO so `langhost` tests the views deterministically. Also fixed an SMP bug this exposed: AP kernel stacks were 64 KiB, but any core may compile a request and a `stdlib`-using compile needs ~60 KiB, so the compiler overflowed an AP stack into the neighbouring `.bss` (random `#UD`/`#PF`). `AP_STACK_BYTES` is now 256 KiB, matching the boot core. |
+| 2026-11-16 | Stack guards implemented for boot, AP and task stacks (spec 0002 H2, spec 0004 C6, ADR 0006). `arch/x86_64/src/paging.rs` gains `split_huge_page`, `set_pte_present`, `pte_present`, `flush_page` and `reload_cr3`; `kernel/src/guard.rs` owns a 32-entry 4 KiB table cache keyed by 2 MiB base and a 96-frame registry, and `install_guarded` moved there from `arch` (still the boot stack's entry point). Each `ApStack` is now guard + 256 KiB body; all seven AP guards are installed and PTE-checked before the SIPIs, and `smp::start` prints `guards: boot 1, ap 7, tables M`, halting on a mismatch or a changed free-frame count. Every PTE change does a local CR3 reload plus a generation-tagged wake-IPI TLB shootdown and bounded wait. Task placement allocates `stack_len + 4096` contiguous frames, the lowest is the guard, `regions.stack` starts one frame above with the exact manifest length, and `Region::free` unguards before `free_contiguous` on every destruction path. `#PF` prints `stack guard: task N` / `ap core N` / `boot core` before the dump. `samples/apps/deep` proves `run deep` reports `child: faulted StackOverflow` (the interpreter path, not the hardware guard). |

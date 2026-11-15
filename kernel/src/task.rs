@@ -22,6 +22,7 @@ use abi::Status;
 use interpreter::Machine;
 
 use crate::frame;
+use crate::guard;
 use crate::println;
 use crate::sync::SpinLock;
 
@@ -84,9 +85,16 @@ pub enum TaskClass {
 /// One physically contiguous task region.
 #[derive(Clone, Copy)]
 pub struct Region {
+    /// First usable byte. For a guarded stack this is one frame above `base`.
     pub start: u64,
+    /// Frames the region itself uses (the guard frame is not counted).
     pub frames: usize,
+    /// Declared length in bytes, exactly the manifest size.
     pub len: usize,
+    /// Allocation base and total frames, so `free` returns guard + region as
+    /// one unit (spec 0007). Equal to `start`/`frames` without a guard.
+    base: u64,
+    span: usize,
 }
 
 impl Region {
@@ -95,7 +103,51 @@ impl Region {
         let len = len.max(1);
         let frames = (len + frame::FRAME_SIZE as usize - 1) / frame::FRAME_SIZE as usize;
         let start = frame::alloc_contiguous(frames).ok_or(Status::Full)?;
-        Ok(Region { start, frames, len })
+        Ok(Region {
+            start,
+            frames,
+            len,
+            base: start,
+            span: frames,
+        })
+    }
+
+    /// Allocates `len` usable bytes plus one not-present guard frame below them
+    /// (spec 0004 C6, ADR 0006).
+    ///
+    /// The lowest frame is unmapped before the task can be claimed; `start` and
+    /// `len` describe only the stack above it, so the interpreter's bounds
+    /// checks and its `StackOverflow` fault are unchanged and never rely on the
+    /// hardware guard. The guard is restored in [`Region::free`] *before* the
+    /// frames are returned to the allocator: a frame left unmapped would fault
+    /// on the first touch of its next life.
+    ///
+    /// The allocation is `frames + 1` contiguous frames; failing to find that
+    /// run is `Status::Full`, as for any other region.
+    fn allocate_guarded(len: usize, task: u64) -> Result<Self, Status> {
+        let len = len.max(1);
+        let frames = (len + frame::FRAME_SIZE as usize - 1) / frame::FRAME_SIZE as usize;
+        let span = frames + 1;
+        let base = frame::alloc_contiguous(span).ok_or(Status::Full)?;
+        if !guard::guard(base, guard::GuardKind::Task, task) {
+            frame::free_contiguous(base, span);
+            return Err(Status::Full);
+        }
+        // Read the entry back: a stack whose guard silently stayed present is
+        // worse than a placement failure. The page above the guard is the
+        // stack's first frame, which must still be mapped.
+        if !guard::check(base) {
+            guard::unguard(base);
+            frame::free_contiguous(base, span);
+            return Err(Status::Full);
+        }
+        Ok(Region {
+            start: base + frame::FRAME_SIZE,
+            frames,
+            len,
+            base,
+            span,
+        })
     }
 
     pub fn as_slice(&self) -> &[u8] {
@@ -111,8 +163,21 @@ impl Region {
         unsafe { core::slice::from_raw_parts_mut(self.start as *mut u8, self.len) }
     }
 
+    /// Returns the whole allocation as one unit, restoring a guard first.
+    ///
+    /// Every destruction path reaches this through [`Task::reclaim`]: normal
+    /// exit, kill, fault, a failed `spawn`, a verifier rejection and a stale
+    /// slot eviction. A failure to restore the guard is a kernel bug (the frame
+    /// would be handed out while still unmapped), so it halts.
     fn free(self) {
-        frame::free_contiguous(self.start, self.frames);
+        if self.base != self.start && !guard::unguard(self.base) {
+            println!(
+                "guard: cannot restore the frame at {:#x} (task stack); halting",
+                self.base
+            );
+            arch_x86_64::halt();
+        }
+        frame::free_contiguous(self.base, self.span);
     }
 }
 
@@ -184,7 +249,7 @@ impl Task {
                 return Err(status);
             }
         };
-        let stack = match Region::allocate(stack_len) {
+        let stack = match Region::allocate_guarded(stack_len, id) {
             Ok(stack) => stack,
             Err(status) => {
                 code.free();

@@ -45,6 +45,47 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | Q41 | Float text beyond fixed decimal | shortest round-trip formatting and full decimal parsing are deferred | when float output must round-trip losslessly |
 | Q46 | Moving the checked slice into `stdlib` | **Blocked, not pending.** `core.substr_into` cannot move: the destination capacity must be a *call-site immediate* (the `SUBSTR` `capacity` field), while a `stdlib` helper declares concrete capacities and the language has no generics, so one helper could serve only one destination size (it would lose `split_once`'s `string[128]` head and every smaller destination). The future option is a buffer parameter that carries its **runtime capacity**, which would need a language change. Until then the checked slice stays in `core` and there is one slicing primitive, not two (spec 0003, "Slicing and search") | only if runtime-capacity buffer parameters are added |
 
+## E. Fault handling
+
+| # | Question | Options / recommendation | Trigger |
+|---|----------|--------------------------|---------|
+| Q47 | Recovering a task from a hardware guard hit | not in M1: a `#PF` inside a known guard names the stack and halts. The legal overflow is the interpreter's `Faulted(StackOverflow)`, which the guard never sees. Recovering one task from the fault path needs the task id in the handler, a safe abandon of the faulted kernel frame, and a reason the interpreter cannot already produce — and it would weaken the `fault`/`exit` budget rule (ADR 0010) | if a kernel-side stack bug must not take the machine down, or when per-task stack isolation replaces shared address-space assumptions |
+
+## Decided in the 2026-11-16 guards session
+
+**Per-task and per-AP stack guards (spec 0002 H2, spec 0004 C6, ADR 0006).** The one-off
+boot-stack split became shared machinery in `kernel/src/guard.rs` over
+`arch/x86_64/src/paging.rs`: `split_huge_page` (one 2 MiB page to 512 present+writable
+4 KiB entries), `set_pte_present`, `flush_page` and `reload_cr3`. A cache of **32** 4 KiB
+tables keyed by 2 MiB base makes several guards share one table (task stacks commonly do);
+a registry of **96** frames names the guard in the `#PF` report. Each `ApStack` is now
+`guard: [u8; 4096]` followed by the 256 KiB body, and all seven possible AP guards are
+installed *before* the SIPIs, so an AP never starts on an unguarded stack. A task's
+placement allocates `stack_len + 4096` contiguous frames, installs the lowest frame as the
+guard, and sets `regions.stack` to `base + 4096` with `len = stack_len`; the interpreter's
+`StackOverflow` check is unchanged. `Region::free` restores the present bit before
+returning guard + stack as one unit, and every destruction path (normal/killed/faulted
+exit, failed `spawn`, verifier rejection, stale-slot eviction) goes through
+`Task::reclaim` → `Region::free`.
+
+**SMP TLB correctness was the hard part.** A frame may have been a live task stack on
+another core before it became a guard, so clearing the PTE locally is not enough: a stale
+present translation would let that core write the guard. Every guard/unguard therefore
+does a local CR3 reload, publishes a flush generation, sends the existing wake IPI to
+every online core, and waits bounded (100 ms) for each target to reload CR3 from the IPI
+handler. The handler takes no guard lock, so two cores flushing concurrently acknowledge
+each other instead of deadlocking.
+
+The boot self-check reads the PTEs back (guard not present, the page above present),
+verifies the frame allocator's free count is unchanged, and prints
+`guards: boot 1, ap 7, tables M`; a mismatch halts with a message. A guard hit prints
+`stack guard: task N` / `ap core N` / `boot core` before the register dump. The hardware
+guard is a hard backstop: `samples/apps/deep` proves the legal path is still
+`child: faulted StackOverflow` through the interpreter. Remaining: Q47 (per-task recovery
+from a hardware guard hit) and freeing a split table when its last guard goes away (the
+32-table cache is never released in M1, so at most 32 distinct 2 MiB regions can be
+guarded over a boot).
+
 ## Decided in the 2026-11-15 SMP session
 
 **AP bring-up details (spec 0002 OQ 5) are resolved.** Discovery is by attempt, not by
@@ -84,8 +125,8 @@ hook, not an affinity.
   on that stack. `#PF` now has its own IST because an overflow cannot push an exception
   frame on the exhausted stack; the double-fault IST remains the backstop. 256 KiB (not the
   proposed 128 KiB) is required to keep the 32-level bound with ~60 KiB of headroom; a
-  larger limit needs either a larger stack or a non-recursive parser. Per-task stack guards
-  remain separate future work (spec 0002, H2).
+  larger limit needs either a larger stack or a non-recursive parser. Per-task and per-AP
+  guards were added later (see the 2026-11-16 guards session, spec 0002 H2).
 
 ## Decided in the 2026-11-13 session
 
@@ -406,7 +447,8 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
 15. ~~Kernel stack bound for compilation~~ — done (Q42): a fixed 32-level compiler nesting
     limit with a diagnostic, plus a dedicated 256 KiB guarded kernel stack for everything
     after early boot (one not-present frame, 2 MiB page split to 4 KiB PTEs, `#PF` on its
-    own IST). The boot stack is now early-boot only. Per-task stack guards stay future work.
+    own IST). The boot stack is now early-boot only. Per-task and per-AP guards landed in
+    the 2026-11-16 guards session.
 16. ~~Enums and the `Status` ABI~~ — done: `type Name = (Variant, ...)` with nominal
     types, ordinals `0..n-1`, same-enum assignment/comparison and ordinal ordering,
     `int(enum)` and range-checked `EnumName(int)` (`fault(Overflow)`, opcode `enum_cast`,
@@ -488,5 +530,13 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
     proves the binary paths end to end, and the host has a loopback FIFO for deterministic
     tests. The lane also fixed an SMP bug it exposed: AP kernel stacks were 64 KiB while any
     core may compile, so a `stdlib`-using compile overflowed into the neighbouring `.bss`;
-    every core's stack is now 256 KiB. Next: per-task stack guards (and guards for AP
-    stacks), `f64` text, then explicit close (Q10).
+    every core's stack is now 256 KiB. Per-task and per-AP guards landed in the
+    2026-11-16 guards session. Next: `f64` text, then explicit close (Q10), with Q47 for
+    recovery from a hardware guard hit.
+25. ~~Per-task and per-AP stack guards~~ — done: a shared split-table cache and guard
+    registry, AP guards installed before the SIPIs, one guard frame below every task stack,
+    a CR3 + IPI TLB shootdown after each PTE change, the boot PTE/free-frame self-check
+    (`guards: boot 1, ap 7, tables M`) and a `#PF` guard line. `run deep` still reports
+    `child: faulted StackOverflow` through the interpreter. Remaining: Q47 (per-task
+    recovery from a hardware guard hit) and releasing a split table when its last guard
+    goes away.

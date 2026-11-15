@@ -7,6 +7,7 @@ mod ext2;
 mod fb;
 mod font8x8;
 mod frame;
+mod guard;
 mod mb2;
 mod module;
 mod repl;
@@ -148,7 +149,7 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
     };
     // SAFETY: the frames were just reserved, the guard is 4 KiB aligned and
     // below 4 GiB, and this runs before the boot stack is abandoned.
-    let stack = unsafe { arch_x86_64::stack::install_guarded(guard) };
+    let stack = unsafe { guard::install_guarded(guard) };
     // The boot core's TSS should name its real kernel stack, not the static AP
     // stack `gdt::init` put there (nothing runs at ring 3, but the field must
     // describe reality).
@@ -250,10 +251,15 @@ pub extern "C" fn timer_tick() {
     clock::advance_tick();
 }
 
-/// Called by the wake-IPI stub in `arch_x86_64`. The handler only acknowledges:
-/// the interrupted core re-checks the runnable set after `hlt` (spec 0007).
+/// Called by the wake-IPI stub in `arch_x86_64`.
+///
+/// The scheduling half only acknowledges: the interrupted core re-checks the
+/// runnable set after `hlt` (spec 0007). The same vector also carries the guard
+/// TLB shootdown, so the handler reloads CR3 when a newer flush is pending
+/// (`smp::flush_all`, spec 0002 H2).
 #[no_mangle]
 pub extern "C" fn wake_ipi() {
+    smp::on_ipi();
     apic::eoi();
 }
 
@@ -275,6 +281,35 @@ pub extern "C" fn exception_dispatch(frame: *const idt::InterruptFrame) -> ! {
         idt::name(frame.vector as usize),
         frame.error
     );
+
+    let (cr2, cr3): (u64, u64);
+    // SAFETY: reading control registers is legal at ring 0.
+    unsafe {
+        core::arch::asm!("mov {}, cr2", out(reg) cr2);
+        core::arch::asm!("mov {}, cr3", out(reg) cr3);
+    }
+
+    // A page fault inside a known guard names the stack that ran out. This is
+    // a hard bug backstop, not a per-task fault: the interpreter's own frame
+    // checks terminate a legal overflow with `Faulted(StackOverflow)` before
+    // the hardware guard is reachable (spec 0002 H2). Any other fault keeps the
+    // old behaviour. Both halt.
+    if frame.vector == 14 {
+        if let Some(info) = guard::describe(cr2) {
+            match info.kind {
+                guard::GuardKind::Task => {
+                    let _ = writeln!(out, "  stack guard: task {} (a kernel bug)", info.who);
+                }
+                guard::GuardKind::ApCore => {
+                    let _ = writeln!(out, "  stack guard: ap core {}", info.who);
+                }
+                guard::GuardKind::BootCore => {
+                    let _ = writeln!(out, "  stack guard: boot core");
+                }
+            }
+        }
+    }
+
     let _ = writeln!(
         out,
         "  rip={:#018x} cs={:#x} rflags={:#x} rsp={:#x} ss={:#x}",
@@ -285,13 +320,6 @@ pub extern "C" fn exception_dispatch(frame: *const idt::InterruptFrame) -> ! {
         "  rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x}",
         frame.rax, frame.rbx, frame.rcx, frame.rdx
     );
-
-    let (cr2, cr3): (u64, u64);
-    // SAFETY: reading control registers is legal at ring 0.
-    unsafe {
-        core::arch::asm!("mov {}, cr2", out(reg) cr2);
-        core::arch::asm!("mov {}, cr3", out(reg) cr3);
-    }
     let _ = writeln!(out, "  cr2={cr2:#x} cr3={cr3:#x}");
 
     arch_x86_64::halt();

@@ -254,15 +254,31 @@ chosen by the compiler; constructors write into caller-provided storage.
 ### Stacks
 
 Each task has a preallocated native stack, sized in the manifest. The interpreter's own
-frames live on this stack, so application recursion depth is bounded by the declared
+frames live in this stack, so application recursion depth is bounded by the declared
 stack size. A not-present guard page at the growing end raises a page fault even at CPL 0
-(ADR 0006, H2); a fault inside a known guard range terminates that task instead of
-panicking the kernel. Large locals are allowed in frames; the manifest declares the stack
-that must hold the worst case.
+(ADR 0006, H2). Large locals are allowed in frames; the manifest declares the stack that
+must hold the worst case.
 
-The kernel stack used by the loop, the REPL and the in-kernel compiler is guarded first:
-after early boot the core switches to a 256 KiB stack with one not-present guard frame
-below it (`arch/x86_64/src/stack.rs`). Per-task stack guards are still future work.
+The guard is one extra frame immediately below the declared stack, excluded from the
+`stack` region (spec 0004 C6). The interpreter checks every frame extent against the
+declared length, so a legal overflow terminates the task with `Faulted(StackOverflow)`
+before the hardware guard is reachable; the guard is a hard backstop for a kernel bug.
+A guard hit names the stack (`stack guard: task N` / `ap core N` / `boot core`) and halts
+the machine. Terminating only the task from the hardware fault is deferred
+(OPEN-QUESTIONS Q47).
+
+Every kernel stack is guarded too: after early boot the boot core switches to a 256 KiB
+stack with one not-present guard frame below it, and each AP's static 256 KiB `.bss`
+stack has its own guard frame installed before the SIPIs are sent. The shared machinery
+lives in `kernel/src/guard.rs` over `arch/x86_64/src/paging.rs`:
+
+- a cache of 32 4 KiB tables keyed by 2 MiB base; a table is created by splitting the
+  covering huge page once, and all 512 entries stay present so several guards share it;
+- a registry of up to 96 guarded frames that names the stack in the `#PF` report;
+- a local CR3 reload plus an IPI shootdown to every online core after each PTE change,
+  because a frame may still be translated by another core's TLB from an earlier life;
+- a boot self-check that reads the PTEs back and proves the frame allocator's free count
+  did not change, printing `guards: boot N, ap N, tables N` before the SIPIs.
 
 ### Hardening (provisional, ADR 0006)
 
@@ -270,8 +286,11 @@ The MMU cannot separate applications at CPL 0, but it can still catch kernel bug
 measures are adopted provisionally — accepted only for as long as they stay cheap:
 
 - **H1 (MUST):** Kernel text and read-only data are mapped read-only, with `CR0.WP = 1`.
-- **H2 (MUST):** Every task stack has a not-present guard page at its growing end. A fault
-  inside a known guard range terminates that task; any other fault is a kernel panic.
+- **H2 (MUST):** Every task stack has a not-present guard page at its growing end. The
+  guard is one extra frame below the declared region, so the interpreter's frame-extent
+  check is the first line of defence; a fault inside a known guard range names the guard
+  and halts as a kernel-bug backstop, and per-task recovery from the hardware fault is
+  deferred (OPEN-QUESTIONS Q47). Any other fault is a kernel panic.
 - **H3 (MUST):** NX is enabled (`EFER.NXE`); kernel data, task stacks and application
   regions are mapped non-executable.
 - **H4 (MUST):** All of this lives in the single shared address space: no per-task page
@@ -405,7 +424,8 @@ R7).
 4. Platform discovery: memory map, ACPI, APIC, timers, keyboard.
 5. Interpreter loop on the boot core; APs are brought up with INIT-SIPI-SIPI through a
    sub-1 MiB trampoline within the milestone (see "SMP": `MAX_CORES` 8, trampoline at
-   `0x8000`, parameter page at `0x9000`, per-core TSS/IST/stacks, bounded discovery).
+   `0x8000`, parameter page at `0x9000`, per-core TSS/IST/guarded stacks, bounded
+   discovery).
 6. Loader registers the ext2 provider; the REPL service compiles `shell` from the image
    root and starts it as a task on the boot core. The shell provides the prompt and
    requests further runs through the spawn queue.
@@ -415,7 +435,14 @@ not-present guard frame below it (one guard frame plus 256 KiB of stack, from th
 allocator). The guard turns a kernel stack overflow into a `#PF` instead of a write into the
 boot page tables; the fault handler runs on its own IST. The in-kernel compiler additionally
 has a fixed nesting limit (32 counted levels); exceeding it is a compile `Diagnostic`. The
-limit is calibrated to the guarded stack size (Q42; `arch/x86_64/src/stack.rs`).
+limit is calibrated to the guarded stack size (Q42; `kernel/src/guard.rs`,
+`arch/x86_64/src/stack.rs`).
+
+The same machinery guards the AP stacks and the task stacks: `smp::start` installs the
+guard below every static AP stack before the SIPIs, and the loader installs the extra guard
+frame below a task's declared stack before the task enters the runnable set. The boot
+self-check prints one `guards: boot 1, ap N, tables M` line and halts if a guard is not
+actually not-present.
 
 UEFI and real-hardware boot are out of scope (ADR 0014). The boot path lives entirely in
 `arch/x86_64`.
@@ -461,7 +488,7 @@ task; after that, shutdown.
 | Realtime promotion with no free core | `Status.Full`; task stays normal |
 | Realtime task misses its heartbeat | Terminate at next safe point; `fault(WatchdogTimeout)`; recovery rejected; `exit`; reclaim |
 | Application fault detected by interpreter (out of bounds, capacity, illegal operation) | Abort operation; `fault(code, diag)`; if it returns, `exit(Faulted(code), diag)` then reclaim; if it jumps, resume |
-| Stack overflow | Guard-page fault; `fault(StackOverflow, diag)` on kernel stack; same outcomes as above |
+| Stack overflow | Interpreter frame-extent check: terminate with `Faulted(StackOverflow)` and reclaim; the not-present guard below the stack is a hardware backstop that names the guard and halts |
 | `fault` returns | Terminal: `exit(Faulted(code), diag)` then reclaim |
 | `fault` jumps to a recovery label | Reset frame stack to the label; resume; budget not reset; one recovery per task |
 | Second fault after a recovery | Terminal; `fault` is not called again; `exit` then reclaim |
@@ -519,3 +546,4 @@ task; after that, shutdown.
 | 2026-11-13 | The interpreter layer is split into a `compiler` and an `interpreter` crate over a shared `abi` (spec 0008). |
 | 2026-11-13 | Delivery fixed as source-only: the image never contains bytecode, and the manifest is a runtime value (ADR 0019). |
 | 2026-11-15 | APs are real: `MAX_CORES` 8, INIT-SIPI-SIPI through the `0x8000` trampoline, a `0x9000` parameter page, per-core TSS/IST/stacks, observation by attempt with a bounded wait, one IPI vector shared by every core. |
+| 2026-11-16 | H2 implemented for boot, AP and task stacks: a shared split-table cache and guard registry (`kernel/src/guard.rs`, `arch/x86_64/src/paging.rs`), a CR3 + wake-IPI TLB shootdown after every PTE change, AP guards installed before the SIPIs, one extra guard frame below each task stack, a boot PTE/free-frame self-check (`guards: boot 1, ap N, tables M`) and a `#PF` line naming the guard. The interpreter's `StackOverflow` check stays the legal path; a hardware guard hit halts (per-task recovery deferred, Q47). |

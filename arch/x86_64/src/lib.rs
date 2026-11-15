@@ -14,6 +14,7 @@ pub mod apic;
 pub mod gdt;
 pub mod idt;
 pub mod keyboard;
+pub mod paging;
 pub mod pit;
 pub mod port;
 pub mod serial;

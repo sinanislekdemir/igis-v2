@@ -9,7 +9,8 @@
 //! A page fault needs its own stack because the fault may be a kernel stack
 //! overflow: the exception frame cannot be pushed on the stack that just ran
 //! out. The guard stack design is in `stack.rs` (Q42); the AP stacks in `smp`
-//! are unguarded (per-task and per-core guards are future work).
+//! each carry their own guard frame, installed by `smp::start` through
+//! `kernel::guard` before the SIPIs (spec 0002 H2).
 
 use core::arch::asm;
 use core::mem::size_of;
