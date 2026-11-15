@@ -245,6 +245,8 @@ constraints learned there.
    Record the answer in the relevant spec.
 5. **Keep this file true.** Update the phase, status table, and toolchain notes when they
    change. Anything that grows beyond a few lines belongs in a spec or ADR.
+6. **Work is broken into tickets in `PLAN.md`.** One ticket ≈ one session and one commit;
+   its acceptance criteria and the deferred backlog live there, not in chat.
 
 ## Repository layout
 
@@ -253,6 +255,7 @@ constraints learned there.
 ├── AGENTS.md          # this file: operational facts and conventions
 ├── IDEAS.md           # unstructured inbox
 ├── OPEN-QUESTIONS.md  # parked decisions and unresolved questions
+├── PLAN.md            # milestone plan, ticket backlog, deferred items
 ├── adr/               # decision log (immutable once accepted)
 ├── specs/             # normative specifications (living)
 ├── arch/x86_64/       # boot stub, page tables, long-mode transition, serial, APIC
