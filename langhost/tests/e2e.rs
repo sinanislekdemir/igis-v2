@@ -277,6 +277,77 @@ fn find_and_substr_work_end_to_end() {
 }
 
 #[test]
+fn utf8_helpers_and_mixed_slicing_work_end_to_end() {
+    let result = run_sample("utf8.ig", b"");
+    assert_eq!(
+        String::from_utf8(result.output).expect("the sample writes ASCII"),
+        "len empty ok\n\
+         len ascii ok\n\
+         len mixed ok\n\
+         decode 1-byte ok\n\
+         decode 2-byte ok\n\
+         decode 3-byte ok\n\
+         decode 4-byte ok\n\
+         decode continuation ok\n\
+         decode at end ok\n\
+         decode negative ok\n\
+         decode into ok\n\
+         decode into capacity ok\n\
+         decode into stray ok\n\
+         decode into overlong ok\n\
+         decode into surrogate ok\n\
+         decode into too large ok\n\
+         decode into truncated ok\n\
+         valid empty ok\n\
+         valid ascii ok\n\
+         valid mixed ok\n\
+         substr boundaries ok\n\
+         substr split ok\n\
+         substr past end ok\n\
+         substr negative ok\n\
+         substr raw slice ok\n\
+         substr bytes to string ok\n\
+         substr bytes invalid ok\n\
+         split multibyte ok\n"
+    );
+    assert_eq!(result.reason, ExitReason::Ok);
+}
+
+#[test]
+fn an_empty_literal_assignment_leaves_no_operand_behind() {
+    // Regression: `dst := ""` used to push the destination reference for an
+    // `append` it never emitted, so one value stayed on the run-time operand
+    // stack. A following five-operand call then overflowed a full operand area.
+    let source = r#"
+unit emptyliteral;
+
+uses core, stdlib;
+
+var
+  text: string[32];
+  blank: string[8];
+  scalar: int;
+  next: int;
+  st: Status;
+
+procedure main(args: const string[1024]);
+begin
+  text := "aé€😀";
+  blank := "";
+  st := stdlib.utf8_decode(text, 0, scalar, next);
+  if st = Ok then
+    core.write("empty literal ok\n")
+  else
+    core.write("empty literal bad\n");
+end;
+"#;
+    let package = langhost::compile(source.as_bytes(), "emptyliteral").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"empty literal ok\n");
+}
+
+#[test]
 fn enums_carry_ordinals_and_check_casts_end_to_end() {
     let source = br#"
 unit enumapp;

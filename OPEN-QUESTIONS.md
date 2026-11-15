@@ -44,6 +44,7 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 |---|----------|--------------------------|---------|
 | Q40 | `f32` support | not in M1; additive later, but it needs its own opcode and conversion rules | when single precision is needed |
 | Q41 | Float text beyond fixed decimal | shortest round-trip formatting and full decimal parsing are deferred | when float output must round-trip losslessly |
+| Q46 | Moving the checked slice into `stdlib` | **Blocked, not pending.** `core.substr_into` cannot move: the destination capacity must be a *call-site immediate* (the `SUBSTR` `capacity` field), while a `stdlib` helper declares concrete capacities and the language has no generics, so one helper could serve only one destination size (it would lose `split_once`'s `string[128]` head and every smaller destination). The future option is a buffer parameter that carries its **runtime capacity**, which would need a language change. Until then the checked slice stays in `core` and there is one slicing primitive, not two (spec 0003, "Slicing and search") | only if runtime-capacity buffer parameters are added |
 
 ## Decided in the 2026-11-14 session
 
@@ -134,8 +135,8 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
   Q29 (ADR 0017 addendum), Q34 (children continue), Q35 (64-entry exit ring).
 - Q5, Q6, Q7, Q11–Q13, Q15–Q38 and Q42 are resolved and removed from the table; Q1 and Q2
   are now closed provisionally, so only the handler budget and heartbeat (Q3/Q4), the
-  deferred debug/DMA/streams items, the staged port handles (Q45) and the two float
-  follow-ups remain.
+  deferred debug/DMA/streams items, the staged port handles (Q45), the two float
+  follow-ups (Q40/Q41) and the blocked `substr_into` move (Q46) remain.
 
 ## Decided in the 2026-11-12 session
 
@@ -182,11 +183,11 @@ These are no longer open; they were recorded in specs and ADRs:
   Arrays may be state, locals, parameters, record fields and sum payloads. One structural
   array table is shared by the application and `stdlib`, so arrays cross the unit
   boundary; `stdlib.split_all` fills an `array[string[64], 8]`.
-- **Still missing for a complete stdlib:** UTF-8 helpers (`utf8_decode_into`,
-  code-point iteration), moving `substr_into` from `core` to `stdlib`, `f64`
-  formatting/parsing, typed stream views, and a shared cross-unit type table so library
-  signatures can use records, sums and user enums. `map` support landed with
-  `map_get_or` (below).
+- **Still missing for a complete stdlib:** `f64` formatting/parsing, typed stream views,
+  and a shared cross-unit type table so library signatures can use records, sums and user
+  enums. The `substr_into` move is withdrawn (Q46): the destination capacity must be a
+  call-site immediate. `map` support landed with `map_get_or` (below), and the UTF-8
+  helpers landed in the 2026-11-15 session (below).
 - **Rings (2026-11-14).** `ring[T, N]` is a fixed-capacity FIFO, nominal in element type
   and count, with the `N` elements first and `head: u64`/`count: u64` after them. The
   built-in `core.ring_push`/`pop`/`peek`/`full`/`empty` are compiler-recognised
@@ -206,6 +207,35 @@ These are no longer open; they were recorded in specs and ADRs:
   out-parameter untouched. One structural map table is shared with `stdlib`, whose
   `map_get_or` takes a `map[int, int, 8]`. The design was already fixed (Q18, "Maps are
   FNV-1a with linear probing"); this session implemented it.
+
+## Decided in the 2026-11-15 UTF-8 session
+
+- **Mixed-kind slicing lives in `core.substr_into`, with the destination deciding.** All
+  four destination/source kind combinations are legal: a `string` destination from a
+  `string` source keeps T4's code-point-boundary rule (including an empty range that starts
+  inside a code point), a `string` destination from a `bytes` source validates the copied
+  range as **strict UTF-8** (only 1- to 4-byte sequences; no overlongs, no surrogates, no
+  values above `U+10FFFF`, no truncation, no stray continuation byte), and a `bytes`
+  destination copies either source raw. `bytes` → `string` through this primitive is the
+  checked conversion T3 names, so the `string` invariant is established at the single point
+  where raw bytes can become text.
+- **The source kind is the reserved `SUBSTR` `b` field** (`a` stays the destination kind,
+  the `capacity` immediate is unchanged), so no opcode was added and the ABI v1 table is
+  unchanged. The verifier accepts `a` and `b` in `0..=1` and requires `c = 0`.
+- **The `stdlib.substr_into` move is withdrawn (Q46).** The destination capacity must be a
+  call-site immediate; a concrete-capacity helper could only serve one destination size.
+  The checked slice stays in `core`, and there is no second slicing API.
+- **UTF-8 helpers are ordinary language code.** `stdlib.utf8_decode_into` (T3:
+  `CapacityExceeded` when the source exceeds 256 bytes, `Invalid` for malformed input, both
+  writing nothing), `utf8_len` (non-continuation bytes), `utf8_decode` (bounds-checked
+  code-point decode; `Invalid` and nothing written at a bad index or a sequence that runs
+  past the end), and `utf8_valid` (the strict validator, avoiding a conversion). No new
+  opcode; the library grows by four functions.
+- **A latent codegen bug was fixed on the way.** `dst := ""` emitted the destination
+  reference for an `append` it then skipped, leaving one value on the run-time operand
+  stack; a following call could then overflow a full operand area. Empty literals now add
+  nothing after `clear` (covered by `samples/lang/utf8.ig` and a `langhost` regression
+  test).
 
 ## Suggested next step
 
@@ -312,5 +342,13 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
     leaves its out-parameter untouched. The structural map table is shared with `stdlib`
     (`map_get_or`), and `samples/lang/map.ig` covers collisions, backward shift, key 0,
     the empty buffer key, aggregate values, whole copies and the three parameter modes.
-    Next: UTF-8 helpers, then the `substr_into` move, then APs, the realtime class and
-    streams.
+22. ~~UTF-8 helpers and mixed-kind slicing~~ — done: `core.substr_into` takes all four
+    destination/source kind combinations, with the destination deciding (boundaries for a
+    `string` source, strict UTF-8 validation for a `bytes` source, a raw copy for a `bytes`
+    destination). The source kind is the `SUBSTR` `b` field, so the opcode table is
+    unchanged. `stdlib.utf8_decode_into` (T3), `utf8_len`, `utf8_decode` and `utf8_valid`
+    are ordinary language code; `samples/lang/utf8.ig` covers 1-/2-/3-/4-byte code points
+    and every malformed class, and `samples/apps/utf8` runs as `run utf8`. The
+    `stdlib.substr_into` move is withdrawn (Q46). Next: APs (INIT-SIPI-SIPI and the
+    per-core interpreter loops), then the realtime class and streams. Remaining on the
+    language/host track: `f64` text conversion and the cross-unit type table.

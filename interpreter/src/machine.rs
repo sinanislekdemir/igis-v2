@@ -742,8 +742,9 @@ impl Machine {
             }
             opcodes::SUBSTR => {
                 let kind = a;
+                let source_kind = b;
                 let capacity = read_u32(code, pc + 4)? as usize;
-                self.substr(kind, capacity, state, stack, constants, args)?;
+                self.substr(kind, source_kind, capacity, state, stack, constants, args)?;
             }
             opcodes::FORMAT_INT => {
                 let kind = a;
@@ -2165,13 +2166,24 @@ impl Machine {
 
     /// `substr`: copy a slice of `source` into `destination` (`core.substr_into`).
     ///
-    /// `kind` is [`opcodes::buffer_kind`]; for `STRING` both slice boundaries
-    /// must fall on UTF-8 code-point boundaries in the source (spec 0003, T4).
+    /// `kind` is the destination's [`opcodes::buffer_kind`] and `source_kind`
+    /// the source's; all four combinations are legal and the **destination**
+    /// decides the check (spec 0003, "Slicing and search"):
+    ///
+    /// - `string` destination: the copied range must be valid UTF-8. A `string`
+    ///   source keeps the T4 boundary rule (a slice that splits a code point is
+    ///   rejected, including an empty range inside one); a `bytes` source is
+    ///   validated strictly, so this is the one primitive that can turn raw
+    ///   bytes into a `string`.
+    /// - `bytes` destination: a raw copy of either source kind, no check.
+    ///
     /// Negative offsets push `-4` (`Status::Invalid`). A start past the source
-    /// length copies nothing. Nothing is written when the call is rejected.
+    /// length copies nothing and clears the destination. Nothing is written
+    /// when the call is rejected.
     fn substr(
         &mut self,
         kind: u8,
+        source_kind: u8,
         capacity: usize,
         state: &mut [u8],
         stack: &mut [u8],
@@ -2179,6 +2191,10 @@ impl Machine {
         args: &[u8],
     ) -> Result<(), FaultCode> {
         if kind != opcodes::buffer_kind::STRING && kind != opcodes::buffer_kind::BYTES {
+            return Err(FaultCode::IllegalOperation);
+        }
+        if source_kind != opcodes::buffer_kind::STRING && source_kind != opcodes::buffer_kind::BYTES
+        {
             return Err(FaultCode::IllegalOperation);
         }
         let length = self.pop(stack)? as i64;
@@ -2241,9 +2257,19 @@ impl Machine {
         if kind == opcodes::buffer_kind::STRING && in_range {
             let bytes = buffer_slice(source_region, source, source_len, state, stack, code, args)?;
             let start = start as usize;
-            if !utf8_boundary(bytes, start) || !utf8_boundary(bytes, start + copied) {
-                // A slice that would split a code point is not a `string`
-                // (spec 0003, T4): reject it and leave the destination alone.
+            let end = start + copied;
+            let accepted = if source_kind == opcodes::buffer_kind::STRING {
+                // The source `string` invariant makes boundary checks enough:
+                // a continuation byte at either end means the slice would split
+                // a code point (spec 0003, T4).
+                utf8_boundary(bytes, start) && utf8_boundary(bytes, end)
+            } else {
+                // Raw bytes: the copied range itself must be strict UTF-8. This
+                // is the only primitive that produces a `string` from `bytes`
+                // (spec 0003, T3).
+                utf8_valid(&bytes[start..end])
+            };
+            if !accepted {
                 self.push(stack, status_code(Status::Invalid))?;
                 return Ok(());
             }
@@ -2425,6 +2451,51 @@ fn utf8_boundary(bytes: &[u8], index: usize) -> bool {
         None => index == bytes.len(),
         Some(byte) => byte & 0xC0 != 0x80,
     }
+}
+
+/// True when `bytes` is strict UTF-8 (spec 0003, T3).
+///
+/// Only 1-, 2-, 3- and 4-byte sequences are accepted. Overlong encodings
+/// (`C0`/`C1` leads, `E0 80..`, `F0 80..`), surrogates `U+D800..U+DFFF`
+/// (`ED A0..`), values above `U+10FFFF` (`F4 90..` and `F5..FF` leads),
+/// truncated sequences and stray continuation bytes are all rejected. This is
+/// the check behind a `string` destination fed by a `bytes` source; it is
+/// never applied to a `string` source, whose invariant already holds.
+fn utf8_valid(bytes: &[u8]) -> bool {
+    let mut at = 0;
+    while at < bytes.len() {
+        let lead = bytes[at];
+        let (extra, low, high) = match lead {
+            0x00..=0x7F => {
+                at += 1;
+                continue;
+            }
+            0xC2..=0xDF => (1, 0x80, 0xBF),
+            0xE0 => (2, 0xA0, 0xBF),
+            0xE1..=0xEC | 0xEE..=0xEF => (2, 0x80, 0xBF),
+            // `ED A0..` would encode a surrogate.
+            0xED => (2, 0x80, 0x9F),
+            0xF0 => (3, 0x90, 0xBF),
+            0xF1..=0xF3 => (3, 0x80, 0xBF),
+            // `F4 90..` and `F5..` exceed `U+10FFFF`.
+            0xF4 => (3, 0x80, 0x8F),
+            _ => return false,
+        };
+        if at + extra >= bytes.len() {
+            return false;
+        }
+        let second = bytes[at + 1];
+        if second < low || second > high {
+            return false;
+        }
+        for byte in &bytes[at + 2..at + extra + 1] {
+            if !(0x80..=0xBF).contains(byte) {
+                return false;
+            }
+        }
+        at += extra + 1;
+    }
+    true
 }
 
 /// Reads one byte from a region, bounds-checked like [`buffer_slice`].

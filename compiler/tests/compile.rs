@@ -830,8 +830,9 @@ end;
     assert!(error.message.contains("type mismatch"), "{}", error.message);
 }
 
-/// Returns `(kind, capacity)` for every `substr` instruction in order.
-fn substr_encodings(package: &Owned) -> Vec<(u8, u32)> {
+/// Returns `(destination kind, source kind, capacity)` for every `substr`
+/// instruction in order.
+fn substr_encodings(package: &Owned) -> Vec<(u8, u8, u32)> {
     use abi::opcodes;
     let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
     let start = 40 + 24 * header.function_count as usize;
@@ -843,8 +844,9 @@ fn substr_encodings(package: &Owned) -> Vec<(u8, u32)> {
         let words = opcodes::instruction_words(op).expect("known opcode") as usize;
         if op == opcodes::SUBSTR {
             let kind = instructions[pc + 1];
+            let source_kind = instructions[pc + 2];
             let capacity = u32::from_le_bytes(instructions[pc + 4..pc + 8].try_into().unwrap());
-            seen.push((kind, capacity));
+            seen.push((kind, source_kind, capacity));
         }
         pc += words * 4;
     }
@@ -914,7 +916,7 @@ end;
 }
 
 #[test]
-fn substr_encodes_kind_and_destination_capacity() {
+fn substr_encodes_both_kinds_and_destination_capacity() {
     let source = br#"
 unit t;
 
@@ -925,6 +927,8 @@ var
   part: string[8];
   raw: bytes[16];
   piece: bytes[4];
+  tail: bytes[8];
+  wide: string[12];
   n: int;
 
 procedure main(args: const string[1024]);
@@ -933,39 +937,136 @@ begin
   raw := "abcdef";
   n := core.substr_into(part, text, 0, 2);
   n := core.substr_into(piece, raw, 1, 2);
+  n := core.substr_into(part, raw, 0, 2);
+  n := core.substr_into(tail, text, 0, 2);
+  n := core.substr_into(wide, "abc", 0, 1);
 end;
 "#;
     let package = compile(source, "t.ig").expect("compiles");
     assert_eq!(
         substr_encodings(&package),
         vec![
-            (abi::opcodes::buffer_kind::STRING, 8),
-            (abi::opcodes::buffer_kind::BYTES, 4)
+            (
+                abi::opcodes::buffer_kind::STRING,
+                abi::opcodes::buffer_kind::STRING,
+                8
+            ),
+            (
+                abi::opcodes::buffer_kind::BYTES,
+                abi::opcodes::buffer_kind::BYTES,
+                4
+            ),
+            // `bytes` source into a `string` destination is the checked
+            // conversion; the destination kind selects the run-time check.
+            (
+                abi::opcodes::buffer_kind::STRING,
+                abi::opcodes::buffer_kind::BYTES,
+                8
+            ),
+            (
+                abi::opcodes::buffer_kind::BYTES,
+                abi::opcodes::buffer_kind::STRING,
+                8
+            ),
+            // A literal takes its kind from the destination.
+            (
+                abi::opcodes::buffer_kind::STRING,
+                abi::opcodes::buffer_kind::STRING,
+                12
+            ),
         ]
     );
 }
 
 #[test]
-fn substr_rejects_mixed_kinds() {
-    let source = br#"
+fn substr_rejects_non_writable_destinations_and_a_wrong_arity() {
+    // A literal is not a writable place.
+    let literal = br#"
 unit t;
 
 uses core;
 
 var
-  part: string[8];
-  raw: bytes[8];
   n: int;
 
 procedure main(args: const string[1024]);
 begin
-  raw := "ab";
-  n := core.substr_into(part, raw, 0, 1);
+  n := core.substr_into("abc", "abc", 0, 1);
 end;
 "#;
-    let error = compile(source, "t.ig").expect_err("string and bytes are distinct");
-    assert!(error.message.contains("same kind"), "{}", error.message);
-    assert!(error.message.contains("differ"), "{}", error.message);
+    let error = compile(literal, "t.ig").expect_err("a literal is not a destination");
+    assert!(
+        error.message.contains("must be a variable or parameter"),
+        "{}",
+        error.message
+    );
+
+    // A `const` parameter is read-only.
+    let constant = br#"
+unit t;
+
+uses core;
+
+var
+  n: int;
+
+procedure poke(dst: const string[8]);
+begin
+  n := core.substr_into(dst, "abc", 0, 1);
+end;
+
+procedure main(args: const string[1024]);
+var
+  text: string[8];
+begin
+  poke(text);
+end;
+"#;
+    let error = compile(constant, "t.ig").expect_err("const is not writable");
+    assert!(error.message.contains("const"), "{}", error.message);
+
+    // Buffer parameters are `const` or `var`; there is no `value` mode.
+    let value = br#"
+unit t;
+
+uses core;
+
+procedure poke(dst: string[8]);
+begin
+end;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile(value, "t.ig").expect_err("a buffer parameter needs a mode");
+    assert!(
+        error.message.contains("must be declared `const` or `var`"),
+        "{}",
+        error.message
+    );
+
+    let arity = br#"
+unit t;
+
+uses core;
+
+var
+  text: string[8];
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  text := "abc";
+  n := core.substr_into(text, text, 0);
+end;
+"#;
+    let error = compile(arity, "t.ig").expect_err("four arguments are required");
+    assert!(
+        error.message.contains("expects 4 arguments, got 3"),
+        "{}",
+        error.message
+    );
 }
 
 #[test]
@@ -2488,8 +2589,9 @@ fn the_embedded_stdlib_compiles_on_its_own() {
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(manifest_unit(&package), "stdlib");
     assert_eq!(
-        header.function_count, 8,
-        "trim_into, split_once, parse_int_into, starts_with, contains_byte, split_all, drain_into, map_get_or"
+        header.function_count, 12,
+        "trim_into, split_once, parse_int_into, starts_with, contains_byte, split_all, \
+         drain_into, map_get_or, utf8_decode_into, utf8_len, utf8_decode, utf8_valid"
     );
     assert_eq!(header.entry, 0);
     assert_eq!(header.state_size, 0, "the stdlib declares no state");

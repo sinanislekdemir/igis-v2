@@ -4147,13 +4147,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
 
         for index in 0..parts.len() {
             let part = parts.as_slice()[index];
+            // An empty literal adds nothing after `clear`; pushing the
+            // destination reference for an append that is never emitted would
+            // leave one value on the run-time operand stack.
+            if matches!(part.kind, ExprKind::Str(bytes) if bytes.is_empty()) {
+                continue;
+            }
             self.push_buffer_dest_ref(destination)?;
             match part.kind {
                 ExprKind::Str(bytes) => {
-                    if bytes.is_empty() {
-                        self.pop(1)?;
-                        continue;
-                    }
                     let offset = match self.pool.intern(bytes) {
                         Ok(offset) => offset,
                         Err(_) => return Err(self.arena_error(part.line, part.column)),
@@ -5003,10 +5005,12 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::scalar(Kind::Int)))
             }
-            // `core.substr_into(dst, src, start: int, len: int) -> int`. Staged:
-            // spec 0003 T4 targets `stdlib.substr_into`; until `stdlib` exists
-            // the primitive is a `core` opcode. Same kind only; a `string`
-            // rejects boundaries that split a code point at run time.
+            // `core.substr_into(dst, src, start: int, len: int) -> int`. It stays
+            // in `core`: the destination capacity must be a call-site
+            // immediate. All four kind
+            // combinations are legal; the **destination** kind decides the
+            // check (string→string boundaries, bytes→string strict UTF-8,
+            // bytes destination raw).
             "core.substr_into" => {
                 if args.len() != 4 {
                     return Err(self.err(
@@ -5017,20 +5021,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 }
                 let destination = self.emit_var_buffer_ref(args[0])?;
                 // A literal takes its kind from the destination (spec 0003,
-                // T1); a named source must match exactly.
-                if !matches!(args[1].kind, ExprKind::Str(_)) {
-                    if let Some(source) = self.probe_buffer(args[1]) {
-                        if source.kind != destination.kind {
-                            return Err(self.err_at(
-                                args[1],
-                                format_args!(
-                                    "`core.substr_into` needs `src` and `dst` of the same kind; `{destination}` and `{source}` differ"
-                                ),
-                            ));
-                        }
-                    }
-                }
-                self.emit_ref(args[1], Some(destination.kind))?;
+                // T1); a named source contributes its own kind, and mixing
+                // `string` with `bytes` is allowed.
+                let source_kind = if matches!(args[1].kind, ExprKind::Str(_)) {
+                    destination.kind
+                } else {
+                    self.probe_buffer(args[1])
+                        .map_or(destination.kind, |source| source.kind)
+                };
+                let source = self.emit_ref(args[1], Some(source_kind))?;
                 let start = self.expr_scalar(args[2])?;
                 if start.kind != Kind::Int {
                     return Err(self.err_at(
@@ -5052,7 +5051,12 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     Kind::Bytes => opcodes::buffer_kind::BYTES,
                     _ => unreachable!("the destination is a buffer"),
                 };
-                self.word(opcodes::SUBSTR, kind, 0, 0)?;
+                let source_kind = match source.kind {
+                    Kind::String => opcodes::buffer_kind::STRING,
+                    Kind::Bytes => opcodes::buffer_kind::BYTES,
+                    _ => unreachable!("the source is a buffer"),
+                };
+                self.word(opcodes::SUBSTR, kind, source_kind, 0)?;
                 self.imm32(destination.cap)?;
                 self.pop(4)?;
                 self.push();

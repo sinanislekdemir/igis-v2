@@ -1065,13 +1065,13 @@ fn op_word(out: &mut Vec<u8>, opcode: u8, a: u8, b: u8, c: u8) {
     out.extend_from_slice(&[opcode, a, b, c]);
 }
 
-fn substr_package(kind: u8, capacity: u32, start: i64, length: i64) -> Vec<u8> {
+fn substr_package(kind: u8, source_kind: u8, capacity: u32, start: i64, length: i64) -> Vec<u8> {
     let mut instructions = Vec::new();
     op_imm(&mut instructions, opcodes::REF_STATE, 16);
     op_imm(&mut instructions, opcodes::REF_STATE, 32);
     op_const(&mut instructions, start);
     op_const(&mut instructions, length);
-    op_word(&mut instructions, opcodes::SUBSTR, kind, 0, 0);
+    op_word(&mut instructions, opcodes::SUBSTR, kind, source_kind, 0);
     instructions.extend_from_slice(&capacity.to_le_bytes());
     op_imm(&mut instructions, opcodes::STORE_STATE, 0);
     op(&mut instructions, opcodes::RET);
@@ -1084,13 +1084,14 @@ fn substr_package(kind: u8, capacity: u32, start: i64, length: i64) -> Vec<u8> {
 
 fn run_substr(
     kind: u8,
+    source_kind: u8,
     capacity: u32,
     start: i64,
     length: i64,
     destination: &[u8],
     source: &[u8],
 ) -> (i64, Vec<u8>) {
-    let code = substr_package(kind, capacity, start, length);
+    let code = substr_package(kind, source_kind, capacity, start, length);
     let mut host = MockHost::default();
     let mut state = vec![0u8; 40];
     state[8..16].copy_from_slice(&(destination.len() as u64).to_le_bytes());
@@ -1107,28 +1108,60 @@ fn run_substr(
 
 #[test]
 fn substr_copies_and_clamps_to_the_source_tail() {
-    let (result, copied) = run_substr(opcodes::buffer_kind::BYTES, 8, 2, 99, b"XYZ", b"abcdef");
+    let (result, copied) = run_substr(
+        opcodes::buffer_kind::BYTES,
+        opcodes::buffer_kind::BYTES,
+        8,
+        2,
+        99,
+        b"XYZ",
+        b"abcdef",
+    );
     assert_eq!(result, 4);
     assert_eq!(copied, b"cdef");
 }
 
 #[test]
 fn substr_clamps_to_the_destination_capacity() {
-    let (result, copied) = run_substr(opcodes::buffer_kind::BYTES, 3, 0, 99, b"XYZ", b"abcdef");
+    let (result, copied) = run_substr(
+        opcodes::buffer_kind::BYTES,
+        opcodes::buffer_kind::BYTES,
+        3,
+        0,
+        99,
+        b"XYZ",
+        b"abcdef",
+    );
     assert_eq!(result, 3);
     assert_eq!(copied, b"abc");
 }
 
 #[test]
 fn substr_past_the_end_copies_nothing() {
-    let (result, copied) = run_substr(opcodes::buffer_kind::BYTES, 8, 9, 2, b"XYZ", b"abc");
+    let (result, copied) = run_substr(
+        opcodes::buffer_kind::BYTES,
+        opcodes::buffer_kind::BYTES,
+        8,
+        9,
+        2,
+        b"XYZ",
+        b"abc",
+    );
     assert_eq!(result, 0);
     assert_eq!(copied, b"");
 }
 
 #[test]
 fn substr_zero_length_clears_the_destination() {
-    let (result, copied) = run_substr(opcodes::buffer_kind::BYTES, 8, 1, 0, b"XYZ", b"abc");
+    let (result, copied) = run_substr(
+        opcodes::buffer_kind::BYTES,
+        opcodes::buffer_kind::BYTES,
+        8,
+        1,
+        0,
+        b"XYZ",
+        b"abc",
+    );
     assert_eq!(result, 0);
     assert_eq!(copied, b"");
 }
@@ -1137,6 +1170,7 @@ fn substr_zero_length_clears_the_destination() {
 fn substr_negative_arguments_are_invalid_and_write_nothing() {
     for (start, length) in [(-1i64, 2i64), (0, -1)] {
         let (result, copied) = run_substr(
+            opcodes::buffer_kind::BYTES,
             opcodes::buffer_kind::BYTES,
             8,
             start,
@@ -1150,18 +1184,116 @@ fn substr_negative_arguments_are_invalid_and_write_nothing() {
 }
 
 #[test]
-fn substr_string_rejects_a_split_code_point() {
+fn substr_string_source_keeps_the_boundary_rule() {
     // "é" is two bytes (0xC3 0xA9); starting at 1 splits it.
-    let (result, copied) = run_substr(opcodes::buffer_kind::STRING, 8, 1, 1, b"XYZ", b"\xC3\xA9");
+    let (result, copied) = run_substr(
+        opcodes::buffer_kind::STRING,
+        opcodes::buffer_kind::STRING,
+        8,
+        1,
+        1,
+        b"XYZ",
+        b"\xC3\xA9",
+    );
     assert_eq!(result, -4);
     assert_eq!(copied, b"XYZ", "the destination is untouched");
+
+    // An empty range that starts inside a code point is still not a boundary.
+    let (result, copied) = run_substr(
+        opcodes::buffer_kind::STRING,
+        opcodes::buffer_kind::STRING,
+        8,
+        1,
+        0,
+        b"XYZ",
+        b"\xC3\xA9",
+    );
+    assert_eq!(result, -4);
+    assert_eq!(copied, b"XYZ", "the destination is untouched");
+
+    // Both boundaries fall on code points, so the sequence copies.
+    let (result, copied) = run_substr(
+        opcodes::buffer_kind::STRING,
+        opcodes::buffer_kind::STRING,
+        8,
+        1,
+        2,
+        b"",
+        b"a\xC3\xA9",
+    );
+    assert_eq!(result, 2);
+    assert_eq!(copied, b"\xC3\xA9");
 }
 
 #[test]
-fn substr_string_accepts_code_point_boundaries() {
-    let (result, copied) = run_substr(opcodes::buffer_kind::STRING, 8, 1, 2, b"", b"a\xC3\xA9");
+fn substr_bytes_source_into_a_string_is_strictly_validated() {
+    let string = opcodes::buffer_kind::STRING;
+    let bytes = opcodes::buffer_kind::BYTES;
+
+    // A complete, well-formed sequence converts.
+    let (result, copied) = run_substr(string, bytes, 8, 0, 2, b"", b"\xC3\xA9");
     assert_eq!(result, 2);
     assert_eq!(copied, b"\xC3\xA9");
+
+    // Every malformed class is `-4` and leaves the destination alone.
+    for bad in [
+        &b"\x80"[..],        // stray continuation
+        b"\xC0\xAF",         // overlong 2-byte
+        b"\xC1\xBF",         // overlong 2-byte
+        b"\xE0\x80\x80",     // overlong 3-byte
+        b"\xED\xA0\x80",     // surrogate
+        b"\xF0\x80\x80\x80", // overlong 4-byte
+        b"\xF4\x90\x80\x80", // above U+10FFFF
+        b"\xF5\x80\x80\x80", // invalid lead
+        b"\xE2\x82",         // truncated
+        b"\xC3",             // truncated
+        b"\xC3\xA9\xFF",     // invalid byte after a good sequence
+    ] {
+        let (result, copied) = run_substr(string, bytes, 8, 0, bad.len() as i64, b"keep", bad);
+        assert_eq!(result, -4, "accepted {bad:02X?}");
+        assert_eq!(copied, b"keep", "the destination is untouched");
+    }
+
+    // A destination capacity that cuts a code point is a truncated sequence.
+    let (result, copied) = run_substr(string, bytes, 1, 0, 2, b"", b"\xC3\xA9");
+    assert_eq!(result, -4);
+    assert_eq!(copied, b"");
+}
+
+#[test]
+fn substr_bytes_destination_copies_raw_from_either_kind() {
+    let bytes = opcodes::buffer_kind::BYTES;
+
+    // A mid-code-point cut of a `string` is raw data (spec 0003, T4).
+    let (result, copied) = run_substr(
+        bytes,
+        opcodes::buffer_kind::STRING,
+        8,
+        2,
+        1,
+        b"",
+        b"a\xC3\xA9",
+    );
+    assert_eq!(result, 1);
+    assert_eq!(copied, b"\xA9");
+
+    // Raw bytes are copied without validation.
+    let (result, copied) = run_substr(bytes, bytes, 8, 0, 2, b"", b"\xC0\xAF");
+    assert_eq!(result, 2);
+    assert_eq!(copied, b"\xC0\xAF");
+}
+
+#[test]
+fn substr_rejects_a_source_kind_out_of_range() {
+    let code = substr_package(opcodes::buffer_kind::STRING, 2, 8, 0, 1);
+    let mut scratch = scratch_for(&code);
+    let error = interpreter::verify(&code, &mut scratch).expect_err("must be refused");
+    assert_eq!(error.status, Status::Invalid);
+    assert!(
+        error.message.contains("substr kind is out of range"),
+        "{}",
+        error.message
+    );
 }
 
 fn find_package(needle: u8) -> Vec<u8> {

@@ -164,8 +164,18 @@ pub const FIND: u8 = 0x43;
 /// Pop a length, pop a start, pop a source reference, pop a destination
 /// reference, copy the slice and push the copied length (`core.substr_into`).
 ///
-/// `a` is the buffer kind ([`buffer_kind`]): `STRING` additionally requires
-/// both slice boundaries to fall on UTF-8 code-point boundaries in the source.
+/// `a` is the **destination** buffer kind ([`buffer_kind`]) and `b` the
+/// **source** kind; all four combinations are legal. The destination kind
+/// decides the check:
+///
+/// - `STRING` destination from a `STRING` source: both slice boundaries must
+///   fall on UTF-8 code-point boundaries in the source.
+/// - `STRING` destination from a `BYTES` source: the copied range must be
+///   strict UTF-8 (no overlong encodings, no surrogates, nothing above
+///   `U+10FFFF`, no truncated sequence, no stray continuation byte). This is
+///   the only primitive that turns raw bytes into a `string` (T3).
+/// - `BYTES` destination: a raw copy from either source kind, no check (T4).
+///
 /// Immediate: `capacity: u32`, the destination's declared capacity. Negative
 /// `start` or `len` pushes `-4` (`Status::Invalid`) and writes nothing; a
 /// `start` past the source length copies nothing and clears the destination.

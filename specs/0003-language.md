@@ -173,8 +173,9 @@ Rules:
   (`stdlib.utf8_decode_into`), and reports an error instead of producing an invalid
   string.
 - **T4 (MUST):** Slicing a `string` at an arbitrary byte offset yields `bytes`, not
-  `string`. A checked `stdlib.substr_into` returns `string` only if both boundaries fall
-  on code-point boundaries.
+  `string`. A checked `core.substr_into` returns `string` only if both boundaries fall
+  on code-point boundaries (`string` source) or the copied range is strict UTF-8
+  (`bytes` source); its `bytes` destination copies raw data.
 - **T5 (MUST):** Capacity is measured in bytes, never characters. `string[128]` holds at
   most 128 bytes of UTF-8.
 
@@ -204,21 +205,36 @@ Rules:
 - **Length.** `core.len(buf) -> uint` returns the runtime length for either kind. One
   builtin serves both because the length word is part of the shared representation.
 
-### Slicing and search (staged)
+### Slicing and search (implemented)
 
-- **T4 staging.** `core.substr_into(dst, src, start: int, len: int) -> int` is the checked
-  slice from T4, temporarily in `core` because `stdlib` does not exist yet. It moves to
-  `stdlib.substr_into` once the language can express it; the semantics do not change.
-- `dst` must be a writable (`var`) buffer and `src` any buffer, including a literal. Both
-  must have the same kind: `string` from `string`, `bytes` from `bytes`; mixing is a
-  compile error.
-- Negative `start` or `len` returns `-4` (`Status.Invalid`) and writes nothing.
-  `start > len(src)` returns 0 and clears the destination. Otherwise the copied length is
-  `min(len, len(src) - start, capacity(dst))`, the destination's runtime length becomes
-  that value, and the result is the copied length.
-- For `string`, both `start` and `start + copied` must fall on UTF-8 code-point boundaries
-  in `src`; otherwise the result is `-4` and nothing is written. `bytes` copies raw data
-  and needs no check.
+- **The checked slice stays in `core`.** `core.substr_into(dst, src, start: int, len: int)
+  -> int` is the checked slice from T4. The earlier staging note said it would move to
+  `stdlib.substr_into` "once the language can express it"; it cannot, ever, without a
+  language change: the destination capacity must be a **call-site immediate** (that is
+  what the `SUBSTR` `capacity` immediate is), while a `stdlib` helper can only declare
+  concrete capacities (there are no generics). A library helper would therefore only serve
+  one destination size and would lose `split_once`'s `string[128]` head and every other
+  smaller destination. `stdlib.substr_into` is withdrawn as a planned move; the future
+  option is a buffer parameter that carries its runtime capacity (recorded in
+  `OPEN-QUESTIONS.md`). There is one slicing primitive, not two.
+- **Four kind combinations, destination-kind rule.** `dst` must be a writable (`var`)
+  buffer and `src` any buffer, including a literal. `a` in the instruction is the
+  destination kind and `b` the source kind, so all four combinations are legal and the
+  **destination** decides the check:
+  - `string` destination, `string` source: both `start` and `start + copied` must fall on
+    UTF-8 code-point boundaries in `src`; a slice that splits a code point (including an
+    empty range that starts inside one) is rejected.
+  - `string` destination, `bytes` source: the copied range must be strict UTF-8 — 1- to
+    4-byte sequences only, no overlong encodings, no surrogates `U+D800..U+DFFF`, nothing
+    above `U+10FFFF`, no truncated sequence, no stray continuation byte. Invalid input is
+    rejected. This is the only primitive that can produce a `string` from raw bytes, so the
+    invariant is enforced where it is created (T3).
+  - `bytes` destination (either source kind): a raw copy, no UTF-8 check (T4).
+- **Results.** Negative `start` or `len` returns `-4` (`Status.Invalid`) and writes
+  nothing. `start > len(src)` returns 0 and clears the destination. Otherwise the copied
+  length is `min(len, len(src) - start, capacity(dst))`, the destination's runtime length
+  becomes that value, and the result is the copied length. A rejected boundary or invalid
+  byte sequence also returns `-4` and writes nothing.
 - **`core.find(buf, value: byte) -> int`** returns the first index of `value`, or `-1`.
   It scans `0..len` only and serves both kinds; a `string` is searched byte-wise, not by
   code point.
@@ -674,9 +690,12 @@ point where the value is created, instead of at every call site.
 
 - Console, streams and files are byte-oriented; text applications convert explicitly.
 - Shared byte operations (`len`, compare, find) are defined on both.
-- UTF-8-specific operations (`codepoints`, `chars`, `substr_into`) exist only on `string`.
-  The staged `core.substr_into` also accepts a `bytes` destination so raw slices have a
-  checked copy before `stdlib` exists; only the `string` form checks boundaries.
+- UTF-8-specific operations (`utf8_len`, `utf8_decode`, `utf8_valid`, `utf8_decode_into`)
+  live in `stdlib` and take a `string` (or `bytes` for the validator). The one `core`
+  primitive that straddles the invariant is `core.substr_into`: its destination kind
+  decides the check, so `string` → `string` and `bytes` → `string` are validated while a
+  `bytes` destination copies raw data (T4). `bytes` → `string` through `substr_into` is
+  the checked conversion T3 names.
 - Comparison is byte-wise (`bytes`) or code-point-wise (`string`), both lexicographic.
   In this slice equality compares bytes, which is the same relation for valid UTF-8.
 
@@ -974,11 +993,17 @@ declared capacities and the at-least-N rule applies to callers.
 | `function stdlib.starts_with(src: const string[0]; prefix: const string[0]): bool` | Byte-wise prefix test (not a code-point test). |
 | `function stdlib.contains_byte(src: const string[0]; value: byte): bool` | True when `core.find` finds the byte. |
 | `function stdlib.drain_into(dst: var array[int, 8]; count: var int; src: var ring[int, 8]): Status` | Moves up to eight integers out of `src`, oldest first, and writes the moved count. `NotFound` (nothing written) when `src` is empty. The first helper whose signature carries a `ring`. |
+| `function stdlib.utf8_decode_into(dst: var string[256]; src: const bytes[0]): Status` | T3's checked conversion of the whole source. `CapacityExceeded` (nothing written) when `core.len(src) > 256`; otherwise the conversion runs through `core.substr_into`, where `-4` (`Status.Invalid`) means the bytes are not strict UTF-8 and nothing is written. Valid input yields `Ok` and exactly the source bytes as a `string`. |
+| `function stdlib.utf8_len(src: const string[0]): int` | Number of code points: the bytes that are not continuation bytes (`0x80..0xBF`). The source is a valid `string`, so the count is a byte scan (T5: capacities stay in bytes). |
+| `function stdlib.utf8_decode(src: const string[0]; index: int; codepoint: var int; next: var int): Status` | Decodes the code point that starts at `index`. `Invalid` and nothing written when `index < 0`, `index >= len`, the byte at `index` is a continuation byte, or the sequence would run past the end; otherwise writes the scalar (`0..=0x10FFFF`) and the index just past it and returns `Ok`. A `string` source needs no re-validation, only the bounds checks. |
+| `function stdlib.utf8_valid(src: const bytes[0]): bool` | Strict UTF-8 validator for raw bytes, matching the interpreter's rule exactly: 1- to 4-byte sequences only, no overlong encodings, no surrogates, nothing above `U+10FFFF`, no truncated sequence, no stray continuation byte. It checks bytes without converting them and cross-checks `utf8_decode_into`'s primitive. |
 
-Still missing for a complete standard library: UTF-8 helpers (code-point iteration,
-checked `utf8_decode_into`), the move of `substr_into` from `core`, `f64`
-formatting/parsing, and typed stream views. `map` support and `map_get_or` landed with
-the structural map table (spec 0003, "Maps").
+Still missing for a complete standard library: `f64` formatting/parsing and typed stream
+views. The `substr_into` move is withdrawn: the checked slice stays in `core` because the
+destination capacity must be a call-site immediate, and the language has no generics
+(see "Slicing and search"). `map` support and `map_get_or` landed with the structural map
+table (spec 0003, "Maps"); the UTF-8 helpers landed as ordinary language code over
+`core.substr_into`, `core.len` and buffer indexing, adding no opcode.
 
 ## Failure modes
 
@@ -995,6 +1020,8 @@ the structural map table (spec 0003, "Maps").
 | `core.map_put`/`map_remove` on a `const` map parameter | Compile error |
 | `core.ring_push`/`pop` on a `value` ring parameter | Mutates the callee's private copy; the caller's ring is unchanged |
 | Buffers of different kinds compared (`string` = `bytes`) | Compile error |
+| `core.substr_into` `string` destination that splits a code point or copies invalid UTF-8 | `-4` (`Status.Invalid`); destination untouched |
+| `core.substr_into` `bytes` destination | Raw copy from either source kind; no UTF-8 check |
 | `string`/`bytes` write past capacity | `fault(CapacityExceeded)`; no truncation, no growth |
 | `ring` push on full, `map` put on full | `Status.Full` (non-fatal) or explicit failure, never growth |
 | Invalid UTF-8 conversion | `Status.Invalid`; no invalid `string` can be constructed |
@@ -1073,3 +1100,4 @@ the structural map table (spec 0003, "Maps").
 | 2026-11-14 | `core.run(path, args, var diag, var reason) -> Status` implemented (spawn + wait, with the pending id held in the machine). The request-completion diagnostic path also landed: a compile/load failure after `spawn` returned fills `diag` for `run` callers while `wait` still observes `Faulted(IoError)`. Q43 narrows to a distinct `TaskId` type. |
 | 2026-11-14 | `function Name(...): T;` with `return value;` implemented for scalar results; a function must end in a `return` on every path, and a procedure may `return;`. Implemented the first `stdlib` slice in real source: `trim_into`, `split_once`, `parse_int_into`, `starts_with` and `contains_byte`, compiled into the application package, qualified as `stdlib.*`, with no new opcodes. |
 | 2026-11-14 | Fixed-capacity rings implemented: `ring[T, N]` is nominal in element and count, layout is `N` elements at `align8(element size)` followed by `head: u64` and `count: u64`, and the built-in `core.ring_push`/`pop`/`peek`/`full`/`empty` lower to the existing reference/copy/branch instructions (no opcode). `push` returns `Full` on a full ring; `pop`/`peek` return `NotFound` and leave the out-parameter untouched on an empty one; `push`/`pop` require a writable place, so a `const` receiver is rejected while a `value` copy is writable and private to the callee. Rings may be state, locals, parameters, record fields, sum payloads and array elements; the structural ring table is shared with `stdlib`, whose `drain_into` takes a ring. |
+| 2026-11-15 | UTF-8 slice implemented. `core.substr_into` accepts all four destination/source kind combinations: the destination kind decides the check (a `string` source keeps T4's code-point-boundary rule, a `bytes` source is validated as strict UTF-8, a `bytes` destination copies raw), encoded in the `SUBSTR` `b` field as the source kind with no new opcode. `stdlib` gains `utf8_decode_into` (T3, checked bytes→string), `utf8_len`, `utf8_decode` and `utf8_valid`. The `stdlib.substr_into` move is withdrawn: the destination capacity must be a call-site immediate, and without generics a library helper could only serve one capacity (recorded in `OPEN-QUESTIONS.md`). |

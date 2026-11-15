@@ -232,6 +232,34 @@ compile-time image size, header included. The compiler interns `(key, value, cou
 in one structural map table shared by the application and `stdlib`, so a map crosses
 the unit boundary with one id.
 
+### `substr` (mixed kinds)
+
+`substr` is one opcode and no new one was needed for mixed-kind slicing. Its opcode
+word carries the destination kind in `a` and the source kind in `b` (both
+`buffer_kind`: `string` 0, `bytes` 1; `c` reserved), plus one `capacity` immediate
+for the destination. Operands are `[destination][source][start][length] -> length`.
+
+The machine resolves both references, checks that the destination length is within
+the capacity and that both buffers lie inside their regions, then applies the
+destination-kind rule:
+
+- A `string` destination from a `string` source checks both slice boundaries with the
+  source's UTF-8 invariant, so a slice that splits a code point — including an empty
+  range that starts inside one — pushes `-4` and writes nothing.
+- A `string` destination from a `bytes` source validates the copied range as **strict
+  UTF-8**: only 1- to 4-byte sequences, no overlong encodings (`C0`/`C1` leads,
+  `E0 80..`, `F0 80..`), no surrogates (`ED A0..`), nothing above `U+10FFFF`
+  (`F4 90..`, `F5..`), no truncated sequence and no stray continuation byte. This is
+  the only instruction that produces a `string` from raw bytes, so the invariant is
+  enforced at the single point where it can be created (T3).
+- A `bytes` destination copies either source kind raw, with no UTF-8 check (T4).
+
+A negative `start` or `len` and a rejected code-point boundary or invalid byte
+sequence all push `-4` (`Status.Invalid`) before any write; a `start` past the source
+length pushes `0` and clears the destination; otherwise the copied length is
+`min(len, src_len - start, capacity)` and is pushed. The verifier accepts `a` and `b`
+in `0..=1` and requires `c = 0`.
+
 ### Frames
 
 Each call pushes one frame on the task's stack region:
@@ -281,7 +309,7 @@ artifact:
 | Comparisons | `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `cmp_buffers` for buffers |
 | Conversions | `i2f`, `f2i` (truncate and range-check), `trunc8`, `sext`, `zext` |
 | Control flow | `jmp`, `jz`, `jnz`, `call`, `ret` |
-| Buffers and aggregates | `append` (capacity-checked), `load_u8`/`store_u8` (length- and capacity-checked), `find` (byte scan), `substr` (checked slice), `format_int` (decimal/hex formatting), `enum_cast` (range-checked ordinal → enum), `ref_offset` (field reference), `ref_element` (array element reference, index-checked), `copy_refs` (record, sum, array, ring and `case` payload copies), `map_put`/`map_get`/`map_has`/`map_remove`/`map_count` (open-addressing map, layout in the immediates) |
+| Buffers and aggregates | `append` (capacity-checked), `load_u8`/`store_u8` (length- and capacity-checked), `find` (byte scan), `substr` (checked slice; `a` = destination kind, `b` = source kind), `format_int` (decimal/hex formatting), `enum_cast` (range-checked ordinal → enum), `ref_offset` (field reference), `ref_element` (array element reference, index-checked), `copy_refs` (record, sum, array, ring and `case` payload copies), `map_put`/`map_get`/`map_has`/`map_remove`/`map_count` (open-addressing map, layout in the immediates) |
 | Builtins | `call_builtin n` — host-interface and `core` primitives |
 | System | `safe` (explicit poll), `trap` (compiler-inserted fault) |
 
@@ -324,6 +352,10 @@ the bump arena, isolated in `compiler/src/arena.rs`.
   `stdlib`); a fault binary-searches it for `line` and `column`, and the unit id names the
   source unit. The compiler reserves one hidden
   `Diagnostic` slot in `state` for the interpreter to fill before invoking `fault`/`exit`.
+- Field validation is per opcode: a reserved field must be zero unless the opcode defines
+  it. `substr` is the one buffer opcode with two kind fields — `a` is the destination kind
+  and `b` the source kind, each `0..=1` (`string`, `bytes`) — so the verifier accepts both
+  and rejects anything else; the capacity immediate must fit a section.
 - Compile errors are reported through the same `Diagnostic` into the caller's buffer
   (spec 0005); compilation never writes to an application-visible region.
 
@@ -430,3 +462,4 @@ pub fn run(task: &mut Task);
 | 2026-11-14 | Multi-unit packages: an application with `uses stdlib;` compiles the embedded `stdlib/stdlib.ig` into the same package. Library functions come first in one function table (entry is the application's `main`), the constant pool and instruction section are shared, and line-table entries carry a unit id (0 application, 1 stdlib; verifier accepts `0..=1`). The manifest keeps the application's unit name; compile diagnostics name the failing unit. Type ids stay per-unit, so records, sums and user enums may not cross the boundary yet. |
 | 2026-11-14 | Rings need no new opcodes: `core.ring_push`/`pop`/`peek`/`full`/`empty` are compiler-lowered with `ref_offset`/`load_ref` for the header, `add_u`/`mod_u` for the wrap, `ref_element` for the element, `load_ref`/`store_ref` or `copy_refs`/`clear`+`append` for the value, and `eq`+`jz` for the status branches. The ABI v1 opcode table is unchanged. The ring value is `N` elements followed by `head` and `count`, and the structural ring table is shared with `stdlib`. |
 | 2026-11-15 | Maps add five opcodes: `map_put`, `map_get`, `map_has`, `map_remove` (opcode word `a` = key kind, `b` = value kind; immediates `capacity`, `count`, `key_size`, `value_size`) and `map_count` (no immediates). The interpreter hashes with FNV-1a, probes linearly and deletes with backward shift; a `put` past the entry limit pushes `Full` and writes nothing. The map image is `count` then `capacity` slots of state/hash/key/value, the structural map table is shared with `stdlib`, and a library signature may carry a map. |
+| 2026-11-15 | `substr` gained a source kind: the reserved `b` field is now the source's `buffer_kind` while `a` stays the destination kind, so all four `string`/`bytes` combinations are legal with no new opcode. The verifier accepts `a`/`b` in `0..=1` and `c = 0`; the machine applies the destination-kind rule (boundary check for a `string` source, strict UTF-8 validation for a `bytes` source, raw copy for a `bytes` destination). |

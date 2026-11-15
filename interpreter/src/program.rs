@@ -373,7 +373,9 @@ fn verify_instructions(
                     return Err(invalid(base + pc, "conversion kinds are out of range"));
                 }
             } else if op == opcodes::SUBSTR {
-                if a > opcodes::buffer_kind::BYTES || b != 0 || c != 0 {
+                // `a` is the destination kind and `b` the source kind; all
+                // four combinations are legal (spec 0008, `SUBSTR`).
+                if a > opcodes::buffer_kind::BYTES || b > opcodes::buffer_kind::BYTES || c != 0 {
                     return Err(invalid(base + pc, "substr kind is out of range"));
                 }
             } else if op == opcodes::FORMAT_INT {

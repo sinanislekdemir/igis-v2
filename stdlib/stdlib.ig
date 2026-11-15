@@ -18,6 +18,7 @@ const
   TrimCapacity = 256;
   SplitHeadCapacity = 128;
   SplitTailCapacity = 256;
+  Utf8Capacity = 256;
   MaxInt = 9223372036854775807;
   MinInt = -9223372036854775807 - 1;
 
@@ -240,4 +241,165 @@ begin
   if core.map_get(src, key, value) <> Ok then
     return fallback;
   return value;
+end;
+
+// Converts the whole of `src` (raw bytes) into a valid UTF-8 `string`. T3: the
+// conversion is explicit and checked, so an invalid `string` cannot be built.
+// A source longer than the destination capacity returns CapacityExceeded and
+// writes nothing; malformed UTF-8 returns Invalid and writes nothing. The
+// check itself lives in `core.substr_into`, the only primitive that turns
+// `bytes` into a `string`.
+function utf8_decode_into(dst: var string[256]; src: const bytes[0]): Status;
+var
+  length: int;
+  copied: int;
+begin
+  length := int(core.len(src));
+  if length > Utf8Capacity then
+    return CapacityExceeded;
+  copied := core.substr_into(dst, src, 0, length);
+  if copied = -4 then
+    return Invalid;
+  if copied < 0 then
+    return CapacityExceeded;
+  return Ok;
+end;
+
+// Number of code points in `src`: every byte that is not a UTF-8 continuation
+// byte (`0x80..0xBF`) starts one code point. The source is a valid `string`,
+// so a byte scan is enough (spec 0003, T5: capacities stay in bytes).
+function utf8_len(src: const string[0]): int;
+var
+  at: int;
+  count: int;
+  length: int;
+begin
+  length := int(core.len(src));
+  at := 0;
+  count := 0;
+  while at < length do
+  begin
+    if src[at] < byte(0x80) or src[at] > byte(0xBF) then
+      count := count + 1;
+    at := at + 1;
+  end;
+  return count;
+end;
+
+// Decodes the code point that starts at `index` in the valid `string` `src`
+// and writes its scalar value and the index just past it. Returns Invalid,
+// writing nothing, when `index` is negative, at or past the end, points at a
+// continuation byte, or names a sequence that would run past the end. No full
+// re-validation is needed because `src` is a `string`.
+function utf8_decode(src: const string[0]; index: int; codepoint: var int; next: var int): Status;
+var
+  length: int;
+  lead: int;
+  width: int;
+  value: int;
+begin
+  length := int(core.len(src));
+  if index < 0 or index >= length then
+    return Invalid;
+  lead := int(src[index]);
+  if lead >= 0x80 and lead <= 0xBF then
+    return Invalid;
+  if lead < 0x80 then
+    width := 1
+  else if lead < 0xE0 then
+    width := 2
+  else if lead < 0xF0 then
+    width := 3
+  else if lead < 0xF8 then
+    width := 4
+  else
+    return Invalid;
+  if index + width > length then
+    return Invalid;
+  if width = 1 then
+    value := lead
+  else if width = 2 then
+    value := (lead - 0xC0) * 0x40 + (int(src[index + 1]) - 0x80)
+  else if width = 3 then
+    value := (lead - 0xE0) * 0x1000
+      + (int(src[index + 1]) - 0x80) * 0x40
+      + (int(src[index + 2]) - 0x80)
+  else
+    value := (lead - 0xF0) * 0x40000
+      + (int(src[index + 1]) - 0x80) * 0x1000
+      + (int(src[index + 2]) - 0x80) * 0x40
+      + (int(src[index + 3]) - 0x80);
+  codepoint := value;
+  next := index + width;
+  return Ok;
+end;
+
+// Strict UTF-8 validator for raw bytes, matching the interpreter's rules
+// (spec 0003, T3): 1- to 4-byte sequences only, no overlong encodings
+// (`C0`/`C1`, `E0 80..`, `F0 80..`), no surrogates (`ED A0..`), nothing above
+// `U+10FFFF` (`F4 90..`, `F5..FF`), no truncated sequence and no stray
+// continuation byte. It checks bytes without converting them and cross-checks
+// `utf8_decode_into`'s primitive.
+function utf8_valid(src: const bytes[0]): bool;
+var
+  at: int;
+  length: int;
+  lead: int;
+  extra: int;
+  low: int;
+  high: int;
+  step: int;
+begin
+  length := int(core.len(src));
+  at := 0;
+  while at < length do
+  begin
+    lead := int(src[at]);
+    if lead < 0x80 then
+      at := at + 1
+    else
+    begin
+      if lead >= 0xC2 and lead <= 0xDF then
+      begin
+        extra := 1;
+        low := 0x80;
+        high := 0xBF;
+      end
+      else if lead >= 0xE0 and lead <= 0xEF then
+      begin
+        extra := 2;
+        low := 0x80;
+        high := 0xBF;
+        if lead = 0xE0 then
+          low := 0xA0
+        else if lead = 0xED then
+          high := 0x9F;
+      end
+      else if lead >= 0xF0 and lead <= 0xF4 then
+      begin
+        extra := 3;
+        low := 0x80;
+        high := 0xBF;
+        if lead = 0xF0 then
+          low := 0x90
+        else if lead = 0xF4 then
+          high := 0x8F;
+      end
+      else
+        return false;
+      if at + extra >= length then
+        return false;
+      if int(src[at + 1]) < low or int(src[at + 1]) > high then
+        return false;
+      step := 2;
+      while step <= extra do
+      begin
+        if int(src[at + step]) < 0x80 or int(src[at + step]) > 0xBF then
+          return false;
+        step := step + 1;
+      end;
+      at := at + extra + 1;
+    end;
+  end;
+  return true;
 end;
