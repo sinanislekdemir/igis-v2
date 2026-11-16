@@ -54,7 +54,10 @@ pub const STDLIB_PATH: &str = "stdlib/stdlib.ig";
 /// 0008 "Compile memory"). Tokens, AST nodes, name tables, the instruction
 /// and line-table images and the constant pool all live here; a caller with a
 /// larger buffer still only gets this much, so the bound is real.
-pub const MAX_ARENA_BYTES: usize = 1024 * 1024;
+///
+/// M2.4.0 raised this from 1 MiB: the UI layout layer pushed the embedded
+/// `stdlib` unit past the old cap. 2 MiB leaves room for M2.4.1–M2.4.6.
+pub const MAX_ARENA_BYTES: usize = 2 * 1024 * 1024;
 
 /// Code-blob buffer a caller must provide (provisional tuning value, spec 0008:
 /// 256 KiB per application).

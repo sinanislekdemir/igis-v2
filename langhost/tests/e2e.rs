@@ -206,6 +206,7 @@ fn stage_app_samples_compile_with_the_spawn_builtins() {
         "floats",
         "text",
         "desktop",
+        "ui_layout",
     ] {
         let path = format!("{}/../samples/apps/{name}", env!("CARGO_MANIFEST_DIR"));
         let source = std::fs::read(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
@@ -1097,4 +1098,234 @@ fn windows_proof_b_compiles_and_reports_no_graphics_on_the_host() {
     let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
     assert_eq!(result.reason, ExitReason::Ok);
     assert_eq!(result.output, b"windows_proof_b: no graphics\n".to_vec());
+}
+
+#[test]
+fn ui_metrics_and_the_disabled_screen_path_are_deterministic() {
+    let source = r#"
+unit uimetrics;
+
+uses core, stdlib, syslib;
+
+var
+  text: string[32];
+  n: int;
+  st: Status;
+
+procedure show(label: const string[0]; value: int);
+begin
+  n := core.format_int_into(text, value, uint(10), uint(0));
+  core.write(label);
+  core.write("=");
+  core.write(text);
+  core.write("\n");
+end;
+
+procedure main(args: const string[1024]);
+begin
+  show("w0", stdlib.ui_text_width(""));
+  show("w3", stdlib.ui_text_width("abc"));
+  show("wutf8", stdlib.ui_text_width("aé"));
+  show("h", stdlib.ui_text_height());
+  show("line", stdlib.ui_line_height());
+  show("inset", stdlib.ui_content_inset());
+  show("bar", stdlib.ui_title_bar_height());
+  show("box", stdlib.ui_close_box_size());
+  show("cx", stdlib.ui_text_center_x(0, 100, "abc"));
+  show("cy", stdlib.ui_text_center_y(0, 16));
+  show("narrowx", stdlib.ui_text_center_x(7, 8, "abc"));
+  show("shorty", stdlib.ui_text_center_y(9, 8));
+  show("black", int(stdlib.ui_black()));
+  show("white", int(stdlib.ui_white()));
+  show("gray", int(stdlib.ui_gray()));
+  show("focus", int(stdlib.ui_focus()));
+  show("accent", int(stdlib.ui_accent()));
+  st := stdlib.ui_frame(0, 0, 32, 32);
+  if st = Invalid then core.write("frame=invalid\n");
+  st := stdlib.ui_title_bar(0, 0, 100, "host", true);
+  if st = Invalid then core.write("title=invalid\n");
+  st := stdlib.ui_close_box(0, 0);
+  if st = Invalid then core.write("close=invalid\n");
+  st := stdlib.ui_separator(0, 0, 32);
+  if st = Invalid then core.write("sep=invalid\n");
+  st := stdlib.ui_center_text(0, 0, 100, 16, "host", stdlib.ui_black());
+  if st = Invalid then core.write("text=invalid\n");
+end;
+"#;
+    let package = langhost::compile(source.as_bytes(), "uimetrics").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(
+        String::from_utf8(result.output).expect("ASCII output"),
+        "w0=0\n\
+         w3=24\n\
+         wutf8=16\n\
+         h=8\n\
+         line=16\n\
+         inset=8\n\
+         bar=16\n\
+         box=11\n\
+         cx=38\n\
+         cy=4\n\
+         narrowx=7\n\
+         shorty=9\n\
+         black=0\n\
+         white=16777215\n\
+         gray=13421772\n\
+         focus=16777215\n\
+         accent=128\n\
+         frame=invalid\n\
+         title=invalid\n\
+         close=invalid\n\
+         sep=invalid\n\
+         text=invalid\n"
+    );
+}
+
+#[test]
+fn ui_layout_compiles_and_reports_the_host_path() {
+    let path = format!("{}/../samples/apps/ui_layout", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "ui_layout").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"ui_layout: host ok\n".to_vec());
+}
+
+/// A host with a screen that records the drawing calls instead of rasterising.
+/// It proves the helper's drawing *sequence* (geometry and order) without the
+/// kernel window service.
+struct Painter {
+    fills: Vec<(i64, i64, i64, i64, u32)>,
+    outlines: Vec<(i64, i64, i64, i64, u32)>,
+    texts: Vec<(i64, i64, Vec<u8>, u32)>,
+    output: Vec<u8>,
+}
+
+impl Host for Painter {
+    fn console_write(&mut self, bytes: &[u8]) {
+        self.output.extend_from_slice(bytes);
+    }
+
+    fn clock(&mut self) -> u64 {
+        0
+    }
+
+    fn screen_width(&mut self) -> u64 {
+        1024
+    }
+
+    fn screen_height(&mut self) -> u64 {
+        768
+    }
+
+    fn fill_rect(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) -> Status {
+        self.fills.push((x, y, w, h, color));
+        Status::Ok
+    }
+
+    fn draw_rect(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) -> Status {
+        self.outlines.push((x, y, w, h, color));
+        Status::Ok
+    }
+
+    fn draw_text(&mut self, x: i64, y: i64, text: &[u8], color: u32) -> Status {
+        self.texts.push((x, y, text.to_vec(), color));
+        Status::Ok
+    }
+}
+
+#[test]
+fn ui_title_bar_draws_the_documented_sequence() {
+    let source = br#"
+unit uiseq;
+
+uses core, stdlib, syslib;
+
+var
+  st: Status;
+
+procedure main(args: const string[1024]);
+begin
+  st := stdlib.ui_frame(10, 20, 100, 50);
+  st := stdlib.ui_title_bar(10, 20, 100, "Hi", true);
+  st := stdlib.ui_close_box(14, 23);
+  st := stdlib.ui_separator(11, 35, 98);
+  st := stdlib.ui_center_text(10, 20, 100, 16, "Hi", stdlib.ui_black());
+  if st = Ok then
+    core.write("ui sequence ok\n");
+end;
+"#;
+    let package = langhost::compile(source, "uiseq").expect("compiles");
+    let mut scratch = vec![0u8; package.code.len().div_ceil(32)];
+    let program = interpreter::Program::parse(&package.code, &mut scratch).expect("verifies");
+    let header = *program.header();
+    let mut state = vec![0u8; header.state_size as usize];
+    let mut stack = vec![0u8; header.stack_size as usize];
+    let args = vec![0u8; 8 + 1024];
+    let mut machine = interpreter::Machine::new();
+    let mut host = Painter {
+        fills: Vec::new(),
+        outlines: Vec::new(),
+        texts: Vec::new(),
+        output: Vec::new(),
+    };
+    let outcome = machine.run(
+        &program,
+        &mut host,
+        &mut state,
+        &mut stack,
+        &args,
+        langhost::DEFAULT_BUDGET,
+    );
+    assert_eq!(outcome, interpreter::Outcome::Exited(ExitReason::Ok));
+    assert_eq!(host.output, b"ui sequence ok\n");
+
+    const BLACK: u32 = 0x000000;
+    const WHITE: u32 = 0x00FF_FFFF;
+
+    assert_eq!(
+        host.outlines,
+        vec![
+            (10, 20, 100, 50, BLACK),
+            (14, 23, 11, 11, BLACK),
+            (14, 23, 11, 11, BLACK),
+        ],
+        "ui_frame, the title bar's close box, then the explicit close box"
+    );
+    assert!(
+        host.fills.contains(&(11, 21, 98, 15, WHITE)),
+        "focused title background: {:?}",
+        host.fills
+    );
+    for row in [22, 24, 26, 28, 30, 32, 34] {
+        assert!(
+            host.fills.contains(&(11, row, 98, 1, BLACK)),
+            "stripe at row {row}: {:?}",
+            host.fills
+        );
+    }
+    assert!(
+        host.fills.contains(&(14, 23, 11, 11, WHITE)),
+        "close box background: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(11, 35, 98, 1, BLACK)),
+        "title separator: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(60, 23, 20, 10, WHITE)),
+        "title band behind the glyphs: {:?}",
+        host.fills
+    );
+    assert_eq!(
+        host.texts,
+        vec![
+            (62, 24, b"Hi".to_vec(), BLACK),
+            (52, 24, b"Hi".to_vec(), BLACK),
+        ],
+        "the centred title, then the explicit centred text"
+    );
 }

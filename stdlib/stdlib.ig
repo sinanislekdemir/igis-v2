@@ -6,13 +6,18 @@ unit stdlib;
 // `uses stdlib;`. Its top-level names are reachable only as `stdlib.<name>`
 // from the application; inside this unit they are unqualified.
 //
-// Only `core` primitives are used here. There are no new opcodes or builtins:
-// every helper is ordinary language code. No `state` is declared, so importing
-// the library adds no bytes to an application's `state` region.
+// `core` primitives are used for the language services, and `syslib` for the
+// UI layout/chrome layer (ADR 0026): the library is trusted embedded source,
+// and an application already has every `syslib` primitive, so the import grants
+// nothing new. There are no new opcodes or builtins: every helper is ordinary
+// language code. No `state` is declared, so importing the library adds no bytes
+// to an application's `state` region.
 //
 // Capacities are concrete because the language has no generics. A `var string`
 // parameter uses the at-least-N rule, so a destination must be at least as
 // large as the declared capacity.
+
+uses core, syslib;
 
 const
   TrimCapacity = 256;
@@ -25,6 +30,17 @@ const
   LineCapacity = 255;
   MaxInt = 9223372036854775807;
   MinInt = -9223372036854775807 - 1;
+  UiTitleCapacity = 64;
+  UiGlyphWidth = 8;
+  UiGlyphHeight = 8;
+  UiLineHeight = 16;
+  UiContentInset = 8;
+  UiTitleBarHeight = 16;
+  UiCloseBoxSize = 11;
+  UiBlack = 0x000000;
+  UiWhite = 0x00FFFFFF;
+  UiGray = 0x00CCCCCC;
+  UiAccent = 0x000080;
 
 // Copies `src` without leading or trailing spaces, tabs, CRs and LFs and
 // returns the copied length. The destination must hold the whole result:
@@ -860,4 +876,274 @@ end;
 function send_bytes(ep: const out_stream[1]; data: const bytes[0]): Status;
 begin
   return core.send(ep, data);
+end;
+
+// ---- UI layout and chrome (spec 0003, "UI layout and chrome"; ADR 0026) --
+//
+// Client-side chrome for dialogs, panels and controls inside an application's
+// own content. The window service still draws the real window frames (spec
+// 0011, ADR 0024); these helpers never call it. Everything here is ordinary
+// language code over the nine `syslib` drawing primitives, with scalar and
+// buffer arguments only. The palette and the metrics are functions because a
+// `stdlib` constant is not visible across the unit boundary.
+//
+// The font is 8x8 and `syslib.draw_text` advances one cell per byte, drawing a
+// blank cell for a byte above 0x7F. `ui_text_width` counts UTF-8 code points,
+// which agree with the cell count for the ASCII the font covers.
+
+// One 8-pixel cell per code point in `text`.
+function ui_text_width(text: const string[0]): int;
+begin
+  return utf8_len(text) * UiGlyphWidth;
+end;
+
+// Height of one glyph row.
+function ui_text_height(): int;
+begin
+  return UiGlyphHeight;
+end;
+
+// Standard text line advance: one row plus leading, equal to the title bar.
+function ui_line_height(): int;
+begin
+  return UiLineHeight;
+end;
+
+// Standard content/control margin from a frame, title bar or neighbour.
+function ui_content_inset(): int;
+begin
+  return UiContentInset;
+end;
+
+// Height of the title bar drawn by `ui_title_bar`.
+function ui_title_bar_height(): int;
+begin
+  return UiTitleBarHeight;
+end;
+
+// Side of the close box drawn by `ui_close_box`.
+function ui_close_box_size(): int;
+begin
+  return UiCloseBoxSize;
+end;
+
+// System 7.5 palette. Text, borders, chrome ink and the desktop dither.
+function ui_black(): uint;
+begin
+  return uint(UiBlack);
+end;
+
+// Content and desktop base, and the focused title background.
+function ui_white(): uint;
+begin
+  return uint(UiWhite);
+end;
+
+// Unfocused title background and disabled control face.
+function ui_gray(): uint;
+begin
+  return uint(UiGray);
+end;
+
+// The named focused title background (equal to white).
+function ui_focus(): uint;
+begin
+  return uint(UiWhite);
+end;
+
+// Selection/highlight accent.
+function ui_accent(): uint;
+begin
+  return uint(UiAccent);
+end;
+
+// `x + (w - text width) / 2`, or `x` when the text is at least as wide as the
+// box, so the result is never left of `x`.
+function ui_text_center_x(x: int; w: int; text: const string[0]): int;
+var
+  width: int;
+begin
+  width := ui_text_width(text);
+  if width >= w then
+    return x;
+  return x + (w - width) div 2;
+end;
+
+// `y + (h - 8) / 2`, or `y` when the row is at most one glyph high.
+function ui_text_center_y(y: int; h: int): int;
+begin
+  if UiGlyphHeight >= h then
+    return y;
+  return y + (h - UiGlyphHeight) div 2;
+end;
+
+// A one-pixel black outline inside `(x, y, w, h)`; the interior is untouched.
+// `w <= 0`, `h <= 0` or disabled graphics return `Status.Invalid` and draw
+// nothing (the `syslib.draw_rect` rule).
+function ui_frame(x: int; y: int; w: int; h: int): Status;
+begin
+  return syslib.draw_rect(x, y, w, h, uint(UiBlack));
+end;
+
+// An 11x11 black outline at `(x, y)`. The background is not filled, so the
+// caller picks it; `ui_title_bar` fills the box first with the bar colour.
+function ui_close_box(x: int; y: int): Status;
+begin
+  return syslib.draw_rect(x, y, UiCloseBoxSize, UiCloseBoxSize, uint(UiBlack));
+end;
+
+// One black row `(x, y, w, 1)`.
+function ui_separator(x: int; y: int; w: int): Status;
+begin
+  return syslib.fill_rect(x, y, w, 1, uint(UiBlack));
+end;
+
+// Draws `text` centred in `(x, y, w, h)`, left/top aligned when it does not
+// fit, through `syslib.draw_text` (transparent background).
+function ui_center_text(x: int; y: int; w: int; h: int; text: const string[0]; color: uint): Status;
+begin
+  return syslib.draw_text(
+    ui_text_center_x(x, w, text),
+    ui_text_center_y(y, h),
+    text,
+    color);
+end;
+
+// Paints a title bar inside a frame whose origin is `(x, y)` and whose width is
+// `w`. The caller has drawn the one-pixel frame with `ui_frame`; this helper
+// never paints the outer border. The interior is white with black stripes when
+// focused, plain gray when not; the close box sits at `(x + 4, y + 3)` and the
+// title is centred in the band right of it, truncated to at most 64 bytes at a
+// code-point boundary. A separator at `y + 15` closes the bar.
+//
+// `w < 3` returns `Invalid` and draws nothing. A narrow bar (interior under 14
+// pixels) omits the close box; a band under one glyph omits the title. The
+// result is the first non-`Ok` status from a `syslib` call, so disabled
+// graphics propagate as `Invalid` after the first paint.
+function ui_title_bar(x: int; y: int; w: int; title: const string[0]; focused: bool): Status;
+var
+  st: Status;
+  inner_x: int;
+  inner_w: int;
+  title_h: int;
+  bg: uint;
+  row: int;
+  box_x: int;
+  box_y: int;
+  avail: int;
+  fits: int;
+  at: int;
+  next: int;
+  codepoint: int;
+  shown_chars: int;
+  shown_bytes: int;
+  length: int;
+  text_w: int;
+  band_x: int;
+  left: int;
+  right: int;
+  copied: int;
+  staged: string[64];
+  done: bool;
+begin
+  if w < 3 then
+    return Invalid;
+  inner_x := x + 1;
+  inner_w := w - 2;
+  title_h := UiTitleBarHeight - 1;
+  if focused then
+    bg := uint(UiWhite)
+  else
+    bg := uint(UiGray);
+
+  st := syslib.fill_rect(inner_x, y + 1, inner_w, title_h, bg);
+  if st <> Ok then
+    return st;
+
+  if focused then
+  begin
+    row := y + 2;
+    while row < y + title_h do
+    begin
+      st := syslib.fill_rect(inner_x, row, inner_w, 1, uint(UiBlack));
+      if st <> Ok then
+        return st;
+      row := row + 2;
+    end;
+  end;
+
+  // The box ends at x + 15 (exclusive); the interior ends at x + w - 1.
+  if inner_w >= 14 then
+  begin
+    box_x := x + 4;
+    box_y := y + 3;
+    st := syslib.fill_rect(box_x, box_y, UiCloseBoxSize, UiCloseBoxSize, bg);
+    if st <> Ok then
+      return st;
+    st := ui_close_box(box_x, box_y);
+    if st <> Ok then
+      return st;
+  end;
+
+  st := ui_separator(inner_x, y + UiTitleBarHeight - 1, inner_w);
+  if st <> Ok then
+    return st;
+
+  // Title text: the band right of the close box, at most 64 bytes and never
+  // splitting a code point.
+  avail := inner_w - 20;
+  if avail >= UiGlyphWidth then
+  begin
+    fits := avail div UiGlyphWidth;
+    length := int(core.len(title));
+    at := 0;
+    next := 0;
+    shown_chars := 0;
+    shown_bytes := 0;
+    done := false;
+    while not done and shown_chars < fits and at < length do
+    begin
+      st := utf8_decode(title, at, codepoint, next);
+      if st <> Ok then
+        done := true
+      else
+      begin
+        at := next;
+        if at <= UiTitleCapacity then
+        begin
+          shown_chars := shown_chars + 1;
+          shown_bytes := at;
+        end
+        else
+          done := true;
+      end;
+    end;
+    if shown_bytes > 0 then
+    begin
+      copied := core.substr_into(staged, title, 0, shown_bytes);
+      if copied < 0 then
+        return Invalid;
+      text_w := shown_chars * UiGlyphWidth;
+      band_x := inner_x + 20 + (avail - text_w) div 2;
+      // Repaint the band behind the text so stripes never cross a glyph, but
+      // clamp it to the interior: a narrow bar must not touch the border.
+      left := band_x - 2;
+      if left < inner_x then
+        left := inner_x;
+      right := band_x + text_w + 2;
+      if right > inner_x + inner_w then
+        right := inner_x + inner_w;
+      if right > left then
+      begin
+        st := syslib.fill_rect(left, y + 3, right - left, 10, bg);
+        if st <> Ok then
+          return st;
+      end;
+      st := syslib.draw_text(band_x, y + 4, staged, uint(UiBlack));
+      if st <> Ok then
+        return st;
+    end;
+  end;
+
+  return Ok;
 end;

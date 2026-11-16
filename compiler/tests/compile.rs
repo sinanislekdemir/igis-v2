@@ -286,7 +286,7 @@ fn a_tiny_manifest_buffer_is_a_capacity_error() {
 #[test]
 fn compile_into_reports_its_caps() {
     assert_eq!(compiler::MAX_SOURCE_BYTES, 64 * 1024);
-    assert_eq!(compiler::MAX_ARENA_BYTES, 1024 * 1024);
+    assert_eq!(compiler::MAX_ARENA_BYTES, 2 * 1024 * 1024);
     assert_eq!(compiler::MAX_CODE_BYTES, 256 * 1024);
     assert_eq!(compiler::MAX_MANIFEST_BYTES, 4 * 1024);
 }
@@ -2935,11 +2935,15 @@ fn the_embedded_stdlib_compiles_on_its_own() {
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(manifest_unit(&package), "stdlib");
     assert_eq!(
-        header.function_count, 21,
+        header.function_count, 39,
         "trim_into, split_once, parse_int_into, parse_f64_into, starts_with, contains_byte, \
          split_all, drain_into, map_get_or, utf8_decode_into, utf8_len, utf8_decode, \
          utf8_valid, recv_exact, send_frame, recv_frame_into, send_line, recv_line_into, \
-         send_u64, recv_u64, send_bytes"
+         send_u64, recv_u64, send_bytes, plus the M2.4.0 UI layer: ui_text_width, \
+         ui_text_height, ui_line_height, ui_content_inset, ui_title_bar_height, \
+         ui_close_box_size, ui_black, ui_white, ui_gray, ui_focus, ui_accent, \
+         ui_text_center_x, ui_text_center_y, ui_frame, ui_title_bar, ui_close_box, \
+         ui_separator, ui_center_text"
     );
     assert_eq!(header.entry, 0);
     assert_eq!(header.state_size, 0, "the stdlib declares no state");
@@ -3023,6 +3027,99 @@ end;
         "{}",
         error.message
     );
+}
+
+#[test]
+fn an_application_calls_the_ui_layout_helpers() {
+    let source = br#"
+unit ui;
+uses core, stdlib, syslib;
+
+var
+  st: Status;
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := stdlib.ui_text_width(args);
+  n := stdlib.ui_text_center_x(0, 100, "ok");
+  n := stdlib.ui_text_center_y(0, stdlib.ui_line_height());
+  if stdlib.ui_text_height() = 8 then
+    n := n + 1;
+  if stdlib.ui_content_inset() = 8 then
+    n := n + 1;
+  if stdlib.ui_title_bar_height() = 16 then
+    n := n + 1;
+  if stdlib.ui_close_box_size() = 11 then
+    n := n + 1;
+  if stdlib.ui_black() = uint(0) and stdlib.ui_white() = uint(0x00FFFFFF) then
+    n := n + 1;
+  if stdlib.ui_gray() = uint(0x00CCCCCC) and stdlib.ui_focus() = stdlib.ui_white() then
+    n := n + 1;
+  if stdlib.ui_accent() = uint(0x000080) then
+    n := n + 1;
+  st := stdlib.ui_frame(0, 0, 10, 10);
+  st := stdlib.ui_title_bar(0, 0, 100, "title", true);
+  st := stdlib.ui_close_box(1, 1);
+  st := stdlib.ui_separator(0, 20, 100);
+  st := stdlib.ui_center_text(0, 0, 100, 16, "ok", stdlib.ui_black());
+  if st = Invalid then
+    n := n + 1;
+end;
+"#;
+    let package = compile(source, "ui.ig").expect("the UI helpers compile");
+    let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
+    assert_eq!(
+        header.entry, 39,
+        "the entry follows the 39 library functions"
+    );
+    assert!(header_function_count(&package) > 39);
+}
+
+#[test]
+fn ui_helpers_reject_a_record_or_sum_argument() {
+    // Type ids are per unit, so a record or sum still has no identity across
+    // the boundary; the argument is a type mismatch rather than a shared type.
+    let record = br#"
+unit t;
+uses core, stdlib;
+
+type P = record x: int; end;
+
+var
+  p: P;
+  st: Status;
+
+procedure main(args: const string[1024]);
+begin
+  st := stdlib.ui_frame(p, 0, 10, 10);
+end;
+"#;
+    let error = compile(record, "t.ig").expect_err("a record is not an int");
+    assert!(
+        error.message.contains("cannot be used as a scalar"),
+        "{}",
+        error.message
+    );
+
+    let sum = br#"
+unit t;
+uses core, stdlib;
+
+type V = A | B;
+
+var
+  v: V;
+  st: Status;
+
+procedure main(args: const string[1024]);
+begin
+  st := stdlib.ui_frame(0, 0, 10, 10);
+  st := stdlib.ui_center_text(0, 0, 10, 10, v, stdlib.ui_black());
+end;
+"#;
+    let error = compile(sum, "t.ig").expect_err("a sum is not a string");
+    assert!(error.message.contains("not a buffer"), "{}", error.message);
 }
 
 #[test]
