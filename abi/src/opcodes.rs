@@ -586,6 +586,14 @@ pub mod builtin {
     /// no window exists or graphics are disabled. No operands.
     pub const WINDOW_FOCUS: u32 = 38;
 
+    /// `syslib.window_present(id) -> Status`: present a window's content
+    /// rectangle from the shadow, clipped to the window's visible parts (its
+    /// content minus the frames of higher windows), so a client's presentation
+    /// cannot cover a higher window or its chrome (spec 0011, W17). Owner-only
+    /// like `close`/`move`: `NotFound` for an unknown id, `Invalid` for another
+    /// task's window or disabled graphics.
+    pub const WINDOW_PRESENT: u32 = 39;
+
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
         match id {
@@ -627,6 +635,7 @@ pub mod builtin {
             WINDOW_FRAME_RECT => Some((2, 1)),
             WINDOW_CONTENT_RECT => Some((2, 1)),
             WINDOW_FOCUS => Some((0, 1)),
+            WINDOW_PRESENT => Some((1, 1)),
             _ => None,
         }
     }

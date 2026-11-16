@@ -188,6 +188,8 @@ pub enum EventKind {
     KeyDown = 3,
     /// A key was released.
     KeyUp = 4,
+    /// A window needs its whole content repainted (spec 0011, W12).
+    Expose = 5,
 }
 
 impl EventKind {
@@ -199,6 +201,7 @@ impl EventKind {
             EventKind::PointerUp => "PointerUp",
             EventKind::KeyDown => "KeyDown",
             EventKind::KeyUp => "KeyUp",
+            EventKind::Expose => "Expose",
         }
     }
 
@@ -210,6 +213,7 @@ impl EventKind {
             2 => Some(EventKind::PointerUp),
             3 => Some(EventKind::KeyDown),
             4 => Some(EventKind::KeyUp),
+            5 => Some(EventKind::Expose),
             _ => None,
         }
     }
@@ -231,7 +235,12 @@ pub struct Event {
     pub y: i64,
     /// Button mask (pointer) or packed key value (keyboard).
     pub code: u64,
-    /// Target window; always 0 until the window service routes events (M2.3).
+    /// Target window id, or 0. The kernel host fills it at poll time: pointer
+    /// and key events go to the focused window, a pointer-down goes to the
+    /// topmost window at its position (raising it first), and an `Expose`
+    /// names the window whose content must be repainted. Producers leave it 0
+    /// and an injected non-zero value is passed through unchanged (spec 0011,
+    /// W12/W16).
     pub window: i64,
 }
 

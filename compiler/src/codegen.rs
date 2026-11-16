@@ -350,12 +350,13 @@ const STATUS_VARIANTS: [&str; 8] = [
 /// Variants of the predeclared `EventKind` enum, in the order
 /// `abi::EventKind` fixes (spec 0010, I19). The variants are global constants,
 /// so an application writes `KeyDown` and compares `ev.kind = KeyDown`.
-const EVENT_KIND_VARIANTS: [&str; 5] = [
+const EVENT_KIND_VARIANTS: [&str; 6] = [
     "PointerMove",
     "PointerDown",
     "PointerUp",
     "KeyDown",
     "KeyUp",
+    "Expose",
 ];
 
 /// Fields of the predeclared `Event` record, at the offsets `abi::layout`
@@ -6065,6 +6066,27 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.one(opcodes::BUILTIN, builtin::WINDOW_FOCUS)?;
                 self.push();
                 Ok(Some(Type::scalar(Kind::Int)))
+            }
+            // `syslib.window_present(id) -> Status` (spec 0011, W17): the
+            // sanctioned presentation path for a window client. The kernel
+            // clips the presented content to the window's visible parts; the
+            // compiler only checks the staged signature.
+            "syslib.window_present" => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`syslib.window_present` expects 1 argument, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                self.window_id(target, args[0])?;
+                self.one(opcodes::BUILTIN, builtin::WINDOW_PRESENT)?;
+                self.pop(1)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
             }
             // Ring operations (spec 0003, "Rings") are compiler-recognised
             // built-in procedures, not host builtins: they lower to the

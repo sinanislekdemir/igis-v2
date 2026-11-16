@@ -89,6 +89,7 @@ struct WindowHost {
     moved: Option<(u64, i64, i64)>,
     closed: Vec<u64>,
     raised: Vec<u64>,
+    presented: Vec<u64>,
 }
 
 impl WindowHost {
@@ -106,6 +107,7 @@ impl WindowHost {
             moved: None,
             closed: Vec::new(),
             raised: Vec::new(),
+            presented: Vec::new(),
         }
     }
 }
@@ -147,6 +149,15 @@ impl Host for WindowHost {
 
     fn window_focus(&mut self) -> u64 {
         self.focus
+    }
+
+    fn window_present(&mut self, id: u64) -> Status {
+        self.presented.push(id);
+        if id == 0 {
+            Status::NotFound
+        } else {
+            Status::Ok
+        }
     }
 }
 
@@ -386,4 +397,56 @@ fn the_trait_defaults_are_a_disabled_window_service() {
     assert_eq!(state_word(&state, 40), Status::Invalid as u64);
     assert_eq!(state_word(&state, 48), Status::Invalid as u64);
     assert_eq!(state_word(&state, 56), 0);
+    let mut instructions = Vec::new();
+    op_const(&mut instructions, 1);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::WINDOW_PRESENT,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op(&mut instructions, opcodes::RET);
+    let code = build(&instructions, &[], 64);
+    let mut state = vec![0u8; 64];
+    let mut host = DisabledHost;
+    assert_eq!(
+        run(&code, &mut state, &mut host),
+        Outcome::Exited(interpreter::ExitReason::Ok)
+    );
+    assert_eq!(
+        state_word(&state, 0),
+        Status::Invalid as u64,
+        "the default window_present is the disabled service"
+    );
+}
+
+#[test]
+fn window_present_pops_the_id_and_pushes_the_status() {
+    let mut instructions = Vec::new();
+    op_const(&mut instructions, 5);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::WINDOW_PRESENT,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op_const(&mut instructions, 0);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::WINDOW_PRESENT,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 8);
+    op(&mut instructions, opcodes::RET);
+
+    let code = build(&instructions, &[], 64);
+    let mut state = vec![0u8; 64];
+    let mut host = WindowHost::new();
+    assert_eq!(
+        run(&code, &mut state, &mut host),
+        Outcome::Exited(interpreter::ExitReason::Ok)
+    );
+    assert_eq!(host.presented, vec![5, 0]);
+    assert_eq!(state_word(&state, 0), Status::Ok as u64);
+    assert_eq!(state_word(&state, 8), Status::NotFound as u64);
 }

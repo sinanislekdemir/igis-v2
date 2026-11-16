@@ -307,6 +307,13 @@ pub trait Host {
         0
     }
 
+    /// Presents a window's content rectangle, clipped to its visible parts
+    /// (`syslib.window_present`, spec 0011, W17). The caller must own the
+    /// window; the default is a disabled service (`Invalid`).
+    fn window_present(&mut self, _id: u64) -> Status {
+        Status::Invalid
+    }
+
     /// Requests a new application instance (`core.spawn`).
     ///
     /// `path` and `args` are the bytes of the two `string` buffers. `diag` is a
@@ -1707,6 +1714,11 @@ impl Machine {
                     builtin::WINDOW_FOCUS => {
                         let focus = host.window_focus();
                         self.push(stack, focus)?;
+                    }
+                    builtin::WINDOW_PRESENT => {
+                        let window = self.pop(stack)?;
+                        let status = host.window_present(window);
+                        self.push(stack, status as u64)?;
                     }
                     _ => return Err(FaultCode::IllegalOperation),
                 }

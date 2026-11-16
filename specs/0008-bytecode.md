@@ -393,11 +393,12 @@ on the same table; the machine, not the compiler, owns the runtime checks.
 | 36 | `window_frame_rect` | 2 → 1 | id, `Rect` ref; writes on `Ok` |
 | 37 | `window_content_rect` | 2 → 1 | id, `Rect` ref; writes on `Ok` |
 | 38 | `window_focus` | 0 → 1 | focused window id or 0 |
+| 39 | `window_present` | 1 → 1 | window id; presents the visible content; owner-only |
 
 Graphics builtins add no opcode, so ABI v1 stays at **75** opcodes (spec 0009). The input
 builtins (spec 0010) and the window builtins (spec 0011) add none either; the interpreter
 owns the button-mask rule and the operand decoding, the host owns the pointer state, the
-event queue and the window table.
+event queue, the window table, poll-time routing and the per-window exposes.
 
 ### Compiler / runtime split
 
@@ -560,3 +561,4 @@ pub fn run(task: &mut Task);
 | 2026-11-16 | Builtin id **26** `pointer_source` (0 → 1) reports the active pointer source, 0 none / 1 PS/2 / 2 absolute USB tablet (spec 0010, I27). No opcode is added; ABI v1 stays at **75**. |
 | 2026-11-16 | Event builtins (spec 0010, I18/I19): `next_event` (27, 1 → 1; blocks on an empty queue with `Blocked(WaitKind::Input)`), `poll_event` (28, 1 → 1; pushes `WouldBlock`), `inject_event` (29, 1 → 1; debug-only, unknown kind is `Invalid`), `event_drops` (30, 0 → 1) and `event_flush` (31, 0 → 1). The host writes a 40-byte `abi::layout::event` image; no opcode is added and ABI v1 stays at **75**. |
 | 2026-11-16 | Window builtins add no opcode (spec 0011, M2.3.1): ids 32–38 are `window_open` (6 → 1), `window_close` (1 → 1), `window_raise` (1 → 1), `window_move` (3 → 1), `window_frame_rect` (2 → 1), `window_content_rect` (2 → 1) and `window_focus` (0 → 1). The interpreter decodes the operands, resolves the title and the out-parameters and writes the 32-byte `abi::layout::rect` image only on `Ok`; the kernel host owns the table and the policy. `Rect` is a predeclared record, so no new type or opcode is needed; ABI v1 stays at **75**. |
+| 2026-11-16 | `window_present` is builtin 39 (1 → 1): pop a window id, present the window's content clipped to its visible parts, push the `Status`. Owner-only and disabled-graphics `Invalid`; no opcode, ABI v1 stays at **75**. `EventKind.Expose` is ordinal 5; routing (`Event.window`) happens in the host at poll time and adds no bytecode. |

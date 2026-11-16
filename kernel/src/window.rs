@@ -89,6 +89,8 @@ struct Window {
     h: i64,
     title_len: usize,
     title: [u8; TITLE_CAP],
+    /// A whole-content repaint is pending for this window (spec 0011, W12).
+    expose_pending: bool,
     used: bool,
 }
 
@@ -102,6 +104,7 @@ impl Window {
         h: 0,
         title_len: 0,
         title: [0; TITLE_CAP],
+        expose_pending: false,
         used: false,
     };
 
@@ -649,6 +652,7 @@ impl Table {
     /// each removal (W8). The damage accumulates and one repair pass covers all
     /// removed frames, so a terminated task's windows disappear together.
     fn close_task(&mut self, owner: u64) {
+        let mut removed = false;
         let mut pos = 0;
         while pos < self.count {
             if self.windows[self.order[pos]].owner == owner {
@@ -656,12 +660,17 @@ impl Table {
                 self.remove_at(pos);
                 self.erases.add(frame, 0);
                 self.chrome.add(frame);
+                removed = true;
             } else {
                 pos += 1;
             }
         }
-        if let Some(pos) = self.position(self.focus) {
-            self.chrome.add(title_rect(&self.windows[self.order[pos]]));
+        // Only an actual removal can move the focus, so a task that owned no
+        // window records no damage (and wakes nobody with a spurious expose).
+        if removed {
+            if let Some(pos) = self.position(self.focus) {
+                self.chrome.add(title_rect(&self.windows[self.order[pos]]));
+            }
         }
     }
 
@@ -746,6 +755,80 @@ impl Table {
         let _ = gfx::draw_rect(frame.x, frame.y, frame.w, frame.h, CHROME_INK);
     }
 
+    /// Marks one whole-content expose on every live window whose frame
+    /// intersects the current chrome damage (spec 0011, W12). Coalesced per
+    /// window: a pending expose means "repaint the whole content once".
+    fn mark_exposes(&mut self) -> bool {
+        let mut marked = false;
+        for pos in 0..self.count {
+            let slot = self.order[pos];
+            if !self.windows[slot].expose_pending
+                && self.chrome.intersects(self.windows[slot].frame())
+            {
+                self.windows[slot].expose_pending = true;
+                marked = true;
+            }
+        }
+        marked
+    }
+
+    /// Takes the topmost pending expose owned by `owner`, clearing it.
+    fn take_expose(&mut self, owner: u64) -> Option<u64> {
+        for pos in (0..self.count).rev() {
+            let slot = self.order[pos];
+            if self.windows[slot].owner == owner && self.windows[slot].expose_pending {
+                self.windows[slot].expose_pending = false;
+                return Some(self.windows[slot].id);
+            }
+        }
+        None
+    }
+
+    /// Whether `owner` has any pending expose.
+    fn has_expose(&self, owner: u64) -> bool {
+        (0..self.count).any(|pos| {
+            let slot = self.order[pos];
+            self.windows[slot].owner == owner && self.windows[slot].expose_pending
+        })
+    }
+
+    /// The topmost window whose frame contains `(x, y)` (spec 0011, W16).
+    fn hit_test(&self, x: i64, y: i64) -> Option<u64> {
+        for pos in (0..self.count).rev() {
+            let window = &self.windows[self.order[pos]];
+            let frame = window.frame();
+            if x >= frame.x
+                && y >= frame.y
+                && x < frame.x.saturating_add(frame.w)
+                && y < frame.y.saturating_add(frame.h)
+            {
+                return Some(window.id);
+            }
+        }
+        None
+    }
+
+    /// Presents a window's content rectangle, clipped to its visible parts
+    /// (spec 0011, W17). The caller must own the window.
+    fn present(&self, owner: u64, id: u64) -> Status {
+        let Some(pos) = self.position(id) else {
+            return Status::NotFound;
+        };
+        let window = &self.windows[self.order[pos]];
+        if window.owner != owner {
+            return Status::Invalid;
+        }
+        let content = window.content();
+        let parts = self.visible_parts(content, pos + 1);
+        for part in parts.rects[..parts.count].iter() {
+            if gfx::set_clip(part.x, part.y, part.w, part.h) {
+                let _ = gfx::present(part.x, part.y, part.w, part.h);
+                gfx::reset_clip();
+            }
+        }
+        Status::Ok
+    }
+
     /// Runs one synchronous repair pass (spec 0011, W11).
     ///
     /// 1. The desktop is restored in the erased parts no live window covers.
@@ -758,14 +841,15 @@ impl Table {
     /// Runs under the table lock (window → graphics), so the z-order it walks
     /// is the one the caller just produced. The repair is synchronous: no
     /// snapshot and no client call.
-    fn repair(&mut self) {
+    fn repair(&mut self) -> bool {
         if self.erases.count == 0 && self.chrome.count == 0 {
-            return;
+            return false;
         }
         if gfx::size().0 == 0 {
             self.clear_damage();
-            return;
+            return false;
         }
+        let marked = self.mark_exposes();
         gfx::reset_clip();
         let mut present = Presentation::new();
 
@@ -822,6 +906,7 @@ impl Table {
             let _ = gfx::present(rect.x, rect.y, rect.w, rect.h);
         }
         self.clear_damage();
+        marked
     }
 }
 
@@ -836,8 +921,14 @@ pub fn open(owner: u64, x: i64, y: i64, w: i64, h: i64, title: &[u8]) -> Result<
     let (screen_w, screen_h) = gfx::size();
     let mut table = TABLE.lock();
     let result = table.open(screen_w as i64, screen_h as i64, owner, x, y, w, h, title);
-    if result.is_ok() {
-        table.repair();
+    let wake = if result.is_ok() {
+        table.repair()
+    } else {
+        false
+    };
+    drop(table);
+    if wake {
+        crate::task::wake_input();
     }
     result
 }
@@ -846,8 +937,14 @@ pub fn open(owner: u64, x: i64, y: i64, w: i64, h: i64, title: &[u8]) -> Result<
 pub fn close(owner: u64, id: u64) -> Status {
     let mut table = TABLE.lock();
     let status = table.close(owner, id);
-    if status == Status::Ok {
-        table.repair();
+    let wake = if status == Status::Ok {
+        table.repair()
+    } else {
+        false
+    };
+    drop(table);
+    if wake {
+        crate::task::wake_input();
     }
     status
 }
@@ -856,8 +953,14 @@ pub fn close(owner: u64, id: u64) -> Status {
 pub fn raise(id: u64) -> Status {
     let mut table = TABLE.lock();
     let status = table.raise(id);
-    if status == Status::Ok {
-        table.repair();
+    let wake = if status == Status::Ok {
+        table.repair()
+    } else {
+        false
+    };
+    drop(table);
+    if wake {
+        crate::task::wake_input();
     }
     status
 }
@@ -867,8 +970,14 @@ pub fn move_to(owner: u64, id: u64, x: i64, y: i64) -> Status {
     let (screen_w, screen_h) = gfx::size();
     let mut table = TABLE.lock();
     let status = table.move_to(screen_w as i64, screen_h as i64, owner, id, x, y);
-    if status == Status::Ok {
-        table.repair();
+    let wake = if status == Status::Ok {
+        table.repair()
+    } else {
+        false
+    };
+    drop(table);
+    if wake {
+        crate::task::wake_input();
     }
     status
 }
@@ -900,7 +1009,53 @@ pub fn focus() -> u64 {
 pub fn close_task(owner: u64) {
     let mut table = TABLE.lock();
     table.close_task(owner);
-    table.repair();
+    let wake = table.repair();
+    drop(table);
+    if wake {
+        crate::task::wake_input();
+    }
+}
+
+/// Takes the topmost pending whole-content `Expose` owned by `owner`, if any
+/// (spec 0011, W12). Only the owner can take its own expose.
+pub fn take_expose(owner: u64) -> Option<u64> {
+    TABLE.lock().take_expose(owner)
+}
+
+/// Whether `owner` has a pending `Expose`. The scheduler's input block re-check
+/// uses it so an expose marked between the empty read and the block is not lost.
+pub fn has_expose(owner: u64) -> bool {
+    TABLE.lock().has_expose(owner)
+}
+
+/// Routes a pointer-down at `(x, y)`: hit-tests the topmost frame, raises and
+/// focuses that window, repairs, and returns its id (spec 0011, W16). Returns
+/// `None` on the desktop or when graphics are disabled.
+pub fn route_click(x: i64, y: i64) -> Option<u64> {
+    if gfx::size().0 == 0 {
+        return None;
+    }
+    let mut table = TABLE.lock();
+    let id = table.hit_test(x, y)?;
+    if table.raise(id) != Status::Ok {
+        return None;
+    }
+    let wake = table.repair();
+    drop(table);
+    if wake {
+        crate::task::wake_input();
+    }
+    Some(id)
+}
+
+/// Presents a window's content, clipped to its visible parts (spec 0011, W17).
+/// `Invalid` when graphics are disabled, `NotFound` for an unknown id, and
+/// `Invalid` for a window owned by another task.
+pub fn present(owner: u64, id: u64) -> Status {
+    if gfx::size().0 == 0 {
+        return Status::Invalid;
+    }
+    TABLE.lock().present(owner, id)
 }
 
 /// Boot self-check: runs the policy on a scratch table with fixed 1024 × 768
@@ -1292,4 +1447,113 @@ fn title_of(table: &Table, id: u64) -> Option<Rect> {
     table
         .position(id)
         .map(|pos| title_rect(&table.windows[table.order[pos]]))
+}
+
+/// Boot self-check for routing and expose ownership (spec 0011, W12/W16/W17):
+/// pending-expose marking, owner isolation, topmost-first take order, the
+/// hit-test order and the loss of an expose when its window closes. Pure: it
+/// works on a scratch table and never touches the screen.
+///
+/// Returns the first failing step, or `Ok(())`; `kmain` prints
+/// `window: route ok` and halts on a mismatch.
+pub fn route_self_check() -> Result<(), u32> {
+    const SCREEN_W: i64 = 1024;
+    const SCREEN_H: i64 = 768;
+
+    // Two windows of different owners, not overlapping.
+    let mut table = Table::new();
+    let a = table
+        .open(SCREEN_W, SCREEN_H, 1, 10, 10, 100, 50, b"A")
+        .map_err(|_| 1u32)?;
+    let b = table
+        .open(SCREEN_W, SCREEN_H, 2, 400, 400, 100, 50, b"B")
+        .map_err(|_| 2u32)?;
+    if a != 1 || b != 2 {
+        return Err(3);
+    }
+
+    // Raising A damages A (its frame) and B (the old focus title bar). The
+    // expose is per window and only its owner can take it.
+    table.clear_damage();
+    if table.raise(a) != Status::Ok {
+        return Err(4);
+    }
+    if !table.mark_exposes() {
+        return Err(5);
+    }
+    if !table.has_expose(1) || !table.has_expose(2) {
+        return Err(6);
+    }
+    if table.take_expose(1) != Some(a) {
+        return Err(7);
+    }
+    if table.has_expose(1) {
+        return Err(8);
+    }
+    if !table.has_expose(2) {
+        return Err(9);
+    }
+    if table.take_expose(2) != Some(b) {
+        return Err(10);
+    }
+    if table.has_expose(2) {
+        return Err(11);
+    }
+
+    // Hit-testing the topmost frame.
+    if table.hit_test(50, 20) != Some(a) || table.hit_test(450, 410) != Some(b) {
+        return Err(12);
+    }
+    if table.hit_test(900, 700).is_some() {
+        return Err(13);
+    }
+    if table.move_to(SCREEN_W, SCREEN_H, 2, b, 20, 20) != Status::Ok {
+        return Err(14);
+    }
+    // A was raised above B earlier, so the overlap still hits A.
+    if table.hit_test(30, 30) != Some(a) {
+        return Err(15);
+    }
+    table.clear_damage();
+    if table.raise(b) != Status::Ok {
+        return Err(16);
+    }
+    if table.hit_test(30, 30) != Some(b) {
+        return Err(17);
+    }
+
+    // Exposes are taken topmost first and coalesce per window.
+    table.mark_exposes();
+    if table.take_expose(1) != Some(a) {
+        return Err(18);
+    }
+    if table.take_expose(2) != Some(b) {
+        return Err(19);
+    }
+    // No new damage: a second pass marks nothing.
+    table.clear_damage();
+    if table.mark_exposes() {
+        return Err(20);
+    }
+
+    // A closed window loses its pending expose.
+    let c = table
+        .open(SCREEN_W, SCREEN_H, 3, 600, 100, 100, 50, b"C")
+        .map_err(|_| 21u32)?;
+    table.clear_damage();
+    if table.raise(c) != Status::Ok {
+        return Err(22);
+    }
+    table.mark_exposes();
+    if !table.has_expose(3) {
+        return Err(23);
+    }
+    if table.close(3, c) != Status::Ok {
+        return Err(24);
+    }
+    if table.take_expose(3).is_some() {
+        return Err(25);
+    }
+
+    Ok(())
 }

@@ -82,33 +82,60 @@ an `int`; `0` is never a valid id.
   The drawing primitives do not change and applications get no clip primitive. Client
   content drawing is not automatically clipped (one global clip, several cores; see
   "Clip discipline"); a client's presentation is limited to its content rectangle by
-  `window_present` in M2.3.3.
+  `window_present` (W17).
 - **W11 (MUST):** The service tracks damage and repairs it synchronously (M2.3.2):
   `open`, `move`, `raise`, `close` and a focus change damage the affected frame
   rectangles, the overlapped windows and the desktop below them. One repair pass restores
   the desktop where a window was removed or moved, redraws the chrome of every damaged
   window bottom-to-top in its visible parts, and presents the union once. Client content
-  is the client's: M2.3.2 never keeps or repaints another window's content, and the
-  whole-content `Expose` request that asks the owner to repaint is M2.3.3 (W12).
+  is the client's: the service never keeps or repaints another window's content; it asks
+  the owner to repaint with a whole-content `Expose` (W12).
 - **W12 (MUST):** `Expose` is delivered to the owning task as a machine event with
   `kind = Expose`, `window = id`, `x = 0`, `y = 0`, `code = 0`, and it always asks for the
-  **whole content rectangle**; M2 has no partial-damage rectangles. `EventKind.Expose`
-  and its ordinal are added when M2.3.3 implements routing, together with the routing
-  that fills spec 0010's `Event.window` field. The service never blocks on a client: one
-  that does not repaint leaves its previous pixels (stale content), and the repair pass
-  still presents the union.
+  **whole content rectangle**; M2 has no partial-damage rectangles. `EventKind.Expose` has
+  ordinal 5. A repair marks one pending expose per damaged live window (coalesced), and
+  only that window's owner can take it; the host tries the caller's pending expose before
+  the machine-wide queue. The service never blocks on a client: one that does not repaint
+  leaves its previous pixels (stale content), and the repair pass still presents the union.
+  A client that ignores an expose is not closed in M2 (see W18).
 - **W13 (MUST):** With graphics disabled (`screen_width() == 0`), `window_open` is
   `Status.Invalid`, `close`/`raise`/`move` are `Status.NotFound` (no window can exist),
-  `window_frame_rect`/`window_content_rect` are `Status.Invalid`, and `window_focus` is
-  `0`. Nothing hangs and no allocation is attempted.
+  `window_frame_rect`/`window_content_rect`/`window_present` are `Status.Invalid`, and
+  `window_focus` is `0`. Nothing hangs and no allocation is attempted.
 - **W14 (MUST):** The window service is entered through host builtins; `Host` defaults
-  describe a disabled service (`Invalid` at `open` and on the rect reads, `NotFound` at
-  `close`/`raise`/`move`, focus `0`), exactly the kernel's disabled-table results (W13),
-  so `langhost`, host tests and a kernel without graphics behave identically. No bytecode
-  opcode is added.
+  describe a disabled service (`Invalid` at `open`, on the rect reads and on
+  `window_present`; `NotFound` at `close`/`raise`/`move`; focus `0`), exactly the kernel's
+  disabled-table results (W13), so `langhost`, host tests and a kernel without graphics
+  behave identically. No bytecode opcode is added.
 - **W15 (MUST):** The table and its focus/z-order state are one machine-wide value behind
   one lock. Any core may serve any window call; the result is the same as if calls were
   serialised.
+- **W16 (MUST):** Event routing happens at **poll time**, in the kernel host, where no
+  graphics lock is held. Producers (`event::push_pointer`, `push_key`) keep
+  `window = 0`; they must not take the window lock, because the pointer path runs under
+  the graphics lock and the repair takes window → graphics. On poll:
+  - a pending `Expose` for the calling task is returned first (owner-only, no queue);
+  - otherwise the machine-wide queue supplies the event: a `PointerDown` is hit-tested
+    against the topmost window frame, which is raised and focused before the click is
+    delivered, and the event names that window; other pointer and key events name the
+    focused window (or 0); an event that already carries a non-zero `window` (an injected
+    `Expose`, or any injected addressed event) is passed through unchanged.
+  A click that raises a window may mark an expose; the routing path wakes input waiters
+  after dropping the window lock.
+- **W17 (MUST):** `syslib.window_present(id)` presents exactly the window's content
+  rectangle from the shadow, clipped to its **visible parts** (content minus the frames of
+  higher windows), and leaves the chrome and higher windows' pixels untouched. It is
+  owner-only like `close`/`move`: `Ok`, `NotFound` for an unknown id, `Invalid` for
+  another task's window or disabled graphics. It does not repair, raise or mark anything.
+  `syslib.present` remains a legal generic primitive (spec 0009, G10), but
+  `window_present` is the sanctioned path for a window client: it bounds what the client's
+  presentation can cover.
+- **W18 (MUST):** Client liveness policy for M2: a task that never reads its events and
+  never repaints leaves stale content on screen; the service does **not** close it, kill
+  it, or reclaim its window for missing an expose. Window lifetime remains exactly task
+  lifetime (`close`, `kill`, fault, normal exit), and a repaint is always requested again
+  the next time that window is damaged. Timeouts and forced closes are deferred until
+  there is a desktop shell that can judge a client (M2.3.4/M2.3.5).
 
 ## Design
 
@@ -187,15 +214,16 @@ restores it. The clip is a property of the **shadow**, not of a task, so a globa
 cannot be held across an asynchronous `Expose` to another task: after the expose is
 queued the client runs on its own core and its drawing calls would race with any other
 client. M2 therefore narrows for service-owned paint only (chrome and desktop restore)
-and limits the client's visible result at `window_present`, which presents exactly the
-content rectangle. Drawing outside the content rectangle is a client bug and stays
-possible; the service draws the chrome over the content rectangle's border and title row
-at every repair, so a client cannot permanently paint over the frame.
+and limits the client's visible result at `window_present`, which presents only the
+content rectangle's visible parts. Drawing outside those parts is a client bug and stays
+possible in the shadow; the service draws the chrome over the content rectangle's border
+and title row at every repair, and a later client present does not cover a higher window.
 
 Because the clip is global, a client drawing on another core during the short synchronous
 narrowed interval is clipped to the same rectangle. That is a bounded visual race with no
 state corruption (the next repair or client draw repaints the area); it is accepted for
-M2 and disappears once `window_present` owns the client's presentation in M2.3.3.
+M2. `window_present` bounds the presentation, not the drawing, and the client is expected
+to draw only in its visible content until a per-task clip exists (M2.4).
 
 The boot self-check narrows the clip, paints across its edge, verifies the pixels outside
 were not written, restores the clip and the pixels, and prints `graphics: clip ok`
@@ -263,6 +291,70 @@ no snapshot is needed.
 their merge rules, the visible-part subtraction and the damage each lifecycle operation
 records, all on scratch state without touching the screen.
 
+### Routing, expose and `window_present` (implemented in M2.3.3)
+
+Event producers do **not** stamp a window. The pointer producers run inside `gfx` while
+the graphics lock is held, and the keyboard path runs from the console; taking the window
+lock there would nest graphics → window against the repair's window → graphics and can
+deadlock on SMP. Producers therefore leave `Event.window = 0` and a machine-wide queue
+entry stays address-free until it is polled.
+
+The kernel host routes on `poll_event`, where no graphics lock is held:
+
+1. **Pending expose first.** `window::take_expose(current)` returns the topmost window of
+   the calling task with a pending flag, clears it and builds the event
+   (`kind = Expose`, `window = id`, `x = y = code = 0`). A foreign task can never take
+   another task's expose, because the table is searched by owner; there is no per-task
+   queue to steal from.
+2. **Queue next.** `event::poll` supplies one queued event. If it already carries a
+   non-zero `window` (an injected `Expose`, or any explicitly addressed injection) it is
+   passed through unchanged. A `PointerDown` is hit-tested against the topmost window
+   **frame**: a hit raises and focuses that window (the W7 affordance) before the event is
+   handed over, and the event names it; a miss stays 0. Every other pointer or key event
+   names `window_focus()` (0 when no window exists).
+
+#### Lock order (the only nesting is window → graphics)
+
+| Path | Takes | Then |
+|------|-------|------|
+| pointer producer (`gfx`) | graphics | nothing (enqueues only) |
+| keyboard/console producer | console, graphics per cell | nothing |
+| poll-time routing | nothing | window (`take_expose`/`route_click`); routing a click repairs: window → graphics; input waiters are woken **after** the window lock is dropped |
+| window wrappers (`open`/`move`/`rect` reads) | graphics (screen size, released) | window → graphics for the repair; input wake after the unlock |
+| repair | window | graphics (dither, chrome, present) |
+| `Task::reclaim` → `close_task` | nothing (no scheduler lock held) | window → graphics; input wake after the unlock |
+| scheduler `Input` block | no lock | `event::has_event` / `window::has_expose`; then slot locks in `wake_input` |
+
+No path takes graphics and then window, and no path takes a scheduler slot lock and then
+window. The repair is synchronous under the window lock, so the z-order it walks is the
+state the caller produced.
+
+#### Expose marking and wake-ups
+
+`repair` marks one pending `Expose` on every live window whose frame intersects the chrome
+damage — the same set whose chrome it repaints — before it paints, and returns whether it
+marked anything. The wrappers drop the window lock and only then call
+`task::wake_input()`, so a task blocked in `next_event` wakes and retries; the scheduler's
+`WaitKind::Input` block re-check also tests `window::has_expose(task_id)`, closing the race
+between the empty read and the block. A flag is coalesced per window and dropped with the
+window on close; a task that never polls leaves stale content (W18) and receives the
+request again on the next damage.
+
+#### `window_present`
+
+`window_present(id)` is owner-only (`NotFound` unknown, `Invalid` foreign or graphics
+disabled). It computes the content rectangle minus the frames of every higher window and
+presents each exact visible part with a narrowed clip (`set_clip` + `present` +
+`reset_clip`), so the client's presentation cannot cover a higher window or the chrome.
+It records no damage, takes no part in routing, and does not raise. `syslib.present`
+remains a legal generic primitive (spec 0009, G10) for an application that owns the whole
+screen; a window client uses `window_present`. The service still cannot undo a client that
+draws outside its visible content (no canvas, no per-task clip); that is the accepted M2
+limitation, and `Expose`/chrome repair covers the frame at the next damage.
+
+`window: route ok` checks pending-expose marking, owner isolation, topmost-first take
+order, hit-testing and the loss of an expose when its window closes, all on scratch state.
+
 ## Interfaces
 
 ### Language surface
@@ -276,6 +368,7 @@ syslib.window_move(id: int, x: int, y: int) -> Status
 syslib.window_frame_rect(id: int, var rect: Rect) -> Status
 syslib.window_content_rect(id: int, var rect: Rect) -> Status
 syslib.window_focus() -> int
+syslib.window_present(id: int) -> Status
 ```
 
 `(x, y)` in `window_open` and `window_move` is the **frame origin**; `(w, h)` in
@@ -305,6 +398,7 @@ Error values:
 | `window_frame_rect` | rect written | unknown id | graphics disabled | — |
 | `window_content_rect` | rect written | unknown id | graphics disabled | — |
 | `window_focus` | id of the focused window or `0` | — | — | — |
+| `window_present` | content presented (visible parts only) | unknown id | live window owned by another task, graphics disabled | — |
 
 An out-parameter is written only on `Ok`, like `core.spawn`/`core.wait` (spec 0003, E1).
 The id out-parameter and `window_focus` are `int`; ids are not compared to task ids except
@@ -322,6 +416,7 @@ fn window_move(&mut self, id: u64, x: i64, y: i64) -> Status { Status::NotFound 
 fn window_frame_rect(&mut self, id: u64) -> Result<Rect, Status> { Err(Status::Invalid) }
 fn window_content_rect(&mut self, id: u64) -> Result<Rect, Status> { Err(Status::Invalid) }
 fn window_focus(&mut self) -> u64 { 0 }
+fn window_present(&mut self, id: u64) -> Status { Status::Invalid }
 ```
 
 The interpreter pops the operands in declaration order, resolves the `var` references and
@@ -342,6 +437,10 @@ pub fn move_to(owner: u64, id: u64, x: i64, y: i64) -> Status;
 pub fn frame_rect(id: u64) -> Result<Rect, Status>;
 pub fn content_rect(id: u64) -> Result<Rect, Status>;
 pub fn focus() -> u64;
+pub fn present(owner: u64, id: u64) -> Status;   // window_present
+pub fn take_expose(owner: u64) -> Option<u64>;   // poll-time routing
+pub fn has_expose(owner: u64) -> bool;           // input block re-check
+pub fn route_click(x: i64, y: i64) -> Option<u64>; // hit-test + raise + repair
 pub fn close_task(owner: u64);       // Task::reclaim
 ```
 
@@ -391,12 +490,12 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 
 | # | Question | Trigger / owner |
 |---|----------|-----------------|
-| 1 | Expose delivery: a new `EventKind.Expose` event, a dedicated blocking wait, or a callback-like `window_present` handshake | M2.3.3; this spec fixes the whole-content shape and the `Expose` event as the working design |
+| 1 | ~~Expose delivery: a new `EventKind.Expose` event, a dedicated blocking wait, or a callback-like `window_present` handshake~~ | Resolved in M2.3.3: `EventKind.Expose` (ordinal 5), one coalesced pending expose per damaged window, owner-only take at poll time; `window_present` is the presentation call, not the delivery mechanism (W12/W17) |
 | 2 | Damage coalescing across several operations in one pass (union vs per-window flags) | M2.3.2/M2.6, when a drag produces many moves per frame |
-| 3 | Client liveness: a window whose owner never calls `next_event` or never repaints — close it, or leave stale content forever | M2.3.3/M2.3.5, after event routing exists |
+| 3 | ~~Client liveness: a window whose owner never calls `next_event` or never repaints — close it, or leave stale content forever~~ | Resolved for M2: leave stale content; no timeout, forced close or kill for a missed expose (W18). Revisit when the desktop shell can judge a client (M2.3.5/M2.4) |
 | 4 | Resize and minimum/maximum size interaction with the 8 × 8 content floor | M2.3.5/M2.4 |
 | 5 | Title truncation for proportional text in M2.6 (the 8 × 8 font truncates by bytes, a proportional font by glyphs) | M2.6 |
-| 6 | Whether `window_present` should be the only present path for a window client, or `syslib.present` stays legal | M2.3.3, with the expose protocol |
+| 6 | ~~Whether `window_present` should be the only present path for a window client, or `syslib.present` stays legal~~ | Resolved in M2.3.3: `window_present` is the sanctioned window-client path and is clipped to visible content; `syslib.present` stays a legal generic full-screen primitive (W17) |
 
 ## Changelog
 
@@ -405,3 +504,4 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | 2026-11-16 | Initial accepted version: frame/content geometry, z-order, single focus, ownership and close-on-termination, the 16/64/8×8 limits, the internal clip save/restore, damage/`Expose` shape, the `window_*` surface plus the predeclared `Rect`, and the disabled-graphics rules. Implementation slices M2.3.1–M2.3.3 named. |
 | 2026-11-16 | M2.3.1 implemented: the kernel `window` table with lifecycle, z-order, focus, ownership and `close_task` on `Task::reclaim`; builtins 32–38 with disabled-service defaults; the predeclared `Rect` record; the internal `gfx` clip save/narrow/restore with a boot self-check; the `windows` proof app and child. Chrome, damage and the damage-union `present` are M2.3.2; routing, `Expose` and `window_present` are M2.3.3. |
 | 2026-11-16 | M2.3.2 implemented: service-drawn chrome (1-px black border, 16-px title bar, focused stripes vs plain unfocused, close box, centred 8×8 title), white + black dither desktop restore, bounded damage lists (32 rects) for desktop and chrome damage with visible-part subtraction, one `present` of the damage union, and a synchronous repair under the window lock. `window: paint ok` checks the arithmetic and the damage each operation records; `samples/apps/windows_demo` plus `scripts/windows_screenshot_qmp.py` prove the composition visually. The whole-content `Expose`, event routing and `window_present` remain M2.3.3. |
+| 2026-11-16 | M2.3.3 implemented: `EventKind.Expose` (ordinal 5); producer-free routing at poll time in the kernel host (pending owner expose first, pointer-down hit-test → raise/focus → delivery, other pointer/key events to the focus, explicitly addressed injections passed through); per-window coalesced expose flags marked by `repair` and input waiters woken after the window unlock, with the scheduler's input-block re-check; `syslib.window_present` (builtin 39) presenting exactly the content's visible parts; `window: route ok`; and `samples/apps/windows_events` proving routing, expose fields, foreign isolation, `window_present` and close-on-termination. Open questions 1, 3 and 6 resolved; M2.3.4 is the desktop shell. |

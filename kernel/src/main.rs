@@ -133,6 +133,16 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
             arch_x86_64::halt();
         }
     }
+    // Routing and expose ownership (spec 0011, W12/W16/W17): pending exposes,
+    // owner isolation, topmost-first order and hit-testing, all on scratch
+    // state.
+    match window::route_self_check() {
+        Ok(()) => println!("window: route ok"),
+        Err(step) => {
+            println!("window: route FAIL at step {step}");
+            arch_x86_64::halt();
+        }
+    }
 
     // The pointer device and the software cursor (spec 0010). This needs the
     // shadow (screen size, cursor compositing) and the console (boot log), and

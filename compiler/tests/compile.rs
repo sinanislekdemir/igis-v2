@@ -5519,6 +5519,7 @@ begin
   other := rect.x;
   status := syslib.window_content_rect(id, rect);
   other := rect.h;
+  status := syslib.window_present(id);
   status := syslib.window_close(id);
   focus := syslib.window_focus();
 end;
@@ -5547,6 +5548,7 @@ end;
             builtin::WINDOW_MOVE,
             builtin::WINDOW_FRAME_RECT,
             builtin::WINDOW_CONTENT_RECT,
+            builtin::WINDOW_PRESENT,
             builtin::WINDOW_CLOSE,
             builtin::WINDOW_FOCUS,
         ]
@@ -5677,6 +5679,30 @@ end;
 "#,
             "`syslib.window_focus` expects 0 arguments",
         ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.window_present();
+end;
+"#,
+            "`syslib.window_present` expects 1 argument",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.window_present(uint(1));
+end;
+"#,
+            "`syslib.window_present` expects an `int` window id",
+        ),
     ];
     for (source, expected) in cases {
         let error = compile(source.as_bytes(), "t.ig").expect_err("must be a compile error");
@@ -5686,6 +5712,33 @@ end;
             error.message
         );
     }
+}
+
+#[test]
+fn expose_is_a_valid_event_kind() {
+    let source = br#"
+unit t;
+
+uses core, syslib;
+
+var
+  ev: Event;
+  status: Status;
+
+procedure main(args: const string[1024]);
+begin
+  ev.kind := Expose;
+  ev.x := 0;
+  ev.y := 0;
+  ev.code := uint(0);
+  ev.window := 7;
+  status := syslib.inject_event(ev);
+  status := syslib.poll_event(ev);
+  if ev.kind = Expose then
+    status := syslib.window_present(ev.window);
+end;
+"#;
+    compile(source, "t.ig").expect("Expose is a predeclared EventKind constant");
 }
 
 #[test]

@@ -85,11 +85,13 @@ pub mod diagnostic {
     }
 }
 
-/// `Event`: the predeclared input record (spec 0010, I19).
+/// `Event`: the predeclared input record (spec 0010, I19; routing in spec
+/// 0011, W16).
 ///
 /// Layout follows the language record rule: fields in declaration order, each
 /// aligned to 8 bytes. The compiler's predeclared `Event` type uses these
-/// offsets, and the kernel writes the same bytes directly.
+/// offsets, and the kernel writes the same bytes directly. Producers leave
+/// `window` at 0; the kernel host fills it when the event is polled.
 pub mod event {
     use super::write_i64;
     use crate::{Event, EventKind};
@@ -340,7 +342,9 @@ mod tests {
         assert_eq!(EventKind::PointerUp as u8, 2);
         assert_eq!(EventKind::KeyDown as u8, 3);
         assert_eq!(EventKind::KeyUp as u8, 4);
-        assert_eq!(EventKind::from_ordinal(5), None);
+        assert_eq!(EventKind::Expose as u8, 5);
+        assert_eq!(EventKind::from_ordinal(5), Some(EventKind::Expose));
+        assert_eq!(EventKind::from_ordinal(6), None);
         assert_eq!(EventKind::from_ordinal(4), Some(EventKind::KeyUp));
     }
 

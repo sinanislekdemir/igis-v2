@@ -286,11 +286,51 @@ impl Host for KernelHost<'_> {
         u64::from(crate::gfx::pointer_source())
     }
 
-    // The machine-wide event queue (spec 0010, I19). `next_event` becomes a
-    // block in the machine on `WouldBlock`; `poll_event` reports it. Both share
-    // one queue, so any core may serve either call.
+    // The machine-wide event queue (spec 0010, I19), routed at poll time
+    // (spec 0011, W16). Producers keep `window = 0` and may run under the
+    // graphics lock, so stamping there would nest graphics -> window against
+    // the repair's window -> graphics. Here no graphics lock is held:
+    //
+    // 1. A pending `Expose` for the calling task comes first; only the owner
+    //    can take it, and the event names the whole content rectangle.
+    // 2. Otherwise the global queue supplies the event. A `PointerDown` is
+    //    hit-tested against the topmost frame, which is raised and focused
+    //    before the click is delivered (the W7 affordance). Other pointer and
+    //    key events target the focused window. An explicitly addressed event
+    //    (non-zero `window`, including an injected `Expose`) is passed through
+    //    unchanged, so `inject_event` remains the deterministic test hook.
     fn poll_event(&mut self, event: &mut [u8]) -> Status {
-        crate::event::poll(event)
+        if let Some(id) = crate::window::take_expose(self.current) {
+            let expose = abi::Event {
+                kind: abi::EventKind::Expose,
+                x: 0,
+                y: 0,
+                code: 0,
+                window: id as i64,
+            };
+            abi::layout::event::write(event, expose);
+            return Status::Ok;
+        }
+        let status = crate::event::poll(event);
+        if status != Status::Ok {
+            return status;
+        }
+        let Some(mut routed) = abi::layout::event::read(event) else {
+            return Status::Invalid;
+        };
+        if routed.window == 0 {
+            match routed.kind {
+                abi::EventKind::PointerDown => {
+                    if let Some(id) = crate::window::route_click(routed.x, routed.y) {
+                        routed.window = id as i64;
+                    }
+                }
+                abi::EventKind::Expose => {}
+                _ => routed.window = crate::window::focus() as i64,
+            }
+        }
+        abi::layout::event::write(event, routed);
+        Status::Ok
     }
 
     fn inject_event(&mut self, event: &[u8]) -> Status {
@@ -303,6 +343,13 @@ impl Host for KernelHost<'_> {
 
     fn event_flush(&mut self) -> u64 {
         crate::event::flush()
+    }
+
+    /// Presents a window's content, clipped to its visible parts (spec 0011,
+    /// W17). The host supplies the caller as the owner; the window table takes
+    /// its own lock and no graphics lock is held on entry.
+    fn window_present(&mut self, id: u64) -> Status {
+        crate::window::present(self.current, id)
     }
 
     // Window service (spec 0011). The kernel table owns the geometry, z-order,
@@ -569,10 +616,12 @@ fn loop_body(core: usize, image: &Ext2<'_>) -> ! {
                                 }
                                 WaitKind::Input => {
                                     println!("sched: task {} blocked on input", task.id);
+                                    let id = task.id;
                                     task::block(task, WaitFor::Input);
-                                    // An event may have been queued between the
+                                    // An event may have been queued, or an
+                                    // expose marked for this task, between the
                                     // empty read and the block above.
-                                    if crate::event::has_event() {
+                                    if crate::event::has_event() || crate::window::has_expose(id) {
                                         task::wake_input();
                                     }
                                 }
