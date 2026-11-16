@@ -114,8 +114,10 @@ The interface is split into two namespaces:
   a line or a full key sequence.
 - The kernel does not echo, does not assemble lines, does no editing and exposes no key
   events; prompt, echo, history and line editing are `stdlib`/shell code. The staged
-  `core.read_line` below is a deliberate first-milestone exception until application-side
-  editing exists (Q44).
+  `core.read_line` below is a deliberate first-milestone exception: the language now has
+  code-point-safe insert/delete/cursor/selection helpers (`stdlib.str_*`, M2.4.1), but the
+  shell still consumes console lines outside a window, so the kernel keeps the staged
+  discipline until the terminal window can do application-side editing (Q44, M2.5.5).
 - Console bytes pass through unvalidated: the kernel never checks UTF-8 and never
   interprets escape sequences. In the first milestone the keyboard driver emits US ASCII,
   with `Enter` as `\n` (LF only), `Backspace` as `0x7F`, `Tab` as `\t` and `Ctrl+C` as
@@ -229,10 +231,12 @@ above (spec 0006, spec 0008):
 #### Staged line discipline: `core.read_line`
 
 The target rule above stands: `console_read` is a byte stream, the kernel does not echo
-or assemble lines, and prompt/history/editing are application code. The first milestone
-cannot follow it yet because the language can read and write single bytes but cannot
-delete or insert one inside a buffer, so this slice stages a line reader in the kernel
-console layer:
+or assemble lines, and prompt/history/editing are application code. The language side of
+editing now exists (`stdlib.str_insert_into`, `str_delete_into`, `str_backspace`, the cursor
+helpers and the selection helpers, all code-point-safe; M2.4.1, spec 0003). The shell still
+runs outside a window, though, and the terminal window that would let it drive
+application-side editing is M2.5.5, so this slice keeps a line reader in the kernel console
+layer:
 
 | Primitive | Staged signature | Result |
 |-----------|------------------|--------|
@@ -250,8 +254,8 @@ console layer:
   wakes the task.
 - The host mock has no line ring: `langhost` returns one fixed line (`host`) per call so
   host-side programs exercise the same code path without blocking.
-- This is temporary. Replace it with application-side editing as soon as indexing and
-  string operations exist (Q44).
+- This is temporary. Replace it with application-side editing when the terminal window
+  lands (Q44; M2.5.5); the `stdlib` editing primitives it needs are already in place.
 
 ### `syslib` primitives
 
@@ -458,3 +462,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-16 | `pointer_source(&mut self) -> u64` added (spec 0010, I27), default 0: the host reports which device drives the pointer (0 none, 1 PS/2, 2 tablet). It is a read-only view over the same machine-wide state; no other host method changes, so `langhost` and mocks keep the no-device default. |
 | 2026-11-16 | Window host methods (spec 0011, M2.3.1): `window_open(x, y, w, h, title) -> Result<u64, Status>`, `window_close`/`window_raise`/`window_move` (`Status`), `window_frame_rect`/`window_content_rect` (`Result<Rect, Status>`) and `window_focus() -> u64`. The defaults are a disabled service (`Invalid` at `open` and on the rect reads, `NotFound` at `close`/`raise`/`move`, focus 0), matching the kernel's empty table. The interpreter decodes the operands and writes a 32-byte `abi::layout::rect` image only on `Ok`; builtins 32–38, no new opcode. |
 | 2026-11-16 | M2.3.4 (spec 0012): console output routing is unchanged at this interface (`console_write` bytes, `read_line` lines), but the kernel now paints the terminal into a kernel-owned window and kernel diagnostics into a system-log window; the serial mirror continues for both. A new read-only `window_info` host method is the disabled-service `None` default. |
+| 2026-11-17 | Q44 narrows (M2.4.1): the language now has code-point-safe insert/delete/backspace/cursor/selection helpers (`stdlib.str_*`, spec 0003), so the reason the kernel kept a staged line discipline no longer holds at the language level. The staged `core.read_line` and its four-line ring stay for the shell until the terminal window can run the shell in a window with application-side editing (M2.5.5); the host interface itself is unchanged. |

@@ -243,6 +243,45 @@ Rules:
   It scans `0..len` only and serves both kinds; a `string` is searched byte-wise, not by
   code point.
 
+### String editing and selection (implemented)
+
+`stdlib` provides code-point-safe editing for a 256-byte `string` buffer (M2.4.1). The
+helpers are ordinary language code, not opcodes or builtins. `string` stays read-only by
+index (T4), so a mutator stages the result in a local `bytes[256]`, converts it back with
+`core.substr_into` (which validates strict UTF-8) and publishes the whole value with one
+assignment. Nothing is written into the destination before that final copy.
+
+- **SE1 (MUST):** Positions are byte offsets, never code-point ordinals (T5). A
+  **boundary** is 0, the runtime length, or the first byte of a code point. On a valid
+  `string` that is exactly "the byte at the offset is not a continuation byte
+  (`0x80..0xBF`)".
+- **SE2 (MUST):** Insertion and deletion require both ends of their range to be boundaries
+  inside the text. A negative or past-the-end position, a non-boundary, a negative count or
+  a range that runs past the end returns `Invalid` and changes nothing.
+- **SE3 (MUST):** A mutator is all-or-nothing. It publishes with one whole-buffer copy
+  after every check and staging step, so a rejected call leaves the destination
+  byte-identical, and the result is always valid UTF-8 (the conversion refuses anything
+  else rather than constructing an invalid `string`).
+- **SE4 (MUST):** Insertion and selection replacement return `CapacityExceeded` and change
+  nothing when the result would exceed the helper's 256-byte working capacity. Deletion
+  never grows the text, so its own result always fits; `CapacityExceeded` there only
+  reports an incoming runtime length above 256 (the at-least-N rule can pass a larger
+  buffer), and the text is still untouched.
+- **SE5 (MUST):** Cursor helpers clamp a bad cursor rather than failing: negative → 0,
+  past the end → the length, inside a code point → that code point's first byte. They never
+  return `Invalid`, and movement crosses whole code points.
+- **SE6 (MUST):** The selection is the scalar pair `start`/`stop`, both byte offsets.
+  Normalizing clamps both to boundaries and orders them (`start <= stop`). It is never a
+  record, so it crosses the unit boundary as two `int`s.
+- **SE7 (SHOULD):** `str_backspace` at offset 0 is `Ok` with nothing changed: a text field
+  always receives the key, and an empty prefix is a state, not an error.
+
+The mutators are `str_insert_into`, `str_delete_into`, `str_backspace` and
+`str_selection_replace`; the read-only helpers are `str_boundary`, `str_cursor_clamp`,
+`str_cursor_left`, `str_cursor_right`, `str_cursor_home`, `str_cursor_end`,
+`str_selection_normalize`, `str_selection_all` and `str_selection_collapse`. Their exact
+signatures and results are in "Standard library" below.
+
 ### Integer formatting (staged)
 
 - **`core.format_int_into(dst: var string[N], value: int, base: uint, width: uint) -> int`**
@@ -1356,6 +1395,37 @@ drawing helper returns `Invalid` and writes nothing; metrics and palette still r
 values. `langhost` and the test hosts use that disabled-screen model, so a sample can
 branch on `syslib.screen_width() = 0` deterministically.
 
+#### String editing and selection (M2.4.1)
+
+Code-point-safe editing of a 256-byte text buffer, as ordinary language code over
+`core.len`, `core.substr_into`, buffer indexing and `utf8_len`. There is no new opcode,
+builtin, record, sum, user enum or `state`. Every `var string[256]` destination follows the
+at-least-N rule and the helpers' working capacity is 256 bytes; a caller buffer whose
+runtime length is already above 256 is refused with `CapacityExceeded` before anything is
+read or written. Positions are byte offsets, and the boundary, atomicity, capacity, cursor
+and selection rules are SE1–SE7 above.
+
+| Helper | Semantics |
+|--------|-----------|
+| `stdlib.str_boundary(text: const string[0]; index: int) -> bool` | True when `index` is 0, the length, or the first byte of a code point; false for a negative or past-the-end offset. |
+| `stdlib.str_cursor_clamp(text: const string[0]; cursor: int) -> int` | Clamps to `0..len` and to a boundary: negative → 0, past the end → the length, inside a code point → that code point's first byte. A boundary is returned unchanged. |
+| `stdlib.str_cursor_left(text: const string[0]; cursor: var int) -> int` | Clamps, moves back one whole code point (0 stays 0), writes and returns the new cursor. |
+| `stdlib.str_cursor_right(text: const string[0]; cursor: var int) -> int` | Clamps, moves forward one whole code point (the length stays the length), writes and returns the new cursor. |
+| `stdlib.str_cursor_home(cursor: var int) -> int` | Sets the cursor to 0 and returns it. |
+| `stdlib.str_cursor_end(text: const string[0]; cursor: var int) -> int` | Sets the cursor to the runtime length and returns it. |
+| `stdlib.str_insert_into(text: var string[256]; at: int; insert: const string[0]) -> Status` | Inserts `insert` at boundary `at` (`0` prepends, the length appends). `Invalid` (nothing changed) for a negative or past-the-end offset or a non-boundary; `CapacityExceeded` (nothing changed) when the result would exceed 256 bytes. Empty insertion at a valid boundary is `Ok` and changes nothing. |
+| `stdlib.str_delete_into(text: var string[256]; at: int; count: int) -> Status` | Deletes whole code points in `[at, at + count)`; both ends must be boundaries. `Invalid` (nothing changed) for a negative offset or count, an offset past the end, a range past the end or either end inside a code point. `count = 0` is `Ok` and changes nothing. Deletion never grows the text, so `CapacityExceeded` only reports an incoming length above 256 (SE4). |
+| `stdlib.str_backspace(text: var string[256]; cursor: var int) -> Status` | Deletes the code point before the clamped cursor and moves the cursor to that code point's first byte. At 0 it is `Ok` and changes nothing (SE7). The text is untouched on failure; the cursor is written only on success (apart from the documented clamp). |
+| `stdlib.str_selection_normalize(text: const string[0]; start: var int; stop: var int) -> int` | Clamps both scalars to boundaries, orders them (`start <= stop`) and returns the selection length in bytes, 0 when collapsed. |
+| `stdlib.str_selection_all(text: const string[0]; start: var int; stop: var int) -> int` | Sets `start = 0` and `stop = len`, returning the length. |
+| `stdlib.str_selection_collapse(text: const string[0]; start: var int; stop: var int; to_stop: bool) -> int` | Collapses to the `stop` end when `to_stop`, otherwise to the `start` end; clamps the chosen value, sets both scalars to it and returns the caret. Safe on an unnormalized pair. |
+| `stdlib.str_selection_replace(text: var string[256]; start: var int; stop: var int; insert: const string[0]) -> Status` | Normalizes the pair, then replaces the selection with `insert` in one publish. On success the pair collapses to the caret just past the inserted text. `CapacityExceeded` (text and both scalars untouched) when the result would exceed 256 bytes; the staging path is `str_insert_into`'s, so no partial buffer is visible. |
+
+The M2.4.1 proof is `samples/apps/text_edit`: it exercises ASCII and 1-, 2-, 3- and
+4-byte code points, every rejection path, the capacity boundary, the clamp rule and the
+selection helpers, prints one line per check and ends `text_edit: ok`. It runs in the
+kernel (`run text_edit`) and on `langhost` with the same transcript.
+
 Still missing for a complete standard library: `f32` (Q40) and the remaining float-text
 work (Q41: correctly rounded decimal-to-binary parsing and its subnormal edges); the
 fixed-point `core.format_f64_into`, the shortest round-trip
@@ -1369,8 +1439,11 @@ the UTF-8 helpers landed as ordinary language code over `core.substr_into`, `cor
 buffer indexing, adding no opcode. The M2.4.0 UI layout/chrome layer landed as ordinary
 language code over the `syslib` drawing primitives (`ui_text_width`, the metrics, the
 palette, `ui_frame`, `ui_title_bar`, `ui_close_box`, `ui_separator`, `ui_center_text`),
-adding no opcode or builtin. String editing (M2.4.1), controls (M2.4.2), menus (M2.4.3),
-dialogs (M2.4.4), icons (M2.4.5) and the widgets demo (M2.4.6) are still ahead.
+adding no opcode or builtin. The M2.4.1 string editing layer landed as ordinary language code
+over `core.substr_into`, `core.len`, buffer indexing and the UTF-8 helpers (`str_boundary`,
+the cursor helpers, `str_insert_into`, `str_delete_into`, `str_backspace` and the selection
+helpers), again with no opcode or builtin. Controls (M2.4.2), menus (M2.4.3), dialogs
+(M2.4.4), icons (M2.4.5) and the widgets demo (M2.4.6) are still ahead.
 
 ## Failure modes
 
@@ -1452,6 +1525,12 @@ dialogs (M2.4.4), icons (M2.4.5) and the widgets demo (M2.4.6) are still ahead.
 | `stdlib.ui_frame` with `w <= 0` or `h <= 0` | `Status.Invalid`; nothing drawn |
 | `stdlib.ui_title_bar` with `w < 3` | `Status.Invalid`; nothing drawn; a narrower interior omits the box/title |
 | A `stdlib.ui_*` call with a record, sum or user enum argument | Compile error (aggregates still may not cross the unit boundary) |
+| `stdlib.str_insert_into` at a negative/past-the-end offset or a non-boundary | `Status.Invalid`; text untouched |
+| `stdlib.str_insert_into` or `str_selection_replace` whose result exceeds 256 bytes | `Status.CapacityExceeded`; text and selection untouched |
+| `stdlib.str_delete_into` with a negative offset/count, a range past the end or an end inside a code point | `Status.Invalid`; text untouched |
+| `stdlib.str_delete_into`/`str_insert_into`/`str_backspace` with an incoming text longer than 256 bytes | `Status.CapacityExceeded`; nothing read or written |
+| A `stdlib.str_cursor_*` call with a negative, past-the-end or in-code-point position | Clamped to 0, the length or the code point's first byte; never `Invalid` |
+| `stdlib.str_selection_replace` on an unnormalized pair | The pair is clamped and ordered first; no fault |
 
 ## Open questions
 
@@ -1503,3 +1582,4 @@ dialogs (M2.4.4), icons (M2.4.5) and the widgets demo (M2.4.6) are still ahead.
 | 2026-11-16 | M2.3.3: `EventKind` gains `Expose` (ordinal 5), the whole-content repaint request; `Event.window` is filled by the kernel at poll time (focused window, or the hit-tested window for a pointer-down). `syslib.window_present(id) -> Status` is added as the owner-only window presentation path, clipped to the window's visible content; `syslib.present` remains a legal generic primitive. Builtin 39, no new opcode. |
 | 2026-11-16 | M2.3.4 adds `syslib.window_info(index: uint, var id: int, var rect: Rect, var title: string[64]) -> Status` (spec 0012, builtin 40): the read-only topmost-first window enumeration used by the desktop shell's window list. The title destination is compile-checked at the service's 64-byte cap; no new opcode. |
 | 2026-11-17 | M2.4.0 adds the `stdlib` UI layout/chrome layer (ADR 0026): the library now says `uses core, syslib;` and the helpers draw through the nine graphics primitives as ordinary language code. Metrics (`ui_text_width` = code points × 8, `ui_text_height`, `ui_line_height`, `ui_content_inset`, `ui_title_bar_height`, `ui_close_box_size`, `ui_text_center_x`, `ui_text_center_y`), the System 7.5 palette (`ui_black`, `ui_white`, `ui_gray`, `ui_focus`, `ui_accent`), and client chrome (`ui_frame`, `ui_title_bar`, `ui_close_box`, `ui_separator`, `ui_center_text`). No record/sum/generic/`state`, no new opcode or builtin. |
+| 2026-11-17 | M2.4.1 adds the `stdlib` string editing and selection layer: `str_boundary`, `str_cursor_clamp`/`left`/`right`/`home`/`end`, `str_insert_into`, `str_delete_into`, `str_backspace`, `str_selection_normalize`/`all`/`collapse`/`replace` (13 helpers, 52 total). Positions are byte offsets; insertion and deletion require code-point boundaries, a mutator stages into `bytes[256]`, converts with `core.substr_into` and publishes with one copy, so a failure leaves the destination untouched and the text valid UTF-8. Cursors clamp instead of failing (SE5); backspace at 0 is an `Ok` no-op (SE7); the selection is the scalar pair `start`/`stop` (SE6). The 256-byte working capacity returns `CapacityExceeded` without a partial write. No record/sum/generic/`state`, no new opcode or builtin. Closes the language side of Q44. |

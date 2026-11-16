@@ -27,7 +27,7 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | Q9 | DMA and block primitives | handle model fixed; no primitive in M1 | first real block device |
 | Q39 | Console/stream multiplexing (`poll`/`select`) | none in M1; a task blocks on one source at a time | when an application must serve two input sources |
 | Q43 | Distinct `TaskId` type | `core.run`, `spawn`, `wait` and `kill` are implemented; task ids are still `int` (0 invalid). Introduce a nominal `TaskId` when `stdlib` exposes these primitives, so an id cannot be confused with another integer (spec 0003, "Task ids"). The `stdlib` has started (text helpers only) and still exposes no task primitives | before `stdlib` exposes `run` |
-| Q44 | Staged kernel line discipline (`core.read_line`) | the kernel polls COM1/PS-2, echoes, assembles and stores lines in a 4-line ring; `core.read_line(var buf)` blocks until a line exists and truncates to the buffer. Replace with application-side editing when string length/truncate/insert operations exist: indexing alone reads and writes single bytes but cannot delete one (spec 0005, "Staged line discipline"). The first `stdlib` slice has no editing operations yet | when `stdlib` string editing exists |
+| Q44 | Staged kernel line discipline (`core.read_line`) | the kernel polls COM1/PS-2, echoes, assembles and stores lines in a 4-line ring; `core.read_line(var buf)` blocks until a line exists and truncates to the buffer. The language side is now done (M2.4.1): `stdlib.str_insert_into`, `str_delete_into`, `str_backspace`, the code-point-safe cursor helpers and the selection helpers can edit a `string[256]` atomically. What remains is the terminal window: the shell still consumes console lines outside a window, so the kernel keeps the staged discipline until M2.5.5 runs the shell in a window with application-side editing (spec 0005, "Staged line discipline") | when the terminal window lands (M2.5.5) |
 | Q45 | Staged `syslib` handles | `syslib.port_in8`/`port_out8` are implemented with `Port` as a plain scalar `uint` (low 16 bits used); there are no opaque `Port`/`MmioRegion` types, MMIO mapping, or DMA/block primitives yet. Replace with the handle model when MMIO or DMA lands (specs 0003, 0005) | first MMIO or DMA device |
 | Q48 | Pointer feel: acceleration, wheel, extra buttons | not in M2.2: motion is 1:1 (one count, one pixel) and only three buttons exist. Acceleration needs a tuning curve (and a clock or a count accumulator), a wheel adds a fourth axis, and both want a control to use them. `syslib.inject_pointer` takes only `dx`/`dy`/`buttons`, so a wider device surface would need a new primitive or a field on `Event` (spec 0010, open questions 1–2) | when a desktop application actually uses a real mouse, or a control needs scrolling (M2.4) |
 
@@ -467,8 +467,9 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
     `core.substr_into` (`find`/`substr` opcodes, 57 → 59 in ABI v1) give the shell `cmd`/`rest`
     splitting and `echo <text>`; `run <app> [args]` separates the tail at its first space and
     `child` prints the received `main(args)`. The host `read_line` stub scripts
-    `help`, `run child world`, `echo hi there`, `exit`. Q44 still stands: the kernel keeps
-    the staged 4-line ring until `stdlib` string editing (length/truncate/insert) exists.
+    `help`, `run child world`, `echo hi there`, `exit`. Q44 narrowed in M2.4.1: the
+    `stdlib` editing primitives now exist, and the kernel keeps the staged 4-line ring only
+    until the shell runs in a terminal window (M2.5.5).
 14. ~~Integer formatting and the first `syslib` ports~~ — done: `core.format_int_into`
     (`format_int`, 59 → 60; decimal/hex, sign, zero-padding, exact fit or `-6`, bad base
     `-4`) and `syslib.port_in8`/`port_out8` (builtin ids 7/8, `Host` defaults, kernel over
