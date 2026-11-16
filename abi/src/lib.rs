@@ -171,6 +171,204 @@ impl FaultCode {
     }
 }
 
+/// Kind tag of an input [`Event`] (spec 0010, I19).
+///
+/// The ordinals are the values the predeclared `EventKind` enum has in the
+/// language; the compiler declares the same order.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EventKind {
+    /// The pointer moved; `x`/`y` are the new position and `code` the buttons.
+    PointerMove = 0,
+    /// One or more pointer buttons went down; `code` holds the changed bits.
+    PointerDown = 1,
+    /// One or more pointer buttons went up; `code` holds the changed bits.
+    PointerUp = 2,
+    /// A key was pressed.
+    KeyDown = 3,
+    /// A key was released.
+    KeyUp = 4,
+}
+
+impl EventKind {
+    /// Stable assembler-style name, used by diagnostics and logs.
+    pub const fn name(self) -> &'static str {
+        match self {
+            EventKind::PointerMove => "PointerMove",
+            EventKind::PointerDown => "PointerDown",
+            EventKind::PointerUp => "PointerUp",
+            EventKind::KeyDown => "KeyDown",
+            EventKind::KeyUp => "KeyUp",
+        }
+    }
+
+    /// Decodes a language ordinal; `None` outside the declared variants.
+    pub const fn from_ordinal(value: u64) -> Option<Self> {
+        match value {
+            0 => Some(EventKind::PointerMove),
+            1 => Some(EventKind::PointerDown),
+            2 => Some(EventKind::PointerUp),
+            3 => Some(EventKind::KeyDown),
+            4 => Some(EventKind::KeyUp),
+            _ => None,
+        }
+    }
+}
+
+/// One machine-wide input event (spec 0010, I19).
+///
+/// The record layout is fixed by [`layout::event`], which the compiler's
+/// predeclared `Event` type matches field for field. Pointer events carry the
+/// position in `x`/`y` and the button mask in `code`; key events carry the
+/// packed key value described in [`key`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Event {
+    /// What happened.
+    pub kind: EventKind,
+    /// Pointer `x` in screen pixels; 0 for key events.
+    pub x: i64,
+    /// Pointer `y` in screen pixels; 0 for key events.
+    pub y: i64,
+    /// Button mask (pointer) or packed key value (keyboard).
+    pub code: u64,
+    /// Target window; always 0 until the window service routes events (M2.3).
+    pub window: i64,
+}
+
+/// Keyboard key codes and the packed `Event.code` for `KeyDown`/`KeyUp`
+/// (spec 0010, I18).
+///
+/// A key event packs three things into one `uint`, because the `Event` record
+/// has a single `code` field:
+///
+/// ```text
+/// bits  0..=7   text: the ASCII/control byte, or 0 for a non-text key
+/// bits  8..=11  modifiers after the transition: Shift 1, Ctrl 2, Alt 4, Caps 8
+/// bits 16..=31  key code: stable physical identity (see the constants below)
+/// ```
+///
+/// Printable keys use their unshifted ASCII as the key code (letters are
+/// uppercase), so the key code is stable while the text follows Shift, Caps
+/// and Ctrl. Special keys use the `0x100`-range constants. Modifier keys are
+/// themselves delivered as key events, which is how a consumer tracks the
+/// modifier state without a separate field.
+pub mod key {
+    /// Shift modifier bit in the packed code.
+    pub const MOD_SHIFT: u8 = 1 << 0;
+    /// Control modifier bit.
+    pub const MOD_CTRL: u8 = 1 << 1;
+    /// Alt modifier bit.
+    pub const MOD_ALT: u8 = 1 << 2;
+    /// Caps Lock state bit.
+    pub const MOD_CAPS: u8 = 1 << 3;
+
+    /// Shift amount of the text byte.
+    pub const TEXT_SHIFT: u32 = 0;
+    /// Shift amount of the modifier bits.
+    pub const MODIFIERS_SHIFT: u32 = 8;
+    /// Shift amount of the key code.
+    pub const CODE_SHIFT: u32 = 16;
+    /// Mask of the text byte.
+    pub const TEXT_MASK: u64 = 0xFF;
+    /// Mask of the modifier bits.
+    pub const MODIFIERS_MASK: u8 = 0x0F;
+    /// Mask of the key code.
+    pub const CODE_MASK: u64 = 0xFFFF;
+
+    /// Packs a key event's text, modifiers and key code.
+    pub const fn pack(key_code: u16, text: u8, modifiers: u8) -> u64 {
+        ((text as u64) << TEXT_SHIFT)
+            | (((modifiers & MODIFIERS_MASK) as u64) << MODIFIERS_SHIFT)
+            | (((key_code as u64) & CODE_MASK) << CODE_SHIFT)
+    }
+
+    /// The text byte of a packed key event.
+    pub const fn text(code: u64) -> u8 {
+        (code >> TEXT_SHIFT) as u8
+    }
+
+    /// The modifier bits of a packed key event.
+    pub const fn modifiers(code: u64) -> u8 {
+        ((code >> MODIFIERS_SHIFT) as u8) & MODIFIERS_MASK
+    }
+
+    /// The key code of a packed key event.
+    pub const fn code(code: u64) -> u16 {
+        (code >> CODE_SHIFT) as u16
+    }
+
+    /// Escape.
+    pub const ESCAPE: u16 = 0x100;
+    /// Backspace.
+    pub const BACKSPACE: u16 = 0x101;
+    /// Tab.
+    pub const TAB: u16 = 0x102;
+    /// Enter (main and keypad).
+    pub const ENTER: u16 = 0x103;
+    /// Left arrow.
+    pub const LEFT: u16 = 0x110;
+    /// Right arrow.
+    pub const RIGHT: u16 = 0x111;
+    /// Up arrow.
+    pub const UP: u16 = 0x112;
+    /// Down arrow.
+    pub const DOWN: u16 = 0x113;
+    /// Home.
+    pub const HOME: u16 = 0x114;
+    /// End.
+    pub const END: u16 = 0x115;
+    /// Page Up.
+    pub const PAGE_UP: u16 = 0x116;
+    /// Page Down.
+    pub const PAGE_DOWN: u16 = 0x117;
+    /// Insert.
+    pub const INSERT: u16 = 0x118;
+    /// Delete.
+    pub const DELETE: u16 = 0x119;
+    /// F1.
+    pub const F1: u16 = 0x120;
+    /// F2.
+    pub const F2: u16 = 0x121;
+    /// F3.
+    pub const F3: u16 = 0x122;
+    /// F4.
+    pub const F4: u16 = 0x123;
+    /// F5.
+    pub const F5: u16 = 0x124;
+    /// F6.
+    pub const F6: u16 = 0x125;
+    /// F7.
+    pub const F7: u16 = 0x126;
+    /// F8.
+    pub const F8: u16 = 0x127;
+    /// F9.
+    pub const F9: u16 = 0x128;
+    /// F10.
+    pub const F10: u16 = 0x129;
+    /// F11.
+    pub const F11: u16 = 0x12A;
+    /// F12.
+    pub const F12: u16 = 0x12B;
+    /// Left Shift.
+    pub const LEFT_SHIFT: u16 = 0x130;
+    /// Right Shift.
+    pub const RIGHT_SHIFT: u16 = 0x131;
+    /// Left Control.
+    pub const LEFT_CTRL: u16 = 0x132;
+    /// Right Control.
+    pub const RIGHT_CTRL: u16 = 0x133;
+    /// Left Alt.
+    pub const LEFT_ALT: u16 = 0x134;
+    /// Right Alt.
+    pub const RIGHT_ALT: u16 = 0x135;
+    /// Caps Lock.
+    pub const CAPS_LOCK: u16 = 0x136;
+    /// Num Lock.
+    pub const NUM_LOCK: u16 = 0x137;
+    /// Scroll Lock.
+    pub const SCROLL_LOCK: u16 = 0x138;
+}
+
 /// Why a task stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitReason {

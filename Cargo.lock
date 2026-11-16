@@ -9,6 +9,9 @@ version = "0.0.0"
 [[package]]
 name = "arch_x86_64"
 version = "0.0.0"
+dependencies = [
+ "abi",
+]
 
 [[package]]
 name = "compiler"

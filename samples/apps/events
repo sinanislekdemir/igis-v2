@@ -1,0 +1,206 @@
+unit events;
+
+// M2.2.3-M2.2.5 proof app: keyboard key events, the event queue and blocking.
+//
+//   run events
+//
+// The run is deterministic with no real mouse or keyboard:
+//
+//   1. `poll_event` on an empty queue is `WouldBlock` and leaves the record
+//      untouched.
+//   2. `inject_pointer` moves the pointer and clicks; the pointer path must
+//      queue `PointerMove`, `PointerDown` and `PointerUp`, which `next_event`
+//      returns in order.
+//   3. `inject_event` queues caller-built key records; the packed key value
+//      carries the text, the modifier bits and the stable key code.
+//   4. Seventy injections into a 64-slot queue drop exactly the newest six and
+//      are counted by `event_drops`; `event_flush` returns 64.
+//   5. A spawned helper waits, then injects one key event, proving that
+//      `next_event` really blocked and was woken across cores.
+//
+// `get_pixel` assertions at the pointer position prove the cursor is still a
+// composited overlay and not part of the shadow (spec 0010, I7).
+
+uses core, syslib;
+
+const
+  // `Event.code` for a key event: text | modifiers << 8 | key code << 16.
+  KeyAShift = 65 * 65536 + 1 * 256 + 65; // 'A' with Shift down
+  KeyAUp = 65 * 65536;
+  KeyZ = 90 * 65536;
+
+var
+  ok: bool;
+  status: Status;
+  ev: Event;
+  diag: Diagnostic;
+  reason: ExitReason;
+  child: int;
+  x: int;
+  y: int;
+  w: int;
+  h: int;
+  background: uint;
+  out: string[32];
+  used: int;
+  i: int;
+  drops_before: uint;
+  drops_after: uint;
+  flushed: uint;
+  started: uint;
+  now: uint;
+  exited_ok: bool;
+
+procedure say(line: const string[0]);
+begin
+  core.write(line);
+end;
+
+procedure say_int(value: int);
+begin
+  used := core.format_int_into(out, value, uint(10), uint(0));
+  core.write(out);
+end;
+
+// One line per step; the first failure names the step and stops the checks.
+procedure check(label: const string[0]; passed: bool);
+begin
+  if ok then
+  begin
+    if passed then
+    begin
+      say("events: ");
+      say(label);
+      say(" ok\n");
+    end
+    else
+    begin
+      ok := false;
+      say("events: FAIL ");
+      say(label);
+      say("\n");
+    end;
+  end;
+end;
+
+// Builds a caller-owned event record for `inject_event`.
+procedure make_key(kind: EventKind; code: uint);
+begin
+  ev.kind := kind;
+  ev.x := 0;
+  ev.y := 0;
+  ev.code := code;
+  ev.window := 0;
+end;
+
+// `ExitReason` is a sum type, so `Ok` is matched with `case`, not `=`.
+procedure classify_reason();
+begin
+  exited_ok := false;
+  case reason of
+    Ok: exited_ok := true
+    Killed: exited_ok := false
+    Faulted(code): exited_ok := false
+  end;
+end;
+
+procedure main(args: const string[1024]);
+begin
+  ok := true;
+  background := uint(0x204060);
+  w := int(syslib.screen_width());
+  h := int(syslib.screen_height());
+
+  // A known empty queue.
+  flushed := syslib.event_flush();
+  drops_before := syslib.event_drops();
+
+  // 1. poll_event on an empty queue: WouldBlock, record untouched.
+  make_key(KeyDown, uint(KeyAUp));
+  ev.x := 123;
+  ev.y := 456;
+  ev.window := 7;
+  status := syslib.poll_event(ev);
+  check(
+    "poll empty is WouldBlock",
+    status = WouldBlock
+      and ev.kind = KeyDown
+      and ev.x = 123
+      and ev.y = 456
+      and ev.window = 7);
+
+  // 2. Pointer transitions are queued by the pointer path itself.
+  status := syslib.clear(background);
+  status := syslib.inject_pointer(-100000, -100000, uint(0));
+  status := syslib.inject_pointer(40, 60, uint(0));
+  status := syslib.next_event(ev);
+  check(
+    "pointer move event",
+    status = Ok and ev.kind = PointerMove and ev.x = 40 and ev.y = 60
+      and ev.code = uint(0) and ev.window = 0);
+
+  status := syslib.inject_pointer(0, 0, uint(1));
+  status := syslib.next_event(ev);
+  check(
+    "pointer down event",
+    status = Ok and ev.kind = PointerDown and ev.x = 40 and ev.y = 60
+      and ev.code = uint(1) and ev.window = 0);
+
+  status := syslib.inject_pointer(0, 0, uint(0));
+  status := syslib.next_event(ev);
+  check(
+    "pointer up event",
+    status = Ok and ev.kind = PointerUp and ev.x = 40 and ev.y = 60
+      and ev.code = uint(1) and ev.window = 0);
+
+  // 3. Injected key records come back with the whole packed value.
+  make_key(KeyDown, uint(KeyAShift));
+  status := syslib.inject_event(ev);
+  check("inject key down accepted", status = Ok);
+  status := syslib.next_event(ev);
+  check(
+    "key down event",
+    status = Ok and ev.kind = KeyDown and ev.x = 0 and ev.y = 0
+      and ev.code = uint(KeyAShift));
+
+  make_key(KeyUp, uint(KeyAUp));
+  status := syslib.inject_event(ev);
+  status := syslib.next_event(ev);
+  check("key up event", status = Ok and ev.kind = KeyUp and ev.code = uint(KeyAUp));
+
+  // 4. Overflow: the newest six of seventy are dropped, the oldest 64 remain.
+  flushed := syslib.event_flush();
+  drops_before := syslib.event_drops();
+  make_key(KeyDown, uint(KeyAUp));
+  i := 0;
+  while i < 70 do
+  begin
+    status := syslib.inject_event(ev);
+    i := i + 1;
+  end;
+  drops_after := syslib.event_drops();
+  check("queue dropped newest six", drops_after - drops_before = uint(6));
+  flushed := syslib.event_flush();
+  check("flush returns 64", flushed = uint(64));
+
+  // 5. A blocked next_event is woken by another task's injection.
+  status := core.spawn("events_poke", "", diag, child);
+  check("spawn helper", status = Ok and child > 0);
+  status := syslib.next_event(ev);
+  check(
+    "blocked next_event woke",
+    status = Ok and ev.kind = KeyDown and ev.code = uint(KeyZ));
+  status := core.wait(child, reason);
+  classify_reason();
+  check("helper exited Ok", status = Ok and exited_ok);
+
+  // The cursor is still not in the shadow.
+  x := syslib.pointer_x();
+  y := syslib.pointer_y();
+  check("pointer position", x = 40 and y = 60);
+  check("cursor hotspot is background", syslib.get_pixel(40, 60) = background);
+  check("cursor interior is background", syslib.get_pixel(47, 66) = background);
+
+  if ok then
+    say("events: ok\n");
+end;

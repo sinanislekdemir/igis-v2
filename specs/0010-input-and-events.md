@@ -1,8 +1,8 @@
 # 0010: Input, the pointer and events
 
 - **Status:** Accepted
-- **Scope:** `kernel` (`mouse`, `usb`, `pci`, `gfx`, `console`, `sched`),
-  `arch/x86_64` (i8042, keyboard, ports), `abi`, `compiler`, `interpreter`,
+- **Scope:** `kernel` (`event`, `mouse`, `usb`, `pci`, `gfx`, `console`, `sched`,
+  `task`), `arch/x86_64` (i8042, keyboard, ports), `abi`, `compiler`, `interpreter`,
   `syslib`; M2.2 of the desktop milestone
 - **Supersedes:** none
 - **Superseded by:** none
@@ -38,9 +38,11 @@ The PS/2 device stays as the fallback for a machine with no USB tablet.
 
 Non-goals for this slice (deferred or rejected):
 
-- no event queue, no `Event` record, no `next_event`/`poll_event`, no `WaitFor::Input`;
-- no keyboard key codes, modifiers or arrows in the language: the console keeps its byte
-  stream and `core.read_line` for the shell (M2.2.3 changes that);
+- no event queue, no `Event` record, no `next_event`/`poll_event`, no `WaitFor::Input`
+  *in the original M2.2.0 slice*; M2.2.3/M2.2.4 add them below (I18/I19).
+- no keyboard key codes, modifiers or arrows in the language *in the original slice*: the
+  console keeps its byte stream and `core.read_line` for the shell. M2.2.3 adds the key
+  event layer alongside it (I18).
 - no pointer acceleration, no wheel, no double-click detection, no pointer grab;
 - no per-application cursor and no hardware cursor sprite;
 - no window focus or routing: until M2.3, input is machine-wide and no application "owns"
@@ -146,13 +148,17 @@ Buttons are a bit mask: bit 0 left, bit 1 right, bit 2 middle.
 - **I17 (MUST):** Pointer and cursor work allocates nothing and keeps no per-application
   state: one static decoder, one static pointer, one static cursor table.
 
-### Forward references (specified here, implemented later)
+### Key events and the event queue (M2.2.3–M2.2.5)
 
-- **I18 (MUST, M2.2.3):** The keyboard grows a **key event** layer separate from the line
+These slices are part of the normative surface; the design sub-sections below ("Key
+events", "The event queue") record how they were implemented.
+
+- **I18 (MUST):** The keyboard grows a **key event** layer separate from the line
   discipline: scan-code set 1 is decoded to a key code plus an ASCII/text field with
   Shift/Ctrl/Alt/Caps Lock state, arrows and function keys, into a bounded queue that
-  does not drop under fast typing. `core.read_line` stays for the shell.
-- **I19 (MUST, M2.2.4):** Events are delivered through a predeclared `Event` record
+  does not drop under fast typing. `core.read_line` stays for the shell. The same byte
+  feeds both consumers: a key that produces console text still produces its event.
+- **I19 (MUST):** Events are delivered through a predeclared `Event` record
   `(kind, x, y, code, window)` and two primitives: `syslib.next_event(var ev) -> Status`
   blocks (via a new `WaitFor::Input`, SMP-safe wake) until one is queued, and
   `syslib.poll_event(var ev) -> Status` returns `WouldBlock` when the queue is empty.
@@ -160,6 +166,19 @@ Buttons are a bit mask: bit 0 left, bit 1 right, bit 2 middle.
   dropped and a drop counter is kept, so a slow reader loses recent input rather than the
   event it is about to process. Delivery is machine-wide (focus-independent) until M2.3
   routes events to windows.
+- **I29 (MUST):** `syslib.inject_event(ev: Event) -> Status` appends a caller-built
+  record to the queue, and `syslib.event_drops() -> uint` / `syslib.event_flush() -> uint`
+  expose the drop counter and discard the queue (returning the count). Injection is
+  **debug-only**, like `inject_pointer`: it validates the `kind` ordinal (`Invalid`
+  otherwise) and does not move the pointer. The drop counter is monotonic since boot and
+  is not reset by a flush.
+- **I30 (MUST):** A task blocked in `next_event` is woken by any insertion on any core.
+  The producer publishes the event first and then wakes, and the scheduler re-checks the
+  queue after recording the block, so an event that arrives in the window between the
+  empty read and the block is not lost.
+- **I31 (MUST):** The queue is one machine-wide FIFO and has no per-task routing: two
+  tasks that call `next_event` compete for the same events and each event is delivered
+  once. Focus and ownership arrive with the window service (M2.3).
 
 ### Absolute pointer (M2.2.6)
 
@@ -300,6 +319,75 @@ present goes through the same `present`, so text under the cursor is drawn and t
 covered by it; when the cursor moves away the cell is presented again from the shadow and
 the text is back.
 
+### Key events (M2.2.3)
+
+`arch/x86_64::keyboard::poll` drains controller bytes once and reports both outputs of
+each byte through one callback: the console byte (for the line discipline) and the key
+event (for the queue). A byte that produces both is delivered to both, so the shell and an
+event-driven application never steal each other's keys.
+
+| Scan-code set 1 | Console byte | `KeyEvent` |
+|---|---|---|
+| printable key | the character | stable key code + text under Shift/Caps/Ctrl |
+| Enter (0x1C, or E0 1C) | `\n` | `Enter` |
+| Backspace (0x0E) | `0x7F` | `Backspace` |
+| Tab (0x0F) | `\t` | `Tab` |
+| Ctrl+C | `0x03` | `C` with `Ctrl` and text `0x03` |
+| Shift/Ctrl/Alt/Caps make/break | — | the modifier key itself, with the new state |
+| arrows, Home/End/PgUp/PgDn/Insert/Delete (plain or E0) | — | the `0x110..=0x119` codes |
+| F1–F12 | — | the `0x120..=0x12B` codes |
+| E1 Pause sequence | — | dropped whole (the skip counter prevents fake modifiers) |
+
+A key event packs the three things a consumer needs into `Event.code`, because the record
+has one code field (the values are `abi::key`):
+
+```text
+bits  0..=7   text: ASCII/control byte, 0 for a non-text key or a release
+bits  8..=11  modifiers after the transition: Shift 1, Ctrl 2, Alt 4, Caps 8
+bits 16..=31  key code: unshifted ASCII (letters uppercase) or a 0x100-range code
+```
+
+The key code is the stable physical identity, so `Shift+a` and `a` share key code `'A'`
+but differ in text and modifiers. Modifier transitions are themselves events, so a
+consumer can track the modifier state without a separate field. `Shift+A` with Caps Lock
+on produces text `'A'` with both `Shift` and `Caps` set.
+
+`keyboard::decoder_self_check()` feeds canned scancodes through the same pure `decode`
+function at boot and prints `keyboard: decoder ok` (a mismatch halts with the step
+number), covering make/break, Shift, Caps toggling, Ctrl+C, an extended arrow, F1, Enter,
+Backspace and the Pause sequence.
+
+### The event queue (M2.2.4)
+
+One machine-wide FIFO in `kernel/src/event.rs`:
+
+```text
+Event record (40 bytes, abi::layout::event)
+  0   kind    EventKind enum ordinal: 0 PointerMove | 1 PointerDown |
+              2 PointerUp | 3 KeyDown | 4 KeyUp
+  8   x       int, pointer x in pixels (0 for key events)
+  16  y       int, pointer y in pixels (0 for key events)
+  24  code    uint, packed key value (key events) or button mask (pointer)
+  32  window  int, always 0 until M2.3 routes events
+```
+
+The queue holds **64** events. A full queue drops the incoming event and increments a
+monotonic drop counter; `event_flush` empties the queue and returns the discarded count
+without resetting the counter. The pointer producers emit `PointerMove` on a position
+change, `PointerDown` with the newly pressed bits and `PointerUp` with the released bits;
+a repeated absolute report is idempotent and emits nothing.
+
+An insertion wakes every task blocked on `WaitFor::Input` after the queue lock is
+dropped; the scheduler records that wait only after the empty read, then re-checks the
+queue, so the insert-between-read-and-block race is closed. `next_event` restores its
+operand stack and `pc` exactly like the stream and child waits, so the retry sees an
+unchanged instruction.
+
+`syslib.inject_event` validates the record's kind through `abi::layout::event::read` and
+appends it; it is the deterministic test hook and does not change the pointer (use
+`inject_pointer` for that). `samples/apps/events` and the helper `events_poke` prove the
+whole surface, including a genuinely blocked `next_event` woken by another task.
+
 ### Injection
 
 `syslib.inject_pointer(dx, dy, buttons)` calls the same pointer update as a decoded
@@ -361,11 +449,19 @@ syslib.pointer_y() -> int
 syslib.pointer_buttons() -> uint      // bit 0 left, bit 1 right, bit 2 middle
 syslib.pointer_source() -> uint       // 0 none, 1 PS/2, 2 tablet
 syslib.inject_pointer(dx: int, dy: int, buttons: uint) -> Status
+
+syslib.next_event(var ev: Event) -> Status    // blocks on WaitFor::Input
+syslib.poll_event(var ev: Event) -> Status    // WouldBlock when empty
+syslib.inject_event(ev: Event) -> Status      // debug-only test hook
+syslib.event_drops() -> uint
+syslib.event_flush() -> uint
 ```
 
 The compiler checks arity and the staged types (`int` deltas, `uint` buttons and source);
 the interpreter rejects `buttons > 0b111` with `Status.Invalid` before calling the host,
-like the drawing primitives reject a non-positive extent (spec 0009, G9).
+like the drawing primitives reject a non-positive extent (spec 0009, G9). `Event` and
+`EventKind` are predeclared; `next_event`/`poll_event` require a writable `var ev: Event`,
+while `inject_event` takes a read-only `ev: Event`.
 
 ### Host contract
 
@@ -375,10 +471,15 @@ fn pointer_y(&mut self) -> i64 { 0 }
 fn pointer_buttons(&mut self) -> u64 { 0 }
 fn pointer_source(&mut self) -> u64 { 0 }   // 0 none, 1 PS/2, 2 tablet
 fn inject_pointer(&mut self, _dx: i64, _dy: i64, _buttons: u32) -> Status { Status::Invalid }
+fn poll_event(&mut self, _ev: &mut [u8]) -> Status { Status::WouldBlock }
+fn inject_event(&mut self, _ev: &[u8]) -> Status { Status::Invalid }
+fn event_drops(&mut self) -> u64 { 0 }
+fn event_flush(&mut self) -> u64 { 0 }
 ```
 
-The defaults are a machine with no pointer device and no screen (I11). The kernel
-implements them over `kernel/src/mouse.rs`, `kernel/src/usb.rs` and `kernel/src/gfx.rs`.
+The defaults are a machine with no pointer device and no event queue (I11). The kernel
+implements them over `kernel/src/mouse.rs`, `kernel/src/usb.rs`, `kernel/src/gfx.rs` and
+`kernel/src/event.rs`.
 
 ### Kernel contract
 
@@ -390,6 +491,11 @@ drains the aux device; `gfx::update_pointer(dx, dy, buttons)` applies one move; 
 owns the pointer state and the cursor table. `pci::init()` scans bus 0 and returns the
 UHCI controller, `usb::init()` enumerates the tablet and arms the interrupt endpoint, and
 `usb::poll()` parses a completed report and calls `gfx::set_pointer_absolute`.
+
+`keyboard::decoder_self_check()` runs the same pure `decode` the live path uses and prints
+`keyboard: decoder ok` or halts with the step. `console::poll_input` passes each drained
+byte to both consumers. `event::push` owns the 64-slot queue and wakes `WaitFor::Input`;
+`event::poll`, `event::inject`, `event::drops` and `event::flush` are the host contract.
 
 ## Failure modes
 
@@ -418,6 +524,15 @@ UHCI controller, `usb::init()` enumerates the tablet and arms the interrupt endp
 | Absolute report outside `0..=32767` | Clamped before scaling; the axis stops at the edge |
 | Repeated/duplicate absolute report | Idempotent: the same position and buttons repaint nothing |
 | Tablet ready, PS/2 packet arrives | Decoded and dropped (bytes drained); the tablet is authoritative |
+| Event queue full | The incoming (newest) event is dropped and the drop counter increments; older events stay |
+| `next_event` with an empty queue | The task blocks on `WaitFor::Input`; any insertion on any core wakes it |
+| `inject_event` with an unknown `kind` ordinal | `Status.Invalid`; nothing is queued |
+| `event_flush` with an empty queue | Returns 0; the drop counter is unchanged |
+| Two tasks call `next_event` | They compete for one machine-wide FIFO; each event is delivered once |
+| A keyboard byte arrives | It produces its console byte and its key event, or only one of them; neither path consumes the other's |
+| A Pause (`0xE1`) sequence | The whole five-byte tail is skipped, so it cannot fake Ctrl/NumLock events |
+| Pressing a key with no console meaning | No console byte; the key event is still delivered |
+| A button transition while the pointer also moves | One `PointerMove` followed by `PointerDown`/`PointerUp` with only the changed bits |
 
 ## Alternatives considered
 
@@ -441,7 +556,7 @@ UHCI controller, `usb::init()` enumerates the tablet and arms the interrupt endp
 |---|----------|-----------------|
 | 1 | Pointer acceleration curve and a "pixels per count" scale | when the desktop is actually used with a mouse |
 | 2 | Wheel, extra buttons and double-click detection | when a control needs them (M2.4) |
-| 3 | Event queue capacity and drop accounting | M2.2.4 |
+| 3 | ~~Event queue capacity and drop accounting~~ **Resolved (2026-11-16)**: fixed 64-event queue, newest dropped when full, monotonic drop counter, `event_flush` returns the discarded count and does not reset the counter | M2.2.4 |
 | 4 | A hardware cursor / double buffering if the present cost matters | M2.6.2 measurement |
 | 5 | Whether injection survives into a "debug build" flag | if `syslib.inject_pointer` is ever considered a production surface |
 | 6 | Multi-packet control stages on real hardware | the measured QEMU tablet returns a whole descriptor in one data TD; a device whose control pipe is smaller than 64 bytes would need chained data TDs and would currently be refused |
@@ -453,3 +568,4 @@ UHCI controller, `usb::init()` enumerates the tablet and arms the interrupt endp
 |------|--------|
 | 2026-11-16 | Initial accepted version: PS/2 aux init and decoding, machine-wide pointer state with clamping, cursor composited at present time, the four `syslib` pointer primitives, debug injection, polling ownership, and forward references for key events (M2.2.3) and the event queue (M2.2.4). |
 | 2026-11-16 | M2.2.6 absolute pointer (ADR 0022): PCI scan + UHCI + HID `usb-tablet` enumeration (`GET_DESCRIPTOR`/`SET_ADDRESS`/`SET_CONFIGURATION`/`SET_IDLE`), the measured report layout (buttons, absolute 16-bit LE X/Y, wheel), 0..=32767 → `0..=w-1` scaling with round-to-nearest, tablet-over-PS/2 precedence, the polled interrupt-IN endpoint, `syslib.pointer_source()` (builtin 26, no new opcode), and the `usb:` boot lines. Q49's burst loss and host-scale mismatch are fixed by the absolute report; IRQ12 remains M2.2.7. |
+| 2026-11-16 | M2.2.3–M2.2.5 key events and the event queue: `arch/x86_64::keyboard` decodes set 1 into a console byte and a `KeyEvent` (stable key code, text, Shift/Ctrl/Alt/Caps state, arrows, F1–F12, E1 Pause skipped) with a boot self-check. Predeclared `EventKind` (`PointerMove`/`PointerDown`/`PointerUp`/`KeyDown`/`KeyUp`) and `Event` (`kind,x,y,code,window`, 40 bytes at `abi::layout::event`); key events pack text/modifiers/key code into `code` (`abi::key`). `kernel/src/event.rs` owns a 64-event queue that drops the newest on overflow with a monotonic counter, and pointer transitions enqueue move/down/up. `syslib.next_event` (blocks on `WaitFor::Input`, SMP-safe wake), `poll_event`, `inject_event` (debug-only), `event_drops` and `event_flush` are builtins 27–31 with no new opcode. `samples/apps/events` + `events_poke` prove the API, the overflow policy and a genuinely blocked wake; `keyboard: decoder ok` and `events: ok` run on `-smp 4` and `-smp 1`. |

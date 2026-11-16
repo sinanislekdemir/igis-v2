@@ -65,6 +65,8 @@ pub enum WaitFor {
     /// Space, data or `Closed` on the stream with this endpoint handle
     /// (`core.send`/`core.recv`).
     Stream(u64),
+    /// One event in the machine-wide input queue (`syslib.next_event`).
+    Input,
 }
 
 /// The scheduling class of a task (spec 0007, ADR 0016).
@@ -434,6 +436,14 @@ pub fn wake_console() {
 /// two.
 pub fn wake_stream(handle: u64) {
     wake_matching(|wait| wait == WaitFor::Stream(handle));
+}
+
+/// Makes every task blocked in `syslib.next_event` runnable again.
+///
+/// The event queue calls this after it inserts an event, with its own lock
+/// dropped so the slot locks are never nested inside the queue lock.
+pub fn wake_input() {
+    wake_matching(|wait| wait == WaitFor::Input);
 }
 
 fn wake_matching(matches: impl Fn(WaitFor) -> bool) {

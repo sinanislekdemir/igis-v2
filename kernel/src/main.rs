@@ -3,6 +3,7 @@
 
 mod clock;
 mod console;
+mod event;
 mod ext2;
 mod font8x8;
 mod frame;
@@ -39,6 +40,17 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
     frame::init(mb2_info as usize, fb);
     let graphics = gfx::init(fb);
     console::init();
+
+    // The keyboard decoder feeds the console byte stream and the event queue
+    // (spec 0010, I18). The canned scancodes prove the key layer without a real
+    // keyboard; a mismatch halts so it cannot pass silently.
+    match keyboard::decoder_self_check() {
+        Ok(()) => println!("keyboard: decoder ok"),
+        Err(step) => {
+            println!("keyboard: decoder FAIL at step {step}");
+            arch_x86_64::halt();
+        }
+    }
 
     println!();
     println!("igis-v2: long mode entered");

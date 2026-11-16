@@ -217,6 +217,14 @@ const EXIT_REASON_SUM: u16 = 0;
 /// Compiler-local id of the predeclared `FaultCode` enum. It follows `Status`.
 const FAULT_CODE_ENUM: u16 = 1;
 
+/// Compiler-local id of the predeclared `EventKind` enum. It follows
+/// `Status` and `FaultCode` (spec 0010, I19).
+const EVENT_KIND_ENUM: u16 = 2;
+
+/// Compiler-local id of the predeclared `Event` record (spec 0010, I19). The
+/// predeclared `Diagnostic` is record 0.
+const EVENT_RECORD: u16 = 1;
+
 /// Fields of the predeclared `Diagnostic` record, at the offsets `abi::layout`
 /// fixes. The kernel writes the same fields directly.
 const DIAGNOSTIC_FIELDS: [RecordField<'static>; 8] = [
@@ -308,6 +316,47 @@ const STATUS_VARIANTS: [&str; 8] = [
     "Full",
     "CapacityExceeded",
     "IoError",
+];
+
+/// Variants of the predeclared `EventKind` enum, in the order
+/// `abi::EventKind` fixes (spec 0010, I19). The variants are global constants,
+/// so an application writes `KeyDown` and compares `ev.kind = KeyDown`.
+const EVENT_KIND_VARIANTS: [&str; 5] = [
+    "PointerMove",
+    "PointerDown",
+    "PointerUp",
+    "KeyDown",
+    "KeyUp",
+];
+
+/// Fields of the predeclared `Event` record, at the offsets `abi::layout`
+/// fixes. The kernel writes the same bytes directly.
+const EVENT_FIELDS: [RecordField<'static>; 5] = [
+    RecordField {
+        name: "kind",
+        ty: Type::enumeration(EVENT_KIND_ENUM),
+        off: layout::event::KIND_OFFSET,
+    },
+    RecordField {
+        name: "x",
+        ty: Type::scalar(Kind::Int),
+        off: layout::event::X_OFFSET,
+    },
+    RecordField {
+        name: "y",
+        ty: Type::scalar(Kind::Int),
+        off: layout::event::Y_OFFSET,
+    },
+    RecordField {
+        name: "code",
+        ty: Type::scalar(Kind::Uint),
+        off: layout::event::CODE_OFFSET,
+    },
+    RecordField {
+        name: "window",
+        ty: Type::scalar(Kind::Int),
+        off: layout::event::WINDOW_OFFSET,
+    },
 ];
 
 /// Ordinals used by the compiler-lowered ring operations. They follow
@@ -915,6 +964,15 @@ fn build_tables<'a>(
             global_variants: false,
         })
         .map_err(|_| arena_full(path, name, 1, 1))?;
+    // The predeclared `EventKind` follows; its variants are global constants so
+    // an application can write `ev.kind = KeyDown` and compare against them.
+    enums
+        .push(EnumDef {
+            name: "EventKind",
+            variants: &EVENT_KIND_VARIANTS,
+            global_variants: true,
+        })
+        .map_err(|_| arena_full(path, name, 1, 1))?;
 
     // The predeclared `Diagnostic` is the first record entry; its layout is
     // fixed by `abi::layout`, so the kernel and the compiler cannot disagree.
@@ -925,6 +983,15 @@ fn build_tables<'a>(
             name: "Diagnostic",
             fields: &DIAGNOSTIC_FIELDS,
             size: layout::diagnostic::SIZE,
+        })
+        .map_err(|_| arena_full(path, name, 1, 1))?;
+    // The predeclared `Event` is the second record entry; its layout is fixed
+    // by `abi::layout::event` (spec 0010, I19).
+    records
+        .push(RecordDef {
+            name: "Event",
+            fields: &EVENT_FIELDS,
+            size: layout::event::SIZE,
         })
         .map_err(|_| arena_full(path, name, 1, 1))?;
 
@@ -942,7 +1009,7 @@ fn build_tables<'a>(
     for decl in unit.types {
         if matches!(
             decl.name,
-            "Status" | "FaultCode" | "Diagnostic" | "ExitReason"
+            "Status" | "FaultCode" | "Diagnostic" | "ExitReason" | "EventKind" | "Event"
         ) {
             return Err(diag(
                 path,
@@ -5748,6 +5815,79 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.pop(3)?;
                 self.push();
                 Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            // Event queue (spec 0010, I19). `next_event`/`poll_event` fill a
+            // caller-owned `Event` record; `inject_event` queues a record image
+            // (debug-only). The blocking and overflow rules live in the machine
+            // and the host.
+            "syslib.next_event" | "syslib.poll_event" => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`{target}` expects 1 argument, got {}", args.len()),
+                    ));
+                }
+                let event = Type::record(EVENT_RECORD, layout::event::SIZE);
+                let destination = self.emit_aggregate_ref(args[0], true, "`var ev`")?;
+                if destination != event {
+                    let found = self.type_name(destination);
+                    return Err(self.err_at(
+                        args[0],
+                        format_args!("`{target}` expects `var ev: Event`, found `{found}`"),
+                    ));
+                }
+                let id = if target == "syslib.next_event" {
+                    builtin::NEXT_EVENT
+                } else {
+                    builtin::POLL_EVENT
+                };
+                self.one(opcodes::BUILTIN, id)?;
+                self.pop(1)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "syslib.inject_event" => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`syslib.inject_event` expects 1 argument, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                let event = Type::record(EVENT_RECORD, layout::event::SIZE);
+                let value = self.emit_aggregate_ref(args[0], false, "`ev`")?;
+                if value != event {
+                    let found = self.type_name(value);
+                    return Err(self.err_at(
+                        args[0],
+                        format_args!("`syslib.inject_event` expects `ev: Event`, found `{found}`"),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::INJECT_EVENT)?;
+                self.pop(1)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "syslib.event_drops" | "syslib.event_flush" => {
+                if !args.is_empty() {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`{target}` expects 0 arguments, got {}", args.len()),
+                    ));
+                }
+                let id = if target == "syslib.event_drops" {
+                    builtin::EVENT_DROPS
+                } else {
+                    builtin::EVENT_FLUSH
+                };
+                self.one(opcodes::BUILTIN, id)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Uint)))
             }
             // Ring operations (spec 0003, "Rings") are compiler-recognised
             // built-in procedures, not host builtins: they lower to the

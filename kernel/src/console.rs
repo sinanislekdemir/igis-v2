@@ -261,8 +261,9 @@ fn echo(bytes: &[u8]) {
     write_bytes(bytes);
 }
 
-/// Polls both byte sources into the line discipline. Called once per service
-/// opportunity, before the scheduler claims a task.
+/// Polls both byte sources into the line discipline, and feeds the keyboard's
+/// decoded key events into the machine-wide event queue. Called once per
+/// service opportunity, before the scheduler claims a task.
 pub fn poll_input() {
     let mut input = INPUT.lock();
     for _ in 0..64 {
@@ -271,12 +272,14 @@ pub fn poll_input() {
             None => break,
         }
     }
-    for _ in 0..32 {
-        match keyboard::try_read_byte() {
-            Some(byte) => input.feed(byte),
-            None => break,
+    keyboard::poll(|decoded| {
+        if let Some(byte) = decoded.console {
+            input.feed(byte);
         }
-    }
+        if let Some(key) = decoded.key {
+            crate::event::push_key(key);
+        }
+    });
 }
 
 /// Pops one finished line into `out`, truncating to its length. Returns the

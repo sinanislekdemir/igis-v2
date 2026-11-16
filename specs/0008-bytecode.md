@@ -381,10 +381,15 @@ on the same table; the machine, not the compiler, owns the runtime checks.
 | 24 | `pointer_buttons` | 0 → 1 | bit 0 left, bit 1 right, bit 2 middle |
 | 25 | `inject_pointer` | 3 → 1 | dx, dy, buttons; debug-only; `buttons > 0b111` is `Invalid` |
 | 26 | `pointer_source` | 0 → 1 | 0 none, 1 PS/2, 2 tablet |
+| 27 | `next_event` | 1 → 1 | event record ref; blocks on an empty queue |
+| 28 | `poll_event` | 1 → 1 | event record ref; `WouldBlock` when empty |
+| 29 | `inject_event` | 1 → 1 | event record ref; debug-only; unknown kind is `Invalid` |
+| 30 | `event_drops` | 0 → 1 | newest events dropped since boot |
+| 31 | `event_flush` | 0 → 1 | discard the queue, return the count |
 
 Graphics builtins add no opcode, so ABI v1 stays at **75** opcodes (spec 0009). The input
 builtins (spec 0010) add none either; the interpreter owns the button-mask rule, the host
-owns the pointer state.
+owns the pointer state and the event queue.
 
 ### Compiler / runtime split
 
@@ -545,3 +550,4 @@ pub fn run(task: &mut Task);
 | 2026-11-16 | Graphics builtins add no opcode (spec 0009): ids 13–21 are `screen_width`, `screen_height`, `fill_rect`, `fill_dither`, `draw_rect`, `draw_text`, `get_pixel`, `present` and `clear`, with effects `(0,1)`, `(0,1)`, `(5,1)`, `(5,1)`, `(5,1)`, `(4,1)`, `(2,1)`, `(4,1)` and `(1,1)`. The interpreter validates extents and colours and routes the rest through `Host` with disabled-screen defaults, so ABI v1 stays at **75** opcodes. |
 | 2026-11-16 | Input builtins add no opcode (spec 0010): ids 22–25 are `pointer_x`, `pointer_y`, `pointer_buttons` and the debug-only `inject_pointer`, with effects `(0,1)`, `(0,1)`, `(0,1)` and `(3,1)`. The interpreter rejects `buttons > 0b111` before calling the host; ABI v1 stays at **75** opcodes. |
 | 2026-11-16 | Builtin id **26** `pointer_source` (0 → 1) reports the active pointer source, 0 none / 1 PS/2 / 2 absolute USB tablet (spec 0010, I27). No opcode is added; ABI v1 stays at **75**. |
+| 2026-11-16 | Event builtins (spec 0010, I18/I19): `next_event` (27, 1 → 1; blocks on an empty queue with `Blocked(WaitKind::Input)`), `poll_event` (28, 1 → 1; pushes `WouldBlock`), `inject_event` (29, 1 → 1; debug-only, unknown kind is `Invalid`), `event_drops` (30, 0 → 1) and `event_flush` (31, 0 → 1). The host writes a 40-byte `abi::layout::event` image; no opcode is added and ABI v1 stays at **75**. |

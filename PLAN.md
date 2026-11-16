@@ -16,17 +16,16 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 - **Last commit:** `93fedbf` (scripts: `--no-tablet` PS/2 fallback proof). Tree clean.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
-  and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), plus the
-  `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`).
-- **Verified at that point:** 291 host tests; QMP absolute injection 7/7 exact pixels;
-  `pointer_source` 2 with the tablet and the `mouse: ok` PS/2 fallback without it.
-- **Next slice (not started):** M2.2.3 + M2.2.4 + M2.2.5 together — keyboard key events,
-  the predeclared `Event`/`EventKind` types with `syslib.next_event`/`poll_event`/
-  `inject_event`/`event_drops`/`event_flush`, `WaitFor::Input`, and
-  `samples/apps/events`. A subagent was launched for it and stopped before touching any
-  file (host restart), so there is nothing partial to clean up; start it fresh.
-- **Then:** M2.2.7 PS/2 aux IRQ12 (fixes the measured burst loss on the relative
-  fallback), then M2.3 windows (`specs/0011`, z-order, focus, damage/`expose`).
+  and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
+  `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), and M2.2.3–2.2.5
+  keyboard key events, the event queue and the `events` proof (this commit).
+- **Verified at that point:** 301 host tests; `keyboard: decoder ok` and `events: ok` on
+  `-smp 4` and `-smp 1`; the newest-six-of-seventy overflow and a genuinely blocked
+  `next_event` wake; QMP absolute injection 7/7; regressions `mouse`, `desktop`, `text`,
+  `frames`, `streams`, `deep`, `utf8`, `realtime`, `cores`.
+- **Next slice (not started):** M2.2.7 PS/2 aux IRQ12 (fixes the measured burst loss on the
+  relative fallback; Q49). Then M2.3 windows (`specs/0011`, z-order, focus,
+  damage/`expose`).
 
 ### Resuming from a fresh session (no chat history)
 
@@ -34,26 +33,26 @@ Trust the repository, not a summary. On a fresh start:
 
 1. `git status --short` and `git log --oneline -8` — the tree should be clean and the top
    commit should match the "Last commit" line above; if not, stop and reconcile first.
-2. `cargo test -q -p abi -p compiler -p interpreter -p langhost` — expect **291** tests
-   plus the doctest, all green at `93fedbf`.
+2. `cargo test -q -p abi -p compiler -p interpreter -p langhost` — expect **301** tests
+   plus the doctest, all green.
 3. `cargo xtask build` — expect a clean kernel build.
 4. Read, in this order: this file, `AGENTS.md` (status paragraph + decisions table),
    `specs/0009-graphics-and-windows.md`, `specs/0010-input-and-events.md`,
    `adr/0020`, `adr/0021`, `adr/0022`.
 5. Baseline kernel checks (headless, no chat needed):
-   - `( sleep 6; printf 'run desktop\n'; sleep 4; printf 'exit\n' ) | timeout 120s \
-     qemu-system-x86_64 -cdrom build/igis.iso -m 256M -serial stdio -monitor none \
-     -no-reboot -no-shutdown -accel tcg -vga std -display none -smp 4`
-     → `desktop: ok`, `mouse: decoder ok`, `usb: tablet ...` when the device is present.
+   - `( sleep 6; printf 'run desktop\n'; sleep 4; printf 'run events\n'; sleep 8; \
+     printf 'exit\n' ) | timeout 120s qemu-system-x86_64 -cdrom build/igis.iso -m 256M \
+     -serial stdio -monitor none -no-reboot -no-shutdown -accel tcg -vga std \
+     -display none -smp 4 -usb -device usb-tablet`
+     → `desktop: ok`, `keyboard: decoder ok`, `events: ok`, `usb: tablet ...` when the
+     device is present.
    - `python3 scripts/tablet_qmp.py build/igis.iso` → `7/7 absolute cases passed`.
    - `python3 scripts/tablet_qmp.py build/igis.iso --no-tablet` → `mouse: ok` fallback.
-6. The next slice is the M2.2.3/2.2.4/2.2.5 block above. Its touchpoints, so nothing has
-   to be rediscovered: `abi/src/{lib.rs,opcodes.rs}` (layout + builtin ids),
-   `compiler/src/codegen.rs` (predeclared types and `syslib` signatures),
-   `interpreter/src/machine.rs` (`Host`, builtin arms, `WaitKind`),
-   `kernel/src/{task.rs,sched.rs,gfx.rs,mouse.rs,console.rs,main.rs}` (queue, producers,
-   wake path), `arch/x86_64/src/keyboard.rs` (key events), `samples/apps/events`,
-   `specs/0003`, `specs/0008`, `specs/0010`.
+6. The next slice is **M2.2.7** (PS/2 aux IRQ12), then M2.3 windows. M2.2.7 touchpoints:
+   `arch/x86_64/src/{interrupts.s,idt.rs}`, the PIC/IOAPIC setup, `kernel/src/mouse.rs`
+   (drain on the interrupt instead of polling), `kernel/src/sched.rs` (the service
+   opportunity keeps the poll as a backstop), and `scripts/tablet_qmp.py`'s relative burst
+   test to confirm one-for-one delivery. Spec 0010, Q49.
 
 If anything in this file disagrees with the code or the specs, the code and specs win and
 this file must be corrected in the same commit.
@@ -93,15 +92,18 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
   (never in the shadow), clamping to the screen, `syslib.pointer_x/pointer_y`,
   `pointer_buttons` and the debug-only `inject_pointer`, present of the two dirty cursor
   rectangles only. Proof: `samples/apps/mouse` (`get_pixel` under a moved cursor).
-- [ ] **M2.2.3** Keyboard event layer: scancode set 1 → key code + ASCII (shift/ctrl/alt,
+- [x] **M2.2.3** Keyboard event layer: scancode set 1 → key code + ASCII (shift/ctrl/alt,
   caps lock), arrows and function keys, a bounded queue, no drops under fast typing; kept
   separate from the kernel line discipline (`core.read_line` stays for the shell).
-- [ ] **M2.2.4** Event queue + `syslib` API: predeclared `Event` record
+  `arch/x86_64/src/keyboard.rs` (pure `decode`, `decoder_self_check`).
+- [x] **M2.2.4** Event queue + `syslib` API: predeclared `Event` record
   (`kind, x, y, code, window`), `syslib.next_event(var ev) -> Status` (blocks via
   `WaitFor::Input`, SMP-safe wake), `syslib.poll_event`, overflow policy, and a
   deterministic `syslib.inject_event` for headless tests (documented as debug-only).
-- [ ] **M2.2.5** Proof app `samples/apps/events`: injected pointer moves and clicks and a
-  few keys, printed in one claim, with `get_pixel` cursor assertions.
+  `kernel/src/event.rs`, `samples/apps/events`.
+- [x] **M2.2.5** Proof app `samples/apps/events`: injected pointer moves and clicks and a
+  few keys, printed in one claim, with `get_pixel` cursor assertions; `events_poke`
+  proves the blocked wake.
 - [x] **M2.2.6** Absolute pointer: PCI config-space scan, UHCI host controller, HID
   `usb-tablet` (SET_ADDRESS/SET_CONFIGURATION, boot protocol, absolute X/Y scaled to the
   screen), QEMU `-usb -device usb-tablet`, PS/2 kept as the fallback, `syslib.pointer_source()`

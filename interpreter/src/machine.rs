@@ -220,6 +220,35 @@ pub trait Host {
         0
     }
 
+    /// Pops one event from the machine-wide queue into `ev`, a slice shaped
+    /// like the `Event` record ([`layout::event::SIZE`] bytes): `syslib.next_event`
+    /// and `syslib.poll_event` (spec 0010, I19). Returns [`Status::Ok`] after
+    /// writing the record, or [`Status::WouldBlock`] when the queue is empty.
+    /// The default is a machine with no input: always empty.
+    fn poll_event(&mut self, _ev: &mut [u8]) -> Status {
+        Status::WouldBlock
+    }
+
+    /// Appends a record-shaped event image to the machine-wide queue
+    /// (`syslib.inject_event`, spec 0010, I19). The debug-only test hook: the
+    /// host validates the kind ordinal. Returns [`Status::Invalid`] by default,
+    /// so a host with no input queue refuses.
+    fn inject_event(&mut self, _ev: &[u8]) -> Status {
+        Status::Invalid
+    }
+
+    /// Events dropped because the queue was full (`syslib.event_drops`). The
+    /// default is 0 for a host with no queue.
+    fn event_drops(&mut self) -> u64 {
+        0
+    }
+
+    /// Discards every queued event and returns how many were discarded
+    /// (`syslib.event_flush`). The default is 0 for a host with no queue.
+    fn event_flush(&mut self) -> u64 {
+        0
+    }
+
     /// Requests a new application instance (`core.spawn`).
     ///
     /// `path` and `args` are the bytes of the two `string` buffers. `diag` is a
@@ -290,6 +319,9 @@ pub enum WaitKind {
     /// Wait for space/data/close on the stream with this endpoint handle
     /// (`core.send`/`core.recv`).
     Stream(u64),
+    /// Wait for one event in the machine-wide input queue
+    /// (`syslib.next_event`, spec 0010, I19).
+    Input,
 }
 
 /// Result of [`Host::wait`].
@@ -1494,6 +1526,50 @@ impl Machine {
                     builtin::POINTER_SOURCE => {
                         let source = host.pointer_source();
                         self.push(stack, source)?;
+                    }
+                    // Event queue (spec 0010, I19). `next_event` blocks on an
+                    // empty queue; `poll_event` reports `WouldBlock`. Both fill
+                    // the caller's record only on success.
+                    builtin::NEXT_EVENT | builtin::POLL_EVENT => {
+                        let event_bits = self.pop(stack)?;
+                        let mut event = [0u8; layout::event::SIZE as usize];
+                        let status = host.poll_event(&mut event);
+                        if status == Status::Ok {
+                            self.write_bytes(event_bits, &event, state, stack, constants, args)?;
+                            self.push(stack, Status::Ok as u64)?;
+                        } else if status == Status::WouldBlock && id == builtin::NEXT_EVENT {
+                            // Restore the instruction boundary: the retry after
+                            // the wake-up sees the same operand stack and pc.
+                            self.pc = pc;
+                            self.sp = saved_sp;
+                            return Ok(Step::Blocked(WaitKind::Input));
+                        } else {
+                            self.push(stack, status as u64)?;
+                        }
+                    }
+                    builtin::INJECT_EVENT => {
+                        let event_bits = self.pop(stack)?;
+                        let (region, offset) =
+                            self.resolve(event_bits, state, stack, constants, args)?;
+                        let event = buffer_slice(
+                            region,
+                            offset,
+                            layout::event::SIZE as usize,
+                            state,
+                            stack,
+                            constants,
+                            args,
+                        )?;
+                        let status = host.inject_event(event);
+                        self.push(stack, status as u64)?;
+                    }
+                    builtin::EVENT_DROPS => {
+                        let drops = host.event_drops();
+                        self.push(stack, drops)?;
+                    }
+                    builtin::EVENT_FLUSH => {
+                        let flushed = host.event_flush();
+                        self.push(stack, flushed)?;
                     }
                     _ => return Err(FaultCode::IllegalOperation),
                 }

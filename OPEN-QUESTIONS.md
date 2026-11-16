@@ -5,7 +5,7 @@ Parked decisions for igis-v2. This is the working register; each spec's own
 resolved, record the answer in the relevant spec or in a new ADR, then remove it here.
 
 **Status:** implementation phase. Last updated: 2026-11-16.
-**Snapshot:** specs 0001–0010, ADRs 0001–0021.
+**Snapshot:** specs 0001–0010, ADRs 0001–0022.
 
 ## How to use
 
@@ -573,5 +573,12 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
     rectangular clip, the console drawing through the shadow, and `samples/apps/desktop`
     (dither background, menu bar with a right-aligned clock, striped title-bar window,
     nine-pixel self-check, `desktop: ok`). Graphics disable cleanly for a missing tag,
-    non-32-bpp mode, bad geometry or a failed shadow allocation. Next: M2.2 mouse and
-    events, then M2.3 windows and `expose`.
+    non-32-bit-per-pixel mode, bad geometry or a failed shadow allocation. Next: M2.2
+    mouse and events, then M2.3 windows and `expose`.
+27. ~~Keyboard key events and the event queue~~ — done (M2.2.3–M2.2.5; spec 0010
+    I18/I19/I29–I31): the PS/2 decoder feeds the console byte stream and a `KeyEvent`
+    (stable key code, text, modifiers, arrows, function keys, Pause skipped) with a boot
+    self-check; `kernel/src/event.rs` is a 64-event machine-wide FIFO that drops the
+    newest on overflow, `gfx` enqueues pointer transitions, and `syslib.next_event`
+    blocks on `WaitFor::Input`. `samples/apps/events` + `events_poke` prove the surface
+    and the blocked wake. Next: M2.2.7 (PS/2 aux IRQ12) and M2.3 windows.

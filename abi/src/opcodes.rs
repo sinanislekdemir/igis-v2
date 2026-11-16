@@ -513,6 +513,32 @@ pub mod builtin {
     /// graphics enablement.
     pub const POINTER_SOURCE: u32 = 26;
 
+    /// `syslib.next_event(var ev) -> Status`: pop an `Event` record reference
+    /// and fill it from the front of the machine-wide event queue (spec 0010,
+    /// I19). When the queue is empty the machine blocks on input and retries
+    /// the same instruction on wake. On success the record is written and `Ok`
+    /// pushed; an error `Status` is pushed with the record untouched.
+    pub const NEXT_EVENT: u32 = 27;
+
+    /// `syslib.poll_event(var ev) -> Status`: as `NEXT_EVENT` but never blocks;
+    /// an empty queue pushes `WouldBlock` and leaves the record untouched.
+    pub const POLL_EVENT: u32 = 28;
+
+    /// `syslib.inject_event(ev: Event) -> Status`: **debug-only** test hook
+    /// (spec 0010, I19). Pop an `Event` record reference and append its image
+    /// to the event queue. An unknown `kind` ordinal pushes `Invalid` and
+    /// queues nothing. It does not move the pointer; use `INJECT_POINTER` for
+    /// the pointer state.
+    pub const INJECT_EVENT: u32 = 29;
+
+    /// `syslib.event_drops() -> uint`: events dropped because the queue was
+    /// full since boot (spec 0010, I19). Monotonic.
+    pub const EVENT_DROPS: u32 = 30;
+
+    /// `syslib.event_flush() -> uint`: discard every queued event and push how
+    /// many were discarded. The drop counter is not reset.
+    pub const EVENT_FLUSH: u32 = 31;
+
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
         match id {
@@ -542,6 +568,11 @@ pub mod builtin {
             POINTER_BUTTONS => Some((0, 1)),
             INJECT_POINTER => Some((3, 1)),
             POINTER_SOURCE => Some((0, 1)),
+            NEXT_EVENT => Some((1, 1)),
+            POLL_EVENT => Some((1, 1)),
+            INJECT_EVENT => Some((1, 1)),
+            EVENT_DROPS => Some((0, 1)),
+            EVENT_FLUSH => Some((0, 1)),
             _ => None,
         }
     }

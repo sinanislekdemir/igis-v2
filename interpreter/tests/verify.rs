@@ -5,6 +5,7 @@
 //! other (spec 0008, B12).
 
 use abi::opcodes;
+use abi::refs;
 use abi::{
     CodeHeader, Function, Status, ABI_VERSION, CODE_MAGIC, NO_DIAGNOSTIC, NO_NAME,
     PROFILE_X86_64_LE,
@@ -380,6 +381,9 @@ struct MockHost {
     pointer_buttons_value: u64,
     pointer_source_value: u64,
     injections: Vec<(i64, i64, u32)>,
+    events: std::collections::VecDeque<Vec<u8>>,
+    event_injections: Vec<Vec<u8>>,
+    event_drops_value: u64,
 }
 
 impl Host for MockHost {
@@ -555,6 +559,35 @@ impl Host for MockHost {
 
     fn pointer_source(&mut self) -> u64 {
         self.pointer_source_value
+    }
+
+    // Event queue (spec 0010, I19): a scriptable FIFO. `inject_event` also
+    // records the image so a test can assert what crossed the host boundary.
+    fn poll_event(&mut self, event: &mut [u8]) -> Status {
+        match self.events.pop_front() {
+            Some(image) => {
+                let copied = image.len().min(event.len());
+                event[..copied].copy_from_slice(&image[..copied]);
+                Status::Ok
+            }
+            None => Status::WouldBlock,
+        }
+    }
+
+    fn inject_event(&mut self, event: &[u8]) -> Status {
+        self.event_injections.push(event.to_vec());
+        self.events.push_back(event.to_vec());
+        Status::Ok
+    }
+
+    fn event_drops(&mut self) -> u64 {
+        self.event_drops_value
+    }
+
+    fn event_flush(&mut self) -> u64 {
+        let flushed = self.events.len() as u64;
+        self.events.clear();
+        flushed
     }
 }
 
@@ -3791,4 +3824,177 @@ fn pointer_defaults_describe_no_device() {
     assert_eq!(word(8), 0);
     assert_eq!(word(16), 0);
     assert_eq!(word(24), Status::Invalid as u64);
+}
+
+// ---- event queue (spec 0010, I19) -----------------------------------------
+
+#[test]
+fn event_builtins_poll_inject_count_drops_and_flush() {
+    let mut instructions = Vec::new();
+    // poll_event into slot 0 while the queue is empty.
+    op_const(
+        &mut instructions,
+        refs::encode(refs::REGION_STATE, 0) as i64,
+    );
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::POLL_EVENT,
+    );
+    store_at(&mut instructions, 96);
+    // inject_event from the record at 48.
+    op_const(
+        &mut instructions,
+        refs::encode(refs::REGION_STATE, 48) as i64,
+    );
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::INJECT_EVENT,
+    );
+    store_at(&mut instructions, 104);
+    // poll_event now returns the injected record.
+    op_const(
+        &mut instructions,
+        refs::encode(refs::REGION_STATE, 0) as i64,
+    );
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::POLL_EVENT,
+    );
+    store_at(&mut instructions, 112);
+    // Inject a second event, then flush it and flush the empty queue again.
+    op_const(
+        &mut instructions,
+        refs::encode(refs::REGION_STATE, 48) as i64,
+    );
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::INJECT_EVENT,
+    );
+    store_at(&mut instructions, 120);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::EVENT_FLUSH,
+    );
+    store_at(&mut instructions, 128);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::EVENT_FLUSH,
+    );
+    store_at(&mut instructions, 136);
+    // The drop counter is a host value.
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::EVENT_DROPS,
+    );
+    store_at(&mut instructions, 144);
+    op(&mut instructions, opcodes::RET);
+
+    let spec = FnSpec {
+        frame_size: 160,
+        operand_off: 40,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &[], 152, 160, 0);
+
+    let event = abi::Event {
+        kind: abi::EventKind::PointerMove,
+        x: 12,
+        y: 34,
+        code: 0b101,
+        window: 0,
+    };
+    let mut state = vec![0u8; 152];
+    let mut record = [0u8; abi::layout::event::SIZE as usize];
+    abi::layout::event::write(&mut record, event);
+    state[48..88].copy_from_slice(&record);
+    // A sentinel proves an empty poll leaves the destination untouched.
+    state[0..40].fill(0xAA);
+
+    let mut host = MockHost {
+        event_drops_value: 7,
+        ..Default::default()
+    };
+    let mut stack = vec![0u8; 160];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 300);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+
+    let word = |offset: usize| u64::from_le_bytes(state[offset..offset + 8].try_into().unwrap());
+    assert_eq!(word(96), Status::WouldBlock as u64);
+    assert_eq!(word(104), Status::Ok as u64);
+    assert_eq!(word(112), Status::Ok as u64);
+    assert_eq!(&state[0..40], &record);
+    assert_eq!(word(120), Status::Ok as u64);
+    assert_eq!(word(128), 1);
+    assert_eq!(word(136), 0);
+    assert_eq!(word(144), 7);
+    assert_eq!(
+        host.event_injections,
+        vec![record.to_vec(), record.to_vec()]
+    );
+}
+
+#[test]
+fn next_event_blocks_on_input_and_retries_after_a_wake() {
+    let mut instructions = Vec::new();
+    op_const(
+        &mut instructions,
+        refs::encode(refs::REGION_STATE, 0) as i64,
+    );
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::NEXT_EVENT,
+    );
+    store_at(&mut instructions, 40);
+    op(&mut instructions, opcodes::RET);
+
+    let spec = FnSpec {
+        frame_size: 56,
+        operand_off: 40,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &[], 48, 64, 0);
+    let mut state = vec![0u8; 48];
+    let mut stack = vec![0u8; 64];
+    let mut host = MockHost::default();
+
+    let (outcome, mut machine) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Blocked(WaitKind::Input));
+
+    let event = abi::Event {
+        kind: abi::EventKind::KeyDown,
+        x: 0,
+        y: 0,
+        code: abi::key::pack(u16::from(b'Z'), b'Z', abi::key::MOD_CTRL),
+        window: 0,
+    };
+    let mut record = [0u8; abi::layout::event::SIZE as usize];
+    abi::layout::event::write(&mut record, event);
+    host.events.push_back(record.to_vec());
+
+    let outcome = resume_with_host(&code, &mut state, &mut stack, &mut host, 100, &mut machine);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(&state[0..40], &record);
+    assert_eq!(
+        u64::from_le_bytes(state[40..48].try_into().unwrap()),
+        Status::Ok as u64
+    );
+}
+
+#[test]
+fn event_defaults_refuse_an_injection_and_report_an_empty_queue() {
+    // No overrides: the trait defaults model a machine with no event queue.
+    let mut host = Recorder { output: Vec::new() };
+    let mut event = [0u8; 40];
+    assert_eq!(host.poll_event(&mut event), Status::WouldBlock);
+    assert_eq!(host.inject_event(&event), Status::Invalid);
+    assert_eq!(host.event_drops(), 0);
+    assert_eq!(host.event_flush(), 0);
 }

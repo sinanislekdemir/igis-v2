@@ -502,6 +502,9 @@ pub fn update_pointer(dx: i64, dy: i64, buttons: u32) -> Status {
         return Status::Invalid;
     };
     let old = screen.cursor_rect();
+    let old_x = i64::from(screen.pointer.x);
+    let old_y = i64::from(screen.pointer.y);
+    let old_buttons = u64::from(screen.pointer.buttons);
     let (width, height) = (screen.width as i64, screen.height as i64);
     let (x, y) = apply_motion(
         screen.pointer.x as i64,
@@ -525,6 +528,10 @@ pub fn update_pointer(dx: i64, dy: i64, buttons: u32) -> Status {
     if let Some((x, y, w, h)) = new {
         screen.present(x, y, w, h);
     }
+    // The pointer moved and/or its buttons changed: publish the transitions
+    // to the machine-wide queue while the graphics lock still orders them
+    // (spec 0010, I19).
+    crate::event::push_pointer(old_x, old_y, old_buttons, x, y, u64::from(buttons));
     Status::Ok
 }
 
@@ -586,6 +593,9 @@ pub fn set_pointer_absolute(x: i64, y: i64, buttons: u32) -> Status {
     }
 
     let old = screen.cursor_rect();
+    let old_x = i64::from(screen.pointer.x);
+    let old_y = i64::from(screen.pointer.y);
+    let old_buttons = u64::from(screen.pointer.buttons);
     screen.pointer.x = x;
     screen.pointer.y = y;
     screen.pointer.buttons = buttons;
@@ -600,6 +610,14 @@ pub fn set_pointer_absolute(x: i64, y: i64, buttons: u32) -> Status {
     if let Some((x, y, w, h)) = new {
         screen.present(x, y, w, h);
     }
+    crate::event::push_pointer(
+        old_x,
+        old_y,
+        old_buttons,
+        i64::from(x),
+        i64::from(y),
+        u64::from(buttons),
+    );
     Status::Ok
 }
 

@@ -5321,3 +5321,173 @@ end;
         );
     }
 }
+
+// ---- syslib events (spec 0010, M2.2.3-M2.2.5) -----------------------------
+
+#[test]
+fn syslib_event_surface_is_accepted_and_emits_its_builtins() {
+    use abi::opcodes::{self, builtin};
+
+    let source = br#"
+unit t;
+
+uses core, syslib;
+
+var
+  ev: Event;
+  status: Status;
+  drops: uint;
+  flushed: uint;
+
+procedure main(args: const string[1024]);
+begin
+  ev.kind := KeyDown;
+  ev.x := 0;
+  ev.y := 0;
+  ev.code := uint(65);
+  ev.window := 0;
+  status := syslib.poll_event(ev);
+  status := syslib.next_event(ev);
+  status := syslib.inject_event(ev);
+  drops := syslib.event_drops();
+  flushed := syslib.event_flush();
+end;
+"#;
+    let package = compile(source, "t.ig").expect("the event surface compiles");
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+    let mut seen = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        if op == opcodes::BUILTIN {
+            seen.push(u32::from_le_bytes(
+                instructions[pc + 4..pc + 8].try_into().unwrap(),
+            ));
+        }
+        pc += words * 4;
+    }
+    assert_eq!(
+        seen,
+        vec![
+            builtin::POLL_EVENT,
+            builtin::NEXT_EVENT,
+            builtin::INJECT_EVENT,
+            builtin::EVENT_DROPS,
+            builtin::EVENT_FLUSH,
+        ]
+    );
+}
+
+#[test]
+fn syslib_event_argument_types_and_arity_are_checked() {
+    let cases = [
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.poll_event();
+end;
+"#,
+            "`syslib.poll_event` expects 1 argument",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.next_event(uint(1));
+end;
+"#,
+            "`var ev` must be a variable, field or element",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure poke(ev: const Event);
+begin
+  status := syslib.next_event(ev);
+end;
+procedure main(args: const string[1024]);
+begin
+end;
+"#,
+            "cannot pass `const` value `ev` as `var`",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.inject_event(uint(1));
+end;
+"#,
+            "`ev` must be a variable, field or element",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var drops: uint;
+procedure main(args: const string[1024]);
+begin
+  drops := syslib.event_drops(uint(1));
+end;
+"#,
+            "`syslib.event_drops` expects 0 arguments",
+        ),
+    ];
+    for (source, expected) in cases {
+        let error = compile(source.as_bytes(), "t.ig").expect_err("must be a compile error");
+        assert!(
+            error.message.contains(expected),
+            "expected `{expected}`, got `{}`",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn event_and_event_kind_are_predeclared_and_cannot_be_redeclared() {
+    let cases = [
+        (
+            r#"
+unit t;
+type Event = record x: int; end;
+procedure main(args: const string[1024]);
+begin
+end;
+"#,
+            "`Event` is predeclared",
+        ),
+        (
+            r#"
+unit t;
+type EventKind = (Mine);
+procedure main(args: const string[1024]);
+begin
+end;
+"#,
+            "`EventKind` is predeclared",
+        ),
+    ];
+    for (source, expected) in cases {
+        let error = compile(source.as_bytes(), "t.ig").expect_err("must be a compile error");
+        assert!(
+            error.message.contains(expected),
+            "expected `{expected}`, got `{}`",
+            error.message
+        );
+    }
+}

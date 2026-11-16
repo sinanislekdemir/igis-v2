@@ -727,6 +727,31 @@ contributes no global constants. Every other enum's variants are global constant
 0003, "Enums"), and a sum type's variants are reachable only through construction and
 `case`.
 
+`EventKind` and `Event` are also predeclared (spec 0010, I19), with the fixed layout in
+`abi::layout::event`:
+
+```text
+type EventKind = (PointerMove, PointerDown, PointerUp, KeyDown, KeyUp);
+
+type Event = record              // offsets, size 40
+  kind: EventKind;               // 0   (ordinal in one 8-byte slot)
+  x: int;                        // 8   pointer x (0 for key events)
+  y: int;                        // 16  pointer y (0 for key events)
+  code: uint;                    // 24  packed key value or button mask
+  window: int;                   // 32  always 0 until M2.3 routes events
+end;
+```
+
+The `EventKind` variants are global constants (`KeyDown`, `PointerMove`, ...), so an
+application writes `ev.kind := KeyDown` and compares `ev.kind = PointerDown`. For a key
+event, `code` packs `text | modifiers << 8 | key code << 16` with `abi::key`'s shifts;
+the text byte is the ASCII/control byte (0 for a non-text key or a release), the modifier
+bits are Shift 1 / Ctrl 2 / Alt 4 / Caps 8 at the time of the transition, and the key code
+is the unshifted ASCII (letters uppercase) or a `0x100`-range code for Escape,
+Backspace, Tab, Enter, arrows, Home/End/Page keys, Insert/Delete, F1–F12 and the modifier
+keys. Declaring `Event`, `EventKind`, `Diagnostic`, `ExitReason`, `Status` or `FaultCode`
+is a compile error.
+
 There are **no user-defined generics**. The parametric types above are built in; the
 compiler knows their layout and operations. Generic algorithms are either built-ins
 (`ring`, `map`) or written per type in `stdlib`.
@@ -1061,9 +1086,22 @@ pointer (spec 0010, I27). `inject_pointer` is **debug-only**: it is the determin
 hook, it moves the pointer by screen deltas with the same clamping as a real report (`dy`
 positive moves down), sets the mask, and returns `Status.Invalid` without changing
 anything when `buttons > 0b111`. It does not expose the device, and there is no way for
-an application to read raw mouse or keyboard bytes. The keyboard still reaches an
-application only as the console byte stream (`core.read_line`); key events are a later
-slice (M2.2.3) and the event queue is M2.2.4.
+an application to read raw mouse or keyboard bytes.
+
+**Event queue (spec 0010, I18/I19).** `EventKind` and `Event` are predeclared alongside
+`Diagnostic`; the event surface is:
+
+```text
+syslib.next_event(var ev: Event) -> Status    // blocks until one is queued
+syslib.poll_event(var ev: Event) -> Status    // WouldBlock when empty
+syslib.inject_event(ev: Event) -> Status      // debug-only test hook
+syslib.event_drops() -> uint                  // newest events dropped, monotonic
+syslib.event_flush() -> uint                  // discard the queue, return the count
+```
+
+The queue is machine-wide; a task that calls `next_event` blocks in `WaitFor::Input` and
+is woken by an insertion on any core. The keyboard still feeds the console byte stream
+(`core.read_line`) unchanged: one key byte produces the console byte and a key event.
 
 ## Constants and manifests
 
@@ -1342,4 +1380,5 @@ buffer indexing, adding no opcode.
 | 2026-11-16 | Shortest round-trip float text implemented. `core.format_f64_short_into(dst, value) -> int` writes the fewest significant digits that parse back to exactly the same bits, positionally while `-6 < e10 + 1 <= 21` and in scientific form otherwise (`1e20` positional, `1e21` scientific, `1e-6` positional, `1e-7` scientific), with no width, no `2^63` bound and no trailing `.0`; `0`/`-0`, `nan`, `inf`/`-inf` are literal, an exact decimal tie rounds away from zero, and a result wider than the destination is `-6` with the length untouched. The digit search is pure interpreter code (`format_f64_short`): the value and both round-trip interval endpoints are expanded to exact `10^9`-limb integers, the shortest bracketing `n`-digit decimals are tested with integer comparisons, and the text is published with one copy. No allocation, no host call. Q41 narrows to correctly rounded decimal-to-binary parsing and its subnormal edges; `f32` stays open (Q40). |
 | 2026-11-16 | Staged graphics surface (spec 0009): `syslib.screen_width`/`screen_height`, `fill_rect`, `fill_dither`, `draw_rect`, `draw_text`, `get_pixel`, `present` and `clear`, with `int` coordinates, `uint` colours (`0x00RRGGBB`), a `const string[0]` text argument and `Status` results. `Invalid` covers `w <= 0`, `h <= 0` and a colour above `0x00FFFFFF`; off-screen coordinates are clipped, never faulted. The primitives are host builtins, not new opcodes, and the disabled-screen shape is `0x0` / `Invalid` / `0`. |
 | 2026-11-16 | Staged input surface (spec 0010): `syslib.pointer_x() -> int`, `pointer_y() -> int`, `pointer_buttons() -> uint` and the debug-only `inject_pointer(dx: int, dy: int, buttons: uint) -> Status`. The pointer is a machine-wide value read through the host, not a device handle; `inject_pointer` moves by screen deltas with the same clamping as a real report and returns `Invalid` above `0b111` without changing anything. Raw device bytes stay out of the language: the keyboard remains the console byte stream for `core.read_line`, and key events (M2.2.3) and the event queue (M2.2.4) are future slices. |
+| 2026-11-16 | Event surface (spec 0010, M2.2.3–M2.2.5): `EventKind` and `Event` are predeclared (`PointerMove`/`PointerDown`/`PointerUp`/`KeyDown`/`KeyUp`; `kind,x,y,code,window`, 40 bytes at `abi::layout::event`), and `syslib.next_event`/`poll_event`/`inject_event`/`event_drops`/`event_flush` are host builtins. A key event packs text, modifiers and the stable key code into `code` (`abi::key`), and one key byte still feeds the console stream for `core.read_line`. `next_event` blocks in the new `WaitFor::Input`. |
 | 2026-11-16 | `syslib.pointer_source() -> uint` added (spec 0010, I27): 0 none, 1 PS/2, 2 absolute USB tablet. It is a read-only machine value next to the pointer, a host builtin (id 26) with no new opcode, and `inject_pointer` keeps working regardless of source. |

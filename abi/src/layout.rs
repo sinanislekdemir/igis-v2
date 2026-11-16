@@ -85,6 +85,64 @@ pub mod diagnostic {
     }
 }
 
+/// `Event`: the predeclared input record (spec 0010, I19).
+///
+/// Layout follows the language record rule: fields in declaration order, each
+/// aligned to 8 bytes. The compiler's predeclared `Event` type uses these
+/// offsets, and the kernel writes the same bytes directly.
+pub mod event {
+    use super::write_i64;
+    use crate::{Event, EventKind};
+
+    /// Record size in bytes.
+    pub const SIZE: u32 = 40;
+
+    /// Record alignment in bytes.
+    pub const ALIGN: u32 = 8;
+
+    /// Offset of `kind`.
+    pub const KIND_OFFSET: u32 = 0;
+
+    /// Offset of `x`.
+    pub const X_OFFSET: u32 = 8;
+
+    /// Offset of `y`.
+    pub const Y_OFFSET: u32 = 16;
+
+    /// Offset of `code`.
+    pub const CODE_OFFSET: u32 = 24;
+
+    /// Offset of `window`.
+    pub const WINDOW_OFFSET: u32 = 32;
+
+    /// Writes an event into a record-sized slice. A short slice is untouched.
+    pub fn write(dst: &mut [u8], event: Event) {
+        let Some(dst) = dst.get_mut(..SIZE as usize) else {
+            return;
+        };
+        write_i64(dst, KIND_OFFSET, event.kind as i64);
+        write_i64(dst, X_OFFSET, event.x);
+        write_i64(dst, Y_OFFSET, event.y);
+        write_i64(dst, CODE_OFFSET, event.code as i64);
+        write_i64(dst, WINDOW_OFFSET, event.window);
+    }
+
+    /// Reads an event from a record-sized slice. Returns `None` for a short
+    /// slice or an unknown kind ordinal, so a corrupt injection is refused
+    /// rather than interpreted.
+    pub fn read(src: &[u8]) -> Option<Event> {
+        let src = src.get(..SIZE as usize)?;
+        let kind = EventKind::from_ordinal(i64::from_le_bytes(src[0..8].try_into().ok()?) as u64)?;
+        Some(Event {
+            kind,
+            x: i64::from_le_bytes(src[8..16].try_into().ok()?),
+            y: i64::from_le_bytes(src[16..24].try_into().ok()?),
+            code: u64::from_le_bytes(src[24..32].try_into().ok()?),
+            window: i64::from_le_bytes(src[32..40].try_into().ok()?),
+        })
+    }
+}
+
 /// `ExitReason`: the predeclared sum type `Ok | Killed | Faulted(code)`.
 pub mod exit_reason {
     use super::write_i64;
@@ -160,7 +218,60 @@ fn write_text(dst: &mut [u8], offset: u32, cap: u32, text: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExitReason, FaultCode};
+    use crate::key;
+    use crate::{Event, EventKind, ExitReason, FaultCode};
+
+    #[test]
+    fn event_offsets_match_the_spec() {
+        assert_eq!(event::KIND_OFFSET, 0);
+        assert_eq!(event::X_OFFSET, 8);
+        assert_eq!(event::Y_OFFSET, 16);
+        assert_eq!(event::CODE_OFFSET, 24);
+        assert_eq!(event::WINDOW_OFFSET, 32);
+        assert_eq!(event::SIZE, 40);
+    }
+
+    #[test]
+    fn event_round_trips_and_rejects_unknown_kinds() {
+        let event = Event {
+            kind: EventKind::PointerDown,
+            x: -4,
+            y: 768,
+            code: 0b101,
+            window: 2,
+        };
+        let mut bytes = [0u8; event::SIZE as usize];
+        event::write(&mut bytes, event);
+        assert_eq!(event::read(&bytes), Some(event));
+
+        bytes[0..8].copy_from_slice(&9i64.to_le_bytes());
+        assert_eq!(event::read(&bytes), None);
+        assert_eq!(event::read(&bytes[..16]), None);
+    }
+
+    #[test]
+    fn key_codes_pack_text_modifiers_and_identity() {
+        let code = key::pack(key::LEFT, 0, key::MOD_SHIFT | key::MOD_CTRL);
+        assert_eq!(key::text(code), 0);
+        assert_eq!(key::modifiers(code), key::MOD_SHIFT | key::MOD_CTRL);
+        assert_eq!(key::code(code), key::LEFT);
+
+        let code = key::pack(u16::from(b'A'), b'A', 0);
+        assert_eq!(key::text(code), b'A');
+        assert_eq!(key::modifiers(code), 0);
+        assert_eq!(key::code(code), u16::from(b'A'));
+    }
+
+    #[test]
+    fn event_kind_ordinals_are_stable() {
+        assert_eq!(EventKind::PointerMove as u8, 0);
+        assert_eq!(EventKind::PointerDown as u8, 1);
+        assert_eq!(EventKind::PointerUp as u8, 2);
+        assert_eq!(EventKind::KeyDown as u8, 3);
+        assert_eq!(EventKind::KeyUp as u8, 4);
+        assert_eq!(EventKind::from_ordinal(5), None);
+        assert_eq!(EventKind::from_ordinal(4), Some(EventKind::KeyUp));
+    }
 
     #[test]
     fn diagnostic_offsets_match_the_spec() {

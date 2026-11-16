@@ -286,6 +286,25 @@ impl Host for KernelHost<'_> {
         u64::from(crate::gfx::pointer_source())
     }
 
+    // The machine-wide event queue (spec 0010, I19). `next_event` becomes a
+    // block in the machine on `WouldBlock`; `poll_event` reports it. Both share
+    // one queue, so any core may serve either call.
+    fn poll_event(&mut self, event: &mut [u8]) -> Status {
+        crate::event::poll(event)
+    }
+
+    fn inject_event(&mut self, event: &[u8]) -> Status {
+        crate::event::inject(event)
+    }
+
+    fn event_drops(&mut self) -> u64 {
+        crate::event::drops()
+    }
+
+    fn event_flush(&mut self) -> u64 {
+        crate::event::flush()
+    }
+
     // Streams (spec 0006): the kernel table owns the buffer and the generation
     // check. The machine turns `WouldBlock` into a block for the blocking
     // opcodes and into a staged status for `try_*`; the host is always
@@ -514,6 +533,15 @@ fn loop_body(core: usize, image: &Ext2<'_>) -> ! {
                                     // wake path then found nobody to wake.
                                     if crate::stream::ready_for(id, handle) {
                                         task::wake_stream(handle);
+                                    }
+                                }
+                                WaitKind::Input => {
+                                    println!("sched: task {} blocked on input", task.id);
+                                    task::block(task, WaitFor::Input);
+                                    // An event may have been queued between the
+                                    // empty read and the block above.
+                                    if crate::event::has_event() {
+                                        task::wake_input();
                                     }
                                 }
                             }
