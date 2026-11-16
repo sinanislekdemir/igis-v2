@@ -1131,6 +1131,8 @@ syslib.window_frame_rect(id: int, var rect: Rect) -> Status
 syslib.window_content_rect(id: int, var rect: Rect) -> Status
 syslib.window_focus() -> int
 syslib.window_present(id: int) -> Status
+syslib.window_info(index: uint, var id: int, var rect: Rect,
+                   var title: string[64]) -> Status
 ```
 
 `(x, y)` is the frame origin and `(w, h)` the content size; the service derives the frame
@@ -1142,9 +1144,14 @@ owner-only (`Invalid` for another task's window, `NotFound` for an unknown id) w
 `raise` is allowed to any task; the rect reads report `NotFound`/`Invalid`. An
 out-parameter is written only on `Ok`. `window_present` presents the window's content
 clipped to its visible parts (the sanctioned presentation path for a window client;
-`syslib.present` remains a generic full-screen primitive) and is owner-only. When graphics are disabled, `open` and the rect
-reads are `Invalid`, `close`/`raise`/`move` are `NotFound` and `window_focus` is `0`. The
-window model is fixed by spec 0011 and ADR 0024; no opcode is added.
+`syslib.present` remains a generic full-screen primitive) and is owner-only. `window_info`
+is the read-only enumeration added in M2.3.4 (spec 0012): index `0` is the topmost live
+window, and an index past the end is `NotFound` with every out-parameter untouched. The
+title destination must be a `var string` of at least 64 bytes (compile-checked); titles
+are truncated to that cap by the window service. When graphics are disabled, `open` and
+the rect reads are `Invalid`, `close`/`raise`/`move` are `NotFound`, `window_info` is
+`NotFound` and `window_focus` is `0`. The window model is fixed by spec 0011 and ADR 0024;
+no opcode is added.
 
 ## Constants and manifests
 
@@ -1427,3 +1434,4 @@ buffer indexing, adding no opcode.
 | 2026-11-16 | `syslib.pointer_source() -> uint` added (spec 0010, I27): 0 none, 1 PS/2, 2 absolute USB tablet. It is a read-only machine value next to the pointer, a host builtin (id 26) with no new opcode, and `inject_pointer` keeps working regardless of source. |
 | 2026-11-16 | Window surface (spec 0011, M2.3.1): `Rect` is a predeclared record (`x, y, w, h: int`, 32 bytes at `abi::layout::rect`) and `syslib.window_open`/`close`/`raise`/`move`/`frame_rect`/`content_rect`/`focus` are host builtins. `open` takes the frame origin and the content size; ids are `int` with `0` invalid, monotonic and never reused; `close`/`move` are owner-only while `raise` is any task's; the rect reads write a `Rect` only on `Ok`; 16 windows, a 64-byte title and an 8×8 minimum content. No new opcode. |
 | 2026-11-16 | M2.3.3: `EventKind` gains `Expose` (ordinal 5), the whole-content repaint request; `Event.window` is filled by the kernel at poll time (focused window, or the hit-tested window for a pointer-down). `syslib.window_present(id) -> Status` is added as the owner-only window presentation path, clipped to the window's visible content; `syslib.present` remains a legal generic primitive. Builtin 39, no new opcode. |
+| 2026-11-16 | M2.3.4 adds `syslib.window_info(index: uint, var id: int, var rect: Rect, var title: string[64]) -> Status` (spec 0012, builtin 40): the read-only topmost-first window enumeration used by the desktop shell's window list. The title destination is compile-checked at the service's 64-byte cap; no new opcode. |

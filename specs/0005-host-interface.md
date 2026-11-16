@@ -124,6 +124,10 @@ The interface is split into two namespaces:
   example to kill or interrupt the child it is waiting on.
 - The console has no owner. Any task may read, and a byte is consumed by the first task
   that reads it. The first milestone assumes one interactive application.
+- Console output is still one byte stream to the host, but since M2.3.4 (spec 0012) the
+  kernel paints it into a kernel-owned terminal window instead of the whole screen;
+  kernel `println!` diagnostics go to a separate system-log window. The serial mirror is
+  unchanged and both windows are text-only targets, not a change to this host contract.
 - There is no `poll` or `select`: a task cannot wait on the console and a stream at the
   same time. It blocks on one source at a time (open question 12).
 - `send` is atomic (`0006-streams.md`): it either enqueues the whole slice or returns an
@@ -453,3 +457,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-16 | Input host methods (spec 0010): `pointer_x`/`pointer_y` (`i64`, 0), `pointer_buttons` (`u64`, 0) and the debug-only `inject_pointer(dx, dy, buttons)` (`Invalid`). The pointer is one machine-wide value owned by the kernel graphics module; the interpreter rejects `buttons > 0b111` before the host is called, and `langhost`/host mocks see the no-device defaults. |
 | 2026-11-16 | `pointer_source(&mut self) -> u64` added (spec 0010, I27), default 0: the host reports which device drives the pointer (0 none, 1 PS/2, 2 tablet). It is a read-only view over the same machine-wide state; no other host method changes, so `langhost` and mocks keep the no-device default. |
 | 2026-11-16 | Window host methods (spec 0011, M2.3.1): `window_open(x, y, w, h, title) -> Result<u64, Status>`, `window_close`/`window_raise`/`window_move` (`Status`), `window_frame_rect`/`window_content_rect` (`Result<Rect, Status>`) and `window_focus() -> u64`. The defaults are a disabled service (`Invalid` at `open` and on the rect reads, `NotFound` at `close`/`raise`/`move`, focus 0), matching the kernel's empty table. The interpreter decodes the operands and writes a 32-byte `abi::layout::rect` image only on `Ok`; builtins 32–38, no new opcode. |
+| 2026-11-16 | M2.3.4 (spec 0012): console output routing is unchanged at this interface (`console_write` bytes, `read_line` lines), but the kernel now paints the terminal into a kernel-owned window and kernel diagnostics into a system-log window; the serial mirror continues for both. A new read-only `window_info` host method is the disabled-service `None` default. |

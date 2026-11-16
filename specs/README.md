@@ -18,6 +18,7 @@ revised as understanding improves, and their history lives in git.
 | 0009 | [Graphics, the shadow screen and the window service](0009-graphics-and-windows.md) | Accepted | syslib, kernel gfx/console, compiler, interpreter | 2026-11-16 |
 | 0010 | [Input, the pointer and events](0010-input-and-events.md) | Accepted | syslib, kernel mouse/usb/pci/gfx/console/sched, arch i8042/ports, compiler, interpreter | 2026-11-16 |
 | 0011 | [Windows](0011-windows.md) | Accepted | abi, compiler, interpreter, kernel window/gfx/task/sched, syslib | 2026-11-16 |
+| 0012 | [The desktop shell and kernel text windows](0012-desktop-shell.md) | Accepted | kernel console/gfx/window/sched, compiler, interpreter, abi, samples/apps | 2026-11-16 |
 
 ## Lifecycle
 

@@ -81,7 +81,11 @@ grows down. Colours are `0x00RRGGBB`.
   processing and no wrapping; a byte outside `0x00..=0x7F` draws a blank cell.
 - **G14 (MUST):** The text console draws glyphs into the shadow and presents the rows
   it touched. Kernel `print!`/`println!` output therefore has one path to the screen.
-  The existing console lock and line atomicity are preserved across cores.
+  The existing console lock and line atomicity are preserved across cores. Since
+  M2.3.4 (spec 0012) the console paints into two kernel-owned text windows instead of
+  the whole screen: application output and the line-discipline echo go to a terminal
+  window, kernel diagnostics to a system-log window, and no text scrolls the shadow.
+  The one-shadow and one-lock rules are unchanged.
 - **G15 (MUST):** When the framebuffer is missing, is not 32 bpp, or the shadow cannot
   be allocated, graphics are disabled: `screen_width`/`screen_height` return 0, every
   drawing primitive returns `Status.Invalid`, `get_pixel` returns 0, and the kernel and
@@ -137,6 +141,11 @@ its 16×16 cell is presented; scrolling copies the shadow up by 16 rows, clears 
 exposed band and presents the screen once. The console draws through the same helper as
 `syslib`, so a partially drawn rule or a desktop underneath is never in a different
 image from what an application reads.
+
+**Superseded in part by spec 0012 (M2.3.4):** the console no longer owns the full
+screen. It keeps two character grids and paints only inside two kernel-owned window
+content rectangles (owner `0`), one per stream; scrolling moves a grid and repaints that
+window. The "one shadow, one clip" rules above still hold.
 
 Text before `gfx::init` runs is serial-only. `kmain` initialises the frame allocator and
 graphics before the console attaches, so the normal boot log is on screen from the first
@@ -248,3 +257,4 @@ an `Info` (width, height, pitch, bpp, shadow address/size/frames, free-frame del
 | 2026-11-16 | M2.2: `present` composites the software cursor into the framebuffer after the row copy (G5), so `get_pixel` stays uncomposited and headless self-checks stay deterministic; the cursor model itself is spec 0010. M2.2 row of the forward-reference table updated; cursor question resolved. |
 | 2026-11-16 | M2.3.0/M2.3.1: spec 0011 and ADR 0024 fix the window model (content-size geometry, one z-order, one focus, ownership, 16/64/8×8 limits). `gfx` gains the kernel-internal `set_clip`/`reset_clip` used by the service, with a boot self-check (`graphics: clip ok`); no application clip primitive is added (open question 1 resolved). The `syslib` drawing surface is unchanged; chrome, damage and `present` of a union are M2.3.2. |
 | 2026-11-16 | M2.3.2: the window service draws chrome and restores the desktop through the same shadow and internal clip (narrowed per visible part), then presents the damage union once; `syslib.present`/`clear` and the nine drawing primitives are unchanged. The service desktop is white with the `(X + Y)` black dither. `window: paint ok` checks the damage arithmetic at boot. |
+| 2026-11-16 | M2.3.4 (spec 0012, ADR 0025): the console paints two kernel-owned text windows (owner `0`, terminal and system log) instead of the whole screen, with per-window grids and scrolling; expose repair is pulled by `console::pump` at the service opportunity. The whole-screen console helpers and the shadow scroll are removed from `gfx`; the nine drawing primitives, `present`, `clear` and the clip are unchanged. A full-screen `clear` erases the console windows' pixels; their grids survive and repaint on the next expose/output. |

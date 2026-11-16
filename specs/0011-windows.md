@@ -24,6 +24,7 @@ This spec fixes the window model. It is implemented in slices so each lands with
 | M2.3.1 | window records, lifecycle, geometry, z-order, focus, ownership, the internal clip helpers and the `syslib` window surface | this spec |
 | M2.3.2 | composition and repair: chrome drawn by the service, damage accumulation, `present` of the damage union, background restore on move, raise/focus repaint | M2.3.1 |
 | M2.3.3 | event routing (pointer/key to the focused window), `expose` delivery and the automatic content clip of `window_present`, close-on-task-termination proof | M2.3.2 |
+| M2.3.4 | the desktop shell and kernel text windows; read-only enumeration (`window_info`), owner `0` for kernel windows (spec 0012) | M2.3.3 |
 
 Non-goals for M2.3:
 
@@ -100,8 +101,9 @@ an `int`; `0` is never a valid id.
   A client that ignores an expose is not closed in M2 (see W18).
 - **W13 (MUST):** With graphics disabled (`screen_width() == 0`), `window_open` is
   `Status.Invalid`, `close`/`raise`/`move` are `Status.NotFound` (no window can exist),
-  `window_frame_rect`/`window_content_rect`/`window_present` are `Status.Invalid`, and
-  `window_focus` is `0`. Nothing hangs and no allocation is attempted.
+  `window_frame_rect`/`window_content_rect`/`window_present` are `Status.Invalid`,
+  `window_info` is `Status.NotFound` for every index, and `window_focus` is `0`. Nothing
+  hangs and no allocation is attempted.
 - **W14 (MUST):** The window service is entered through host builtins; `Host` defaults
   describe a disabled service (`Invalid` at `open`, on the rect reads and on
   `window_present`; `NotFound` at `close`/`raise`/`move`; focus `0`), exactly the kernel's
@@ -136,6 +138,19 @@ an `int`; `0` is never a valid id.
   lifetime (`close`, `kill`, fault, normal exit), and a repaint is always requested again
   the next time that window is damaged. Timeouts and forced closes are deferred until
   there is a desktop shell that can judge a client (M2.3.4/M2.3.5).
+- **W19 (MUST):** `syslib.window_info(index, var id, var rect, var title) -> Status` is
+  the read-only enumeration (M2.3.4; spec 0012 D15). Index `0` is the **topmost** live
+  window and indices increase down the z-order. `Ok` writes the id, the **frame**
+  rectangle and the title through the out-parameters; an index at or past the live count,
+  or disabled graphics, is `NotFound` and writes nothing. The title destination is a
+  compile-time `var string` of at least 64 bytes (the W9 title cap); the interpreter
+  bounds-checks it before the host call. There is no write access and no new opcode
+  (builtin 40).
+- **W20 (MUST):** Owner id `0` is reserved for the kernel. Global task ids start at `1`,
+  so no task can own or address a kernel window by identity. A kernel window is otherwise
+  an ordinary window: it has geometry, z-order, focus, `Expose`, hit-testing and
+  `window_present`, and the kernel calls the same public functions with owner `0`
+  (spec 0012 D6).
 
 ## Design
 
@@ -192,6 +207,10 @@ may raise any window. A finished task's windows are closed by `Task::reclaim` be
 regions are freed, on every path. Because the REPL can start the same application twice,
 ownership is per task instance, not per application path; the second instance cannot touch
 the first one's windows.
+
+Owner `0` is the kernel (W20). Task ids start at `1`, and the kernel uses the same public
+functions, so the kernel's terminal and system-log windows (spec 0012) are ordinary
+windows with a reserved owner rather than a parallel table.
 
 There is no capability model (spec 0003, H4; vision R14): the check exists so a bug or a
 mistake in one application cannot silently destroy another's window, not to isolate a
@@ -369,6 +388,8 @@ syslib.window_frame_rect(id: int, var rect: Rect) -> Status
 syslib.window_content_rect(id: int, var rect: Rect) -> Status
 syslib.window_focus() -> int
 syslib.window_present(id: int) -> Status
+syslib.window_info(index: uint, var id: int, var rect: Rect,
+                   var title: string[64]) -> Status
 ```
 
 `(x, y)` in `window_open` and `window_move` is the **frame origin**; `(w, h)` in
@@ -399,6 +420,7 @@ Error values:
 | `window_content_rect` | rect written | unknown id | graphics disabled | — |
 | `window_focus` | id of the focused window or `0` | — | — | — |
 | `window_present` | content presented (visible parts only) | unknown id | live window owned by another task, graphics disabled | — |
+| `window_info` | id, frame and title written | index past the end, graphics disabled | title destination below capacity 64 (compile error) | — |
 
 An out-parameter is written only on `Ok`, like `core.spawn`/`core.wait` (spec 0003, E1).
 The id out-parameter and `window_focus` are `int`; ids are not compared to task ids except
@@ -417,7 +439,11 @@ fn window_frame_rect(&mut self, id: u64) -> Result<Rect, Status> { Err(Status::I
 fn window_content_rect(&mut self, id: u64) -> Result<Rect, Status> { Err(Status::Invalid) }
 fn window_focus(&mut self) -> u64 { 0 }
 fn window_present(&mut self, id: u64) -> Status { Status::Invalid }
+fn window_info(&mut self, index: u64) -> Option<WindowInfo> { None }
 ```
+
+`WindowInfo` (interpreter crate) carries `id`, the frame `Rect`, and a fixed
+`[u8; 64]` title with its length; the default `None` is the disabled service.
 
 The interpreter pops the operands in declaration order, resolves the `var` references and
 the title, calls the host, writes the id or the `Rect` image (32 bytes at the
@@ -438,6 +464,8 @@ pub fn frame_rect(id: u64) -> Result<Rect, Status>;
 pub fn content_rect(id: u64) -> Result<Rect, Status>;
 pub fn focus() -> u64;
 pub fn present(owner: u64, id: u64) -> Status;   // window_present
+pub fn info(index: u64) -> Option<Info>;          // window_info, topmost first
+pub fn visible_content_parts(id: u64, out: &mut [Rect]) -> usize; // kernel-only
 pub fn take_expose(owner: u64) -> Option<u64>;   // poll-time routing
 pub fn has_expose(owner: u64) -> bool;           // input block re-check
 pub fn route_click(x: i64, y: i64) -> Option<u64>; // hit-test + raise + repair
@@ -467,6 +495,8 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | Empty title | Legal; a 2-pixel content offset is unaffected |
 | Two cores call the service at once | One table lock serialises them; no partial state is visible |
 | Client ignores an `Expose` (M2.3.3) | Its previous pixels remain; the repair pass still presents |
+| `window_info` index past the end (M2.3.4) | `NotFound`; id, rect and title are untouched |
+| Kernel window clicked (M2.3.4) | Ordinary hit-test/raise/focus; `Expose` asks the console to repaint |
 | Application draws outside its content rectangle | Possible (no clip primitive, no capability model); the service repairs the damage on the next pass |
 | `move` to the same origin | `Ok`, no change |
 | `raise` on the top window | `Ok`, focus set, order unchanged |
@@ -505,3 +535,4 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | 2026-11-16 | M2.3.1 implemented: the kernel `window` table with lifecycle, z-order, focus, ownership and `close_task` on `Task::reclaim`; builtins 32–38 with disabled-service defaults; the predeclared `Rect` record; the internal `gfx` clip save/narrow/restore with a boot self-check; the `windows` proof app and child. Chrome, damage and the damage-union `present` are M2.3.2; routing, `Expose` and `window_present` are M2.3.3. |
 | 2026-11-16 | M2.3.2 implemented: service-drawn chrome (1-px black border, 16-px title bar, focused stripes vs plain unfocused, close box, centred 8×8 title), white + black dither desktop restore, bounded damage lists (32 rects) for desktop and chrome damage with visible-part subtraction, one `present` of the damage union, and a synchronous repair under the window lock. `window: paint ok` checks the arithmetic and the damage each operation records; `samples/apps/windows_demo` plus `scripts/windows_screenshot_qmp.py` prove the composition visually. The whole-content `Expose`, event routing and `window_present` remain M2.3.3. |
 | 2026-11-16 | M2.3.3 implemented: `EventKind.Expose` (ordinal 5); producer-free routing at poll time in the kernel host (pending owner expose first, pointer-down hit-test → raise/focus → delivery, other pointer/key events to the focus, explicitly addressed injections passed through); per-window coalesced expose flags marked by `repair` and input waiters woken after the window unlock, with the scheduler's input-block re-check; `syslib.window_present` (builtin 39) presenting exactly the content's visible parts; `window: route ok`; and `samples/apps/windows_events` proving routing, expose fields, foreign isolation, `window_present` and close-on-termination. Open questions 1, 3 and 6 resolved; M2.3.4 is the desktop shell. |
+| 2026-11-16 | M2.3.4 (spec 0012, ADR 0025): read-only `syslib.window_info` (builtin 40, no new opcode) returning a topmost-first id, frame and 64-byte title snapshot; owner `0` admitted as the kernel owner (task ids start at 1) and kernel windows are ordinary windows; the kernel's terminal and system-log windows use the same public functions. The three samples that assumed an empty window baseline record `window_focus()` at start and compare against it. |

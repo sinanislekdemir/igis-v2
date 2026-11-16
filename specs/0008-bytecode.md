@@ -394,6 +394,7 @@ on the same table; the machine, not the compiler, owns the runtime checks.
 | 37 | `window_content_rect` | 2 → 1 | id, `Rect` ref; writes on `Ok` |
 | 38 | `window_focus` | 0 → 1 | focused window id or 0 |
 | 39 | `window_present` | 1 → 1 | window id; presents the visible content; owner-only |
+| 40 | `window_info` | 4 → 1 | index, id ref, `Rect` ref, title ref; topmost first; writes on `Ok` |
 
 Graphics builtins add no opcode, so ABI v1 stays at **75** opcodes (spec 0009). The input
 builtins (spec 0010) and the window builtins (spec 0011) add none either; the interpreter
@@ -562,3 +563,4 @@ pub fn run(task: &mut Task);
 | 2026-11-16 | Event builtins (spec 0010, I18/I19): `next_event` (27, 1 → 1; blocks on an empty queue with `Blocked(WaitKind::Input)`), `poll_event` (28, 1 → 1; pushes `WouldBlock`), `inject_event` (29, 1 → 1; debug-only, unknown kind is `Invalid`), `event_drops` (30, 0 → 1) and `event_flush` (31, 0 → 1). The host writes a 40-byte `abi::layout::event` image; no opcode is added and ABI v1 stays at **75**. |
 | 2026-11-16 | Window builtins add no opcode (spec 0011, M2.3.1): ids 32–38 are `window_open` (6 → 1), `window_close` (1 → 1), `window_raise` (1 → 1), `window_move` (3 → 1), `window_frame_rect` (2 → 1), `window_content_rect` (2 → 1) and `window_focus` (0 → 1). The interpreter decodes the operands, resolves the title and the out-parameters and writes the 32-byte `abi::layout::rect` image only on `Ok`; the kernel host owns the table and the policy. `Rect` is a predeclared record, so no new type or opcode is needed; ABI v1 stays at **75**. |
 | 2026-11-16 | `window_present` is builtin 39 (1 → 1): pop a window id, present the window's content clipped to its visible parts, push the `Status`. Owner-only and disabled-graphics `Invalid`; no opcode, ABI v1 stays at **75**. `EventKind.Expose` is ordinal 5; routing (`Event.window`) happens in the host at poll time and adds no bytecode. |
+| 2026-11-16 | `window_info` is builtin 40 (4 → 1, spec 0012 D15): index, id reference, `Rect` reference and a `var string` title reference. Index `0` is the topmost live window; `NotFound` past the end or with disabled graphics leaves every destination untouched; `Ok` writes the id, the frame image and the title (at most 64 bytes) and pushes `Status::Ok`. The compiler requires the title destination to have capacity 64 and the interpreter bounds-checks the region before the host call. No new opcode; ABI v1 stays at **75**. |
