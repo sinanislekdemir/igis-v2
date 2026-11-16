@@ -131,7 +131,11 @@ begin
 
   // 2. Pointer transitions are queued by the pointer path itself.
   status := syslib.clear(background);
+  // Clamp to the origin, then discard the move event the clamp may have
+  // produced: a previous app in the same boot may have left the pointer
+  // elsewhere, so the next event must deterministically be the move to (40, 60).
   status := syslib.inject_pointer(-100000, -100000, uint(0));
+  flushed := syslib.event_flush();
   status := syslib.inject_pointer(40, 60, uint(0));
   status := syslib.next_event(ev);
   check(
