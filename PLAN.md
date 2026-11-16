@@ -14,11 +14,12 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `93fedbf` (scripts: `--no-tablet` PS/2 fallback proof). Tree clean.
+- **Last commit:** `4f2038c` (keyboard key events and the event queue, M2.2.3–2.2.5).
+  Tree clean.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), and M2.2.3–2.2.5
-  keyboard key events, the event queue and the `events` proof (this commit).
+  keyboard key events, the event queue and the `events` proof (`4f2038c`).
 - **Verified at that point:** 301 host tests; `keyboard: decoder ok` and `events: ok` on
   `-smp 4` and `-smp 1`; the newest-six-of-seventy overflow and a genuinely blocked
   `next_event` wake; QMP absolute injection 7/7; regressions `mouse`, `desktop`, `text`,
