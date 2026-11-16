@@ -83,12 +83,13 @@ an `int`; `0` is never a valid id.
   content drawing is not automatically clipped (one global clip, several cores; see
   "Clip discipline"); a client's presentation is limited to its content rectangle by
   `window_present` in M2.3.3.
-- **W11 (MUST):** The service tracks damage and repair (M2.3.2): `open`, `move`, `raise`,
-  `close` and a focus change damage the affected frame rectangles, the overlapped windows
-  and the desktop below them; a repair pass asks each damaged window's owner to repaint
-  its content and presents the union once. The exact accumulation and present order is
-  M2.3.2; this spec fixes what is damaged and that a client repaint is requested with a
-  whole-content `Expose`.
+- **W11 (MUST):** The service tracks damage and repairs it synchronously (M2.3.2):
+  `open`, `move`, `raise`, `close` and a focus change damage the affected frame
+  rectangles, the overlapped windows and the desktop below them. One repair pass restores
+  the desktop where a window was removed or moved, redraws the chrome of every damaged
+  window bottom-to-top in its visible parts, and presents the union once. Client content
+  is the client's: M2.3.2 never keeps or repaints another window's content, and the
+  whole-content `Expose` request that asks the owner to repaint is M2.3.3 (W12).
 - **W12 (MUST):** `Expose` is delivered to the owning task as a machine event with
   `kind = Expose`, `window = id`, `x = 0`, `y = 0`, `code = 0`, and it always asks for the
   **whole content rectangle**; M2 has no partial-damage rectangles. `EventKind.Expose`
@@ -180,40 +181,87 @@ gfx::set_clip(x, y, w, h) -> bool   // intersect with the screen; false when dis
 gfx::reset_clip()                   // restore the full-screen clip
 ```
 
-They are kernel-internal; there is no `syslib` binding. A repair pass saves the current
-clip, narrows it to the rectangle it is painting, draws, and restores it. The clip is a
-property of the **shadow**, not of a task, so a global clip cannot be held across an
-asynchronous `Expose` to another task: after the expose is queued the client runs on its
-own core and its drawing calls would race with any other client. M2 therefore narrows for
-service-owned paint (chrome, background restore, presentation) and limits the client's
-visible result at `window_present`, which presents exactly the content rectangle.
-Drawing outside the content rectangle is a client bug and stays possible; M2.3.2 draws the
-chrome over the content rectangle's border and bottom row so the damage is at least
-repaired at the next pass.
+They are kernel-internal; there is no `syslib` binding. A repair pass resets the clip, and
+for each rectangle it is about to paint it narrows the clip to that rectangle, draws, and
+restores it. The clip is a property of the **shadow**, not of a task, so a global clip
+cannot be held across an asynchronous `Expose` to another task: after the expose is
+queued the client runs on its own core and its drawing calls would race with any other
+client. M2 therefore narrows for service-owned paint only (chrome and desktop restore)
+and limits the client's visible result at `window_present`, which presents exactly the
+content rectangle. Drawing outside the content rectangle is a client bug and stays
+possible; the service draws the chrome over the content rectangle's border and title row
+at every repair, so a client cannot permanently paint over the frame.
+
+Because the clip is global, a client drawing on another core during the short synchronous
+narrowed interval is clipped to the same rectangle. That is a bounded visual race with no
+state corruption (the next repair or client draw repaints the area); it is accepted for
+M2 and disappears once `window_present` owns the client's presentation in M2.3.3.
 
 The boot self-check narrows the clip, paints across its edge, verifies the pixels outside
 were not written, restores the clip and the pixels, and prints `graphics: clip ok`
-(M2.3.1 proof for the helper M2.3.2 needs).
+(M2.3.1 proof).
 
-### Damage and repair (shape fixed here, implemented in M2.3.2)
+### Composition and repair (implemented in M2.3.2)
 
-| Operation | Damaged |
-|-----------|---------|
-| `open` | the new frame rect; every window intersecting it; the desktop under the new frame |
-| `raise` | the raised frame rect; the two focus title bars (old and new); windows intersecting either |
-| `move` | the old frame rect ∪ the new frame rect; windows intersecting either; the desktop under both |
-| `close` | the closed frame rect; windows intersecting it; the desktop under it |
-| focus change | the title bars of the old and new focused frames |
+The service is the only writer of chrome and the desktop; applications write only their
+content rectangles. A repair always paints in this order, all while holding the window
+lock:
 
-A repair pass runs bottom-to-top over the damaged windows: draw the desktop/dither where a
-window was removed, draw the chrome of each window (M2.3.2), queue one whole-content
-`Expose` to each damaged window's owner, then present the union of the damaged rectangles
-once. `present` composites the cursor as before (spec 0010, I7). Nothing in the repair
-pass blocks on a client; a live task's expose sits in the event queue and is read by
-`syslib.next_event` (M2.3.3). Windows that are not damaged are not redrawn.
+1. **Desktop restore.** Each `Erase { rect, covers_from }` paints the base white and the
+   `(X + Y)` black dither in the parts of `rect` not covered by live windows at z-order
+   index `covers_from..`. The coverage limit is what makes the cases differ:
+   - `open`: `covers_from = count` (the new window is topmost) — its whole frame starts
+     as desktop, including the content the client is about to draw;
+   - `move`, new frame: `covers_from = moved index + 1` — windows above the moved one
+     keep their pixels; windows below are covered and correctly erased;
+   - `move`, old frame and `close`: `covers_from = 0` — any live window overlapping the
+     area keeps its pixels and has its chrome redrawn.
+2. **Chrome, bottom-to-top.** Every window whose frame intersects the chrome damage
+   redraws its chrome, clipped to each visible part of its frame (its frame minus the
+   frames of every higher window) intersected with the damage. Drawing in z-order and
+   clipping to visible parts means a lower window can never corrupt a higher window's
+   content or chrome.
+3. **Present.** The bounding-box union of all damage is presented once with
+   `gfx::present`, which composites the cursor as before (spec 0010, I7). Undamaged
+   windows are not repainted.
 
-This is the smallest protocol that keeps one image and one copy out: clients redraw on
-demand, the service owns the order and the present.
+`move` to the same origin records nothing. A refused operation (`NotFound`, `Invalid`)
+records nothing. `close_task` accumulates every removed frame and repairs once, so a
+terminated task's windows disappear together.
+
+#### Chrome
+
+| Part | Pixels |
+|------|--------|
+| outer border | 1 px black on all four sides (`draw_rect` over the frame) |
+| title bar | rows `y + 1 ..= y + 15`, inside the border, full inner width |
+| focused title | white background with a black 1-px stripe on every other row |
+| unfocused title | plain `0xCCCCCC` (no stripes) |
+| close box | 11 × 11 at `(x + 4, y + 3)`: title-colour fill, black outline |
+| title text | 8 × 8 font, black, centred in the band right of the close box; truncated to the band and preceded by a band-coloured fill so stripes never cross a glyph |
+| separator | 1 px black at the last title row (`y + 15`) |
+
+The service draws the chrome inside-out and the outer border last, so no interior fill
+can spill onto it. The content rectangle is never written by chrome.
+
+#### Desktop
+
+The desktop is white (`0x00FFFFFF`) with the black 50% dither on every `(X + Y)` even
+pixel — the same pattern `samples/apps/desktop` draws. The service owns this background;
+an application that wants a different desktop clears the screen itself before opening
+windows, and a later restore returns to the service's pattern.
+
+#### Lock order and self-checks
+
+A repair takes the window lock and then calls `gfx` (window → graphics). The wrappers
+read the screen size (graphics) *before* taking the window lock, and no path takes the
+graphics lock and then the window lock, so there is no cycle. The repair is synchronous
+under the window lock: the z-order it walks is exactly the state the caller produced, so
+no snapshot is needed.
+
+`window: rules ok` checks the table policy; `window: paint ok` runs the damage lists,
+their merge rules, the visible-part subtraction and the damage each lifecycle operation
+records, all on scratch state without touching the screen.
 
 ## Interfaces
 
@@ -356,3 +404,4 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 |------|--------|
 | 2026-11-16 | Initial accepted version: frame/content geometry, z-order, single focus, ownership and close-on-termination, the 16/64/8×8 limits, the internal clip save/restore, damage/`Expose` shape, the `window_*` surface plus the predeclared `Rect`, and the disabled-graphics rules. Implementation slices M2.3.1–M2.3.3 named. |
 | 2026-11-16 | M2.3.1 implemented: the kernel `window` table with lifecycle, z-order, focus, ownership and `close_task` on `Task::reclaim`; builtins 32–38 with disabled-service defaults; the predeclared `Rect` record; the internal `gfx` clip save/narrow/restore with a boot self-check; the `windows` proof app and child. Chrome, damage and the damage-union `present` are M2.3.2; routing, `Expose` and `window_present` are M2.3.3. |
+| 2026-11-16 | M2.3.2 implemented: service-drawn chrome (1-px black border, 16-px title bar, focused stripes vs plain unfocused, close box, centred 8×8 title), white + black dither desktop restore, bounded damage lists (32 rects) for desktop and chrome damage with visible-part subtraction, one `present` of the damage union, and a synchronous repair under the window lock. `window: paint ok` checks the arithmetic and the damage each operation records; `samples/apps/windows_demo` plus `scripts/windows_screenshot_qmp.py` prove the composition visually. The whole-content `Expose`, event routing and `window_present` remain M2.3.3. |

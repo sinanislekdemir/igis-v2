@@ -14,25 +14,29 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `ba4f93c` (M2.3.1 window records and lifecycle) on top of `13aecf2`
-  (M2.3.0: spec 0011 and ADR 0024). Tree clean.
+- **Last commit:** `M2.3.2` composition and repair (the feature commit; its hash is
+  recorded in the follow-up docs commit) on top of `142f04f` (M2.3.1 resume note). Tree
+  clean.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
   keyboard key events, the event queue and the `events` proof (`4f2038c`), M2.2.7
   PS/2 aux IRQ12 with the lock-free ring (`70b82cd`), the order-independent `events`
-  proof (`8afa36a`), the M2.3.0 window spec (`13aecf2`), and M2.3.1 window records and
-  lifecycle (`ba4f93c`).
-- **Verified at that point:** **312 host tests** (abi 15, compiler 139, interpreter 113,
-  langhost 45, including doctests); `cargo xtask build`/`image` clean; the boot prints
-  `graphics: clip ok` and `window: rules ok` on `-smp 4` and `-smp 1`; `run windows` →
-  every check plus `windows: ok` on both core counts; regressions `events`, `mouse`,
-  `desktop`, `text 42 hi`, `frames`, `streams`, `deep`, `utf8`, `realtime`, `cores` pass
-  on both; `scripts/tablet_qmp.py` 7/7, `--no-tablet` → `mouse: ok`, and
-  `scripts/mouse_burst_qmp.py --cores 1 --batch 300` → 600/600 with the aux IRQ12 line.
-- **Next slice (not started):** M2.3.2 composition and repair — chrome drawn by the
-  service, damage accumulation, background restore, `present` of the damage union, and
-  raise/focus repaint, using the M2.3.1 table and the internal clip helpers.
+  proof (`8afa36a`), the M2.3.0 window spec (`13aecf2`), M2.3.1 window records and
+  lifecycle (`ba4f93c`), and M2.3.2 composition and repair (the feature commit below).
+- **Verified at that point:** **313 host tests** (abi 15, compiler 139, interpreter 113,
+  langhost 46, including doctests); `cargo xtask build`/`image` clean; the boot prints
+  `graphics: clip ok`, `window: rules ok` and `window: paint ok` on `-smp 4` and `-smp 1`;
+  `run windows` → `windows: ok` on both; `run windows_demo` → `windows_demo: checks ok`,
+  `windows_demo: ready`, then `windows_demo: ok` after the 15 s realtime hold on both;
+  the screenshot harness writes `/home/sinan/Desktop/igis-windows.png` (1024×768 PNG);
+  regressions `events`, `mouse`, `desktop`, `text 42 hi`, `frames`, `streams`, `deep`,
+  `utf8`, `realtime`, `cores` pass on both; `scripts/tablet_qmp.py` 7/7, `--no-tablet` →
+  `mouse: ok`, and `scripts/mouse_burst_qmp.py --cores 1 --batch 300` → 600/600.
+- **Next slice (not started):** M2.3.3 event routing and `Expose` — `EventKind.Expose`,
+  `Event.window` filled from the focused window, pointer/key delivery to the focused
+  window, `syslib.window_present` clipping the client's presentation to its content
+  rectangle, and close-on-task-termination retested through events.
 
 ### Resuming from a fresh session (no chat history)
 
@@ -40,7 +44,7 @@ Trust the repository, not a summary. On a fresh start:
 
 1. `git status --short` and `git log --oneline -8` — the tree should be clean and the top
    commit should match the "Last commit" line above; if not, stop and reconcile first.
-2. `cargo test -q -p abi -p compiler -p interpreter -p langhost` — expect **312** tests
+2. `cargo test -q -p abi -p compiler -p interpreter -p langhost` — expect **313** tests
    plus the doctest, all green.
 3. `cargo xtask build` — expect a clean kernel build.
 4. Read, in this order: this file, `AGENTS.md` (status paragraph + decisions table),
@@ -48,21 +52,28 @@ Trust the repository, not a summary. On a fresh start:
    `specs/0011-windows.md`, `adr/0020`, `adr/0021`, `adr/0022`, `adr/0023`, `adr/0024`.
 5. Baseline kernel checks (headless, no chat needed):
    - `( sleep 6; printf 'run desktop\n'; sleep 4; printf 'run events\n'; sleep 8; \
-     printf 'run windows\n'; sleep 6; printf 'exit\n' ) | timeout 120s \
+     printf 'run windows\n'; sleep 4; printf 'run windows_demo\n'; sleep 22; \
+     printf 'exit\n' ) | timeout 150s \
      qemu-system-x86_64 -cdrom build/igis.iso -m 256M -serial stdio -monitor none \
      -no-reboot -no-shutdown -accel tcg -vga std -display none -smp 4 \
      -usb -device usb-tablet`
-     → `graphics: clip ok`, `window: rules ok`, `desktop: ok`, `keyboard: decoder ok`,
-     `events: ok`, `windows: ok`, `ioapic: version ...`, `mouse: aux IRQ12 enabled ...`,
-     `usb: tablet ...` when the device is present.
+     → `graphics: clip ok`, `window: rules ok`, `window: paint ok`, `desktop: ok`,
+     `keyboard: decoder ok`, `events: ok`, `windows: ok`, `windows_demo: checks ok`,
+     `windows_demo: ready`, `windows_demo: ok`, `ioapic: version ...`,
+     `mouse: aux IRQ12 enabled ...`, `usb: tablet ...` when the device is present.
+   - `python3 scripts/windows_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
+     `/home/sinan/Desktop/igis-windows.png`.
    - `python3 scripts/tablet_qmp.py build/igis.iso` → `7/7 absolute cases passed`.
    - `python3 scripts/tablet_qmp.py build/igis.iso --no-tablet` → `mouse: ok` fallback.
    - `python3 scripts/mouse_burst_qmp.py build/igis.iso` → `600/600` px with a
      `mouse: aux IRQ12 delivered ...` line; `--cores 1` is the single-core variant.
-6. The next slice is **M2.3.2** (composition and repair). Touchpoints:
-   `kernel/src/window.rs` (damage flags, paint order, chrome metrics already here),
-   `kernel/src/gfx.rs` (`set_clip`/`reset_clip`, `present`), `kernel/src/console.rs`
-   (the console still presents its own cells), and `samples/apps/desktop`/`windows`.
+6. The next slice is **M2.3.3** (routing and `Expose`). Touchpoints:
+   `kernel/src/event.rs` (`EventKind.Expose`, `Event.window`), `kernel/src/window.rs`
+   (expose queueing, `window_present`), `kernel/src/sched.rs`/`interpreter` (the new
+   builtin), `specs/0010-input-and-events.md` and `specs/0003-language.md`. M2.3.4 is the
+   desktop shell; until then the console and the desktop share the shadow, so an
+   application that prints after composing scrolls the windows (the demo prints first and
+   repaints after).
 
 If anything in this file disagrees with the code or the specs, the code and specs win and
 this file must be corrected in the same commit.
@@ -138,9 +149,10 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
 - [x] **M2.3.1** Window records and lifecycle: `syslib.window_open(x, y, w, h, title)`,
   `window_close`, `window_raise`, `window_move`, `window_content_rect`, `window_frame_rect`;
   z-order list, focus, per-window clip region; ownership by task id.
-- [ ] **M2.3.2** Composition and repair: frame chrome drawn by the server, damage union of
+- [x] **M2.3.2** Composition and repair: frame chrome drawn by the server, damage union of
   affected rectangles, `present` of the union, background restore on move (dither pattern),
-  overlapping windows, raise/focus repaint.
+  overlapping windows, raise/focus repaint (`window: paint ok`, `samples/apps/windows_demo`,
+  `scripts/windows_screenshot_qmp.py`).
 - [ ] **M2.3.3** Event routing and `expose`: pointer/key events go to the focused window;
   a window gets an `expose` when damaged; `syslib.window_present` clips to the content
   rectangle automatically; close-on-task-termination.

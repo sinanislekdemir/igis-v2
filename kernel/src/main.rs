@@ -123,6 +123,16 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
             arch_x86_64::halt();
         }
     }
+    // Composition and repair bookkeeping (spec 0011, W11): damage merging, the
+    // visible-part subtraction and the damage each operation records. Pure, so
+    // it never touches the screen the console is drawing on.
+    match window::paint_self_check() {
+        Ok(()) => println!("window: paint ok"),
+        Err(step) => {
+            println!("window: paint FAIL at step {step}");
+            arch_x86_64::halt();
+        }
+    }
 
     // The pointer device and the software cursor (spec 0010). This needs the
     // shadow (screen size, cursor compositing) and the console (boot log), and

@@ -1033,3 +1033,16 @@ end;
         b"open invalid\nrect invalid\nfocus zero\nclose notfound\n".to_vec()
     );
 }
+
+#[test]
+fn windows_demo_compiles_and_reports_no_graphics_on_the_host() {
+    let path = format!(
+        "{}/../samples/apps/windows_demo",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "windows_demo").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"windows_demo: no graphics\n".to_vec());
+}
