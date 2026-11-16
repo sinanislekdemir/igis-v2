@@ -6,7 +6,7 @@
 - **Supersedes:** the full-screen console of spec 0009 G14 (superseded in part)
 - **Superseded by:** none
 - **ADRs:** 0020, 0024, 0025
-- **Updated:** 2026-11-16
+- **Updated:** 2026-11-17
 
 ## Context
 
@@ -50,7 +50,11 @@ resize. Those are M2.4/M2.5.
   global clip: a whole-grid repaint must not clip an application drawing on another
   core. A cell that is partly or wholly covered leaves the covering window untouched. A
   single cell is presented after it is painted; a whole-window repaint presents each
-  visible part once.
+  visible part once. Because a window on another core can move above the console
+  between the visible-parts query and the paint, every cell/part paint reads the
+  window service's visible-geometry generation before the query, compares it after the
+  paint, and retries with fresh parts (bounded); a move after the final check is covered
+  by the service's own expose on the next pump.
 - **D4 (MUST):** On a pending `Expose` for owner `0`, the console repaints that window's
   grid. The repaint is **pulled**, not called from the window service: `console::pump`
   takes exposed owner-0 windows at the service opportunity (and the idle loop, through
@@ -282,3 +286,4 @@ while that id is its own; otherwise it presents what the service last left.
 |------|--------|
 | 2026-11-16 | Initial accepted version: kernel-owned terminal and system-log windows, per-window grids with pull-based expose repair, the owner-0 rule, the desktop shell and its direct menu items, read-only `window_info` (builtin 40), the lock order and the proof plan. |
 | 2026-11-16 | M2.3.4 implemented: `console::init` opens `Terminal` and `System Log` (owner `0`) after the desktop fill; grids and per-window scroll; `console::route_self_check` (`console: terminal ok`, `console: log ok`, `console: route ok`); `console::pump` pulls owner-0 exposes in `poll_input`; explicit-clip `gfx::draw_cell`/`present_within` (the console never narrows the global clip); `window::open` admits owner `0`, `window::info`/`visible_content_parts`; builtin 40 with compiler capacity and interpreter destination checks; `samples/apps/desktop_shell` check/normal modes; the bar is presented after it is drawn; `events`/`windows`/`windows_events` record the boot focus baseline; `scripts/desktop_screenshot_qmp.py` captures `/home/sinan/Desktop/igis-desktop.png` (1024×768). M2.3.5 remains the two-app/focus/drag/expose proof. |
+| 2026-11-17 | D3 made race-free: `window::generation()` (kernel-internal) is bumped by every visible mutation and read by `paint_cell`/`repaint` before computing visible parts and after painting; a changed generation retries the cell/part with fresh parts (bounded `PAINT_RETRIES`). M2.3.5's two-application proof deterministically reproduced the old stale-parts overwrite (a log-grid repaint computed before a window moved above it painted that window's area afterwards); the retry keeps the covered window's pixels. `samples/apps/windows_proof` and `scripts/windows_proof_screenshot_qmp.py` added. |

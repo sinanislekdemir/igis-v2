@@ -4,7 +4,7 @@ Parked decisions for igis-v2. This is the working register; each spec's own
 "Open questions" section remains authoritative for that document. When an item is
 resolved, record the answer in the relevant spec or in a new ADR, then remove it here.
 
-**Status:** implementation phase. Last updated: 2026-11-16.
+**Status:** implementation phase. Last updated: 2026-11-17.
 **Snapshot:** specs 0001–0012, ADRs 0001–0025.
 
 ## How to use
@@ -53,6 +53,12 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | # | Question | Options / recommendation | Trigger |
 |---|----------|--------------------------|---------|
 | Q47 | Recovering a task from a hardware guard hit | not in M1: a `#PF` inside a known guard names the stack and halts. The legal overflow is the interpreter's `Faulted(StackOverflow)`, which the guard never sees. Recovering one task from the fault path needs the task id in the handler, a safe abandon of the faulted kernel frame, and a reason the interpreter cannot already produce — and it would weaken the `fault`/`exit` budget rule (ADR 0010) | if a kernel-side stack bug must not take the machine down, or when per-task stack isolation replaces shared address-space assumptions |
+
+## F. Scheduler liveness
+
+| # | Question | Options / recommendation | Trigger |
+|---|----------|--------------------------|---------|
+| Q50 | `core.kill` of a task another core has already claimed | `request_kill` publishes `KILL_FLAGS` before taking the slot lock; a claimed task's owner reads the flag after its quantum. If the owner reads it just before the publication and then blocks the task, the request can be left with no runnable owner and `wait` can hang. M2.3.5's proof hit this once on `-smp 4` and avoids the path with a stage-4 close/exit acknowledged by `core.wait`; the two fixes are to re-check `KILL_FLAGS` in the block path under the slot lock, or to publish the flag while holding the slot lock and wake a blocked task after it. The hang is observed but the exact interleaving is unproven | when an application must kill an arbitrary running task (M2.4 window/task controls) |
 
 ## Decided in the 2026-11-16 guards session
 

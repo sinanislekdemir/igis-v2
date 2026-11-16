@@ -6,7 +6,7 @@
 - **Superseded by:** none
 - **ADRs:** 0003 (cooperative model, budget intent), 0006 (guard pages), 0011 (work
   stealing), 0016 (realtime class), 0018 (floating point)
-- **Updated:** 2026-11-15
+- **Updated:** 2026-11-17
 
 ## Context
 
@@ -41,8 +41,10 @@ ADR 0011 concrete.
   endpoints, invalidate handles, release all regions.
 - **Sch11 (MUST):** The first milestone runs one core and brings up the others within the
   same milestone; the protocol is identical in both cases.
-- **Sch12 (SHOULD):** Fairness is FIFO. There are no priorities, no affinity and no load
-  balancing policy in the first milestone.
+- **Sch12 (SHOULD):** Fairness is round-robin over the runnable slots: after a
+  successful claim the scan starts at the next slot, so a task that is always
+  runnable in a low slot cannot starve the higher slots on a single core. There are
+  no priorities, no affinity and no load-balancing policy in the first milestone.
 - **Sch13 (MUST):** A task may promote itself once to the realtime class with
   `core.realtime_on()`. Promotion is refused with `Status.Full` if the number of realtime
   tasks would exceed the number of online cores.
@@ -494,3 +496,4 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 2026-11-15 | Realtime class implemented: `core.realtime_on`/`core.heartbeat` (builtins 11/12), admission by a CAS counter against the online core count, realtime-first claim, an inner per-core quantum loop that does not release a realtime task, a one-second deadline in non-blocked time (`HEARTBEAT_NS`), `Faulted(WatchdogTimeout)` at the boundary, and the admission slot released only at termination. `samples/apps/{realtime,beat,spin}` exercise promotion, `Full` on a single core, and the watchdog. |
 | 2026-11-15 | Stream blocking added as a third `WaitFor`: `WaitFor::Stream(handle)` with `task::wake_stream`, sender/receiver/close wake rules and a post-block `stream::ready_for` recheck that closes the failed-attempt-to-block race. Sends and receives take the stream lock without any slot lock and wake after releasing it. |
 | 2026-11-16 | Per-task stack guards: placement takes `stack_len + 4096` contiguous frames, the lowest is unmapped and excluded from the region, and reclaim restores it before returning guard and stack as one unit on every destruction path (failed spawn, verifier rejection, exit, kill, fault, stale eviction). Every PTE change is followed by a CR3 reload and an IPI shootdown to all online cores. |
+| 2026-11-17 | Sch12 made concrete as round-robin: `claim_class` starts its scan at a global `NEXT_CLAIM` cursor, stores the claimed slot + 1 after a successful take, and wraps; the old always-from-slot-0 scan let a busy parent starve its higher-slot children on `-smp 1` (observed by the M2.3.5 two-application proof). On SMP the races make the rotation approximate but never permanently skip a runnable slot. Realtime-first claim is unchanged. |

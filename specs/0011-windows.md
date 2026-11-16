@@ -6,7 +6,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0020, 0024
-- **Updated:** 2026-11-16
+- **Updated:** 2026-11-17
 
 ## Context
 
@@ -25,12 +25,15 @@ This spec fixes the window model. It is implemented in slices so each lands with
 | M2.3.2 | composition and repair: chrome drawn by the service, damage accumulation, `present` of the damage union, background restore on move, raise/focus repaint | M2.3.1 |
 | M2.3.3 | event routing (pointer/key to the focused window), `expose` delivery and the automatic content clip of `window_present`, close-on-task-termination proof | M2.3.2 |
 | M2.3.4 | the desktop shell and kernel text windows; read-only enumeration (`window_info`), owner `0` for kernel windows (spec 0012) | M2.3.3 |
+| M2.3.5 | the two-application proof: side-by-side windows, click focus/raise, a scripted owner drag and an `Expose` repaint, headless | M2.3.4 |
 
 Non-goals for M2.3:
 
 - no per-window canvas, double buffering, alpha blending or scaling (ADR 0020);
-- no interactive resizing, no drag loop, no window menus, no icons — those arrive with
-  M2.3.5/M2.4;
+- no interactive resizing, no window menus, no icons — those arrive with M2.4;
+- no pointer-driven continuous drag loop: M2.3.5 proves a **scripted** owner drag
+  (a sequence of `window_move` calls); following the pointer while a button is held is
+  M2.4;
 - no multiple displays, no off-screen windows, no virtual desktops;
 - no capability model: ownership is a service check, not a security boundary (vision
   R14);
@@ -374,6 +377,63 @@ limitation, and `Expose`/chrome repair covers the frame at the next damage.
 `window: route ok` checks pending-expose marking, owner isolation, topmost-first take
 order, hit-testing and the loss of an expose when its window closes, all on scratch state.
 
+### Two-application proof (implemented in M2.3.5)
+
+`samples/apps/windows_proof` proves the whole M2.3 surface with two **separate tasks**:
+
+| Task | Window | Role |
+|------|--------|------|
+| `windows_proof_a` | `Proof A`, content 300 × 240 at `(40, 300)` | scripted owner drag; repaints its own expose |
+| `windows_proof_b` | `Proof B`, content 300 × 240 at `(560, 300)` | moves over A and back, all by owner `window_move` |
+| `windows_proof` | `Proof Control` at `(900, 640)` | injected clicks and the command stage |
+
+The parent cannot call another task's `window_close`/`window_move`, and the only
+cross-task window mutation is `window_raise`. The script therefore uses a third,
+parent-owned window as a **persistent command stage**: the frame origin of
+`Proof Control` (its `y`, in steps of 10) is read by both children with
+`window_info`. It is state, not an event, so an early command is not lost and the
+machine-wide event queue stays free for the injected pointer clicks.
+
+Phases (all headless):
+
+1. **Side by side.** Both children open and draw their windows; the parent waits for
+   both titles and their content pixels. A pixel in each content rectangle proves
+   both are visible at once.
+2. **Focus switch and raise.** The parent raises `Proof Control` (any-task raise) to
+   establish a non-app focus, then uses the real `syslib.inject_pointer` path: clamp
+   to `(0, 0)`, move over A's content, press, drain. The pointer-down is routed at
+   poll time (hit-test → raise → focus) by whichever task polls it. The parent
+   asserts `window_focus()` and the z-order from `window_info`, plus the focused
+   title-bar stripes versus the unfocused grey; it does not assert which task
+   received the event, because the queue is machine-wide and either task may consume
+   it. A second click over B switches the focus and raises B above A.
+3. **Scripted drag.** Stage 1 makes A perform four owner `window_move` calls. The
+   parent waits for the final frame rectangle and the content pixels, then checks
+   that the old frame area is restored to the live terminal window below (a blank
+   cell is white) and the new frame's border and content are painted.
+4. **Expose and repaint.** Stage 2 makes B move over A. B is topmost, so its whole
+   content draw is legal. The service marks A's whole-content `Expose`; A takes it
+   (owner-only) and repaints only the part left of B's frame, because M2 has no
+   per-task clip: a whole-content draw would overwrite B. The proof checks that the
+   overlap shows B's content, A's visible strip is still A's, and A's visible border
+   remains. Stage 3 makes B move back; A takes the new expose and repaints the
+   uncovered content, which the proof checks at a pixel that was B's content before
+   (so a stale client would fail). The vacated area is restored to the terminal
+   below.
+5. **Teardown.** Stage 4 asks both children to close their own windows and exit; the
+   parent's `core.wait` acknowledges each exit (`Ok`). The proof then checks that both
+   windows are gone, closes the control window, and `window_focus()` falls back to the
+   kernel window that was focused at entry. No timeout or kill is involved.
+
+`run windows_proof` prints `windows_proof: ok` only when every check passed, naming
+the first failing step and label otherwise. `run windows_proof shot` additionally
+prints `windows_proof: ready` and holds the composed frame for three seconds after
+the drag/move checks so `scripts/windows_proof_screenshot_qmp.py` can capture it
+with QMP `screendump`; that harness never views the image.
+
+The drag is scripted. Pointer-driven continuous dragging (and the resize handles it
+would enable) is deliberately M2.4, not an M2.3 promise.
+
 ## Interfaces
 
 ### Language surface
@@ -536,3 +596,4 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | 2026-11-16 | M2.3.2 implemented: service-drawn chrome (1-px black border, 16-px title bar, focused stripes vs plain unfocused, close box, centred 8×8 title), white + black dither desktop restore, bounded damage lists (32 rects) for desktop and chrome damage with visible-part subtraction, one `present` of the damage union, and a synchronous repair under the window lock. `window: paint ok` checks the arithmetic and the damage each operation records; `samples/apps/windows_demo` plus `scripts/windows_screenshot_qmp.py` prove the composition visually. The whole-content `Expose`, event routing and `window_present` remain M2.3.3. |
 | 2026-11-16 | M2.3.3 implemented: `EventKind.Expose` (ordinal 5); producer-free routing at poll time in the kernel host (pending owner expose first, pointer-down hit-test → raise/focus → delivery, other pointer/key events to the focus, explicitly addressed injections passed through); per-window coalesced expose flags marked by `repair` and input waiters woken after the window unlock, with the scheduler's input-block re-check; `syslib.window_present` (builtin 39) presenting exactly the content's visible parts; `window: route ok`; and `samples/apps/windows_events` proving routing, expose fields, foreign isolation, `window_present` and close-on-termination. Open questions 1, 3 and 6 resolved; M2.3.4 is the desktop shell. |
 | 2026-11-16 | M2.3.4 (spec 0012, ADR 0025): read-only `syslib.window_info` (builtin 40, no new opcode) returning a topmost-first id, frame and 64-byte title snapshot; owner `0` admitted as the kernel owner (task ids start at 1) and kernel windows are ordinary windows; the kernel's terminal and system-log windows use the same public functions. The three samples that assumed an empty window baseline record `window_focus()` at start and compare against it. |
+| 2026-11-17 | M2.3.5 implemented: `samples/apps/windows_proof` plus the `windows_proof_a`/`windows_proof_b` children prove two side-by-side windows owned by separate tasks, a focus switch and raise by real injected pointer clicks (state asserted, because the queue is machine-wide), a four-step scripted owner drag with old-area restoration, and an `Expose`/`window_present` repaint after another task moves over and away (including the covered-content check and the visible-part-only draw that M2's missing per-task clip requires). The parent-owned `Proof Control` frame origin is the persistent command channel; teardown is a stage-4 close-and-exit acknowledged by `core.wait`. `run windows_proof shot` and `scripts/windows_proof_screenshot_qmp.py` capture the composed frame. The two prerequisites the proof exposed are fixed separately: a fair claim cursor (spec 0007, Sch12) and the console's stale-parts retry (spec 0012, D3). Pointer-driven continuous dragging remains M2.4. |
