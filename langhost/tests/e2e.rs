@@ -1059,3 +1059,42 @@ fn windows_events_compiles_and_reports_no_graphics_on_the_host() {
     assert_eq!(result.reason, ExitReason::Ok);
     assert_eq!(result.output, b"windows_events: no graphics\n".to_vec());
 }
+
+#[test]
+fn windows_proof_compiles_and_reports_no_graphics_on_the_host() {
+    let path = format!(
+        "{}/../samples/apps/windows_proof",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "windows_proof").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"windows_proof: no graphics\n".to_vec());
+}
+
+#[test]
+fn windows_proof_a_compiles_and_reports_no_graphics_on_the_host() {
+    let path = format!(
+        "{}/../samples/apps/windows_proof_a",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "windows_proof_a").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"windows_proof_a: no graphics\n".to_vec());
+}
+
+#[test]
+fn windows_proof_b_compiles_and_reports_no_graphics_on_the_host() {
+    let path = format!(
+        "{}/../samples/apps/windows_proof_b",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "windows_proof_b").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"windows_proof_b: no graphics\n".to_vec());
+}

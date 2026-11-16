@@ -9,14 +9,14 @@
 //! The take-under-lock *is* the ownership transfer, so there is no separate
 //! state machine and no lock held while the task runs. On SMP the scan can be
 //! replaced by per-slot atomics or per-core queues without changing the
-//! protocol (spec 0007 Q2); the scan is deterministic but not FIFO, which is
-//! acceptable for the single-core milestone (Sch12 is a SHOULD).
+//! protocol (spec 0007 Q2). The scan starts at a rotating cursor (Sch12): a
+//! busy task in a low slot must not starve the higher slots on a single core.
 //!
 //! Every task owns its regions, its `Machine` and its argument buffer, so the
 //! record can be executed by any core (spec 0004, C8). Region allocation is the
 //! only dynamic step and it happens before the task enters the set.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use abi::Status;
 use interpreter::Machine;
@@ -335,6 +335,16 @@ static SLOT_ID: [AtomicU64; MAX_TASKS] = [const { AtomicU64::new(0) }; MAX_TASKS
 /// (Sch8's safe-point rule, with the boundary as the safe point).
 static KILL_FLAGS: [AtomicBool; MAX_TASKS] = [const { AtomicBool::new(false) }; MAX_TASKS];
 
+/// Rotating start of the claim scan (Sch12).
+///
+/// After a successful claim the cursor moves to the next slot, so on a single
+/// core the scan visits slots 0, 1, 2, ... and wraps instead of always
+/// preferring a low slot. A busy task in a low slot therefore cannot starve
+/// the higher slots. A global atomic is enough because the claim already takes
+/// a slot lock; on SMP the races make the rotation approximate, never unfair
+/// in the sense of a permanently skipped slot.
+static NEXT_CLAIM: AtomicUsize = AtomicUsize::new(0);
+
 /// Enqueues `task` in the first free slot (Sch2).
 ///
 /// The caller must have created the record with [`Task::place`]. On
@@ -393,15 +403,20 @@ pub fn claim() -> Option<Task> {
     claim_class(TaskClass::Realtime).or_else(|| claim_class(TaskClass::Normal))
 }
 
-/// Claims a runnable task of one class, scanning the whole table.
+/// Claims a runnable task of one class, scanning the whole table from the
+/// rotating cursor (Sch12).
 fn claim_class(class: TaskClass) -> Option<Task> {
-    for slot in SLOTS.iter() {
-        let mut guard = slot.lock();
+    let start = NEXT_CLAIM.load(Ordering::Relaxed) % MAX_TASKS;
+    for offset in 0..MAX_TASKS {
+        let index = (start + offset) % MAX_TASKS;
+        let mut guard = SLOTS[index].lock();
         let wanted = guard
             .as_ref()
             .is_some_and(|task| task.state == TaskState::Runnable && task.class == class);
         if wanted {
-            return guard.take();
+            let task = guard.take();
+            NEXT_CLAIM.store((index + 1) % MAX_TASKS, Ordering::Relaxed);
+            return task;
         }
     }
     None

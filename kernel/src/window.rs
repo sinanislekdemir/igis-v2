@@ -434,6 +434,12 @@ struct Table {
     /// Pending desktop restore and chrome damage for the next repair pass.
     erases: EraseList,
     chrome: ChromeList,
+    /// Geometry/focus generation (spec 0012 D3): bumped by every mutation that
+    /// can change what is visible. The console's cell/part paints read it
+    /// before computing visible parts and compare it after painting, so a
+    /// window that moves above the console during a repaint is not overwritten
+    /// by stale geometry.
+    generation: u64,
 }
 
 impl Table {
@@ -446,7 +452,13 @@ impl Table {
             next_id: 1,
             erases: EraseList::new(),
             chrome: ChromeList::new(),
+            generation: 0,
         }
+    }
+
+    /// Records a visible-geometry change for the console's stale-parts retry.
+    fn bump(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
     }
 
     fn clear_damage(&mut self) {
@@ -545,6 +557,7 @@ impl Table {
         self.order[self.count] = slot;
         self.count += 1;
         self.focus = id;
+        self.bump();
 
         // The new window covers the desktop and any lower window: restore the
         // desktop across its whole frame (no window above it yet), then draw
@@ -569,6 +582,7 @@ impl Table {
         let frame = self.windows[self.order[pos]].frame();
         let was_focused = self.focus == id;
         self.remove_at(pos);
+        self.bump();
 
         // The window is gone: the desktop returns where no live window covers
         // it, and the windows it uncovered redraw their chrome.
@@ -594,6 +608,7 @@ impl Table {
         }
         self.order[self.count - 1] = slot;
         self.focus = id;
+        self.bump();
 
         // Raising adds coverage and uncovers nothing that was above: redraw
         // the raised window's chrome (its newly visible parts), the title bars
@@ -642,6 +657,7 @@ impl Table {
         window.x = new_x;
         window.y = new_y;
         let moved = window.frame();
+        self.bump();
 
         // The old frame becomes desktop where no live window covers it; the
         // new frame covers the desktop and any lower window. Windows above the
@@ -705,6 +721,7 @@ impl Table {
         // Only an actual removal can move the focus, so a task that owned no
         // window records no damage (and wakes nobody with a spurious expose).
         if removed {
+            self.bump();
             if let Some(pos) = self.position(self.focus) {
                 self.chrome.add(title_rect(&self.windows[self.order[pos]]));
             }
@@ -1040,6 +1057,14 @@ pub fn content_rect(id: u64) -> Result<Rect, Status> {
 /// W19; spec 0012, D15). `None` for an index at or past the live count.
 pub fn info(index: u64) -> Option<Info> {
     TABLE.lock().info(index)
+}
+
+/// The visible-geometry generation (spec 0012 D3). Kernel-internal: the
+/// console reads it around a cell or grid paint so a window that moves above
+/// it during the paint is not overwritten by parts computed for the old
+/// z-order. There is no application binding.
+pub fn generation() -> u64 {
+    TABLE.lock().generation
 }
 
 /// The visible parts of a window's content rectangle, topmost-occlusion

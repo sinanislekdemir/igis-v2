@@ -56,6 +56,16 @@ pub const LINE_RING: usize = 4;
 /// Cell size in pixels: 8×8 glyphs at scale 1 (spec 0012 D2).
 const CELL: i64 = 8;
 
+/// Bounded stale-geometry retries for a console paint (spec 0012 D3).
+///
+/// A cell/part paint computes the window's visible parts, then draws and
+/// presents. A window can move above the console between the two steps on
+/// another core; painting the old parts would then overwrite the higher
+/// window. Each paint therefore compares `window::generation()` before and
+/// after and retries with fresh parts. A move after the final check is covered
+/// by the service's own expose for the next pump.
+const PAINT_RETRIES: usize = 4;
+
 /// Largest grid a terminal can hold. A 1024×768 screen needs 62×89 cells; the
 /// bound leaves room for a much larger mode without a per-screen allocation.
 const MAX_COLS: usize = 128;
@@ -187,23 +197,31 @@ impl Terminal {
             w: 0,
             h: 0,
         }; window::MAX_DAMAGE];
-        let count = window::visible_content_parts(self.id, &mut parts);
-        for part in parts[..count].iter() {
-            if part.x >= x1
-                || part.y >= y1
-                || part.x.saturating_add(part.w) <= x0
-                || part.y.saturating_add(part.h) <= y0
-            {
-                continue;
+        let mut attempts = 0;
+        loop {
+            let generation = window::generation();
+            let count = window::visible_content_parts(self.id, &mut parts);
+            for part in parts[..count].iter() {
+                if part.x >= x1
+                    || part.y >= y1
+                    || part.x.saturating_add(part.w) <= x0
+                    || part.y.saturating_add(part.h) <= y0
+                {
+                    continue;
+                }
+                let clip = gfx::Clip {
+                    x: part.x,
+                    y: part.y,
+                    w: part.w,
+                    h: part.h,
+                };
+                let _ = gfx::draw_cell(x0, y0, code, self.fg, self.bg, clip);
+                let _ = gfx::present_within(x0, y0, CELL, CELL, clip);
             }
-            let clip = gfx::Clip {
-                x: part.x,
-                y: part.y,
-                w: part.w,
-                h: part.h,
-            };
-            let _ = gfx::draw_cell(x0, y0, code, self.fg, self.bg, clip);
-            let _ = gfx::present_within(x0, y0, CELL, CELL, clip);
+            attempts += 1;
+            if window::generation() == generation || attempts >= PAINT_RETRIES {
+                break;
+            }
         }
     }
 
@@ -219,29 +237,37 @@ impl Terminal {
             w: 0,
             h: 0,
         }; window::MAX_DAMAGE];
-        let count = window::visible_content_parts(self.id, &mut parts);
-        for part in parts[..count].iter() {
-            let clip = gfx::Clip {
-                x: part.x,
-                y: part.y,
-                w: part.w,
-                h: part.h,
-            };
-            for row in 0..self.rows {
-                let y = self.y + row as i64 * CELL;
-                if y >= part.y.saturating_add(part.h) || y + CELL <= part.y {
-                    continue;
-                }
-                for col in 0..self.cols {
-                    let x = self.x + col as i64 * CELL;
-                    if x >= part.x.saturating_add(part.w) || x + CELL <= part.x {
+        let mut attempts = 0;
+        loop {
+            let generation = window::generation();
+            let count = window::visible_content_parts(self.id, &mut parts);
+            for part in parts[..count].iter() {
+                let clip = gfx::Clip {
+                    x: part.x,
+                    y: part.y,
+                    w: part.w,
+                    h: part.h,
+                };
+                for row in 0..self.rows {
+                    let y = self.y + row as i64 * CELL;
+                    if y >= part.y.saturating_add(part.h) || y + CELL <= part.y {
                         continue;
                     }
-                    let code = self.grid[row][col];
-                    let _ = gfx::draw_cell(x, y, code, self.fg, self.bg, clip);
+                    for col in 0..self.cols {
+                        let x = self.x + col as i64 * CELL;
+                        if x >= part.x.saturating_add(part.w) || x + CELL <= part.x {
+                            continue;
+                        }
+                        let code = self.grid[row][col];
+                        let _ = gfx::draw_cell(x, y, code, self.fg, self.bg, clip);
+                    }
                 }
+                let _ = gfx::present_within(part.x, part.y, part.w, part.h, clip);
             }
-            let _ = gfx::present_within(part.x, part.y, part.w, part.h, clip);
+            attempts += 1;
+            if window::generation() == generation || attempts >= PAINT_RETRIES {
+                break;
+            }
         }
     }
 
