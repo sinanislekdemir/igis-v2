@@ -14,16 +14,15 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `M2.3.1` window records and lifecycle (the feature commit; its hash is
-  recorded in the follow-up docs commit) on top of `13aecf2` (M2.3.0: spec 0011 and ADR
-  0024). Tree clean.
+- **Last commit:** `ba4f93c` (M2.3.1 window records and lifecycle) on top of `13aecf2`
+  (M2.3.0: spec 0011 and ADR 0024). Tree clean.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
   keyboard key events, the event queue and the `events` proof (`4f2038c`), M2.2.7
   PS/2 aux IRQ12 with the lock-free ring (`70b82cd`), the order-independent `events`
   proof (`8afa36a`), the M2.3.0 window spec (`13aecf2`), and M2.3.1 window records and
-  lifecycle (the feature commit below this note).
+  lifecycle (`ba4f93c`).
 - **Verified at that point:** **312 host tests** (abi 15, compiler 139, interpreter 113,
   langhost 45, including doctests); `cargo xtask build`/`image` clean; the boot prints
   `graphics: clip ok` and `window: rules ok` on `-smp 4` and `-smp 1`; `run windows` →
