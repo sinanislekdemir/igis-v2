@@ -594,6 +594,17 @@ pub mod builtin {
     /// task's window or disabled graphics.
     pub const WINDOW_PRESENT: u32 = 39;
 
+    /// `syslib.window_info(index, var id, var rect, var title) -> Status`: the
+    /// read-only window enumeration (spec 0012, D15; spec 0011, W19). Index `0`
+    /// is the **topmost** live window and indices increase down the z-order.
+    /// `Ok` writes the id, the frame rectangle (a `Rect` image) and the title
+    /// (at most `layout::window::TITLE_CAP` bytes) and pushes `Ok`; an index at
+    /// or past the live count, or disabled graphics, is `NotFound` and writes
+    /// nothing. Operands: `[index][id reference][rect reference][title
+    /// reference]`; the title reference names a `var string` whose
+    /// compile-checked capacity is at least the title cap.
+    pub const WINDOW_INFO: u32 = 40;
+
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
         match id {
@@ -636,6 +647,7 @@ pub mod builtin {
             WINDOW_CONTENT_RECT => Some((2, 1)),
             WINDOW_FOCUS => Some((0, 1)),
             WINDOW_PRESENT => Some((1, 1)),
+            WINDOW_INFO => Some((4, 1)),
             _ => None,
         }
     }

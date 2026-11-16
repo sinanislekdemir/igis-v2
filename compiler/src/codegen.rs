@@ -6088,6 +6088,73 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::enumeration(STATUS_ENUM)))
             }
+            // Read-only enumeration (spec 0011, W19; spec 0012, D15). Index 0
+            // is the topmost window; the title destination is compile-checked
+            // at the service's 64-byte cap so the interpreter needs no capacity
+            // immediate.
+            "syslib.window_info" => {
+                if args.len() != 4 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`syslib.window_info` expects 4 arguments, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                let index = self.expr_scalar(args[0])?;
+                if index.kind != Kind::Uint {
+                    return Err(self.err_at(
+                        args[0],
+                        format_args!(
+                            "`syslib.window_info` expects a `uint` index, found `{index}`"
+                        ),
+                    ));
+                }
+                let id = self.emit_scalar_ref(args[1])?;
+                if id.kind != Kind::Int {
+                    let found = self.type_name(id);
+                    return Err(self.err_at(
+                        args[1],
+                        format_args!("`syslib.window_info` expects `var id: int`, found `{found}`"),
+                    ));
+                }
+                let rect = Type::record(RECT_RECORD, layout::rect::SIZE);
+                let destination = self.emit_aggregate_ref(args[2], true, "`var rect`")?;
+                if destination != rect {
+                    let found = self.type_name(destination);
+                    return Err(self.err_at(
+                        args[2],
+                        format_args!(
+                            "`syslib.window_info` expects `var rect: Rect`, found `{found}`"
+                        ),
+                    ));
+                }
+                let title = self.emit_var_buffer_ref(args[3])?;
+                if title.kind != Kind::String {
+                    let found = self.type_name(title);
+                    return Err(self.err_at(
+                        args[3],
+                        format_args!(
+                            "`syslib.window_info` expects a `var string` title, found `{found}`"
+                        ),
+                    ));
+                }
+                if title.cap < layout::window::TITLE_CAP {
+                    return Err(self.err_at(
+                        args[3],
+                        format_args!(
+                            "`syslib.window_info` needs a title buffer of at least {} bytes, found {}",
+                            layout::window::TITLE_CAP, title.cap
+                        ),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::WINDOW_INFO)?;
+                self.pop(4)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
             // Ring operations (spec 0003, "Rings") are compiler-recognised
             // built-in procedures, not host builtins: they lower to the
             // ordinary reference/copy/branch instructions over the ring's

@@ -136,6 +136,25 @@ struct Rect {
     h: i32,
 }
 
+/// An explicit clip rectangle for kernel-internal drawing (spec 0012, D3).
+///
+/// The window service's repairs save, narrow and restore the shadow's one
+/// global clip (spec 0011, W10). The kernel text windows cannot use that for a
+/// whole-grid repaint: the clip is global, so a long repaint would clip another
+/// task's drawing on another core. These helpers therefore take the clip as an
+/// argument and never touch [`Screen::clip`].
+#[derive(Clone, Copy)]
+pub struct Clip {
+    /// Left edge in screen pixels.
+    pub x: i64,
+    /// Top edge in screen pixels.
+    pub y: i64,
+    /// Width in pixels.
+    pub w: i64,
+    /// Height in pixels.
+    pub h: i64,
+}
+
 /// Pointer state, machine-wide (spec 0010, I4/I5).
 #[derive(Clone, Copy)]
 struct Pointer {
@@ -174,6 +193,28 @@ impl Screen {
         let clip_y1 = self.clip.y as i64 + self.clip.h as i64;
         let x0 = x.max(self.clip.x as i64).max(0);
         let y0 = y.max(self.clip.y as i64).max(0);
+        let x1 = x.saturating_add(w).min(clip_x1).min(self.width as i64);
+        let y1 = y.saturating_add(h).min(clip_y1).min(self.height as i64);
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        Some((x0 as usize, y0 as usize, x1 as usize, y1 as usize))
+    }
+
+    /// Intersects a rectangle with an explicit clip and the screen (spec 0012,
+    /// D3). Unlike [`Screen::clipped`], the global `clip` is ignored.
+    fn clipped_by(
+        &self,
+        x: i64,
+        y: i64,
+        w: i64,
+        h: i64,
+        clip: Clip,
+    ) -> Option<(usize, usize, usize, usize)> {
+        let clip_x1 = clip.x.saturating_add(clip.w);
+        let clip_y1 = clip.y.saturating_add(clip.h);
+        let x0 = x.max(clip.x).max(0);
+        let y0 = y.max(clip.y).max(0);
         let x1 = x.saturating_add(w).min(clip_x1).min(self.width as i64);
         let y1 = y.saturating_add(h).min(clip_y1).min(self.height as i64);
         if x1 <= x0 || y1 <= y0 {
@@ -279,6 +320,22 @@ impl Screen {
         self.store(x as usize, y as usize, color);
     }
 
+    /// Writes one pixel through an explicit clip (spec 0012, D3).
+    fn put_in(&mut self, x: i64, y: i64, color: u32, clip: Clip) {
+        if x < clip.x
+            || y < clip.y
+            || x >= clip.x.saturating_add(clip.w)
+            || y >= clip.y.saturating_add(clip.h)
+            || x < 0
+            || y < 0
+            || x >= self.width as i64
+            || y >= self.height as i64
+        {
+            return;
+        }
+        self.store(x as usize, y as usize, color);
+    }
+
     fn fill(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) {
         let Some((x0, y0, x1, y1)) = self.clipped(x, y, w, h) else {
             return;
@@ -290,6 +347,39 @@ impl Screen {
             if let Some(slice) = self.shadow.get_mut(start..end) {
                 for pixel in slice.chunks_exact_mut(4) {
                     pixel.copy_from_slice(&bytes);
+                }
+            }
+        }
+    }
+
+    /// Fills a rectangle through an explicit clip (spec 0012, D3).
+    fn fill_in(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32, clip: Clip) {
+        let Some((x0, y0, x1, y1)) = self.clipped_by(x, y, w, h, clip) else {
+            return;
+        };
+        let bytes = (color & MAX_COLOR).to_le_bytes();
+        for row in y0..y1 {
+            let start = row * self.pitch + x0 * 4;
+            let end = row * self.pitch + x1 * 4;
+            if let Some(slice) = self.shadow.get_mut(start..end) {
+                for pixel in slice.chunks_exact_mut(4) {
+                    pixel.copy_from_slice(&bytes);
+                }
+            }
+        }
+    }
+
+    /// Paints one 8×8 glyph cell with an opaque background through an explicit
+    /// clip, without presenting (spec 0012, D3).
+    fn glyph_in(&mut self, x: i64, y: i64, code: u8, fg: u32, bg: u32, clip: Clip) {
+        self.fill_in(x, y, 8, 8, bg, clip);
+        if code < 0x80 {
+            let glyph = &FONT8X8_BASIC[code as usize];
+            for (row, bits) in glyph.iter().enumerate() {
+                for col in 0..8 {
+                    if bits & (1 << col) != 0 {
+                        self.put_in(x + col as i64, y + row as i64, fg, clip);
+                    }
                 }
             }
         }
@@ -363,26 +453,31 @@ impl Screen {
         self.overlay_cursor(x0, y0, x1, y1);
     }
 
-    /// Moves the image up by `pixels` scan lines and fills the exposed band.
-    fn scroll(&mut self, pixels: usize, color: u32) {
-        if pixels == 0 || pixels >= self.height {
-            self.fill(0, 0, self.width as i64, self.height as i64, color);
+    /// Copies a rectangle to the framebuffer through an explicit clip
+    /// (spec 0012, D3), then composites the cursor inside the copied region.
+    fn present_in(&mut self, x: i64, y: i64, w: i64, h: i64, clip: Clip) {
+        let Some((x0, y0, x1, y1)) = self.clipped_by(x, y, w, h, clip) else {
+            return;
+        };
+        let row_bytes = (x1 - x0) * 4;
+        if row_bytes == 0 {
             return;
         }
-        let row_bytes = self.pitch;
-        let offset = pixels * row_bytes;
-        let bytes = (self.height - pixels) * row_bytes;
-        let base = self.shadow.as_mut_ptr();
-        // SAFETY: `offset + bytes == pitch * height`, the shadow's own length;
-        // the ranges overlap, so `copy` (memmove) is required.
-        unsafe { core::ptr::copy(base.add(offset), base, bytes) };
-        self.fill(
-            0,
-            (self.height - pixels) as i64,
-            self.width as i64,
-            pixels as i64,
-            color,
-        );
+        for row in y0..y1 {
+            let source = row * self.pitch + x0 * 4;
+            let destination = self.fb as usize + source;
+            // SAFETY: both ranges are inside the shadow and the framebuffer
+            // for this row; the bounds are clipped to the screen and the
+            // framebuffer pitch is the shadow's row stride.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    self.shadow.as_ptr().add(source),
+                    destination as *mut u8,
+                    row_bytes,
+                );
+            }
+        }
+        self.overlay_cursor(x0, y0, x1, y1);
     }
 }
 
@@ -808,56 +903,31 @@ pub fn clear(color: u32) -> Status {
     Status::Ok
 }
 
-// ---- console path -------------------------------------------------------
+// ---- explicit-clip text drawing (kernel text windows, spec 0012) ---------
 
-/// Paints one scaled 8x8 glyph cell with an opaque background and presents the
-/// cell. The text console uses this so it draws through the shadow too
-/// (spec 0009, G14). The present composites the cursor (spec 0010, I8), so a
-/// cell under the cursor is presented with the cursor on top of the glyph and
-/// no stale cursor is left behind.
-pub fn console_glyph(x: usize, y: usize, code: u8, fg: u32, bg: u32, scale: usize) -> bool {
+/// Paints one 8×8 glyph cell with an opaque background through an explicit
+/// clip, without presenting and without touching the shadow's global clip
+/// (spec 0012, D3). Kernel text windows use this so a long repaint cannot clip
+/// an application drawing on another core.
+pub fn draw_cell(x: i64, y: i64, code: u8, fg: u32, bg: u32, clip: Clip) -> bool {
     let mut guard = SCREEN.lock();
     let Some(screen) = guard.as_mut() else {
         return false;
     };
-    let cell = (8 * scale) as i64;
-    screen.fill(x as i64, y as i64, cell, cell, bg);
-    if code < 0x80 {
-        let glyph = &FONT8X8_BASIC[code as usize];
-        for (row, bits) in glyph.iter().enumerate() {
-            for col in 0..8 {
-                if bits & (1 << col) != 0 {
-                    let px = x as i64 + (col * scale) as i64;
-                    let py = y as i64 + (row * scale) as i64;
-                    screen.fill(px, py, scale as i64, scale as i64, fg);
-                }
-            }
-        }
+    screen.glyph_in(x, y, code, fg, bg, clip);
+    true
+}
+
+/// Presents a rectangle through an explicit clip, ignoring the global clip
+/// (spec 0012, D3). `present` composites the cursor as usual.
+pub fn present_within(x: i64, y: i64, w: i64, h: i64, clip: Clip) -> bool {
+    if w <= 0 || h <= 0 {
+        return false;
     }
-    screen.present(x as i64, y as i64, cell, cell);
-    true
-}
-
-/// Scrolls the text image up by `pixels` rows and presents the screen.
-pub fn console_scroll(pixels: usize, color: u32) -> bool {
     let mut guard = SCREEN.lock();
     let Some(screen) = guard.as_mut() else {
         return false;
     };
-    screen.scroll(pixels, color);
-    let (width, height) = (screen.width as i64, screen.height as i64);
-    screen.present(0, 0, width, height);
-    true
-}
-
-/// Clears the text screen and presents it.
-pub fn console_clear(color: u32) -> bool {
-    let mut guard = SCREEN.lock();
-    let Some(screen) = guard.as_mut() else {
-        return false;
-    };
-    let (width, height) = (screen.width as i64, screen.height as i64);
-    screen.fill(0, 0, width, height, color);
-    screen.present(0, 0, width, height);
+    screen.present_in(x, y, w, h, clip);
     true
 }

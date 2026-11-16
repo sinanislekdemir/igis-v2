@@ -11,7 +11,7 @@ use abi::{
     CodeHeader, Function, Rect, Status, ABI_VERSION, CODE_MAGIC, NO_DIAGNOSTIC, NO_NAME,
     PROFILE_X86_64_LE,
 };
-use interpreter::{Host, Machine, Outcome};
+use interpreter::{Host, Machine, Outcome, WindowInfo};
 
 fn build(instructions: &[u8], constants: &[u8], state_size: u32) -> Vec<u8> {
     let header = CodeHeader {
@@ -85,6 +85,7 @@ struct WindowHost {
     open: Result<u64, Status>,
     rect: Result<Rect, Status>,
     focus: u64,
+    info: Option<WindowInfo>,
     opened: Option<(i64, i64, i64, i64, Vec<u8>)>,
     moved: Option<(u64, i64, i64)>,
     closed: Vec<u64>,
@@ -103,6 +104,7 @@ impl WindowHost {
                 h: 4,
             }),
             focus: 7,
+            info: None,
             opened: None,
             moved: None,
             closed: Vec::new(),
@@ -157,6 +159,14 @@ impl Host for WindowHost {
             Status::NotFound
         } else {
             Status::Ok
+        }
+    }
+
+    fn window_info(&mut self, index: u64) -> Option<WindowInfo> {
+        if index == 0 {
+            self.info
+        } else {
+            None
         }
     }
 }
@@ -449,4 +459,113 @@ fn window_present_pops_the_id_and_pushes_the_status() {
     assert_eq!(host.presented, vec![5, 0]);
     assert_eq!(state_word(&state, 0), Status::Ok as u64);
     assert_eq!(state_word(&state, 8), Status::NotFound as u64);
+}
+
+#[test]
+fn window_info_writes_the_id_rect_and_title_on_ok() {
+    // Operands: index, id reference, Rect reference, title data reference.
+    // The title data starts at state 48, so its length word is state[40..48].
+    let mut instructions = Vec::new();
+    op_const(&mut instructions, 0);
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_imm(&mut instructions, opcodes::REF_STATE, 8);
+    op_imm(&mut instructions, opcodes::REF_STATE, 48);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::WINDOW_INFO,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 112);
+    op(&mut instructions, opcodes::RET);
+
+    let code = build(&instructions, &[], 120);
+    let mut state = vec![0u8; 120];
+    let mut host = WindowHost::new();
+    let mut title = [0u8; interpreter::WINDOW_TITLE_CAP];
+    title[..4].copy_from_slice(b"main");
+    host.info = Some(WindowInfo {
+        id: 12,
+        frame: Rect {
+            x: 8,
+            y: 26,
+            w: 498,
+            h: 695,
+        },
+        title_len: 4,
+        title,
+    });
+    assert_eq!(
+        run(&code, &mut state, &mut host),
+        Outcome::Exited(interpreter::ExitReason::Ok)
+    );
+    assert_eq!(state_word(&state, 112), Status::Ok as u64);
+    assert_eq!(state_word(&state, 0), 12, "the id is written on Ok");
+    assert_eq!(
+        layout::rect::read(&state[8..40]),
+        Some(Rect {
+            x: 8,
+            y: 26,
+            w: 498,
+            h: 695,
+        })
+    );
+    assert_eq!(state_word(&state, 40), 4, "the title length is written");
+    assert_eq!(&state[48..52], b"main");
+    assert_eq!(&state[52..112], &[0u8; 60]);
+}
+
+#[test]
+fn window_info_not_found_leaves_every_destination_untouched() {
+    let mut instructions = Vec::new();
+    op_const(&mut instructions, 7);
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_imm(&mut instructions, opcodes::REF_STATE, 8);
+    op_imm(&mut instructions, opcodes::REF_STATE, 48);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::WINDOW_INFO,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 112);
+    op(&mut instructions, opcodes::RET);
+
+    let code = build(&instructions, &[], 120);
+    let mut state = vec![0xAAu8; 120];
+    let mut host = WindowHost::new();
+    assert_eq!(
+        run(&code, &mut state, &mut host),
+        Outcome::Exited(interpreter::ExitReason::Ok)
+    );
+    assert_eq!(state_word(&state, 112), Status::NotFound as u64);
+    assert_eq!(&state[0..112], &[0xAA; 112]);
+}
+
+#[test]
+fn the_default_window_info_is_the_disabled_service() {
+    let mut instructions = Vec::new();
+    op_const(&mut instructions, 0);
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_imm(&mut instructions, opcodes::REF_STATE, 8);
+    op_imm(&mut instructions, opcodes::REF_STATE, 48);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::WINDOW_INFO,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 112);
+    op(&mut instructions, opcodes::RET);
+
+    let code = build(&instructions, &[], 120);
+    let mut state = vec![0u8; 120];
+    let mut host = DisabledHost;
+    assert_eq!(
+        run(&code, &mut state, &mut host),
+        Outcome::Exited(interpreter::ExitReason::Ok)
+    );
+    assert_eq!(state_word(&state, 112), Status::NotFound as u64);
+    assert_eq!(
+        state_word(&state, 0),
+        0,
+        "the disabled default writes nothing"
+    );
 }

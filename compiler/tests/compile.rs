@@ -5757,3 +5757,124 @@ end;
         error.message
     );
 }
+
+#[test]
+fn window_info_is_builtin_forty_and_checks_its_signature() {
+    use abi::opcodes::{self, builtin};
+
+    let source = r#"
+unit t;
+uses core, syslib;
+var
+  status: Status;
+  id: int;
+  rect: Rect;
+  title: string[64];
+procedure main(args: const string[1024]);
+begin
+  status := syslib.window_info(uint(0), id, rect, title);
+  status := syslib.window_info(uint(1), id, rect, title);
+end;
+"#;
+    let package = compile(source.as_bytes(), "t.ig").expect("the enumeration compiles");
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+    let mut seen = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        if op == opcodes::BUILTIN {
+            seen.push(u32::from_le_bytes(
+                instructions[pc + 4..pc + 8].try_into().unwrap(),
+            ));
+        }
+        pc += words * 4;
+    }
+    assert!(seen.contains(&builtin::WINDOW_INFO));
+    assert!(!seen.contains(&builtin::WINDOW_PRESENT));
+
+    let cases = [
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status; id: int; rect: Rect; title: string[64];
+procedure main(args: const string[1024]);
+begin
+  status := syslib.window_info(uint(0), id, rect);
+end;
+"#,
+            "`syslib.window_info` expects 4 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status; id: int; rect: Rect; title: string[64];
+procedure main(args: const string[1024]);
+begin
+  status := syslib.window_info(0, id, rect, title);
+end;
+"#,
+            "`syslib.window_info` expects a `uint` index",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status; count: uint; rect: Rect; title: string[64];
+procedure main(args: const string[1024]);
+begin
+  status := syslib.window_info(uint(0), count, rect, title);
+end;
+"#,
+            "`syslib.window_info` expects `var id: int`",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status; id: int; ev: Event; title: string[64];
+procedure main(args: const string[1024]);
+begin
+  status := syslib.window_info(uint(0), id, ev, title);
+end;
+"#,
+            "`syslib.window_info` expects `var rect: Rect`",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status; id: int; rect: Rect; raw: bytes[64];
+procedure main(args: const string[1024]);
+begin
+  status := syslib.window_info(uint(0), id, rect, raw);
+end;
+"#,
+            "`syslib.window_info` expects a `var string` title",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status; id: int; rect: Rect; title: string[32];
+procedure main(args: const string[1024]);
+begin
+  status := syslib.window_info(uint(0), id, rect, title);
+end;
+"#,
+            "needs a title buffer of at least 64 bytes",
+        ),
+    ];
+    for (source, expected) in cases {
+        let error = compile(source.as_bytes(), "t.ig").expect_err("must be a compile error");
+        assert!(
+            error.message.contains(expected),
+            "expected `{expected}`, got `{}`",
+            error.message
+        );
+    }
+}

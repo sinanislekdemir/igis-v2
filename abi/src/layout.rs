@@ -196,6 +196,15 @@ pub mod rect {
     }
 }
 
+/// Window-service layout constants fixed by spec 0011 (W9) and used by the
+/// read-only enumeration of spec 0012 (D15).
+pub mod window {
+    /// Longest window title in bytes. Longer titles are truncated at a code
+    /// point boundary by the service; `window_info` copies at most this many
+    /// bytes, and the compiler requires a title destination of this capacity.
+    pub const TITLE_CAP: u32 = 64;
+}
+
 /// `ExitReason`: the predeclared sum type `Ok | Killed | Faulted(code)`.
 pub mod exit_reason {
     use super::write_i64;

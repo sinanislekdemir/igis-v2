@@ -47,6 +47,20 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
     let clip_check = gfx::clip_self_check();
     console::init();
 
+    // Console routing (spec 0012): application bytes land in the terminal
+    // window and kernel diagnostics in the system-log window, each with real
+    // foreground/background pixels in the shadow. It writes its two probe
+    // lines through the ordinary paths, clears the grids, and leaves the
+    // serial transcript intact.
+    match console::route_self_check() {
+        Ok(true) => println!("console: route ok"),
+        Ok(false) => println!("console: serial only"),
+        Err(step) => {
+            println!("console: route FAIL at step {step}");
+            arch_x86_64::halt();
+        }
+    }
+
     // The keyboard decoder feeds the console byte stream and the event queue
     // (spec 0010, I18). The canned scancodes prove the key layer without a real
     // keyboard; a mismatch halts so it cannot pass silently.

@@ -384,6 +384,19 @@ impl Host for KernelHost<'_> {
         crate::window::focus()
     }
 
+    /// Read-only enumeration for the desktop shell's window list (spec 0011,
+    /// W19; spec 0012, D15). The kernel table owns the z-order and the title;
+    /// the interpreter copies the snapshot into the caller's out-parameters.
+    fn window_info(&mut self, index: u64) -> Option<interpreter::WindowInfo> {
+        let info = crate::window::info(index)?;
+        Some(interpreter::WindowInfo {
+            id: info.id,
+            frame: info.frame,
+            title_len: info.title_len,
+            title: info.title,
+        })
+    }
+
     // Streams (spec 0006): the kernel table owns the buffer and the generation
     // check. The machine turns `WouldBlock` into a block for the blocking
     // opcodes and into a staged status for `try_*`; the host is always

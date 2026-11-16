@@ -20,6 +20,10 @@
 //! desktop, never another window's content. M2.3.3's `Expose` will ask the
 //! owner to repaint when a repair uncovers its content.
 //!
+//! Owner `0` is reserved for the kernel (spec 0012, D6): task ids start at `1`,
+//! and the kernel's terminal and system-log windows use the same public
+//! functions as an application window.
+//!
 //! # Locking
 //!
 //! The table is one machine-wide [`SpinLock`]. The wrappers read the screen size
@@ -44,7 +48,7 @@ use crate::sync::SpinLock;
 pub const MAX_WINDOWS: usize = 16;
 
 /// Title capacity in bytes; longer titles are truncated (W9).
-pub const TITLE_CAP: usize = 64;
+pub const TITLE_CAP: usize = abi::layout::window::TITLE_CAP as usize;
 
 /// Title bar height in pixels (W3).
 pub const TITLE_BAR_HEIGHT: i64 = 16;
@@ -77,6 +81,20 @@ const TITLE_FOCUSED: u32 = 0x00FF_FFFF;
 
 /// Unfocused title bar: a plain light grey, visibly distinct without stripes.
 const TITLE_UNFOCUSED: u32 = 0x00CC_CCCC;
+
+/// A read-only window snapshot for `syslib.window_info` (spec 0011, W19;
+/// spec 0012, D15). `title` is zero-padded and `title_len` names the used bytes.
+#[derive(Clone, Copy)]
+pub struct Info {
+    /// The live window id.
+    pub id: u64,
+    /// The whole frame rectangle.
+    pub frame: Rect,
+    /// Used bytes of `title`, at most [`TITLE_CAP`].
+    pub title_len: usize,
+    /// Truncated title bytes.
+    pub title: [u8; TITLE_CAP],
+}
 
 /// One window record. `used == false` is a free storage slot.
 #[derive(Clone, Copy)]
@@ -473,7 +491,7 @@ impl Table {
         h: i64,
         title: &[u8],
     ) -> Result<u64, Status> {
-        if screen_w <= 0 || screen_h <= 0 || owner == 0 {
+        if screen_w <= 0 || screen_h <= 0 {
             return Err(Status::Invalid);
         }
         if w < MIN_CONTENT_W || h < MIN_CONTENT_H {
@@ -646,6 +664,25 @@ impl Table {
         self.position(id)
             .map(|pos| self.windows[self.order[pos]].content())
             .ok_or(Status::NotFound)
+    }
+
+    /// One read-only snapshot by z-order index: `0` is the topmost window
+    /// (spec 0011, W19). `None` for an index at or past the live count.
+    fn info(&self, index: u64) -> Option<Info> {
+        if index >= self.count as u64 {
+            return None;
+        }
+        // `order` is bottom-first, so the topmost snapshot reverses it.
+        let pos = self.count - 1 - index as usize;
+        let window = &self.windows[self.order[pos]];
+        let mut info = Info {
+            id: window.id,
+            frame: window.frame(),
+            title_len: window.title_len,
+            title: [0; TITLE_CAP],
+        };
+        info.title[..window.title_len].copy_from_slice(&window.title[..window.title_len]);
+        Some(info)
     }
 
     /// Removes every window owned by `owner`, applying the focus fallback after
@@ -914,9 +951,10 @@ static TABLE: SpinLock<Table> = SpinLock::new(Table::new());
 
 /// Opens a window owned by `owner`: frame origin `(x, y)`, content `(w, h)`.
 ///
-/// A disabled screen has no geometry, so `open` is `Invalid` (W13). The screen
-/// size is read before the table lock is taken; the repair pass (if the open
-/// succeeded) runs under it.
+/// `owner` is a global task id, or `0` for the kernel (task ids start at `1`;
+/// spec 0012, D6). A disabled screen has no geometry, so `open` is `Invalid`
+/// (W13). The screen size is read before the table lock is taken; the repair
+/// pass (if the open succeeded) runs under it.
 pub fn open(owner: u64, x: i64, y: i64, w: i64, h: i64, title: &[u8]) -> Result<u64, Status> {
     let (screen_w, screen_h) = gfx::size();
     let mut table = TABLE.lock();
@@ -996,6 +1034,32 @@ pub fn content_rect(id: u64) -> Result<Rect, Status> {
         return Err(Status::Invalid);
     }
     TABLE.lock().content_rect(id)
+}
+
+/// One read-only window snapshot by z-order index, topmost first (spec 0011,
+/// W19; spec 0012, D15). `None` for an index at or past the live count.
+pub fn info(index: u64) -> Option<Info> {
+    TABLE.lock().info(index)
+}
+
+/// The visible parts of a window's content rectangle, topmost-occlusion
+/// subtracted, for **kernel-owned** content rendering (spec 0012 D3).
+///
+/// This is the console's counterpart to [`present`]: the terminal paints its
+/// grid itself, so it needs the same `content ∩ visible parts` geometry that
+/// `window_present` would use. It is kernel-internal (no `syslib` binding) and
+/// copies at most `out.len()` parts, returning how many were written. An
+/// unknown id or disabled graphics writes none.
+pub fn visible_content_parts(id: u64, out: &mut [Rect]) -> usize {
+    let table = TABLE.lock();
+    let Some(pos) = table.position(id) else {
+        return 0;
+    };
+    let content = table.windows[table.order[pos]].content();
+    let parts = table.visible_parts(content, pos + 1);
+    let count = parts.count.min(out.len());
+    out[..count].copy_from_slice(&parts.rects[..count]);
+    count
 }
 
 /// The focused window id, or 0 (W6).
@@ -1235,6 +1299,24 @@ pub fn self_check() -> Result<(), u32> {
     table.close_task(12);
     if table.count != 0 || table.focus != 0 {
         return Err(26);
+    }
+
+    // 13. Owner 0 is the kernel (spec 0012, D6): it opens, focuses and is
+    //     enumerated topmost-first like any other window, and its own close
+    //     works. The previous steps leave `next_id` at 23.
+    let kernel = table.open(SCREEN_W, SCREEN_H, 0, 10, 10, 100, 50, b"kernel");
+    if kernel != Ok(23) || table.focus != 23 {
+        return Err(27);
+    }
+    match table.info(0) {
+        Some(info) if info.id == 23 && info.title_len == 6 && info.title[..6] == *b"kernel" => {}
+        _ => return Err(28),
+    }
+    if table.info(1).is_some() {
+        return Err(29);
+    }
+    if table.close(0, 23) != Status::Ok || table.focus != 0 {
+        return Err(30);
     }
 
     Ok(())
@@ -1503,6 +1585,11 @@ pub fn route_self_check() -> Result<(), u32> {
     // Hit-testing the topmost frame.
     if table.hit_test(50, 20) != Some(a) || table.hit_test(450, 410) != Some(b) {
         return Err(12);
+    }
+    // Enumeration is topmost first (spec 0011, W19): A was raised above B.
+    match (table.info(0), table.info(1), table.info(2)) {
+        (Some(top), Some(bottom), None) if top.id == a && bottom.id == b => {}
+        _ => return Err(26),
     }
     if table.hit_test(900, 700).is_some() {
         return Err(13);

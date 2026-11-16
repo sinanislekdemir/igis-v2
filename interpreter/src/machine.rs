@@ -52,6 +52,28 @@ pub enum StreamError {
     CapacityExceeded,
 }
 
+/// A read-only window snapshot returned by [`Host::window_info`] (spec 0011,
+/// W19; spec 0012, D15).
+///
+/// The title is staged in a fixed buffer because the interpreter cannot return
+/// a borrowed slice from a host call: the machine copies it into the caller's
+/// `var string[64]` destination after the call. `title_len` never exceeds
+/// [`WINDOW_TITLE_CAP`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowInfo {
+    /// The window id (`0` is never a live window).
+    pub id: u64,
+    /// The whole frame rectangle.
+    pub frame: Rect,
+    /// The used bytes of `title`, at most `WINDOW_TITLE_CAP`.
+    pub title_len: usize,
+    /// The title bytes, zero-padded.
+    pub title: [u8; WINDOW_TITLE_CAP],
+}
+
+/// The fixed title capacity of `window_info` (spec 0011, W9; spec 0012, D15).
+pub const WINDOW_TITLE_CAP: usize = layout::window::TITLE_CAP as usize;
+
 /// The host interface as far as this slice needs it (spec 0005).
 ///
 /// The kernel implements this over its own console, clock and REPL service;
@@ -312,6 +334,13 @@ pub trait Host {
     /// window; the default is a disabled service (`Invalid`).
     fn window_present(&mut self, _id: u64) -> Status {
         Status::Invalid
+    }
+
+    /// Reads one window snapshot by z-order index (`syslib.window_info`,
+    /// spec 0011, W19; spec 0012, D15): index `0` is the topmost live window.
+    /// The default is a disabled service (`None`, reported as `NotFound`).
+    fn window_info(&mut self, _index: u64) -> Option<WindowInfo> {
+        None
     }
 
     /// Requests a new application instance (`core.spawn`).
@@ -1719,6 +1748,58 @@ impl Machine {
                         let window = self.pop(stack)?;
                         let status = host.window_present(window);
                         self.push(stack, status as u64)?;
+                    }
+                    // Read-only enumeration (spec 0011, W19; spec 0012, D15).
+                    // The title destination is a `var string[64]` data
+                    // reference: its length word sits 8 bytes before the data.
+                    // Every destination is validated before the host call, so
+                    // `NotFound` leaves them untouched.
+                    builtin::WINDOW_INFO => {
+                        let title_bits = self.pop(stack)?;
+                        let rect_bits = self.pop(stack)?;
+                        let id_bits = self.pop(stack)?;
+                        let index = self.pop(stack)?;
+                        let (title_region, title_offset) =
+                            self.resolve(title_bits, state, stack, constants, args)?;
+                        if title_region != refs::REGION_STATE && title_region != refs::REGION_STACK
+                        {
+                            return Err(FaultCode::IllegalOperation);
+                        }
+                        if title_offset < 8 {
+                            return Err(FaultCode::OutOfBounds);
+                        }
+                        let title_end = title_offset
+                            .checked_add(WINDOW_TITLE_CAP)
+                            .ok_or(FaultCode::OutOfBounds)?;
+                        if title_end
+                            > region_len(title_region, state, stack, constants, args)
+                                .ok_or(FaultCode::OutOfBounds)?
+                        {
+                            return Err(FaultCode::OutOfBounds);
+                        }
+                        match host.window_info(index) {
+                            None => self.push(stack, Status::NotFound as u64)?,
+                            Some(info) => {
+                                let length = info.title_len.min(WINDOW_TITLE_CAP);
+                                self.write_ref(id_bits, info.id, state, stack, constants, args)?;
+                                let mut image = [0u8; layout::rect::SIZE as usize];
+                                layout::rect::write(&mut image, info.frame);
+                                self.write_bytes(rect_bits, &image, state, stack, constants, args)?;
+                                match title_region {
+                                    refs::REGION_STATE => {
+                                        write_u64(state, title_offset - 8, length as u64)?;
+                                        state[title_offset..title_offset + length]
+                                            .copy_from_slice(&info.title[..length]);
+                                    }
+                                    _ => {
+                                        write_u64(stack, title_offset - 8, length as u64)?;
+                                        stack[title_offset..title_offset + length]
+                                            .copy_from_slice(&info.title[..length]);
+                                    }
+                                }
+                                self.push(stack, Status::Ok as u64)?;
+                            }
+                        }
                     }
                     _ => return Err(FaultCode::IllegalOperation),
                 }
