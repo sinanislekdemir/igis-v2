@@ -1,0 +1,473 @@
+unit desktop_shell;
+
+// M2.3.4 desktop shell (spec 0012): a System 7.5-style menu bar, one desktop
+// window, application launching and a read-only window list.
+//
+//   run desktop_shell          // normal: draw, print `ready`, pump events
+//   run desktop_shell check    // deterministic self-check, print `ok`
+//
+// The menu bar has direct items and no dropdowns (M2.4.3 owns those):
+//
+//   File     enumerate the live windows into the terminal window
+//   Apps     launch `clock` with core.spawn (non-blocking)
+//   Windows  raise the terminal window (the existing "bring forward" item)
+//   Apple    raise the shell's own window
+//
+// The shell draws its own window content and presents it with
+// `syslib.window_present`; an `Expose` for its id repaints that content. Window
+// lifetime, z-order and chrome belong to the kernel service, so the shell never
+// draws outside its content rectangle except for the menu bar, which occupies
+// the top 22 rows where no window starts by convention.
+//
+// The window list uses `syslib.window_info` (builtin 40), which returns the
+// topmost window first. `check` mode injects one pointer-down per item and
+// pumps the event, so the whole surface is deterministic without a pointer
+// device.
+//
+// The desktop shell does not touch the kernel's terminal or system-log pixels:
+// no `syslib.clear`, and every text line goes to the terminal window through
+// `core.write`.
+
+uses core, syslib;
+
+const
+  MenuHeight = 22;
+
+var
+  white: uint;
+  black: uint;
+  screen_w: int;
+  screen_h: int;
+  status: Status;
+  ev: Event;
+  diag: Diagnostic;
+
+  // The shell's own window.
+  own: int;
+  rect: Rect;
+
+  // The last enumeration (`list_windows`) and the raise action.
+  win_id: int;
+  win_rect: Rect;
+  win_title: string[64];
+  count: int;
+  saw_terminal: bool;
+  saw_log: bool;
+  saw_desktop: bool;
+  raised_id: int;
+
+  // Launch bookkeeping.
+  launch_status: Status;
+  last_task: int;
+  launches: int;
+
+  // Menu bookkeeping.
+  handled: bool;
+  file_runs: int;
+  app_runs: int;
+  window_runs: int;
+
+  // Check-mode bookkeeping.
+  failed: bool;
+  step: int;
+  fail_step: int;
+  fail_label: string[64];
+
+  // Scratch.
+  digits: string[16];
+  clk_h: string[2];
+  clk_m: string[2];
+  used: int;
+  now: uint;
+  minutes: uint;
+  hours: uint;
+  top_id: int;
+  focus: int;
+  pos: int;
+
+procedure say(text: const string[0]);
+begin
+  core.write(text);
+end;
+
+procedure say_int(value: int);
+begin
+  used := core.format_int_into(digits, value, uint(10), uint(0));
+  core.write(digits);
+end;
+
+procedure verify(label: const string[0]; passed: bool);
+begin
+  step := step + 1;
+  if not passed and not failed then
+  begin
+    failed := true;
+    fail_step := step;
+    fail_label := label;
+  end;
+end;
+
+// HH:MM from the monotonic clock, right-aligned in the menu bar.
+procedure draw_clock(right: int);
+var
+  clock_x: int;
+begin
+  now := core.clock();
+  minutes := (now div uint(1000000000)) div uint(60);
+  hours := (minutes div uint(60)) mod uint(24);
+  minutes := minutes mod uint(60);
+  used := core.format_int_into(clk_h, int(hours), uint(10), uint(2));
+  used := core.format_int_into(clk_m, int(minutes), uint(10), uint(2));
+  clock_x := right - 40;
+  if clock_x > 200 then
+  begin
+    status := syslib.draw_text(clock_x, 7, clk_h, black);
+    status := syslib.draw_text(clock_x + 16, 7, ":", black);
+    status := syslib.draw_text(clock_x + 24, 7, clk_m, black);
+  end;
+end;
+
+// The menu bar is application-drawn (no global work area in M2.3.4). It stays
+// in the top 22 rows; app windows are expected to open below it.
+procedure draw_menu_bar();
+begin
+  status := syslib.fill_rect(0, 0, screen_w, MenuHeight, white);
+  status := syslib.fill_rect(8, 7, 8, 8, black);
+  status := syslib.draw_text(24, 7, "File", black);
+  status := syslib.draw_text(72, 7, "Apps", black);
+  status := syslib.draw_text(112, 7, "Windows", black);
+  status := syslib.fill_rect(0, MenuHeight - 1, screen_w, 1, black);
+  draw_clock(screen_w - 8);
+  // The bar is application-drawn into the shadow; present its rows so the
+  // framebuffer shows it (a window repair may have presented only its own
+  // damage union).
+  status := syslib.present(0, 0, screen_w, MenuHeight);
+end;
+
+// Draws the shell's own window content. It only repaints when the shell is the
+// topmost window: a covered client has no per-task clip in M2, so painting the
+// whole content would overwrite the window above it. When it is not topmost it
+// only presents, which leaves the visible part as the service last left it
+// (stale/dither), exactly the accepted M2 liveness rule (spec 0011, W18).
+procedure draw_shell_window();
+begin
+  if own > 0 then
+  begin
+    status := syslib.window_info(uint(0), top_id, win_rect, win_title);
+    if status = Ok and top_id = own then
+    begin
+      status := syslib.window_content_rect(own, rect);
+      if status = Ok then
+      begin
+        status := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, white);
+        status := syslib.draw_text(rect.x + 12, rect.y + 12, "igis-v2", black);
+        status := syslib.draw_text(rect.x + 12, rect.y + 28, "M2.3.4 desktop shell", black);
+        status := syslib.draw_text(rect.x + 12, rect.y + 52, "File: list windows", black);
+        status := syslib.draw_text(rect.x + 12, rect.y + 68, "Apps: launch clock", black);
+        status := syslib.draw_text(rect.x + 12, rect.y + 84, "Windows: raise terminal", black);
+        status := syslib.draw_text(rect.x + 12, rect.y + 108, "focus:", black);
+        focus := syslib.window_focus();
+        used := core.format_int_into(digits, focus, uint(10), uint(0));
+        status := syslib.draw_text(rect.x + 68, rect.y + 108, digits, black);
+        // A small black mark in the content, used by the check-mode pixel test
+        // and visible as the shell's own content marker.
+        status := syslib.fill_rect(
+          rect.x + rect.w - 8, rect.y + rect.h - 8, 8, 8, black);
+      end;
+    end;
+    status := syslib.window_present(own);
+  end;
+end;
+
+// Enumerates the live windows, terminal wins first, and writes the list into
+// the terminal window. Records whether the kernel windows and this shell's
+// window were found.
+procedure list_windows();
+begin
+  saw_terminal := false;
+  saw_log := false;
+  saw_desktop := false;
+  count := 0;
+  pos := 0;
+  status := syslib.window_info(uint(pos), win_id, win_rect, win_title);
+  while status = Ok and pos < 32 do
+  begin
+    say("window ");
+    say_int(win_id);
+    say(" \"");
+    say(win_title);
+    say("\" ");
+    say_int(win_rect.x);
+    say(",");
+    say_int(win_rect.y);
+    say(" ");
+    say_int(win_rect.w);
+    say("x");
+    say_int(win_rect.h);
+    say("\n");
+    if win_title = "Terminal" then
+      saw_terminal := true
+    else if win_title = "System Log" then
+      saw_log := true
+    else if win_title = "Desktop" then
+      saw_desktop := true;
+    count := count + 1;
+    pos := pos + 1;
+    status := syslib.window_info(uint(pos), win_id, win_rect, win_title);
+  end;
+end;
+
+// Raises the terminal window: the "Windows" direct item's action. Enumeration
+// order is topmost first, so find it by title rather than by index.
+procedure raise_terminal();
+begin
+  raised_id := 0;
+  pos := 0;
+  status := syslib.window_info(uint(pos), win_id, win_rect, win_title);
+  while status = Ok and pos < 32 and raised_id = 0 do
+  begin
+    if win_title = "Terminal" then
+    begin
+      status := syslib.window_raise(win_id);
+      if status = Ok then
+        raised_id := win_id;
+    end;
+    pos := pos + 1;
+    status := syslib.window_info(uint(pos), win_id, win_rect, win_title);
+  end;
+end;
+
+// Non-blocking launch: the shell must keep serving its menu and events.
+procedure launch_clock();
+begin
+  launch_status := core.spawn("clock", "", diag, last_task);
+  launches := launches + 1;
+  if launch_status = Ok then
+  begin
+    say("desktop_shell: launched clock task ");
+    say_int(last_task);
+    say("\n");
+  end
+  else
+  begin
+    say("desktop_shell: launch failed: ");
+    say(diag.message);
+    say("\n");
+  end;
+end;
+
+// A direct menu item: the row is the menu bar, the x ranges are the item pads.
+procedure handle_menu(x: int; y: int);
+begin
+  handled := false;
+  if y >= 0 and y < MenuHeight then
+  begin
+    if x >= 2 and x < 20 then
+    begin
+      status := syslib.window_raise(own);
+      draw_shell_window();
+      handled := true;
+    end
+    else if x >= 20 and x < 66 then
+    begin
+      list_windows();
+      file_runs := file_runs + 1;
+      handled := true;
+    end
+    else if x >= 66 and x < 112 then
+    begin
+      launch_clock();
+      app_runs := app_runs + 1;
+      handled := true;
+    end
+    else if x >= 112 and x < 180 then
+    begin
+      raise_terminal();
+      window_runs := window_runs + 1;
+      handled := true;
+    end;
+  end;
+end;
+
+// Injects one pointer-down at a menu-bar position (deterministic input for
+// check mode). `inject_event` does not move the pointer; only the event matters.
+procedure inject_click(x: int; y: int);
+begin
+  ev.kind := PointerDown;
+  ev.x := x;
+  ev.y := y;
+  ev.code := uint(1);
+  ev.window := 0;
+  status := syslib.inject_event(ev);
+end;
+
+// Polls until the injected click has been handled (or 32 pollable events pass).
+// Repaints this shell's window on its own exposes and handles only desktop
+// clicks; pointer/key events addressed to a window are ignored.
+procedure pump_click();
+var
+  done: bool;
+  polls: int;
+begin
+  done := false;
+  polls := 0;
+  while not done and polls < 32 do
+  begin
+    status := syslib.poll_event(ev);
+    if status = Ok then
+    begin
+      if ev.kind = Expose then
+      begin
+        if ev.window = own then draw_shell_window();
+      end
+      else if ev.kind = PointerDown then
+      begin
+        if ev.window = 0 then
+        begin
+          handle_menu(ev.x, ev.y);
+          done := true;
+        end;
+      end;
+      polls := polls + 1;
+    end
+    else
+      done := true;
+  end;
+end;
+
+procedure check_mode();
+begin
+  failed := false;
+  step := 0;
+  fail_step := 0;
+  file_runs := 0;
+  app_runs := 0;
+  window_runs := 0;
+  launches := 0;
+  raised_id := 0;
+
+  draw_menu_bar();
+  status := syslib.window_open(600, 72, 360, 164, "Desktop", own);
+  verify("open desktop window", status = Ok and own > 0);
+  if status = Ok then
+  begin
+    draw_shell_window();
+
+    // The menu bar and the service-drawn chrome/content are really in the
+    // shadow. The shell window sits below the bar; no kernel window starts
+    // above y=26.
+    verify("menu bar white", syslib.get_pixel(700, 2) = white);
+    verify("menu baseline", syslib.get_pixel(700, 21) = black);
+    verify("apple square", syslib.get_pixel(10, 10) = black);
+
+    status := syslib.window_frame_rect(own, rect);
+    verify(
+      "frame geometry",
+      status = Ok and rect.x = 600 and rect.y = 72 and rect.w = 362 and rect.h = 181);
+    verify("frame border", syslib.get_pixel(rect.x, rect.y) = black);
+    verify(
+      "content marker",
+      syslib.get_pixel(rect.x + rect.w - 4, rect.y + rect.h - 4) = black);
+
+    // File: enumerate. The kernel terminal and system log must be present,
+    // together with this shell's window.
+    inject_click(40, 10);
+    pump_click();
+    verify("file item handled", handled and file_runs = 1);
+    verify("terminal listed", saw_terminal);
+    verify("system log listed", saw_log);
+    verify("desktop listed", saw_desktop);
+    verify("at least three windows", count >= 3);
+
+    // Apps: a non-blocking spawn of `clock`.
+    inject_click(84, 10);
+    pump_click();
+    verify("apps item handled", handled and app_runs = 1);
+    verify("clock spawned", launch_status = Ok and last_task > 0 and launches = 1);
+
+    // Windows: raise the terminal; focus and the top of the z-order follow.
+    inject_click(132, 10);
+    pump_click();
+    verify("windows item handled", handled and window_runs = 1);
+    verify(
+      "terminal raised",
+      raised_id > 0 and raised_id <> own and syslib.window_focus() = raised_id);
+    status := syslib.window_info(uint(0), win_id, win_rect, win_title);
+    verify(
+      "raised window is the terminal",
+      status = Ok and win_id = raised_id and win_title = "Terminal");
+
+    // Enumeration boundary and the sanctioned presentation path.
+    status := syslib.window_info(uint(999), win_id, win_rect, win_title);
+    verify("index past end is NotFound", status = NotFound);
+    status := syslib.window_present(own);
+    verify("window_present", status = Ok);
+
+    // Leave the bar and the window composed for the final screen.
+    draw_menu_bar();
+    draw_shell_window();
+  end;
+
+  if failed then
+  begin
+    say("desktop_shell: FAIL at step ");
+    say_int(fail_step);
+    say(": ");
+    say(fail_label);
+    say("\n");
+  end
+  else
+    say("desktop_shell: ok\n");
+end;
+
+procedure normal_mode();
+begin
+  draw_menu_bar();
+  status := syslib.window_open(600, 72, 360, 164, "Desktop", own);
+  if status = Ok then draw_shell_window();
+
+  // A normal task would be killed by the 10-second budget. The shell is a
+  // controller: promote to realtime and heartbeat around each blocked wait.
+  // If every core already holds a realtime task, the short normal-budget life
+  // is still enough to show the frame.
+  status := core.realtime_on();
+  say("desktop_shell: ready\n");
+  while true do
+  begin
+    core.heartbeat();
+    status := syslib.next_event(ev);
+    if status = Ok then
+    begin
+      core.heartbeat();
+      if ev.kind = Expose then
+      begin
+        if ev.window = own then draw_shell_window();
+      end
+      else if ev.kind = PointerDown then
+      begin
+        if ev.window = 0 then
+          handle_menu(ev.x, ev.y)
+        else if ev.window = own then
+          draw_shell_window();
+      end;
+      // Keep the bar visible after every event; no window starts above it.
+      draw_menu_bar();
+    end;
+  end;
+end;
+
+procedure main(args: const string[1024]);
+begin
+  white := uint(0xFFFFFF);
+  black := uint(0x000000);
+  screen_w := int(syslib.screen_width());
+  screen_h := int(syslib.screen_height());
+  if screen_w = 0 or screen_h = 0 then
+    say("desktop_shell: no graphics\n")
+  else if screen_w < 400 or screen_h < 300 then
+    say("desktop_shell: screen too small\n")
+  else if args = "check" then
+    check_mode()
+  else
+    normal_mode();
+end;

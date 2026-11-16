@@ -61,6 +61,7 @@ var
   seen: bool;
   more: bool;
   polls: int;
+  baseline: int;
 
 procedure say(line: const string[0]);
 begin
@@ -145,6 +146,9 @@ begin
     say("windows_events: screen too small\n")
   else
   begin
+    // The kernel's terminal and system-log windows exist from boot (spec
+    // 0012); the idle focus is the previously topmost window, not 0.
+    baseline := syslib.window_focus();
     status := syslib.clear(white);
     status := syslib.fill_dither(0, 0, int(screen_w), int(screen_h), black);
     flushed := syslib.event_flush();
@@ -321,7 +325,7 @@ begin
     verify("close A", syslib.window_close(a) = Ok);
     verify("close B", syslib.window_close(b) = Ok);
     verify("close C", syslib.window_close(c) = Ok);
-    verify("focus none", syslib.window_focus() = 0);
+    verify("focus none", syslib.window_focus() = baseline);
 
     if failed then
     begin

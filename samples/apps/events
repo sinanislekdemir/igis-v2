@@ -50,6 +50,7 @@ var
   started: uint;
   now: uint;
   exited_ok: bool;
+  baseline: int;
 
 procedure say(line: const string[0]);
 begin
@@ -111,6 +112,12 @@ begin
   w := int(syslib.screen_width());
   h := int(syslib.screen_height());
 
+  // The kernel owns a terminal and a system-log window from boot (spec 0012),
+  // so the focused window is not 0 even before this app opens one. Pointer
+  // and key events are routed to that focus (spec 0011, W16); the expected
+  // value is recorded instead of assuming an empty desktop.
+  baseline := syslib.window_focus();
+
   // A known empty queue.
   flushed := syslib.event_flush();
   drops_before := syslib.event_drops();
@@ -129,33 +136,35 @@ begin
       and ev.y = 456
       and ev.window = 7);
 
-  // 2. Pointer transitions are queued by the pointer path itself.
+  // 2. Pointer transitions are queued by the pointer path itself. The point
+  // is (40, 10): the menu-bar row, above every window (kernel windows start
+  // at y = 26), so a pointer-down there hits no window and stays unaddressed.
   status := syslib.clear(background);
   // Clamp to the origin, then discard the move event the clamp may have
   // produced: a previous app in the same boot may have left the pointer
-  // elsewhere, so the next event must deterministically be the move to (40, 60).
+  // elsewhere, so the next event must deterministically be the move to (40, 10).
   status := syslib.inject_pointer(-100000, -100000, uint(0));
   flushed := syslib.event_flush();
-  status := syslib.inject_pointer(40, 60, uint(0));
+  status := syslib.inject_pointer(40, 10, uint(0));
   status := syslib.next_event(ev);
   check(
     "pointer move event",
-    status = Ok and ev.kind = PointerMove and ev.x = 40 and ev.y = 60
-      and ev.code = uint(0) and ev.window = 0);
+    status = Ok and ev.kind = PointerMove and ev.x = 40 and ev.y = 10
+      and ev.code = uint(0) and ev.window = baseline);
 
   status := syslib.inject_pointer(0, 0, uint(1));
   status := syslib.next_event(ev);
   check(
     "pointer down event",
-    status = Ok and ev.kind = PointerDown and ev.x = 40 and ev.y = 60
+    status = Ok and ev.kind = PointerDown and ev.x = 40 and ev.y = 10
       and ev.code = uint(1) and ev.window = 0);
 
   status := syslib.inject_pointer(0, 0, uint(0));
   status := syslib.next_event(ev);
   check(
     "pointer up event",
-    status = Ok and ev.kind = PointerUp and ev.x = 40 and ev.y = 60
-      and ev.code = uint(1) and ev.window = 0);
+    status = Ok and ev.kind = PointerUp and ev.x = 40 and ev.y = 10
+      and ev.code = uint(1) and ev.window = baseline);
 
   // 3. Injected key records come back with the whole packed value.
   make_key(KeyDown, uint(KeyAShift));
@@ -201,9 +210,9 @@ begin
   // The cursor is still not in the shadow.
   x := syslib.pointer_x();
   y := syslib.pointer_y();
-  check("pointer position", x = 40 and y = 60);
-  check("cursor hotspot is background", syslib.get_pixel(40, 60) = background);
-  check("cursor interior is background", syslib.get_pixel(47, 66) = background);
+  check("pointer position", x = 40 and y = 10);
+  check("cursor hotspot is background", syslib.get_pixel(40, 10) = background);
+  check("cursor interior is background", syslib.get_pixel(47, 16) = background);
 
   if ok then
     say("events: ok\n");

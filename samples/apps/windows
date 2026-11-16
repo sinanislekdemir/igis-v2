@@ -38,6 +38,7 @@ var
   text: string[16];
   used: int;
   screen_w: uint;
+  baseline: int;
 
 procedure say(line: const string[0]);
 begin
@@ -82,6 +83,11 @@ begin
     say("windows: no graphics\n")
   else
   begin
+    // The kernel's terminal and system-log windows exist from boot (spec
+    // 0012), so closing this app's windows falls back to the previously
+    // topmost window instead of leaving focus 0. Record the baseline first.
+    baseline := syslib.window_focus();
+
     // 1. Two windows. The frame is the content plus a 1-px border and a 16-px
     // title bar: (w + 2, h + 17).
     status := syslib.window_open(40, 40, 200, 120, "one", one);
@@ -146,12 +152,13 @@ begin
     check("focus fell back to one", syslib.window_focus() = one);
 
     // 5. Close order and focus fallback. `one` is still on top after the
-    // raise, so closing it focuses `two`; closing `two` leaves no focus.
+    // raise, so closing it focuses `two`; closing `two` restores the idle
+    // baseline focus (the kernel's topmost window, or a running shell).
     status := syslib.window_close(one);
     check("close one", status = Ok and syslib.window_focus() = two);
     status := syslib.window_close(two);
-    check("close two", status = Ok and syslib.window_focus() = 0);
-    check("focus none", syslib.window_focus() = 0);
+    check("close two", status = Ok and syslib.window_focus() = baseline);
+    check("focus restored", syslib.window_focus() = baseline);
 
     // 6. Unknown ids and invalid geometry.
     check("close unknown", syslib.window_close(two) = NotFound);
