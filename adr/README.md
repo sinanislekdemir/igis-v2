@@ -48,3 +48,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0021 | [Input is one machine-wide pointer and event queue owned by the kernel, with a composited cursor](0021-input-event-model.md) | Accepted | 2026-11-16 |
 | 0022 | [Use an absolute USB HID tablet for the pointer, not a scaled relative mouse](0022-absolute-pointer-usb-tablet.md) | Accepted | 2026-11-16 |
 | 0023 | [Drain PS/2 auxiliary data on IRQ12 through the I/O APIC, into a lock-free ring](0023-ps2-aux-irq12.md) | Accepted | 2026-11-16 |
+| 0024 | [Windows are kernel table records with monotonic ids, content-size geometry and owner-checked lifecycle](0024-window-identity-ownership-focus.md) | Accepted | 2026-11-16 |

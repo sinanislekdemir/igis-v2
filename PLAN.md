@@ -14,25 +14,23 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `8afa36a` (events proof is order-independent) on top of `70b82cd`
-  (PS/2 aux IRQ12, M2.2.7), plus this resume note. Tree clean.
+- **Last commit:** `M2.3.0` — spec 0011 (Windows) and ADR 0024, on top of `30a7d36`
+  (M2.2.7 resume note). Tree clean.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
   keyboard key events, the event queue and the `events` proof (`4f2038c`), M2.2.7
-  PS/2 aux IRQ12 with the lock-free ring (`70b82cd`), and the order-independent
-  `events` proof (`8afa36a`).
-- **Verified at that point:** 301 host tests; `ioapic: version 0x20, IRQ12 -> vector
-  0x2c on apic 0 (level)`, `mouse: aux IRQ12 enabled ...` and a one-time
-  `mouse: aux IRQ12 delivered N interrupt(s), M byte(s)` on `-smp 4` and `-smp 1`;
-  `scripts/mouse_burst_qmp.py` 600/600 px on both; the polled HEAD was also 600/600
-  headlessly (QEMU 10.2.2 retains PS/2 deltas; 346/600 is a host-window result); QMP
-  absolute injection 7/7 and `--no-tablet` → `mouse: ok`; regressions `events`, `mouse`,
-  `desktop`, `text`, `frames`, `streams`, `deep`, `utf8`, `realtime`, `cores`, including
-  `run mouse` followed by `run events` in one boot.
-- **Next slice (not started):** M2.3 windows — `specs/0011` (frame/content rects, z-order,
-  focus, clipping stack, damage/`expose`, close rules, limits), then M2.3.1 window records
-  and lifecycle.
+  PS/2 aux IRQ12 with the lock-free ring (`70b82cd`), the order-independent `events`
+  proof (`8afa36a`), and the M2.3.0 window spec (this commit).
+- **Verified at that point:** 301 host tests (unchanged: this commit is spec-only);
+  `ioapic: version 0x20, IRQ12 -> vector 0x2c on apic 0 (level)`, `mouse: aux IRQ12
+  enabled ...` and a one-time `mouse: aux IRQ12 delivered N interrupt(s), M byte(s)` on
+  `-smp 4` and `-smp 1`; `scripts/mouse_burst_qmp.py` 600/600 px on both; QMP absolute
+  injection 7/7 and `--no-tablet` → `mouse: ok`; regressions `events`, `mouse`, `desktop`,
+  `text`, `frames`, `streams`, `deep`, `utf8`, `realtime`, `cores`.
+- **Next slice (in progress):** M2.3.1 window records and lifecycle — the `syslib` window
+  surface plus the predeclared `Rect` (spec 0011), the kernel `window` table, the internal
+  `gfx` clip helpers, and the `windows` proof app.
 
 ### Resuming from a fresh session (no chat history)
 
@@ -130,7 +128,7 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
 
 ### M2.3 — window service
 
-- [ ] **M2.3.0** Spec 0011 "Windows" (frame/content rects, z-order, focus, clipping stack,
+- [x] **M2.3.0** Spec 0011 "Windows" (frame/content rects, z-order, focus, clipping stack,
   damage, `expose`, close rules, limits: window count, minimum size, title length).
 - [ ] **M2.3.1** Window records and lifecycle: `syslib.window_open(x, y, w, h, title)`,
   `window_close`, `window_raise`, `window_move`, `window_content_rect`, `window_frame_rect`;
