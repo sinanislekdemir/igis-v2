@@ -92,15 +92,18 @@ resize. Those are M2.4/M2.5.
     terminal window;
   - `Apps` launches `clock` with `core.spawn` (non-blocking), records the task id, and
     reports the outcome;
-  - `Windows` raises the next live window in the z-order (wrapping), which is the
-    "list/raise" affordance without a dropdown;
+  - `Windows` raises the existing window titled `Terminal` (the "bring the terminal
+    forward" affordance without a dropdown; it sits left of the shell's window, so the
+    raise cannot uncover the shell);
   - the Apple square raises the shell's own window.
   A launched application is never waited for: the shell uses `core.spawn`, not
   `core.run`.
 - **D12 (MUST):** The shell may own one window of its own ("Desktop"). It draws the
   window content on open and on every `Expose` for that id, calls `window_present`, and
-  ignores exposes for windows it does not own. It never draws in another window's
-  content rectangle.
+  ignores exposes for windows it does not own. It repaints the content only while it is
+  the topmost window; when another window is above it, it presents without redrawing, so
+  a client with no per-task clip (M2) cannot overwrite the window above. It never draws in
+  another window's content rectangle.
 - **D13 (MUST):** `check` mode is deterministic and headless: draw the bar and window,
   check menu-bar/chrome/content pixels with `get_pixel`, inject a `PointerDown` at each
   item with `syslib.inject_event` and pump it, verify the listing (Terminal and System
@@ -209,10 +212,11 @@ event, which also repairs a bar an app covered.
 
 `File` lists windows through `window_info` (`index` 0 upward until `NotFound`) and writes
 the listing into the terminal window. `Apps` calls `core.spawn("clock", "", diag, id)`
-and keeps `id`; `Windows` finds the focused window's index in the same enumeration and
-raises the next one (wrapping). A normal-mode task promotes to realtime and heartbeats
-before blocking in `next_event`; blocked time does not count against the heartbeat, and
-each wake beats again.
+and keeps `id`; `Windows` finds the window titled `Terminal` in the same enumeration and
+raises it. A normal-mode task promotes to realtime and heartbeats before blocking in
+`next_event`; blocked time does not count against the heartbeat, and each wake beats
+again. `draw_shell_window` enumerates the topmost id first and only redraws its content
+while that id is its own; otherwise it presents what the service last left.
 
 ### Proof
 
@@ -270,7 +274,7 @@ each wake beats again.
 | 1 | Work area: should the window service clamp every open below the menu bar? | When a second shell/app cannot avoid the bar (M2.3.5/M2.4) |
 | 2 | Kernel windows as a general logging target (level, ring, scrollback) | When the log window needs history beyond the visible grid |
 | 3 | Menu-bar ownership: the shell app draws it; a second shell instance would draw a second bar | M2.5.6 (boot-to-desktop) and single-instance rules |
-| 4 | Per-window clip/ownership for kernel drawing (today the console clip is service-narrowed only for the cell it paints) | If a kernel producer other than the console draws into a window |
+| 4 | Per-window clip/ownership for kernel drawing (today the console passes an explicit clip per cell and does not mutate the global one) | If a kernel producer other than the console draws into a window |
 
 ## Changelog
 
