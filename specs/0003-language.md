@@ -1258,8 +1258,8 @@ interface: console read/write, `yield`, stream send/receive/try, monotonic clock
 string copy/compare/find, integer and `f64` math, formatting primitives (integer and
 fixed-point float), and the checked conversions. `stdlib` (written in the language)
 provides arrays, rings, maps, UTF-8 helpers, parsing (including decimal `f64`), formatting,
-and typed stream views. `syslib` (native, Rust) provides ports, MMIO handles and future
-block/DMA access.
+typed stream views, and the UI layout/chrome layer. `syslib` (native, Rust) provides
+ports, MMIO handles, the drawing primitives and future block/DMA access.
 
 A function moves from `stdlib` to `core` only when measurement justifies it; the namespace
 is the signal.
@@ -1268,9 +1268,9 @@ is the signal.
 
 The compiler embeds `stdlib/stdlib.ig` (`include_str!`) and compiles it into the
 application's package when the application says `uses stdlib;` (source-only, ADR 0019; spec
-0008, "Multi-unit compilation"). The library imports only `core`, declares no `state`, and
-uses no new opcodes. Its top-level names are **qualified** from the application
-(`stdlib.trim_into`) and unqualified inside the unit.
+0008, "Multi-unit compilation"). The library imports `core` and `syslib` (ADR 0026),
+declares no `state`, and uses no new opcodes or builtins. Its top-level names are
+**qualified** from the application (`stdlib.trim_into`) and unqualified inside the unit.
 
 Capacities are concrete because the language has no generics; the numbers below are the
 declared capacities and the at-least-N rule applies to callers.
@@ -1297,6 +1297,65 @@ declared capacities and the at-least-N rule applies to callers.
 | `function stdlib.recv_u64(ep: const in_stream[1]; value: var int): Status` | Reads exactly 8 little-endian bytes with `recv_exact` and stores the signed value. `Closed`/`CapacityExceeded` propagate and leave `value` untouched. |
 | `function stdlib.send_bytes(ep: const out_stream[1]; data: const bytes[0]): Status` | Sends any `bytes` buffer as one atomic send. The `const bytes[0]` capacity accepts a buffer of any size (at-least-N rule); the endpoint capacity still bounds the send. |
 
+#### UI layout and chrome (M2.4.0)
+
+The UI layer is ordinary language code over the nine `syslib` drawing primitives (ADR
+0026). It is **client** chrome: the window service still draws the real window frames
+(spec 0011), while an application uses these helpers for a dialog, panel or control inside
+its own content, or for a self-drawn title bar. No record, sum, user enum, generic or
+`state` is involved; every argument is a scalar or a buffer with the capacity shown, and
+a destination follows the at-least-N rule. A drawing helper returns the first `syslib`
+`Status` it receives (`Ok`, or `Invalid` on disabled graphics or invalid geometry).
+
+**Metrics.** The font is 8×8 and drawn byte-per-cell by `syslib.draw_text` (G13).
+
+| Helper | Value |
+|--------|-------|
+| `stdlib.ui_text_width(text: const string[0]) -> int` | `utf8_len(text) * 8`: one 8-pixel cell per code point. |
+| `stdlib.ui_text_height() -> int` | `8`: one glyph row. |
+| `stdlib.ui_line_height() -> int` | `16`: one text row plus leading, matching the title bar. |
+| `stdlib.ui_content_inset() -> int` | `8`: the standard content/control margin. |
+| `stdlib.ui_title_bar_height() -> int` | `16`: the title bar height. |
+| `stdlib.ui_close_box_size() -> int` | `11`: the close box's side. |
+| `stdlib.ui_text_center_x(x: int; w: int; text: const string[0]) -> int` | `x + (w - width) / 2`, or `x` when the text is at least as wide as `w` (left aligned). Integer division, both operands positive in the centred case. |
+| `stdlib.ui_text_center_y(y: int; h: int) -> int` | `y + (h - 8) / 2`, or `y` when `h <= 8` (top aligned). |
+
+`ui_text_width` counts code points, while `draw_text` advances one cell per **byte** and
+draws a blank cell for a byte above `0x7F`; for ASCII the two agree. The 8×8 font covers
+ASCII only, so a non-ASCII byte still renders blank (M2.6.1 owns a proportional font and
+glyph metrics).
+
+**Palette.** `stdlib` constants are not exported across a unit boundary, so the palette is
+a set of functions returning `uint` in `0x00RRGGBB` form. The values are the System 7.5
+palette used by the window service and the desktop:
+
+| Helper | Value | Use |
+|--------|-------|-----|
+| `stdlib.ui_black() -> uint` | `0x000000` | text, borders, chrome ink, dither |
+| `stdlib.ui_white() -> uint` | `0xFFFFFF` | content and desktop base, focused title background |
+| `stdlib.ui_gray() -> uint` | `0xCCCCCC` | unfocused title background, disabled control face |
+| `stdlib.ui_focus() -> uint` | `0xFFFFFF` | the focused title background (the named semantic value; equal to white) |
+| `stdlib.ui_accent() -> uint` | `0x000080` | selection/highlight accent |
+
+**Drawing.** `(x, y)` is the top-left pixel of the named rectangle, `w` and `h` are its
+width and height, and the `syslib` geometry rules apply (an extent at or below zero or a
+disabled screen gives `Invalid`, and drawing is clipped, never faulted).
+
+| Helper | Semantics |
+|--------|-----------|
+| `stdlib.ui_frame(x: int; y: int; w: int; h: int) -> Status` | A 1-px black outline inside the extent (the `syslib.draw_rect` rule); the interior is untouched. |
+| `stdlib.ui_title_bar(x: int; y: int; w: int; title: const string[0]; focused: bool) -> Status` | Paints a title bar inside a frame whose origin is `(x, y)` and whose width is `w` (the caller has drawn the 1-px frame with `ui_frame`; the helper never paints the outer border). Interior rows `y+1..y+14` are filled white when focused and `0xCCCCCC` when not; a focused bar gets one black stripe on every other row from `y+2` while the row is below `y+15`. An 11×11 close box is filled with the bar background and outlined black at `(x+4, y+3)` when the interior is at least 14 px wide. The title is truncated to the band right of the close box (`w - 22` pixels, at most 64 bytes, cut at a code-point boundary), its band background is repainted so stripes never cross a glyph, and the text is centred at `y+4` with `ui_text_width`. A separator at `(x+1, y+15)` width `w-2` closes the bar. `w < 3` is `Invalid` and draws nothing; a narrow bar simply omits the box or the title. |
+| `stdlib.ui_close_box(x: int; y: int) -> Status` | An 11×11 black outline at `(x, y)`; the background is untouched, so the caller chooses the fill. `ui_title_bar` calls it after painting the close box's background. |
+| `stdlib.ui_separator(x: int; y: int; w: int) -> Status` | One black row `(x, y, w, 1)`. |
+| `stdlib.ui_center_text(x: int; y: int; w: int; h: int; text: const string[0]; color: uint) -> Status` | Draws `text` at `ui_text_center_x` / `ui_text_center_y` inside the extent, with `syslib.draw_text` (transparent background). It is left/top aligned when the text does not fit horizontally or the row does not fit vertically, so it never produces a negative offset. |
+
+The title staging buffer is 64 bytes, the window service's title capacity; a longer title
+is truncated. Text is drawn one cell per byte with the existing font, so a title containing
+non-ASCII bytes shows blank cells for those bytes. When graphics are disabled, every
+drawing helper returns `Invalid` and writes nothing; metrics and palette still return their
+values. `langhost` and the test hosts use that disabled-screen model, so a sample can
+branch on `syslib.screen_width() = 0` deterministically.
+
 Still missing for a complete standard library: `f32` (Q40) and the remaining float-text
 work (Q41: correctly rounded decimal-to-binary parsing and its subnormal edges); the
 fixed-point `core.format_f64_into`, the shortest round-trip
@@ -1307,7 +1366,11 @@ move is withdrawn: the checked slice stays in `core` because the destination cap
 be a call-site immediate, and the language has no generics (see "Slicing and search").
 `map` support and `map_get_or` landed with the structural map table (spec 0003, "Maps");
 the UTF-8 helpers landed as ordinary language code over `core.substr_into`, `core.len` and
-buffer indexing, adding no opcode.
+buffer indexing, adding no opcode. The M2.4.0 UI layout/chrome layer landed as ordinary
+language code over the `syslib` drawing primitives (`ui_text_width`, the metrics, the
+palette, `ui_frame`, `ui_title_bar`, `ui_close_box`, `ui_separator`, `ui_center_text`),
+adding no opcode or builtin. String editing (M2.4.1), controls (M2.4.2), menus (M2.4.3),
+dialogs (M2.4.4), icons (M2.4.5) and the widgets demo (M2.4.6) are still ahead.
 
 ## Failure modes
 
@@ -1385,6 +1448,10 @@ buffer indexing, adding no opcode.
 | Import cycle | Compile error |
 | Capacity mismatch in assignment | Compile error |
 | `s := s + t` | Compile error (aliasing) |
+| `stdlib.ui_*` drawing on a disabled screen | `Status.Invalid`; nothing drawn |
+| `stdlib.ui_frame` with `w <= 0` or `h <= 0` | `Status.Invalid`; nothing drawn |
+| `stdlib.ui_title_bar` with `w < 3` | `Status.Invalid`; nothing drawn; a narrower interior omits the box/title |
+| A `stdlib.ui_*` call with a record, sum or user enum argument | Compile error (aggregates still may not cross the unit boundary) |
 
 ## Open questions
 
@@ -1435,3 +1502,4 @@ buffer indexing, adding no opcode.
 | 2026-11-16 | Window surface (spec 0011, M2.3.1): `Rect` is a predeclared record (`x, y, w, h: int`, 32 bytes at `abi::layout::rect`) and `syslib.window_open`/`close`/`raise`/`move`/`frame_rect`/`content_rect`/`focus` are host builtins. `open` takes the frame origin and the content size; ids are `int` with `0` invalid, monotonic and never reused; `close`/`move` are owner-only while `raise` is any task's; the rect reads write a `Rect` only on `Ok`; 16 windows, a 64-byte title and an 8×8 minimum content. No new opcode. |
 | 2026-11-16 | M2.3.3: `EventKind` gains `Expose` (ordinal 5), the whole-content repaint request; `Event.window` is filled by the kernel at poll time (focused window, or the hit-tested window for a pointer-down). `syslib.window_present(id) -> Status` is added as the owner-only window presentation path, clipped to the window's visible content; `syslib.present` remains a legal generic primitive. Builtin 39, no new opcode. |
 | 2026-11-16 | M2.3.4 adds `syslib.window_info(index: uint, var id: int, var rect: Rect, var title: string[64]) -> Status` (spec 0012, builtin 40): the read-only topmost-first window enumeration used by the desktop shell's window list. The title destination is compile-checked at the service's 64-byte cap; no new opcode. |
+| 2026-11-17 | M2.4.0 adds the `stdlib` UI layout/chrome layer (ADR 0026): the library now says `uses core, syslib;` and the helpers draw through the nine graphics primitives as ordinary language code. Metrics (`ui_text_width` = code points × 8, `ui_text_height`, `ui_line_height`, `ui_content_inset`, `ui_title_bar_height`, `ui_close_box_size`, `ui_text_center_x`, `ui_text_center_y`), the System 7.5 palette (`ui_black`, `ui_white`, `ui_gray`, `ui_focus`, `ui_accent`), and client chrome (`ui_frame`, `ui_title_bar`, `ui_close_box`, `ui_separator`, `ui_center_text`). No record/sum/generic/`state`, no new opcode or builtin. |

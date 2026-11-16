@@ -50,3 +50,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0023 | [Drain PS/2 auxiliary data on IRQ12 through the I/O APIC, into a lock-free ring](0023-ps2-aux-irq12.md) | Accepted | 2026-11-16 |
 | 0024 | [Windows are kernel table records with monotonic ids, content-size geometry and owner-checked lifecycle](0024-window-identity-ownership-focus.md) | Accepted | 2026-11-16 |
 | 0025 | [Kernel text windows and an application-owned desktop shell](0025-kernel-text-windows-desktop-shell.md) | Accepted | 2026-11-16 |
+| 0026 | [The standard library may import `syslib` for the UI layout layer](0026-stdlib-may-use-syslib.md) | Accepted | 2026-11-17 |

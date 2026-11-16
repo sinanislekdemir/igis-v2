@@ -98,6 +98,12 @@ grows down. Colours are `0x00RRGGBB`.
 - **G18 (SHOULD):** A representative desktop application (background, menu bar, one
   window, text) runs in a few thousand interpreted instructions per quantum: all
   rasterisation is in `core`/`syslib`, not in per-pixel language loops.
+- **G19 (MUST):** The UI layout/chrome helpers (`stdlib.ui_*`, spec 0003) are ordinary
+  language code over G10's primitives and add no drawing builtin, opcode or window-service
+  path. They draw **client** chrome (a dialog/panel/control inside an application's own
+  content); the window service remains the only producer of real window frames and its
+  own title bar, close box and border (spec 0011, ADR 0024). The library may call
+  `syslib` for this (ADR 0026) and inherits G9/G15's error and disabled-screen rules.
 
 ## Design
 

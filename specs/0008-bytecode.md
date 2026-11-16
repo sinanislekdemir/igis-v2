@@ -99,8 +99,10 @@ An application that says `uses stdlib;` is compiled together with the embedded l
 
 - **Name resolution.** The application's top-level names stay unqualified; the library's
   are reachable only as `stdlib.<name>`. Inside the library its own names are unqualified,
-  and it may import only `core` — it cannot reference the application (no cycle, M4).
-  A `stdlib.*` reference without the import, or an unknown `stdlib.*` name, is a compile
+  and it may import `core` and `syslib` (ADR 0026) — it cannot reference the application
+  (no cycle, M4). `syslib` adds no authority the application did not already have (spec
+  0003, H4); it lets the UI layout layer draw with the primitives in spec 0009. A
+  `stdlib.*` reference without the import, or an unknown `stdlib.*` name, is a compile
   error.
 - **Function table.** Library procedures occupy the first indices (`0..L`), application
   procedures follow (`L..L+A`); cross-unit calls resolve to those indices. The entry is the
@@ -417,13 +419,15 @@ Compile memory is caller-provided: source buffer, token/parse arenas, code buffe
 constant buffer, each with a compile-time cap. One package is compiled at a time because
 the service holds the compiler lock (spec 0007), so one set of buffers is enough. The
 first-milestone caps (provisional, tuning): 64 KiB of source per unit, 256 KiB per
-application, 1 MiB of scratch. They bound memory because memory is statically placed; they
-are not a time budget, and compile time is not a design constraint (ADR 0019).
+application, 2 MiB of scratch. They bound memory because memory is statically placed; they
+are not a time budget, and compile time is not a design constraint (ADR 0019). The scratch
+cap was 1 MiB until M2.4.0; the UI layout layer pushed the embedded library over it, so it
+was raised to 2 MiB (the kernel's static arena grows with it, spec 0007).
 
 The `compiler` crate is `no_std` and allocation-free: it borrows the source, stores tokens,
 AST nodes and name tables in the caller's scratch arena, and writes the package into the
 caller's code and manifest buffers. It exports the caps as `MAX_SOURCE_BYTES` (64 KiB),
-`MAX_ARENA_BYTES` (1 MiB), `MAX_CODE_BYTES` (256 KiB) and `MAX_MANIFEST_BYTES` (4 KiB), and
+`MAX_ARENA_BYTES` (2 MiB), `MAX_CODE_BYTES` (256 KiB) and `MAX_MANIFEST_BYTES` (4 KiB), and
 `compile_into` reports exhaustion of any of them as `Status.CapacityExceeded` with a
 `Diagnostic`. The only `unsafe` in the crate is the alignment/initialisation arithmetic of
 the bump arena, isolated in `compiler/src/arena.rs`.
@@ -562,5 +566,6 @@ pub fn run(task: &mut Task);
 | 2026-11-16 | Builtin id **26** `pointer_source` (0 → 1) reports the active pointer source, 0 none / 1 PS/2 / 2 absolute USB tablet (spec 0010, I27). No opcode is added; ABI v1 stays at **75**. |
 | 2026-11-16 | Event builtins (spec 0010, I18/I19): `next_event` (27, 1 → 1; blocks on an empty queue with `Blocked(WaitKind::Input)`), `poll_event` (28, 1 → 1; pushes `WouldBlock`), `inject_event` (29, 1 → 1; debug-only, unknown kind is `Invalid`), `event_drops` (30, 0 → 1) and `event_flush` (31, 0 → 1). The host writes a 40-byte `abi::layout::event` image; no opcode is added and ABI v1 stays at **75**. |
 | 2026-11-16 | Window builtins add no opcode (spec 0011, M2.3.1): ids 32–38 are `window_open` (6 → 1), `window_close` (1 → 1), `window_raise` (1 → 1), `window_move` (3 → 1), `window_frame_rect` (2 → 1), `window_content_rect` (2 → 1) and `window_focus` (0 → 1). The interpreter decodes the operands, resolves the title and the out-parameters and writes the 32-byte `abi::layout::rect` image only on `Ok`; the kernel host owns the table and the policy. `Rect` is a predeclared record, so no new type or opcode is needed; ABI v1 stays at **75**. |
+| 2026-11-17 | The embedded `stdlib` may import `syslib` (ADR 0026): its first-slice "only `core`" rule was a scope statement, not a security boundary. The library is trusted embedded source compiled into the application's package and `syslib` grants the caller no authority it did not already have (spec 0003, H4). The M2.4.0 UI layout layer uses this for the nine graphics primitives; the type-id rule is unchanged, so records, sums and user enums still may not cross the unit boundary. No opcode or builtin is added; ABI v1 stays at **75**. |
 | 2026-11-16 | `window_present` is builtin 39 (1 → 1): pop a window id, present the window's content clipped to its visible parts, push the `Status`. Owner-only and disabled-graphics `Invalid`; no opcode, ABI v1 stays at **75**. `EventKind.Expose` is ordinal 5; routing (`Event.window`) happens in the host at poll time and adds no bytecode. |
 | 2026-11-16 | `window_info` is builtin 40 (4 → 1, spec 0012 D15): index, id reference, `Rect` reference and a `var string` title reference. Index `0` is the topmost live window; `NotFound` past the end or with disabled graphics leaves every destination untouched; `Ok` writes the id, the frame image and the title (at most 64 bytes) and pushes `Status::Ok`. The compiler requires the title destination to have capacity 64 and the interpreter bounds-checks the region before the host call. No new opcode; ABI v1 stays at **75**. |
