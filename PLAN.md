@@ -14,9 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `M2.3.3` event routing, `Expose` and `window_present` (the feature
-  commit; its hash is recorded in the follow-up docs commit) on top of `2a01cbe` (M2.3.2
-  resume note). Tree clean.
+- **Last commit:** `dc14442` (M2.3.3 event routing, `Expose` and `window_present`) on top
+  of `2a01cbe` (M2.3.2 resume note). Tree clean.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -24,7 +23,7 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   PS/2 aux IRQ12 with the lock-free ring (`70b82cd`), the order-independent `events`
   proof (`8afa36a`), the M2.3.0 window spec (`13aecf2`), M2.3.1 window records and
   lifecycle (`ba4f93c`), M2.3.2 composition and repair (`98d3f3a`), and M2.3.3 routing,
-  `Expose` and `window_present` (the feature commit below).
+  `Expose` and `window_present` (`dc14442`).
 - **Verified at that point:** **316 host tests** (abi 15, compiler 140, interpreter 114,
   langhost 47, including doctests); `cargo xtask build`/`image` clean; the boot prints
   `graphics: clip ok`, `window: rules ok`, `window: paint ok` and `window: route ok` on
