@@ -2935,15 +2935,19 @@ fn the_embedded_stdlib_compiles_on_its_own() {
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(manifest_unit(&package), "stdlib");
     assert_eq!(
-        header.function_count, 39,
+        header.function_count, 52,
         "trim_into, split_once, parse_int_into, parse_f64_into, starts_with, contains_byte, \
          split_all, drain_into, map_get_or, utf8_decode_into, utf8_len, utf8_decode, \
          utf8_valid, recv_exact, send_frame, recv_frame_into, send_line, recv_line_into, \
-         send_u64, recv_u64, send_bytes, plus the M2.4.0 UI layer: ui_text_width, \
+         send_u64, recv_u64, send_bytes, the M2.4.0 UI layer: ui_text_width, \
          ui_text_height, ui_line_height, ui_content_inset, ui_title_bar_height, \
          ui_close_box_size, ui_black, ui_white, ui_gray, ui_focus, ui_accent, \
          ui_text_center_x, ui_text_center_y, ui_frame, ui_title_bar, ui_close_box, \
-         ui_separator, ui_center_text"
+         ui_separator, ui_center_text, and the M2.4.1 editing layer: str_boundary, \
+         str_cursor_clamp, str_cursor_left, str_cursor_right, str_cursor_home, \
+         str_cursor_end, str_insert_into, str_delete_into, str_backspace, \
+         str_selection_normalize, str_selection_all, str_selection_collapse, \
+         str_selection_replace"
     );
     assert_eq!(header.entry, 0);
     assert_eq!(header.state_size, 0, "the stdlib declares no state");
@@ -3070,10 +3074,52 @@ end;
     let package = compile(source, "ui.ig").expect("the UI helpers compile");
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(
-        header.entry, 39,
-        "the entry follows the 39 library functions"
+        header.entry, 52,
+        "the entry follows the 52 library functions"
     );
-    assert!(header_function_count(&package) > 39);
+    assert!(header_function_count(&package) > 52);
+}
+
+#[test]
+fn an_application_calls_the_string_editing_helpers() {
+    let source = br#"
+unit edit;
+uses core, stdlib;
+
+var
+  text: string[256];
+  cursor: int;
+  next: int;
+  start: int;
+  stop: int;
+  st: Status;
+  ok: bool;
+
+procedure main(args: const string[1024]);
+begin
+  text := "abc";
+  ok := stdlib.str_boundary(text, 0);
+  next := stdlib.str_cursor_left(text, cursor);
+  next := stdlib.str_cursor_right(text, cursor);
+  next := stdlib.str_cursor_home(cursor);
+  next := stdlib.str_cursor_end(text, cursor);
+  next := stdlib.str_cursor_clamp(text, cursor);
+  st := stdlib.str_insert_into(text, next, "x");
+  st := stdlib.str_delete_into(text, 0, 1);
+  st := stdlib.str_backspace(text, cursor);
+  next := stdlib.str_selection_normalize(text, start, stop);
+  next := stdlib.str_selection_all(text, start, stop);
+  next := stdlib.str_selection_collapse(text, start, stop, true);
+  st := stdlib.str_selection_replace(text, start, stop, "y");
+end;
+"#;
+    let package = compile(source, "edit.ig").expect("the editing helpers compile");
+    let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
+    assert_eq!(
+        header.entry, 52,
+        "the entry follows the 52 library functions"
+    );
+    assert!(header_function_count(&package) > 52);
 }
 
 #[test]

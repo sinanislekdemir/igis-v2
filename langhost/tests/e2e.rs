@@ -1192,6 +1192,74 @@ fn ui_layout_compiles_and_reports_the_host_path() {
     assert_eq!(result.output, b"ui_layout: host ok\n".to_vec());
 }
 
+#[test]
+fn text_edit_compiles_and_edits_utf8_text_on_the_host() {
+    let path = format!("{}/../samples/apps/text_edit", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "text_edit").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(
+        String::from_utf8(result.output).expect("UTF-8 output"),
+        "cursor left widths: ok\n\
+         cursor left at zero: ok\n\
+         cursor right widths: ok\n\
+         cursor right at end: ok\n\
+         clamp inside 3-byte: ok\n\
+         clamp inside 2-byte: ok\n\
+         clamp inside 4-byte: ok\n\
+         clamp negative: ok\n\
+         clamp past end: ok\n\
+         left from inside: ok\n\
+         right from inside: ok\n\
+         cursor home: ok\n\
+         cursor end: ok\n\
+         insert at start: ok\n\
+         insert at end: ok\n\
+         insert multibyte: ok\n\
+         insert before multibyte: ok\n\
+         insert non-boundary: ok\n\
+         insert negative: ok\n\
+         insert past end: ok\n\
+         insert empty: ok\n\
+         fill full: ok\n\
+         insert capacity: ok\n\
+         insert capacity at end: ok\n\
+         delete 2-byte: ok\n\
+         delete 3-byte: ok\n\
+         delete 4-byte: ok\n\
+         delete at start: ok\n\
+         delete zero: ok\n\
+         delete non-boundary start: ok\n\
+         delete non-boundary end: ok\n\
+         delete negative: ok\n\
+         delete past end: ok\n\
+         delete past end position: ok\n\
+         delete whole first point: ok\n\
+         delete all: ok\n\
+         backspace 2-byte: ok\n\
+         backspace to start: ok\n\
+         backspace at zero: ok\n\
+         backspace 4-byte: ok\n\
+         backspace clamped no-op: ok\n\
+         backspace past end: ok\n\
+         selection normalize: ok\n\
+         selection all: ok\n\
+         collapse to start: ok\n\
+         collapse to stop: ok\n\
+         replace 2-byte: ok\n\
+         replace collapsed: ok\n\
+         replace normalized pair: ok\n\
+         replace with empty: ok\n\
+         replace multibyte: ok\n\
+         fill full: ok\n\
+         fill big: ok\n\
+         replace capacity: ok\n\
+         replace shrinks: ok\n\
+         text_edit: ok\n"
+    );
+}
+
 /// A host with a screen that records the drawing calls instead of rasterising.
 /// It proves the helper's drawing *sequence* (geometry and order) without the
 /// kernel window service.

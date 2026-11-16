@@ -41,6 +41,7 @@ const
   UiWhite = 0x00FFFFFF;
   UiGray = 0x00CCCCCC;
   UiAccent = 0x000080;
+  StrEditCapacity = 256;
 
 // Copies `src` without leading or trailing spaces, tabs, CRs and LFs and
 // returns the copied length. The destination must hold the whole result:
@@ -595,6 +596,373 @@ begin
     end;
   end;
   return true;
+end;
+
+// ---- string editing and selection (spec 0003, "String editing") ---------
+//
+// Code-point-safe editing for a 256-byte text buffer, as ordinary language
+// code. `string` stays read-only by index (spec 0003, T4), so a mutator never
+// writes into its destination in place: it copies the result into a local
+// `bytes[256]`, converts that back to a `string` with `core.substr_into` (which
+// validates strict UTF-8) and publishes it with one whole-buffer assignment.
+// A rejected call therefore leaves the destination byte-identical and the text
+// stays valid UTF-8.
+//
+// Positions are byte offsets into the `string`, never code-point ordinals
+// (T5: capacities and lengths are bytes). "Boundary" means the offset is 0, the
+// length, or the first byte of a code point. On a valid `string` that is
+// exactly "the byte is not a continuation byte (0x80..0xBF)".
+//
+// The 256-byte working capacity is the declared parameter capacity; the
+// language's at-least-N rule accepts a larger destination buffer, so a runtime
+// length above 256 is refused with `CapacityExceeded` rather than risking a
+// partial or out-of-bounds copy. Cursor helpers clamp and return a value; the
+// mutators never fault.
+
+// True when `index` is a code-point boundary of the valid `string` `text`: 0,
+// the runtime length, or the first byte of a code point. Negative and
+// past-the-end offsets are not boundaries.
+function str_boundary(text: const string[0]; index: int): bool;
+var
+  length: int;
+begin
+  length := int(core.len(text));
+  if index < 0 or index > length then
+    return false;
+  if index = 0 or index = length then
+    return true;
+  if text[index] >= byte(0x80) and text[index] <= byte(0xBF) then
+    return false;
+  return true;
+end;
+
+// Clamps `cursor` into 0..len and to a code-point boundary: a negative offset
+// becomes 0, an offset past the end becomes the length, and an offset inside a
+// multi-byte code point moves back to that code point's first byte. A position
+// already on a boundary is returned unchanged. This is the rule every cursor
+// helper below applies; none of them returns `Invalid` for a bad cursor.
+function str_cursor_clamp(text: const string[0]; cursor: int): int;
+var
+  length: int;
+  at: int;
+begin
+  length := int(core.len(text));
+  if cursor <= 0 then
+    return 0;
+  if cursor >= length then
+    return length;
+  at := cursor;
+  while at > 0 and text[at] >= byte(0x80) and text[at] <= byte(0xBF) do
+    at := at - 1;
+  return at;
+end;
+
+// Moves the clamped cursor back one whole code point and returns it. At 0 it
+// stays 0. A cursor inside a code point is clamped first, then the code point
+// before that boundary is crossed.
+function str_cursor_left(text: const string[0]; cursor: var int): int;
+var
+  at: int;
+  previous: int;
+begin
+  at := str_cursor_clamp(text, cursor);
+  if at > 0 then
+  begin
+    previous := at - 1;
+    while previous > 0 and text[previous] >= byte(0x80) and text[previous] <= byte(0xBF) do
+      previous := previous - 1;
+    at := previous;
+  end;
+  cursor := at;
+  return at;
+end;
+
+// Moves the clamped cursor forward one whole code point and returns it. At the
+// length it stays there; a cursor inside a code point is clamped first, so the
+// next move crosses the code point that contains it.
+function str_cursor_right(text: const string[0]; cursor: var int): int;
+var
+  at: int;
+  length: int;
+begin
+  at := str_cursor_clamp(text, cursor);
+  length := int(core.len(text));
+  if at < length then
+  begin
+    at := at + 1;
+    while at < length and text[at] >= byte(0x80) and text[at] <= byte(0xBF) do
+      at := at + 1;
+  end;
+  cursor := at;
+  return at;
+end;
+
+// Sets the cursor to 0 and returns it. The text is not needed.
+function str_cursor_home(cursor: var int): int;
+begin
+  cursor := 0;
+  return 0;
+end;
+
+// Sets the cursor to the runtime length and returns it.
+function str_cursor_end(text: const string[0]; cursor: var int): int;
+var
+  length: int;
+begin
+  length := int(core.len(text));
+  cursor := length;
+  return length;
+end;
+
+// Inserts `insert` at byte offset `at`, which must be a code-point boundary.
+// `at = len` appends, `at = 0` prepends. Returns Ok, or Invalid (nothing
+// changed) for a negative offset, an offset past the end or a non-boundary, or
+// CapacityExceeded (nothing changed) when the result would exceed 256 bytes.
+// The inserted text is itself a valid `string`, so the result is valid UTF-8.
+function str_insert_into(text: var string[256]; at: int; insert: const string[0]): Status;
+var
+  length: int;
+  add: int;
+  i: int;
+  raw: bytes[256];
+  staged: string[256];
+  copied: int;
+begin
+  length := int(core.len(text));
+  if length > StrEditCapacity then
+    return CapacityExceeded;
+  if at < 0 or at > length then
+    return Invalid;
+  if not str_boundary(text, at) then
+    return Invalid;
+  add := int(core.len(insert));
+  if add > StrEditCapacity - length then
+    return CapacityExceeded;
+
+  i := 0;
+  while i < at do
+  begin
+    raw[i] := text[i];
+    i := i + 1;
+  end;
+  i := 0;
+  while i < add do
+  begin
+    raw[at + i] := insert[i];
+    i := i + 1;
+  end;
+  i := at;
+  while i < length do
+  begin
+    raw[i + add] := text[i];
+    i := i + 1;
+  end;
+
+  // The result is valid UTF-8 by construction (two valid strings joined on a
+  // boundary); the conversion is still the only publish path and would refuse a
+  // malformed result instead of building an invalid `string`.
+  copied := core.substr_into(staged, raw, 0, length + add);
+  if copied <> length + add then
+    return Invalid;
+  text := staged;
+  return Ok;
+end;
+
+// Deletes `count` bytes at offset `at`. Both `at` and `at + count` must be
+// code-point boundaries inside the text, so only whole code points are removed;
+// `count = 0` is Ok and changes nothing. Returns Ok, or Invalid (nothing
+// changed) for a negative offset or count, an offset past the end, a range that
+// runs past the end, or either end inside a code point. Deletion never needs to
+// grow the text, so its own result always fits; CapacityExceeded appears only
+// when the incoming text already exceeds the helper's 256-byte working
+// capacity (an at-least-N caller with a longer runtime length).
+function str_delete_into(text: var string[256]; at: int; count: int): Status;
+var
+  length: int;
+  i: int;
+  raw: bytes[256];
+  staged: string[256];
+  copied: int;
+begin
+  length := int(core.len(text));
+  if length > StrEditCapacity then
+    return CapacityExceeded;
+  if at < 0 or at > length then
+    return Invalid;
+  if count < 0 or count > length - at then
+    return Invalid;
+  if not str_boundary(text, at) or not str_boundary(text, at + count) then
+    return Invalid;
+  if count = 0 then
+    return Ok;
+
+  i := 0;
+  while i < at do
+  begin
+    raw[i] := text[i];
+    i := i + 1;
+  end;
+  i := at + count;
+  while i < length do
+  begin
+    raw[i - count] := text[i];
+    i := i + 1;
+  end;
+
+  copied := core.substr_into(staged, raw, 0, length - count);
+  if copied <> length - count then
+    return Invalid;
+  text := staged;
+  return Ok;
+end;
+
+// Deletes the code point immediately before the clamped cursor and moves the
+// cursor to that code point's first byte. At 0 it is Ok and does nothing (the
+// cursor stays 0), because a text field always receives the key and there is
+// nothing to delete: that is an empty state, not an error. The text is
+// untouched when the delete is rejected, and the cursor is only written on
+// success (apart from the documented clamp).
+function str_backspace(text: var string[256]; cursor: var int): Status;
+var
+  length: int;
+  at: int;
+  previous: int;
+  st: Status;
+begin
+  length := int(core.len(text));
+  if length > StrEditCapacity then
+    return CapacityExceeded;
+  at := str_cursor_clamp(text, cursor);
+  if at = 0 then
+  begin
+    cursor := 0;
+    return Ok;
+  end;
+  previous := at - 1;
+  while previous > 0 and text[previous] >= byte(0x80) and text[previous] <= byte(0xBF) do
+    previous := previous - 1;
+  st := str_delete_into(text, previous, at - previous);
+  if st <> Ok then
+    return st;
+  cursor := previous;
+  return Ok;
+end;
+
+// Clamps both scalars to code-point boundaries, orders them (the result always
+// satisfies `start <= stop`) and returns the selection length in bytes, 0 for a
+// collapsed selection. The pair is the scalar selection representation: no
+// record crosses the unit boundary.
+function str_selection_normalize(text: const string[0]; start: var int; stop: var int): int;
+var
+  first: int;
+  last: int;
+  swap: int;
+begin
+  first := str_cursor_clamp(text, start);
+  last := str_cursor_clamp(text, stop);
+  if first > last then
+  begin
+    swap := first;
+    first := last;
+    last := swap;
+  end;
+  start := first;
+  stop := last;
+  return last - first;
+end;
+
+// Selects the whole text: `start = 0`, `stop = len`, returning the length.
+function str_selection_all(text: const string[0]; start: var int; stop: var int): int;
+var
+  length: int;
+begin
+  length := int(core.len(text));
+  start := 0;
+  stop := length;
+  return length;
+end;
+
+// Collapses the selection to one end: `to_stop` picks the `stop` end, otherwise
+// the `start` end. The chosen scalar is clamped to a code-point boundary, both
+// scalars are set to it, and the caret is returned. Calling this on an
+// unnormalized pair is safe.
+function str_selection_collapse(text: const string[0]; start: var int; stop: var int; to_stop: bool): int;
+var
+  caret: int;
+begin
+  if to_stop then
+    caret := str_cursor_clamp(text, stop)
+  else
+    caret := str_cursor_clamp(text, start);
+  start := caret;
+  stop := caret;
+  return caret;
+end;
+
+// Replaces the selection with `insert` in one publish. The pair is normalized
+// first (clamped and ordered), so an out-of-range or in-code-point selection
+// never faults. On success the selection collapses to the caret just past the
+// inserted text (`start = stop = first + len(insert)`) and the result is valid
+// UTF-8. A result over 256 bytes returns CapacityExceeded with the text and both
+// scalars untouched. The whole result is staged and published once rather than
+// calling `str_delete_into` then `str_insert_into`: two publishes would expose
+// the deletion if the insertion then failed, so a single copy is what makes the
+// operation all-or-nothing.
+function str_selection_replace(text: var string[256]; start: var int; stop: var int; insert: const string[0]): Status;
+var
+  length: int;
+  first: int;
+  last: int;
+  swap: int;
+  add: int;
+  new_length: int;
+  i: int;
+  raw: bytes[256];
+  staged: string[256];
+  copied: int;
+begin
+  length := int(core.len(text));
+  if length > StrEditCapacity then
+    return CapacityExceeded;
+  first := str_cursor_clamp(text, start);
+  last := str_cursor_clamp(text, stop);
+  if first > last then
+  begin
+    swap := first;
+    first := last;
+    last := swap;
+  end;
+  add := int(core.len(insert));
+  if add > StrEditCapacity - (length - (last - first)) then
+    return CapacityExceeded;
+
+  i := 0;
+  while i < first do
+  begin
+    raw[i] := text[i];
+    i := i + 1;
+  end;
+  i := 0;
+  while i < add do
+  begin
+    raw[first + i] := insert[i];
+    i := i + 1;
+  end;
+  i := last;
+  while i < length do
+  begin
+    raw[first + add + (i - last)] := text[i];
+    i := i + 1;
+  end;
+
+  new_length := length - (last - first) + add;
+  copied := core.substr_into(staged, raw, 0, new_length);
+  if copied <> new_length then
+    return Invalid;
+  text := staged;
+  start := first + add;
+  stop := first + add;
+  return Ok;
 end;
 
 // ---- typed stream views (spec 0006, "Receive" and "Interfaces") --------
