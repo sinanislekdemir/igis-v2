@@ -5,7 +5,7 @@ Parked decisions for igis-v2. This is the working register; each spec's own
 resolved, record the answer in the relevant spec or in a new ADR, then remove it here.
 
 **Status:** implementation phase. Last updated: 2026-11-16.
-**Snapshot:** specs 0001–0011, ADRs 0001–0024.
+**Snapshot:** specs 0001–0012, ADRs 0001–0025.
 
 ## How to use
 
@@ -582,3 +582,12 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
     newest on overflow, `gfx` enqueues pointer transitions, and `syslib.next_event`
     blocks on `WaitFor::Input`. `samples/apps/events` + `events_poke` prove the surface
     and the blocked wake. Next: M2.2.7 (PS/2 aux IRQ12) and M2.3 windows.
+28. ~~Console and desktop coexistence, kernel text windows, and the desktop shell's
+    ownership~~ — decided in spec 0012/ADR 0025 (M2.3.4): the console paints two
+    kernel-owned (owner `0`) text windows with per-window grids and per-window scroll,
+    pulled `Expose` repair at the service opportunity, and an explicit clip instead of
+    the shadow's global clip; the desktop shell is an application with an app-drawn
+    direct-item menu bar and read-only `window_info` enumeration. New open items are in
+    spec 0012: a global work area (an app can still cover the bar at `y = 0`), kernel
+    log history beyond the visible grid, single-instance/menu-bar ownership when
+    M2.5.6 boots to the desktop, and per-window clip/ownership for kernel drawing.

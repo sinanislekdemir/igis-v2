@@ -45,9 +45,12 @@ resize. Those are M2.4/M2.5.
   are not printable are blank.
 - **D3 (MUST):** A cell is painted only inside the intersection of its own rectangle,
   the window's content rectangle and the window's **visible parts** (content minus the
-  frames of higher windows), under the service clip. A cell that is partly or wholly
-  covered leaves the covering window untouched. A single cell is presented after it is
-  painted; a whole-window repaint presents each visible part once.
+  frames of higher windows). The console passes that clip **explicitly** to the drawing
+  helpers (`gfx::draw_cell`/`gfx::present_within`) and never narrows the shadow's one
+  global clip: a whole-grid repaint must not clip an application drawing on another
+  core. A cell that is partly or wholly covered leaves the covering window untouched. A
+  single cell is presented after it is painted; a whole-window repaint presents each
+  visible part once.
 - **D4 (MUST):** On a pending `Expose` for owner `0`, the console repaints that window's
   grid. The repaint is **pulled**, not called from the window service: `console::pump`
   takes exposed owner-0 windows at the service opportunity (and the idle loop, through
@@ -82,8 +85,8 @@ resize. Those are M2.4/M2.5.
 - **D10 (MUST):** The shell draws a System 7.5-style menu bar at the top of the screen:
   a white bar 22 pixels high, a black 8×8 Apple square, the labels `File`, `Apps` and
   `Windows`, a black baseline on row 21, and the `core.clock()` `HH:MM` right-aligned.
-  The bar is application-drawn and is redrawn after every event. There are no dropdown
-  menus in M2.3.4: each label is a direct item.
+  The bar is application-drawn and is presented after it is drawn and redrawn after
+  every event. There are no dropdown menus in M2.3.4: each label is a direct item.
 - **D11 (MUST):** A pointer-down with `window = 0` at a menu item runs it:
   - `File` enumerates the live windows and writes their id, title and frame into the
     terminal window;
@@ -161,11 +164,12 @@ newline at the last row scrolls the grid (`copy_within` one row up, clear the la
 repaint the visible parts).
 
 Painting one cell asks the window service for the content's visible parts
-(`window::visible_content_parts`, kernel-internal, no application binding), narrows the
-clip per part intersected with the cell, fills the cell background, draws the one glyph
-with `gfx::draw_text`, presents that intersection and restores the clip. A full repaint
-does the same per part for the whole grid, presenting the part once. Both leave the
-shadow clip reset.
+(`window::visible_content_parts`, kernel-internal, no application binding) and, for each
+part the cell intersects, calls `gfx::draw_cell` (opaque background plus one glyph,
+clipped to the part) and `gfx::present_within` (that intersection). The clip is a
+parameter, not the shadow's global one, so no other task's drawing is affected while a
+grid repaints. A full repaint draws every visible cell of every part and presents each
+part once. The cursor is composited by `present_within` as usual.
 
 `console::pump` drains `window::take_expose(0)`; for each id it finds the matching
 terminal and repaints it. It runs at the end of `console::poll_input`, so every service
@@ -273,3 +277,4 @@ each wake beats again.
 | Date | Change |
 |------|--------|
 | 2026-11-16 | Initial accepted version: kernel-owned terminal and system-log windows, per-window grids with pull-based expose repair, the owner-0 rule, the desktop shell and its direct menu items, read-only `window_info` (builtin 40), the lock order and the proof plan. |
+| 2026-11-16 | M2.3.4 implemented: `console::init` opens `Terminal` and `System Log` (owner `0`) after the desktop fill; grids and per-window scroll; `console::route_self_check` (`console: terminal ok`, `console: log ok`, `console: route ok`); `console::pump` pulls owner-0 exposes in `poll_input`; explicit-clip `gfx::draw_cell`/`present_within` (the console never narrows the global clip); `window::open` admits owner `0`, `window::info`/`visible_content_parts`; builtin 40 with compiler capacity and interpreter destination checks; `samples/apps/desktop_shell` check/normal modes; the bar is presented after it is drawn; `events`/`windows`/`windows_events` record the boot focus baseline; `scripts/desktop_screenshot_qmp.py` captures `/home/sinan/Desktop/igis-desktop.png` (1024×768). M2.3.5 remains the two-app/focus/drag/expose proof. |
