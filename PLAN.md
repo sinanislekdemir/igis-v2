@@ -112,9 +112,15 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
   an absolute report carries the current position. Proof: QMP `abs` events land on exact
   pixels headless. (Chosen 2026-11-16; see Q49.) Spec 0010, ADR 0022. `kernel/src/pci.rs`,
   `kernel/src/usb.rs`, `samples/apps/tablet`, `scripts/tablet_qmp.py`.
-- [ ] **M2.2.7** PS/2 aux IRQ12: drain on interrupt instead of 1 kHz polling, so the
-  relative fallback stops dropping packets in bursts (Q49 measured 346 of 600 px with the
-  burst test); re-run the burst test to confirm one-for-one.
+- [x] **M2.2.7** PS/2 aux IRQ12: the I/O APIC routes IRQ12 to the boot core as a
+  level-triggered vector `0x2C`; the handler drains the controller into a 1024-byte
+  lock-free ring and `mouse::poll` decodes it, with the direct poll kept as the backstop.
+  Fixes the 1 ms drain latency and the multi-core status/data race that Q49 attributed to
+  the relative fallback. `scripts/mouse_burst_qmp.py` (300×(+2) after clamping) is
+  600/600 px on `-smp 4` and `-smp 1`; the polled HEAD is also 600/600 headlessly because
+  QEMU 10.2.2 retains PS/2 deltas, so the historical 346/600 is recorded as a host-window
+  result. Spec 0010, ADR 0023. `arch/x86_64/src/{ioapic.rs,interrupts.s,idt.rs}`,
+  `kernel/src/mouse.rs`.
 
 ### M2.3 — window service
 

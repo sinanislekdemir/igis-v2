@@ -21,7 +21,7 @@ mod sync;
 mod task;
 mod usb;
 
-use arch_x86_64::{apic, gdt, idt, keyboard, serial};
+use arch_x86_64::{apic, gdt, idt, ioapic, keyboard, serial};
 
 /// Entry point called from the 64-bit trampoline in `arch_x86_64`.
 ///
@@ -110,11 +110,13 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
     idt::init(gdt::KERNEL_CODE);
     println!("idt: exception gates, double-fault IST and timer gates installed");
 
+    let mut apic_id = None;
     match apic::init() {
         Some(apic) => {
             let ticks_per_ms = apic.calibrate();
             println!("apic: id {}, {} ticks/ms", apic.id(), ticks_per_ms);
             apic.start_periodic(ticks_per_ms.max(1));
+            apic_id = Some(apic.id());
 
             // SAFETY: the IDT and the timer are installed; interrupts may run.
             unsafe { core::arch::asm!("sti", options(nostack)) };
@@ -132,6 +134,34 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
         }
         None => println!("apic: not present; no timer"),
     }
+
+    // The PS/2 auxiliary interrupt (spec 0010, M2.2.7; ADR 0023). The IDT gate
+    // exists (idt::init above) and the local APIC is enabled, so the IOAPIC can
+    // route IRQ12 to this core; only then does the controller get its aux
+    // interrupt bit. An absent IOAPIC or local APIC is a log line and the
+    // existing polling drain stays in place, never a hang.
+    let aux_irq = match apic_id {
+        Some(destination) => match ioapic::init(12, apic::AUX_VECTOR, destination) {
+            Some(version) => {
+                println!(
+                    "ioapic: version {:#04x}, IRQ12 -> vector {:#x} on apic {} (level)",
+                    version & 0xFF,
+                    apic::AUX_VECTOR,
+                    destination
+                );
+                true
+            }
+            None => {
+                println!("ioapic: absent or unusable; PS/2 polling only");
+                false
+            }
+        },
+        None => {
+            println!("ioapic: no local APIC; PS/2 polling only");
+            false
+        }
+    };
+    mouse::enable_irq(aux_irq);
 
     // The absolute pointer (spec 0010, M2.2.6): scan PCI for the PIIX3 UHCI
     // controller and enumerate the USB tablet. This runs after the APIC timer
@@ -309,6 +339,14 @@ pub extern "C" fn timer_tick() {
 pub extern "C" fn wake_ipi() {
     smp::on_ipi();
     apic::eoi();
+}
+
+/// Called by the PS/2 auxiliary (IRQ12) stub in `arch_x86_64` (spec 0010,
+/// ADR 0023). Moves bytes into the kernel ring and acknowledges the LAPIC; it
+/// takes no kernel lock.
+#[no_mangle]
+pub extern "C" fn aux_irq() {
+    mouse::on_irq();
 }
 
 /// Called by `arch_x86_64` for any architectural exception.

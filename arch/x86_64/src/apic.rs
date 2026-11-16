@@ -31,6 +31,8 @@ pub const TIMER_VECTOR: u8 = 0x20;
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
 /// Inter-processor wake-up (spec 0007, "Interrupts"). One fixed vector.
 pub const WAKE_VECTOR: u8 = 0x40;
+/// PS/2 auxiliary interrupt (IRQ12) through the I/O APIC (spec 0010, ADR 0023).
+pub const AUX_VECTOR: u8 = 0x2C;
 
 /// Interrupt command register: delivery status (bit 12) is clear when the
 /// previous IPI has been accepted.

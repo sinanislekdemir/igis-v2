@@ -36,6 +36,10 @@ pub const HUGE_SIZE: u64 = 2 * 1024 * 1024;
 
 const PRESENT: u64 = 1 << 0;
 const WRITABLE: u64 = 1 << 1;
+/// Page-level write-through (PWT).
+const WRITE_THROUGH: u64 = 1 << 3;
+/// Page-level cache disable (PCD).
+const CACHE_DISABLE: u64 = 1 << 4;
 const PAGE_SIZE_BIT: u64 = 1 << 7;
 /// Physical-address bits of a page-table entry (12..51).
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
@@ -137,6 +141,33 @@ pub fn set_pte_present(base: u64, index: usize, present: bool) -> bool {
             value & !PRESENT
         };
         core::ptr::write_volatile(entry, updated);
+    }
+    fence(Ordering::Release);
+    true
+}
+
+/// Marks the 4 KiB entry covering `addr` uncacheable (`PWT | PCD`).
+///
+/// Device memory behind a write-back mapping can return stale reads or lose
+/// writes on real hardware, so an MMIO page gets an uncached mapping before it
+/// is touched. `addr` must lie in a 2 MiB page whose directory entry already
+/// points at a 4 KiB table (split it with [`split_huge_page`] first). Other
+/// bits (present, write permission, address) are preserved. The caller flushes
+/// the TLB (or reloads CR3) afterwards.
+///
+/// Returns `false` when the range is not mapped as a 4 KiB table.
+pub fn set_pte_uncached(addr: u64) -> bool {
+    let base = addr & !(HUGE_SIZE - 1);
+    let Some(physical) = table_phys(base) else {
+        return false;
+    };
+    let index = ((addr & (HUGE_SIZE - 1)) / PAGE_SIZE) as usize;
+    // SAFETY: the table was split by `split_huge_page`, lives in the kernel
+    // image and is mapped through the higher-half alias; `index` is inside it.
+    unsafe {
+        let entry = ((physical + KERNEL_BASE) as *mut u64).add(index);
+        let value = core::ptr::read_volatile(entry);
+        core::ptr::write_volatile(entry, value | WRITE_THROUGH | CACHE_DISABLE);
     }
     fence(Ordering::Release);
     true

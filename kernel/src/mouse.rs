@@ -1,15 +1,21 @@
-//! Polled PS/2 auxiliary (mouse) device (spec 0010, ADR 0021).
+//! PS/2 auxiliary (mouse) device (spec 0010, ADR 0021, ADR 0023).
 //!
 //! The i8042 controller is initialised once at boot: the auxiliary interface is
-//! enabled, its interrupt is left cleared (the kernel polls), and the device is
-//! put into a known state (defaults, 100 reports/s, 4 counts/mm, 1:1 scaling,
-//! reporting on). Every wait is bounded; a missing controller or device is a
-//! boot log line, never a hang.
+//! enabled, the aux interrupt is left clear (the gate and the IOAPIC route are
+//! not installed yet), and the device is put into a known state (defaults,
+//! 100 reports/s, 4 counts/mm, 1:1 scaling, reporting on). Every wait is
+//! bounded; a missing controller or device is a boot log line, never a hang.
 //!
-//! [`poll`] drains aux bytes from the same service opportunity that polls the
-//! keyboard. The keyboard path leaves aux bytes alone and this path leaves
-//! keyboard bytes alone, so two devices sharing one controller buffer cost one
-//! extra service opportunity at most and never lose a byte (spec 0010, I15).
+//! After the IDT and the local APIC exist, [`enable_irq`] routes IRQ12 through
+//! the I/O APIC to the boot core and sets the controller's aux interrupt bit.
+//! The handler ([`on_irq`]) only drains bytes from the controller into a
+//! lock-free byte ring; it never takes the decoder or graphics lock, because it
+//! may interrupt a core that holds either. [`poll`] decodes the ring from the
+//! same service opportunity that polls the keyboard.
+//!
+//! Polling the controller directly remains the backstop for a machine where the
+//! IOAPIC or the local APIC is absent. The direct drain is disabled while IRQ12
+//! is active, so an aux byte has exactly one reader per mode (spec 0010, I14).
 //!
 //! Decoding is a pure 3-byte state machine ([`Decoder`]) and the position
 //! arithmetic lives in [`crate::gfx`], so the boot self-check can run canned
@@ -20,7 +26,7 @@
 //! `syslib.pointer_x`/`pointer_y`/`pointer_buttons` and move the pointer with
 //! the debug-only `syslib.inject_pointer` (spec 0010, I10–I13).
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 
 use abi::Status;
 use arch_x86_64::port::{inb, outb};
@@ -35,6 +41,19 @@ const DATA_PORT: u16 = 0x60;
 const STATUS_OUTPUT_FULL: u8 = 0x01;
 const STATUS_INPUT_FULL: u8 = 0x02;
 const STATUS_FROM_AUX: u8 = 0x20;
+
+/// Controller configuration bit 1: interrupt on auxiliary data.
+const CONFIG_AUX_IRQ: u8 = 0x02;
+
+/// Aux bytes the handler moves out of the controller per interrupt. The entry
+/// is level-triggered, so a longer queue re-fires after the EOI; the bound only
+/// stops a stuck controller from locking the core.
+const IRQ_DRAIN_LIMIT: usize = 64;
+
+/// Capacity of the handler→decoder ring. One packet is three bytes; 1024 bytes
+/// hold 341 packets, more than the 300-event burst the fallback is measured
+/// with, so the decoder never sees a gap that the controller could have held.
+const AUX_RING_SIZE: usize = 1024;
 
 /// One complete report, already sign-extended. `dy` is the device's direction:
 /// positive means **up** (spec 0010, I3).
@@ -114,6 +133,73 @@ fn delta(negative: bool, low: u8) -> i32 {
 /// opportunity at once; the lock serialises assembly and the pointer update
 /// (spec 0010, I16).
 static DECODER: SpinLock<Decoder> = SpinLock::new(Decoder::new());
+
+/// Aux bytes drained by IRQ12, waiting for [`poll`] to decode them
+/// (spec 0010, I32).
+///
+/// This is a single-producer/single-consumer ring: only the IRQ handler writes
+/// [`AuxRing::head`], and only the consumer that holds [`DECODER`] writes
+/// [`AuxRing::tail`]. The handler therefore never blocks and never takes a
+/// lock, which matters because it may interrupt a core that already holds the
+/// decoder or graphics lock (ADR 0023).
+struct AuxRing {
+    bytes: [AtomicU8; AUX_RING_SIZE],
+    /// Next slot to write; producer-owned.
+    head: AtomicUsize,
+    /// Next slot to read; consumer-owned (under [`DECODER`]).
+    tail: AtomicUsize,
+    /// Bytes discarded because the ring was full.
+    dropped: AtomicU32,
+}
+
+impl AuxRing {
+    const fn new() -> Self {
+        AuxRing {
+            bytes: [const { AtomicU8::new(0) }; AUX_RING_SIZE],
+            head: AtomicUsize::new(0),
+            tail: AtomicUsize::new(0),
+            dropped: AtomicU32::new(0),
+        }
+    }
+
+    /// Called from the interrupt handler only.
+    fn push(&self, byte: u8) {
+        let head = self.head.load(Ordering::Relaxed);
+        let tail = self.tail.load(Ordering::Acquire);
+        if head.wrapping_sub(tail) >= AUX_RING_SIZE {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        self.bytes[head % AUX_RING_SIZE].store(byte, Ordering::Relaxed);
+        self.head.store(head.wrapping_add(1), Ordering::Release);
+    }
+
+    /// Called from the decoder side only, under [`DECODER`].
+    fn pop(&self) -> Option<u8> {
+        let tail = self.tail.load(Ordering::Relaxed);
+        if tail == self.head.load(Ordering::Acquire) {
+            return None;
+        }
+        let byte = self.bytes[tail % AUX_RING_SIZE].load(Ordering::Relaxed);
+        self.tail.store(tail.wrapping_add(1), Ordering::Release);
+        Some(byte)
+    }
+}
+
+static RING: AuxRing = AuxRing::new();
+
+/// True once IRQ12 is routed and the controller raises it. While set, the
+/// interrupt handler is the only reader of the controller's aux bytes and
+/// [`poll`] takes every byte from [`RING`] (spec 0010, I14).
+static IRQ_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Interrupts and bytes the handler has seen, for the one-time boot log that
+/// proves the interrupt path is live (the handler cannot print: it may have
+/// interrupted the console lock holder).
+static IRQ_ENTRIES: AtomicU32 = AtomicU32::new(0);
+static IRQ_BYTES: AtomicU32 = AtomicU32::new(0);
+static IRQ_REPORTED: AtomicBool = AtomicBool::new(false);
+static OVERFLOW_REPORTED: AtomicBool = AtomicBool::new(false);
 
 /// Logs the first real packet of the boot, once (PLAN M2.2.1).
 static FIRST_PACKET: AtomicBool = AtomicBool::new(false);
@@ -210,6 +296,19 @@ fn wait_ack() -> bool {
     false
 }
 
+/// Writes the controller configuration byte (`0x60` command, then the value to
+/// the **data** port; a value written to the command port is a command, not
+/// configuration).
+fn write_config(value: u8) -> bool {
+    if !write_controller(0x60) || !wait_input_clear() {
+        return false;
+    }
+    // SAFETY: the controller expects the configuration byte on the data port
+    // after the `0x60` command, and its input buffer was just observed clear.
+    unsafe { outb(DATA_PORT, value) };
+    true
+}
+
 /// Sends one aux command and waits for its ACK.
 fn aux_command(command: u8) -> bool {
     write_aux(command) && wait_ack()
@@ -230,15 +329,17 @@ fn controller_init() -> bool {
     if !write_controller(0xA8) {
         return false;
     }
-    // Read-modify-write the configuration byte: clear the aux interrupt (we
-    // poll) and leave the keyboard bits, including translation, alone.
+    // Read-modify-write the configuration byte: leave the aux interrupt clear
+    // for now (the IDT gate and the IOAPIC route do not exist yet; `enable_irq`
+    // sets bit 1 after they do) and leave the keyboard bits, including
+    // translation, alone.
     if !write_controller(0x20) {
         return false;
     }
     let Some(config) = read_data() else {
         return false;
     };
-    if !write_controller(0x60) || !write_controller(config & !0x02) {
+    if !write_config(config & !CONFIG_AUX_IRQ) {
         return false;
     }
     // Device defaults, then a known reporting shape.
@@ -399,13 +500,107 @@ pub fn init() {
     }
 }
 
-/// Drains aux bytes from the controller into the decoder, applying every
-/// complete report to the pointer (spec 0010, I14).
+/// Enables or declines the aux interrupt (spec 0010, I1/I14, ADR 0023).
 ///
-/// A keyboard byte is left for `keyboard::try_read_byte`, which in turn leaves
-/// an aux byte for this function. The decoder lock is held across the pointer
-/// update so two cores cannot apply packets out of order (I16).
+/// `routed` is true only when the IDT gate exists and the IOAPIC entry for
+/// IRQ12 is programmed to this core. The controller's configuration byte is
+/// read-modify-written with the aux interrupt bit set, preserving the keyboard
+/// translation and clock bits; a failure leaves the bit clear and polling keeps
+/// working.
+///
+/// The order matters: reporting is stopped for the configuration read so a
+/// report byte cannot be mistaken for the configuration byte, and reporting is
+/// re-enabled **before** the aux interrupt bit is set, because once the bit is
+/// set the interrupt handler would steal the `0xF4` ACK from `wait_ack`. The
+/// configuration write is the last controller transaction, so it has no ACK to
+/// lose; a byte that arrives after it is drained by the handler.
+///
+/// Runs once at boot, after the local APIC and the IDT, before the APs start.
+pub fn enable_irq(routed: bool) {
+    if !routed || !ready() {
+        return;
+    }
+    if !aux_command(0xF5) {
+        println!("mouse: aux IRQ12 unavailable (disable reporting timed out); polling");
+        return;
+    }
+    drain_stale();
+    if !write_controller(0x20) {
+        println!("mouse: aux IRQ12 unavailable (config read); polling");
+        return;
+    }
+    let Some(config) = read_data() else {
+        println!("mouse: aux IRQ12 unavailable (config read timed out); polling");
+        return;
+    };
+    if !aux_command(0xF4) {
+        println!("mouse: aux IRQ12 unavailable (enable reporting timed out); polling");
+        return;
+    }
+    if !write_config(config | CONFIG_AUX_IRQ) {
+        println!("mouse: aux IRQ12 unavailable (config write); polling");
+        return;
+    }
+    // From here on every aux byte has exactly one reader: the handler.
+    IRQ_ACTIVE.store(true, Ordering::Release);
+    println!(
+        "mouse: aux IRQ12 enabled (config {:#04x} + aux irq, vector {:#x}, apic {})",
+        config,
+        arch_x86_64::apic::AUX_VECTOR,
+        arch_x86_64::apic::local_id()
+    );
+}
+
+/// The IRQ12 handler: move aux bytes from the controller into [`RING`], then
+/// acknowledge the local APIC (spec 0010, I32).
+///
+/// It touches no kernel lock and prints nothing, so it is safe to interrupt any
+/// code that holds the decoder, graphics or console lock. The drain is bounded;
+/// the IOAPIC entry is level-triggered, so a still-asserted line is re-delivered
+/// after the EOI instead of being lost. A vector that fires with no aux byte
+/// waiting (a spurious or shared line) just acknowledges and returns.
+#[no_mangle]
+pub extern "C" fn on_irq() {
+    IRQ_ENTRIES.fetch_add(1, Ordering::Relaxed);
+    let mut bytes = 0u32;
+    for _ in 0..IRQ_DRAIN_LIMIT {
+        // SAFETY: reading the i8042 status port has no side effects.
+        let status = unsafe { inb(STATUS_PORT) };
+        if status & STATUS_OUTPUT_FULL == 0 || status & STATUS_FROM_AUX == 0 {
+            break;
+        }
+        // SAFETY: the output buffer holds an aux byte, so the read consumes it.
+        let byte = unsafe { inb(DATA_PORT) };
+        RING.push(byte);
+        bytes += 1;
+    }
+    IRQ_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    // Only the local APIC is acknowledged: the legacy PIC is masked and this
+    // vector was never delivered through it.
+    arch_x86_64::apic::eoi();
+}
+
+/// Decodes queued aux bytes and applies every complete report
+/// (spec 0010, I14/I32).
+///
+/// With IRQ12 active this drains [`RING`], which the handler filled; without
+/// it, this drains the controller directly as the fallback. The two modes are
+/// exclusive: while IRQ12 is active the handler is the only aux reader, so no
+/// byte can be taken out of order by a concurrent poll. The decoder lock is
+/// held across the whole drain, so two cores cannot interleave assembly or
+/// apply packets out of order (I16).
 pub fn poll() {
+    // The ring is normally empty in polling mode; draining it unconditionally
+    // means a byte the handler caught (for example during bring-up) is decoded
+    // rather than left stale.
+    drain_ring();
+    if !IRQ_ACTIVE.load(Ordering::Acquire) {
+        poll_controller();
+    }
+}
+
+/// The fallback drain: read the controller directly while IRQ12 is not routed.
+fn poll_controller() {
     for _ in 0..64 {
         // SAFETY: reading the i8042 status port has no side effects.
         let status = unsafe { inb(STATUS_PORT) };
@@ -418,6 +613,27 @@ pub fn poll() {
         if let Some(packet) = decoder.push(byte) {
             apply(packet);
         }
+    }
+}
+
+/// Drains the IRQ ring under the decoder lock, then reports its health once.
+fn drain_ring() {
+    let mut decoder = DECODER.lock();
+    while let Some(byte) = RING.pop() {
+        if let Some(packet) = decoder.push(byte) {
+            apply(packet);
+        }
+    }
+    let dropped = RING.dropped.load(Ordering::Relaxed);
+    if dropped > 0 && !OVERFLOW_REPORTED.swap(true, Ordering::Relaxed) {
+        println!("mouse: aux ring overflow, {dropped} byte(s) dropped");
+    }
+    let interrupts = IRQ_ENTRIES.load(Ordering::Relaxed);
+    if interrupts > 0 && !IRQ_REPORTED.swap(true, Ordering::Relaxed) {
+        println!(
+            "mouse: aux IRQ12 delivered {interrupts} interrupt(s), {} byte(s)",
+            IRQ_BYTES.load(Ordering::Relaxed)
+        );
     }
 }
 

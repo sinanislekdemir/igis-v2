@@ -13,6 +13,7 @@ core::arch::global_asm!(include_str!("ap.s"));
 pub mod apic;
 pub mod gdt;
 pub mod idt;
+pub mod ioapic;
 pub mod keyboard;
 pub mod paging;
 pub mod pit;

@@ -111,6 +111,7 @@ extern "C" {
 
     fn irq_timer();
     fn irq_wake();
+    fn irq_aux();
     fn irq_spurious();
 }
 
@@ -145,11 +146,13 @@ pub fn init(code_selector: u16) {
 
         let timer_isr: unsafe extern "C" fn() = irq_timer;
         let wake_isr: unsafe extern "C" fn() = irq_wake;
+        let aux_isr: unsafe extern "C" fn() = irq_aux;
         let spurious_isr: unsafe extern "C" fn() = irq_spurious;
         (*idt)[crate::apic::TIMER_VECTOR as usize] =
             Entry::handler(timer_isr as u64, code_selector, 0);
         (*idt)[crate::apic::WAKE_VECTOR as usize] =
             Entry::handler(wake_isr as u64, code_selector, 0);
+        (*idt)[crate::apic::AUX_VECTOR as usize] = Entry::handler(aux_isr as u64, code_selector, 0);
         (*idt)[crate::apic::SPURIOUS_VECTOR as usize] =
             Entry::handler(spurious_isr as u64, code_selector, 0);
     }

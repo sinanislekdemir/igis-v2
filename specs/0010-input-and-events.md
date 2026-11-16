@@ -6,7 +6,7 @@
   `syslib`; M2.2 of the desktop milestone
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0021, 0022
+- **ADRs:** 0021, 0022, 0023
 - **Updated:** 2026-11-16
 
 ## Context
@@ -20,7 +20,8 @@ the service opportunity polls COM1 and the PS/2 keyboard into a byte FIFO, and
 
 This spec covers the first half of that work:
 
-- the **PS/2 auxiliary device** (mouse) as the pointer, polled by the kernel;
+- the **PS/2 auxiliary device** (mouse) as the pointer, drained by the kernel (IRQ12,
+  with a polling backstop since M2.2.7);
 - **pointer state** (`x`, `y`, buttons) as one machine-wide value with 1:1 motion;
 - the **software cursor** as a compositor overlay, drawn at present time and never stored
   in the shadow;
@@ -36,6 +37,17 @@ reaches the guest edges. An **absolute** USB HID tablet (`usb-tablet`) reports t
 position, so a dropped report is harmless and the position is independent of host scaling.
 The PS/2 device stays as the fallback for a machine with no USB tablet.
 
+M2.2.7 completes that fallback: IRQ12 is routed through the I/O APIC to the boot core and
+the handler drains the controller into a lock-free byte ring, with the 1 kHz poll kept as
+the backstop for a machine where the route cannot be set up. This removes the service
+opportunity's drain latency and, more importantly, makes the interrupt handler the only
+reader of aux bytes, so two cores can no longer take a byte out of order. The historical
+Q49 figure (346 of 600 px) was measured through a host window; the headless QMP burst
+harness on QEMU 10.2.2 reports 600/600 on both the polled and the IRQ build, because its
+PS/2 model accumulates deltas and defers packets instead of dropping them. The harness is
+kept as the regression that the IRQ path is one-for-one and that the ring reports the
+interrupts it drained.
+
 Non-goals for this slice (deferred or rejected):
 
 - no event queue, no `Event` record, no `next_event`/`poll_event`, no `WaitFor::Input`
@@ -48,11 +60,15 @@ Non-goals for this slice (deferred or rejected):
 - no window focus or routing: until M2.3, input is machine-wide and no application "owns"
   a window;
 - no new bytecode opcode: the input surface is host builtins behind `BUILTIN`.
-- no USB keyboard, mass storage, hub or IRQ12 in this slice (IRQ12 is M2.2.7); the UHCI
-  driver serves the interrupt-IN endpoint of one full-speed HID tablet.
+- no USB keyboard, mass storage or hub; the UHCI driver serves the interrupt-IN endpoint
+  of one full-speed HID tablet. IRQ12 is **not** deferred any more: M2.2.7 implements it
+  for the PS/2 auxiliary device (I32).
 - no real-hardware control-pipe packetisation: the measured QEMU device returns a whole
   descriptor in one data TD. A device with a smaller control pipe would short-transfer
   and be refused as a descriptor error, never guessed at.
+- no ACPI/MADT parsing: the I/O APIC is assumed at the conventional `0xFEC00000` and the
+  legacy ISA IRQ number is the redirection entry (12), as on the PC machine this milestone
+  targets.
 
 ## Requirements
 
@@ -63,11 +79,16 @@ Buttons are a bit mask: bit 0 left, bit 1 right, bit 2 middle.
 
 - **I1 (MUST):** The kernel initialises the i8042 auxiliary device at boot with a bounded
   wait on the controller's input and output buffer bits: enable the aux interface
-  (`0xA8`), read the controller configuration and clear the aux interrupt bit (`0x20` /
-  `0x60`), then send `0xF6` (defaults), `0xF3 100` (100 reports/s), `0xE8 3`
+  (`0xA8`), read the controller configuration and write it back with the aux interrupt
+  bit clear, then send `0xF6` (defaults), `0xF3 100` (100 reports/s), `0xE8 3`
   (4 counts/mm), `0xE6` (1:1 scaling) and `0xF4` (enable reporting) through the `0xD4`
-  prefix, waiting for each ACK. Every step has a timeout; a missing controller or device
-  is a boot log line, not a hang.
+  prefix, waiting for each ACK. The configuration value is written to the **data** port
+  after the `0x60` command; a value written to the command port is a command, not
+  configuration. Once the IDT gate and the I/O APIC route exist (I32), a second bounded
+  step stops reporting, re-reads the configuration, re-enables reporting, and writes the
+  configuration back with the aux interrupt bit set; the keyboard translation and clock
+  bits are preserved in every read-modify-write. Every step has a timeout; a missing
+  controller or device is a boot log line, not a hang.
 - **I2 (MUST):** Report decoding is a pure 3-byte state machine. Byte 0 carries the three
   buttons in bits 0–2, bit 3 is always 1 (sync), bit 4 is the X sign, bit 5 the Y sign,
   bit 6 the X overflow and bit 7 the Y overflow. A first byte without bit 3 is a desync:
@@ -133,20 +154,60 @@ Buttons are a bit mask: bit 0 left, bit 1 right, bit 2 middle.
   is the hardware escape hatch, not an input API, and the kernel does not promise what a
   competing reader sees.
 
-### Polling and ownership
+### The auxiliary interrupt and ownership (M2.2.7)
 
-- **I14 (MUST):** Input is polled by whichever core reaches the service opportunity:
-  `console::poll_input` drains COM1 and the keyboard, and `mouse::poll` drains the aux
-  device, before every scheduler claim and in the idle loop. There is no input IRQ.
+- **I14 (MUST):** The PS/2 auxiliary device is **interrupt-driven**: IRQ12 is routed
+  through the I/O APIC to the boot core on vector `0x2C`, and the handler drains the
+  controller's output buffer into a lock-free byte ring. Decoding and the pointer update
+  stay in the service opportunity (`mouse::poll`), which drains that ring before every
+  scheduler claim and in the idle loop. Polling the controller directly is **kept as a
+  bounded backstop** for a machine where the I/O APIC or the local APIC is absent, or
+  where the controller refuses the configuration write; in that mode `mouse::poll` drains
+  the controller itself. The two modes are exclusive: while IRQ12 is active the handler is
+  the only reader of aux bytes and the direct drain is not executed, so no byte can be
+  consumed twice or taken out of order.
 - **I15 (MUST):** The keyboard path and the mouse path never consume each other's bytes.
-  The controller status bit 5 says which device a waiting byte came from; the keyboard
-  path stops at an aux byte, the mouse path stops at a keyboard byte, and both are polled
-  in the same opportunity, so a byte is deferred by one poll at most and never lost.
+  The controller status bit 5 says which device a byte came from. With IRQ12 active the
+  handler reads only bytes whose status says auxiliary and the keyboard path reads only
+  bytes whose status says keyboard; the controller's one-byte output buffer makes those
+  conditions mutually exclusive, so neither consumes the other's byte. In the polling
+  backstop the same rule applies: the keyboard path stops at an aux byte and the mouse
+  path stops at a keyboard byte, and both are polled in the same opportunity.
 - **I16 (MUST):** The decoder and the pointer update are serialised by a kernel lock, so
-  two cores polling at once cannot interleave packet assembly or tear the position.
+  two cores draining the ring cannot interleave packet assembly or tear the position.
   Presenting is serialised by the graphics lock (spec 0009).
 - **I17 (MUST):** Pointer and cursor work allocates nothing and keeps no per-application
-  state: one static decoder, one static pointer, one static cursor table.
+  state: one static decoder, one static pointer, one static cursor table, one static byte
+  ring.
+- **I32 (MUST):** The interrupt mechanism is bounded and allocation-free:
+
+  - the I/O APIC is programmed at the conventional MMIO window `0xFEC00000`
+    (`IOREGSEL` 0x00, `IOWIN` 0x10) and the containing 2 MiB identity-mapped page is
+    marked uncacheable (`PWT | PCD`) before the registers are touched;
+  - the redirection entry for IRQ12 is fixed delivery, physical destination, active-high,
+    **level-triggered** and unmasked, with the boot core's APIC id as the destination.
+    Level triggering is required so a partial drain is re-delivered after the EOI instead
+    of waiting for a new edge that the controller cannot produce while its line is
+    already high;
+  - the ring is single-producer/single-consumer: only the handler writes the head and only
+    the decoder (holding the decoder lock) writes the tail. The handler takes **no kernel
+    lock and prints nothing**, because it may interrupt code that holds the decoder,
+    graphics or console lock;
+  - the handler drains at most 64 bytes per interrupt, pushes them into the ring, counts
+    the interrupt and the bytes, and acknowledges the **local APIC only** (the legacy PIC
+    remains masked; no PIC EOI is sent);
+  - a full ring discards the newest byte and increments a drop counter, reported once in
+    the boot log. Overflow is a bounded failure, never a stall: the handler keeps draining
+    the controller, so the level-triggered line still falls;
+  - an unexpected or spurious `0x2C` with no aux byte waiting acknowledges and returns.
+- **I33 (MUST):** Bring-up is fail-safe and visible. The boot log names the route
+  (`ioapic: version ..., IRQ12 -> vector 0x2c on apic N (level)` and
+  `mouse: aux IRQ12 enabled (config ...)`) or the reason polling remains
+  (`ioapic: absent or unusable; PS/2 polling only`, `... no local APIC; PS/2 polling
+  only`, or a controller-step failure). The first interrupt that delivers bytes is
+  reported once as `mouse: aux IRQ12 delivered N interrupt(s), M byte(s)`, printed from
+  the decoder context rather than the handler. An absent device, an absent IOAPIC and a
+  failed configuration write all leave the polling path working.
 
 ### Key events and the event queue (M2.2.3–M2.2.5)
 
@@ -235,9 +296,15 @@ events", "The event queue") record how they were implemented.
 ```
 i8042 ── status 0x64 / data 0x60 ──▶ keyboard (byte stream, console)
         │
-        └─ aux byte ──▶ mouse::Decoder (3-byte assembly)
-                              │ Packet { dx, dy, buttons }
-                              ▼
+        ├─ status bit 5 (aux) ──▶ IRQ12 ──▶ I/O APIC ──▶ handler (boot core)
+        │                                                 │ drain ≤ 64 bytes
+        │                                                 ▼
+        │                                         lock-free byte ring
+        │                                                 │ service opportunity
+        │                                                 ▼
+        └─ fallback: mouse::poll reads the controller ──▶ mouse::Decoder
+                                                              │ Packet { dx, dy, buttons }
+                                                              ▼
 PCI 0C.03 ──▶ UHCI ──▶ tablet HID report { buttons, x, y }
                               │ absolute 0..=32767, scaled
                               ▼
@@ -250,8 +317,9 @@ application ── syslib.get_pixel ──────────────�
 ```
 
 The PS/2 path is the fallback; while the tablet is ready its reports are ignored (I21).
-Both paths are polled in the same service opportunity, so a report is applied at most a
-few milliseconds after it arrives.
+The handler only moves aux bytes; the service opportunity decodes them, so a report is
+applied within one service opportunity of arriving. The tablet endpoint is still polled in
+the same opportunity, and both paths update one pointer state.
 
 ### Controller initialisation
 
@@ -268,9 +336,53 @@ few milliseconds after it arrives.
 | 9 | `0x64 ← 0xD4`, `0x60 ← 0xF4` | ACK | no aux device |
 
 The configuration byte is read-modify-written, so the keyboard translation bit and the
-keyboard clock bit are preserved; only the aux interrupt is cleared, because the kernel
-polls (I14). The keyboard interface itself is enabled by the existing
-`keyboard::init` (`0xAE`).
+keyboard clock bit are preserved. At step 4 the aux interrupt is left clear because the
+IDT gate and the IOAPIC route do not exist yet; the second bring-up step (below) sets it.
+The keyboard interface itself is enabled by the existing `keyboard::init` (`0xAE`).
+
+### The auxiliary interrupt (M2.2.7)
+
+`kernel/src/mouse.rs` and `arch/x86_64/src/ioapic.rs` split the path in two: a short
+handler that moves bytes, and the service opportunity that decodes them.
+
+| Step | What | Bound |
+|------|------|-------|
+| Route | split the `0xFEC00000` 2 MiB page once, mark the register page `PWT \| PCD`, reload CR3 | 1 table |
+| Probe | read `IOAPICVER`; reject `0xFFFFFFFF`, 0 or a redirection count below 12 | 1 read |
+| Program | entry 12: fixed, physical, active-high, level, unmasked, destination = boot core APIC id | 3 writes |
+| Gate | `idt::init` installs `irq_aux` (vector `0x2C`) before the route exists | boot order |
+| Arm | stop reporting (`0xF5`), re-read the configuration, re-enable reporting (`0xF4`), write `config \| 0x02` last | 5 commands |
+| Drain | handler reads status + data while bit 5 says aux; pushes to the ring; EOIs the LAPIC | 64 bytes/IRQ |
+| Decode | `mouse::poll` drains the ring under the decoder lock and applies packets | service opportunity |
+
+The order in "Arm" is load-bearing: once bit 1 is set, an ACK byte is aux data, and the
+handler would steal the `0xF4` ACK from `wait_ack`; so reporting is re-enabled before the
+configuration byte is written. That last write has no ACK, and any byte arriving after it
+is drained by the handler. The configuration byte is not read back after bit 1 is set,
+because the read response would race a pending report; the boot log states the value that
+was written, and the one-time `mouse: aux IRQ12 delivered ...` line proves the route.
+
+The ring holds 1024 bytes (341 reports), more than the 300-event burst in
+`scripts/mouse_burst_qmp.py`, so a burst that reaches the handler cannot overflow before
+the decoder runs. A full ring drops the newest byte and counts it; the handler still
+consumes the controller byte, so a level-triggered line does not stay asserted.
+
+Level triggering is deliberate. The i8042 keeps IRQ12 asserted while its output buffer
+holds another byte; with an edge-triggered entry a handler that stopped at the 64-byte
+bound would leave the line high with no new edge and stall until the next unrelated
+interrupt. With a level entry the IOAPIC re-delivers after the EOI, so the bound is safe.
+
+The handler allocates nothing, prints nothing and takes no kernel lock. It runs on the
+boot core only (the redirection entry names that APIC id), which is what makes the ring a
+single-producer structure. The decoder side may run on any core; the decoder lock makes it
+a single consumer at a time.
+
+The QMP burst harness injects 20 × `rel x=-100` to clamp at the left edge, then 300 ×
+`rel x=+2` as one `input-send-event` batch, and requires exactly +600 guest pixels. On
+QEMU 10.2.2 the polled build also reports 600/600: the emulated PS/2 model accumulates
+deltas in `mouse_dx` and defers packets until the guest reads, so the historical
+host-window 346/600 is not reproducible headlessly. The IRQ build's transcript additionally
+shows the `IRQ12 delivered` line and no direct-poll fallback line.
 
 ### Packet decoding
 
@@ -486,9 +598,10 @@ implements them over `kernel/src/mouse.rs`, `kernel/src/usb.rs`, `kernel/src/gfx
 `mouse::init()` initialises the controller, runs a mode-independent decoder self-check
 (canned packets through the same decoder and the same clamp arithmetic, on scratch state,
 so the real pointer is untouched), logs `mouse: PS/2 aux ready` or `mouse: no aux device`,
-and prints `mouse: decoder ok` or halts loudly with the failing step. `mouse::poll()`
-drains the aux device; `gfx::update_pointer(dx, dy, buttons)` applies one move; `gfx`
-owns the pointer state and the cursor table. `pci::init()` scans bus 0 and returns the
+and prints `mouse: decoder ok` or halts loudly with the failing step. `mouse::enable_irq`
+is the later, optional second step that arms IRQ12 (above). `mouse::poll()` drains the
+byte ring, or the controller when IRQ12 is inactive; `gfx::update_pointer(dx, dy, buttons)`
+applies one move; `gfx` owns the pointer state and the cursor table. `pci::init()` scans bus 0 and returns the
 UHCI controller, `usb::init()` enumerates the tablet and arms the interrupt endpoint, and
 `usb::poll()` parses a completed report and calls `gfx::set_pointer_absolute`.
 
@@ -497,19 +610,35 @@ UHCI controller, `usb::init()` enumerates the tablet and arms the interrupt endp
 byte to both consumers. `event::push` owns the 64-slot queue and wakes `WaitFor::Input`;
 `event::poll`, `event::inject`, `event::drops` and `event::flush` are the host contract.
 
+`ioapic::init(irq, vector, destination)` maps the register page uncached, probes
+`IOAPICVER` and programs one level-triggered redirection entry; it returns `None` for an
+absent or implausible IOAPIC. `mouse::enable_irq(routed)` is the second bring-up step:
+it stops reporting, re-reads the configuration, re-enables reporting, writes
+`config | 0x02` and marks IRQ12 active. `mouse::on_irq()` is called by the `irq_aux` stub:
+it drains at most 64 aux bytes into the ring and EOIs the local APIC. `mouse::poll()`
+drains the ring (and, only while IRQ12 is inactive, the controller) and decodes it.
+`idt::init` installs the `0x2C` gate; `apic::AUX_VECTOR` is the one vector constant.
+
 ## Failure modes
 
 | Situation | Behaviour |
 |-----------|-----------|
 | No i8042 controller or no aux device | `mouse: no aux device`; no cursor; the keyboard and console keep working |
 | A controller command times out | Treated as "no aux device"; init stops, nothing else is affected |
+| No I/O APIC, or `IOAPICVER` is implausible | `ioapic: absent or unusable; PS/2 polling only`; the polling drain stays; no hang |
+| No local APIC | `ioapic: no local APIC; PS/2 polling only`; the timer path is already absent, polling stays |
+| Configuration read/write or the reporting commands time out | `mouse: aux IRQ12 unavailable (...); polling`; bit 1 stays clear and the direct drain is used |
 | Byte stream desync (first byte without bit 3) | Bytes are dropped until bit 3 is set; assembly restarts |
 | Packet with X or Y overflow | Packet ignored whole, including its buttons; the next packet re-states them |
-| Controller output buffer full of keyboard bytes | The mouse stops at a keyboard byte; the keyboard path consumes it at the same opportunity (I15) |
+| Controller output buffer full of keyboard bytes | The handler stops at a keyboard byte and the keyboard path consumes it in the same opportunity (I15) |
+| Aux byte arrives while the handler is running | The line stays high; the level-triggered entry re-delivers after the EOI |
+| Handler reaches its 64-byte bound with the line still high | The level entry re-fires after the EOI; the next pass continues the drain |
+| The 1024-byte ring is full | The newest byte is dropped and counted; the handler still consumes the controller byte, so the line falls; `mouse: aux ring overflow ...` is printed once |
+| A spurious `0x2C` with no aux byte waiting | The handler EOIs and returns; nothing else changes |
 | Pointer delta runs past an edge | Clamped to the edge; no wrap, no error |
 | `inject_pointer` with `buttons > 0b111` | `Status.Invalid`, position and buttons unchanged |
-| Graphics disabled (`screen_width == 0`) | Pointer primitives report 0/no buttons, `inject_pointer` is `Invalid`; the device is still polled, but there is nothing to clamp to and no cursor |
-| Two cores poll at once | The decoder lock serialises assembly and the update; the graphics lock serialises present; the USB lock serialises the endpoint state machine |
+| Graphics disabled (`screen_width == 0`) | Pointer primitives report 0/no buttons, `inject_pointer` is `Invalid`; the device is still drained, but there is nothing to clamp to and no cursor |
+| Two cores reach the service opportunity at once | The decoder lock serialises ring consumption and the update; the handler never takes it, so it cannot deadlock with a held lock |
 | Cursor over text | The cell is presented with the cursor on top; moving away restores the text from the shadow |
 | Application reads `get_pixel` under the cursor | It gets the uncomposited shadow pixel (I7) |
 | Application drives the i8042 through `syslib.port_out8` | Allowed (no capability model); the kernel does not promise input still works |
@@ -544,7 +673,9 @@ byte to both consumers. `event::push` owns the 64-slot queue and wakes `WaitFor:
 | A hardware cursor sprite | Device-specific state, no proof under QEMU, and it would not compose with the window clip later |
 | Per-application cursors | No per-window ownership exists until M2.3 and the visual identity is the system's |
 | Acceleration in this slice | Needs tuning constants and a clock; 1:1 is enough to prove the path |
-| Reading the mouse from the timer interrupt | Input would then need a lock usable from interrupt context; polling in the service opportunity is already where the keyboard lives |
+| Reading and decoding the mouse in the timer interrupt | The decoder and the pointer update take the decoder and graphics locks, and the interrupted thread may already hold either; decoding stays in the service opportunity and the ISR only moves bytes into a lock-free ring (ADR 0023) |
+| An edge-triggered IRQ12 entry | The i8042 holds its line high while more data is buffered, so a bounded drain could leave the line asserted with no new edge; a level entry re-delivers after the EOI (ADR 0023) |
+| A locked queue between the handler and the decoder | The handler may interrupt a core holding the queue lock (it can hold the decoder lock in `poll`), which is a self-deadlock; a single-producer/single-consumer atomic ring needs no lock in the handler (ADR 0023) |
 | A PS/2 scale factor / acceleration | Relative motion is in host pixels and its loss is burst-dependent; a scale can never reach the guest edge and needs tuning per host window (Q49, ADR 0022) |
 | virtio-input / virtio-tablet | A second virtual device class and a queue protocol, while the historical PC machine already has UHCI; the goal is a plain USB tablet QEMU exposes (ADR 0022) |
 | A user-space USB driver over streams | The pointer state is machine-wide and the kernel already polls the device; a driver application would add a byte protocol and a copy per report (ADR 0021, ADR 0022) |
@@ -560,7 +691,7 @@ byte to both consumers. `event::push` owns the 64-slot queue and wakes `WaitFor:
 | 4 | A hardware cursor / double buffering if the present cost matters | M2.6.2 measurement |
 | 5 | Whether injection survives into a "debug build" flag | if `syslib.inject_pointer` is ever considered a production surface |
 | 6 | Multi-packet control stages on real hardware | the measured QEMU tablet returns a whole descriptor in one data TD; a device whose control pipe is smaller than 64 bytes would need chained data TDs and would currently be refused |
-| 7 | USB keyboard, hubs and mass storage | not in this slice; the UHCI driver serves one interrupt-IN endpoint and IRQ12 is M2.2.7 |
+| 7 | USB keyboard, hubs and mass storage | not in this slice; the UHCI driver serves one interrupt-IN endpoint. PS/2 IRQ12 is implemented (M2.2.7); USB endpoints are still polled |
 
 ## Changelog
 
@@ -568,4 +699,5 @@ byte to both consumers. `event::push` owns the 64-slot queue and wakes `WaitFor:
 |------|--------|
 | 2026-11-16 | Initial accepted version: PS/2 aux init and decoding, machine-wide pointer state with clamping, cursor composited at present time, the four `syslib` pointer primitives, debug injection, polling ownership, and forward references for key events (M2.2.3) and the event queue (M2.2.4). |
 | 2026-11-16 | M2.2.6 absolute pointer (ADR 0022): PCI scan + UHCI + HID `usb-tablet` enumeration (`GET_DESCRIPTOR`/`SET_ADDRESS`/`SET_CONFIGURATION`/`SET_IDLE`), the measured report layout (buttons, absolute 16-bit LE X/Y, wheel), 0..=32767 → `0..=w-1` scaling with round-to-nearest, tablet-over-PS/2 precedence, the polled interrupt-IN endpoint, `syslib.pointer_source()` (builtin 26, no new opcode), and the `usb:` boot lines. Q49's burst loss and host-scale mismatch are fixed by the absolute report; IRQ12 remains M2.2.7. |
+| 2026-11-16 | M2.2.7 PS/2 aux IRQ12 (ADR 0023): the IDT gate `0x2C` and `arch/x86_64::ioapic` route IRQ12 through the I/O APIC to the boot core as a level-triggered fixed/physical/active-high entry, with the `0xFEC00000` page split and marked `PWT \| PCD`. The handler drains at most 64 aux bytes into a 1024-byte single-producer/single-consumer atomic ring and EOIs only the local APIC; `mouse::poll` decodes the ring in the service opportunity, and the direct controller drain remains the bounded backstop when the route is unavailable (the two modes are exclusive, so an aux byte has one reader). The controller configuration value is now written to the data port (the old code wrote it to the command port, so bit 1 never persisted); `enable_irq` stops reporting, re-reads the configuration, re-enables reporting and writes `config \| 0x02` last, because once bit 1 is set the handler would steal the `0xF4` ACK. Boot lines: `ioapic: version ...`, `mouse: aux IRQ12 enabled ...`, one-time `mouse: aux IRQ12 delivered ...`, and the `absent/unavailable ... polling` fallbacks. `scripts/mouse_burst_qmp.py` injects a 300×(+2) burst after clamping at x=0 and requires +600; on QEMU 10.2.2 the polled build is also 600/600 because the emulated PS/2 model retains deltas, so the historical 346/600 is a host-window result and is not reproducible headlessly. Verified `-smp 4` and `-smp 1` with all regressions and QMP absolute 7/7. |
 | 2026-11-16 | M2.2.3–M2.2.5 key events and the event queue: `arch/x86_64::keyboard` decodes set 1 into a console byte and a `KeyEvent` (stable key code, text, Shift/Ctrl/Alt/Caps state, arrows, F1–F12, E1 Pause skipped) with a boot self-check. Predeclared `EventKind` (`PointerMove`/`PointerDown`/`PointerUp`/`KeyDown`/`KeyUp`) and `Event` (`kind,x,y,code,window`, 40 bytes at `abi::layout::event`); key events pack text/modifiers/key code into `code` (`abi::key`). `kernel/src/event.rs` owns a 64-event queue that drops the newest on overflow with a monotonic counter, and pointer transitions enqueue move/down/up. `syslib.next_event` (blocks on `WaitFor::Input`, SMP-safe wake), `poll_event`, `inject_event` (debug-only), `event_drops` and `event_flush` are builtins 27–31 with no new opcode. `samples/apps/events` + `events_poke` prove the API, the overflow policy and a genuinely blocked wake; `keyboard: decoder ok` and `events: ok` run on `-smp 4` and `-smp 1`. |

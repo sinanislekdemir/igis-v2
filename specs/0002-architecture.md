@@ -139,6 +139,13 @@ needs more time is deferred to a bottom half drained by the interpreter loop. Th
 standard split, but it matters more here because there is no separate kernel thread that
 can be rescheduled independently.
 
+The first device interrupt beyond the timer and the wake IPI is the PS/2 auxiliary line
+(spec 0010, ADR 0023). The legacy 8259 PICs stay masked; IRQ12 is routed through the
+I/O APIC to the boot core, and its handler only moves bytes from the controller into a
+lock-free ring before EOIng the local APIC. Decoding and the pointer update stay in the
+service opportunity. A handler therefore never takes a kernel lock that an interrupted
+task could hold, which is the rule every future device interrupt must follow.
+
 ### SMP
 
 The model is designed for N cores and boots with one. Within the first milestone,
@@ -470,12 +477,14 @@ presents each glyph cell from the shadow, so there is one image at all times.
 
 ## Input
 
-Input is a kernel device, not a per-application resource (spec 0010, ADR 0021). The
-service opportunity that already polls COM1 and the PS/2 keyboard also drains the i8042
-auxiliary (mouse) device, decodes its 3-byte reports and updates one machine-wide pointer
-state (`x`, `y`, buttons). The cursor is a 16×16 monochrome arrow composited at present
-time into the framebuffer, never stored in the shadow, so `get_pixel` keeps reading
-uncomposited pixels. Applications see only `syslib.pointer_x`/`pointer_y`/
+Input is a kernel device, not a per-application resource (spec 0010, ADR 0021). The PS/2
+auxiliary (mouse) device is interrupt-driven: IRQ12 is routed through the I/O APIC to the
+boot core, the handler drains the controller into a lock-free byte ring, and the service
+opportunity that already polls COM1 and the PS/2 keyboard decodes the ring and updates one
+machine-wide pointer state (`x`, `y`, buttons) (ADR 0023). Direct polling remains the
+bounded backstop for a machine without an I/O APIC. The cursor is a 16×16 monochrome arrow
+composited at present time into the framebuffer, never stored in the shadow, so `get_pixel`
+keeps reading uncomposited pixels. Applications see only `syslib.pointer_x`/`pointer_y`/
 `pointer_buttons`/`pointer_source` and the debug-only `syslib.inject_pointer`; the console
 keeps its byte stream and `core.read_line` for the shell. Keyboard key events and the event
 queue are later M2.2 slices.
@@ -590,6 +599,7 @@ task; after that, shutdown.
 | 2026-11-13 | Delivery fixed as source-only: the image never contains bytecode, and the manifest is a runtime value (ADR 0019). |
 | 2026-11-15 | APs are real: `MAX_CORES` 8, INIT-SIPI-SIPI through the `0x8000` trampoline, a `0x9000` parameter page, per-core TSS/IST/stacks, observation by attempt with a bounded wait, one IPI vector shared by every core. |
 | 2026-11-16 | H2 implemented for boot, AP and task stacks: a shared split-table cache and guard registry (`kernel/src/guard.rs`, `arch/x86_64/src/paging.rs`), a CR3 + wake-IPI TLB shootdown after every PTE change, AP guards installed before the SIPIs, one extra guard frame below each task stack, a boot PTE/free-frame self-check (`guards: boot 1, ap N, tables M`) and a `#PF` line naming the guard. The interpreter's `StackOverflow` check stays the legal path; a hardware guard hit halts (per-task recovery deferred, Q47). |
+| 2026-11-16 | First device interrupt: IRQ12 for the PS/2 auxiliary device is routed through the I/O APIC to the boot core (vector `0x2C`, level-triggered) and its handler only drains bytes into a lock-free ring; decoding stays in the service opportunity. The legacy PICs remain masked and the I/O APIC register page is mapped uncached. This is the split every device interrupt follows (spec 0010, ADR 0023). |
 | 2026-11-16 | Graphics moved to a kernel-owned shadow screen (spec 0009, ADR 0020): the multiboot2 mode lives in `kernel/src/gfx.rs`, the shadow is `pitch * height` contiguous frames allocated after the frame allocator, `present` blits clipped rows with the pitch, the console draws through the shadow, and a rectangular clip is the window-service seam. The framebuffer tag is now optional: a missing or unsupported mode disables graphics and leaves the console on serial instead of halting. |
 | 2026-11-16 | Input added as a kernel device (spec 0010, ADR 0021): the i8042 auxiliary device is initialised at boot and polled in the service opportunity next to the keyboard, one machine-wide pointer state is owned by `kernel/src/gfx.rs`, the software cursor is composited at present time (never in the shadow), and applications reach input only through `syslib.pointer_x`/`pointer_y`/`pointer_buttons` and the debug-only `inject_pointer`. |
 | 2026-11-16 | The absolute USB tablet added as the primary pointer (spec 0010, ADR 0022): `kernel/src/pci.rs` scans bus 0 for the PIIX3 UHCI controller, `kernel/src/usb.rs` enumerates a HID tablet over control transfers and polls one interrupt-IN endpoint, static DMA structures in `.bss` are addressed physically, and `syslib.pointer_source()` reports none/PS/2/tablet. The PS/2 device remains the fallback; both modules are x86/machine-specific until the `arch`/`platform` split. |
