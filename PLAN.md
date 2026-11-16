@@ -14,16 +14,15 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `M2.3.2` composition and repair (the feature commit; its hash is
-  recorded in the follow-up docs commit) on top of `142f04f` (M2.3.1 resume note). Tree
-  clean.
+- **Last commit:** `98d3f3a` (M2.3.2 window composition and repair) on top of `142f04f`
+  (M2.3.1 resume note). Tree clean.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
   keyboard key events, the event queue and the `events` proof (`4f2038c`), M2.2.7
   PS/2 aux IRQ12 with the lock-free ring (`70b82cd`), the order-independent `events`
   proof (`8afa36a`), the M2.3.0 window spec (`13aecf2`), M2.3.1 window records and
-  lifecycle (`ba4f93c`), and M2.3.2 composition and repair (the feature commit below).
+  lifecycle (`ba4f93c`), and M2.3.2 composition and repair (`98d3f3a`).
 - **Verified at that point:** **313 host tests** (abi 15, compiler 139, interpreter 113,
   langhost 46, including doctests); `cargo xtask build`/`image` clean; the boot prints
   `graphics: clip ok`, `window: rules ok` and `window: paint ok` on `-smp 4` and `-smp 1`;
