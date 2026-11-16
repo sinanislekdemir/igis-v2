@@ -14,8 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `69dfb2f` (M2.3.4 resume note) on top of `4f9a45e` (desktop shell,
-  kernel text windows and `window_info`). Tree clean.
+- **Last commit:** the M2.3.4 docs note (top of `git log`) on top of `4f9a45e`
+  (desktop shell, kernel text windows and `window_info`). Tree clean.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
