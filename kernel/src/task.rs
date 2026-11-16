@@ -294,8 +294,11 @@ impl Task {
         // kill, fault, a failed spawn and a stale-slot eviction), so this is
         // the one place that guarantees no stream endpoint is left behind
         // (spec 0006, S7). Close wakes blocked peers after dropping the
-        // stream lock.
+        // stream lock. The task's windows go with it (spec 0011, W8): the
+        // window table takes its own lock and never a slot lock, so the order
+        // is safe.
         crate::stream::close_task(self.id);
+        crate::window::close_task(self.id);
         self.regions.code.free();
         self.regions.state.free();
         self.regions.stack.free();

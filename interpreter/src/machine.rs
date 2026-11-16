@@ -30,7 +30,7 @@
 
 use abi::layout;
 use abi::opcodes::{self, builtin, value_kind};
-use abi::{refs, ExitReason, FaultCode, Status};
+use abi::{refs, ExitReason, FaultCode, Rect, Status};
 
 use crate::program::Program;
 
@@ -246,6 +246,64 @@ pub trait Host {
     /// Discards every queued event and returns how many were discarded
     /// (`syslib.event_flush`). The default is 0 for a host with no queue.
     fn event_flush(&mut self) -> u64 {
+        0
+    }
+
+    // ---- window service (spec 0011) -------------------------------------
+    //
+    // The defaults are a disabled service: a host with no screen cannot open a
+    // window, has no geometry to report and no focus. The kernel's disabled
+    // state behaves the same way, so a host mock, `langhost` and a kernel
+    // without graphics agree (W13/W14).
+
+    /// Opens a window (`syslib.window_open`): frame origin `(x, y)`, content
+    /// size `(w, h)`, `title` as the resolved `string` bytes. Returns the new
+    /// id, or `Invalid` when graphics are disabled or the geometry is refused,
+    /// or `Full` when the table is full.
+    fn window_open(
+        &mut self,
+        _x: i64,
+        _y: i64,
+        _w: i64,
+        _h: i64,
+        _title: &[u8],
+    ) -> Result<u64, Status> {
+        Err(Status::Invalid)
+    }
+
+    /// Closes a window owned by the caller (`syslib.window_close`). The
+    /// default is `NotFound`: a disabled service has no window to close, which
+    /// is exactly the kernel's disabled-table result (W13).
+    fn window_close(&mut self, _id: u64) -> Status {
+        Status::NotFound
+    }
+
+    /// Raises and focuses a window (`syslib.window_raise`). Any task may raise.
+    /// The default is `NotFound`, like [`Host::window_close`].
+    fn window_raise(&mut self, _id: u64) -> Status {
+        Status::NotFound
+    }
+
+    /// Moves a window owned by the caller (`syslib.window_move`), clamping the
+    /// origin so the frame stays on screen. The default is `NotFound`.
+    fn window_move(&mut self, _id: u64, _x: i64, _y: i64) -> Status {
+        Status::NotFound
+    }
+
+    /// The frame rectangle of a window (`syslib.window_frame_rect`), or
+    /// `NotFound` for an unknown id and `Invalid` when graphics are disabled.
+    fn window_frame_rect(&mut self, _id: u64) -> Result<Rect, Status> {
+        Err(Status::Invalid)
+    }
+
+    /// The content rectangle of a window (`syslib.window_content_rect`), with
+    /// the same error values as [`Host::window_frame_rect`].
+    fn window_content_rect(&mut self, _id: u64) -> Result<Rect, Status> {
+        Err(Status::Invalid)
+    }
+
+    /// The focused window id, or `0` (`syslib.window_focus`).
+    fn window_focus(&mut self) -> u64 {
         0
     }
 
@@ -1570,6 +1628,85 @@ impl Machine {
                     builtin::EVENT_FLUSH => {
                         let flushed = host.event_flush();
                         self.push(stack, flushed)?;
+                    }
+                    // Window service (spec 0011). The kernel owns the table and
+                    // the policy; the machine only decodes operands, resolves
+                    // the title and the out-parameters, and writes results on
+                    // `Ok`. An id of 0 is left to the host, which reports
+                    // `NotFound`.
+                    builtin::WINDOW_OPEN => {
+                        let id_bits = self.pop(stack)?;
+                        let title_bits = self.pop(stack)?;
+                        let h = self.pop(stack)?;
+                        let w = self.pop(stack)?;
+                        let y = self.pop(stack)?;
+                        let x = self.pop(stack)?;
+                        let (region, offset) =
+                            self.resolve(title_bits, state, stack, constants, args)?;
+                        let length =
+                            self.buffer_len(region, offset, state, stack, constants, args)?;
+                        let end = offset.checked_add(length).ok_or(FaultCode::OutOfBounds)?;
+                        if end
+                            > region_len(region, state, stack, constants, args)
+                                .ok_or(FaultCode::OutOfBounds)?
+                        {
+                            return Err(FaultCode::OutOfBounds);
+                        }
+                        let title =
+                            buffer_slice(region, offset, length, state, stack, constants, args)?;
+                        match host.window_open(x as i64, y as i64, w as i64, h as i64, title) {
+                            Ok(window) => {
+                                self.write_bytes(
+                                    id_bits,
+                                    &window.to_le_bytes(),
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.push(stack, Status::Ok as u64)?;
+                            }
+                            Err(status) => self.push(stack, status as u64)?,
+                        }
+                    }
+                    builtin::WINDOW_CLOSE => {
+                        let window = self.pop(stack)?;
+                        let status = host.window_close(window);
+                        self.push(stack, status as u64)?;
+                    }
+                    builtin::WINDOW_RAISE => {
+                        let window = self.pop(stack)?;
+                        let status = host.window_raise(window);
+                        self.push(stack, status as u64)?;
+                    }
+                    builtin::WINDOW_MOVE => {
+                        let y = self.pop(stack)?;
+                        let x = self.pop(stack)?;
+                        let window = self.pop(stack)?;
+                        let status = host.window_move(window, x as i64, y as i64);
+                        self.push(stack, status as u64)?;
+                    }
+                    builtin::WINDOW_FRAME_RECT | builtin::WINDOW_CONTENT_RECT => {
+                        let rect_bits = self.pop(stack)?;
+                        let window = self.pop(stack)?;
+                        let result = if id == builtin::WINDOW_FRAME_RECT {
+                            host.window_frame_rect(window)
+                        } else {
+                            host.window_content_rect(window)
+                        };
+                        match result {
+                            Ok(rect) => {
+                                let mut image = [0u8; layout::rect::SIZE as usize];
+                                layout::rect::write(&mut image, rect);
+                                self.write_bytes(rect_bits, &image, state, stack, constants, args)?;
+                                self.push(stack, Status::Ok as u64)?;
+                            }
+                            Err(status) => self.push(stack, status as u64)?,
+                        }
+                    }
+                    builtin::WINDOW_FOCUS => {
+                        let focus = host.window_focus();
+                        self.push(stack, focus)?;
                     }
                     _ => return Err(FaultCode::IllegalOperation),
                 }

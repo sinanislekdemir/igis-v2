@@ -225,6 +225,35 @@ const EVENT_KIND_ENUM: u16 = 2;
 /// predeclared `Diagnostic` is record 0.
 const EVENT_RECORD: u16 = 1;
 
+/// Compiler-local id of the predeclared `Rect` record (spec 0011, W3). It
+/// follows `Diagnostic` (0) and `Event` (1).
+const RECT_RECORD: u16 = 2;
+
+/// Fields of the predeclared `Rect` record (spec 0011, W3), at the offsets
+/// `abi::layout::rect` fixes. The window service writes the same image.
+const RECT_FIELDS: [RecordField<'static>; 4] = [
+    RecordField {
+        name: "x",
+        ty: Type::scalar(Kind::Int),
+        off: layout::rect::X_OFFSET,
+    },
+    RecordField {
+        name: "y",
+        ty: Type::scalar(Kind::Int),
+        off: layout::rect::Y_OFFSET,
+    },
+    RecordField {
+        name: "w",
+        ty: Type::scalar(Kind::Int),
+        off: layout::rect::W_OFFSET,
+    },
+    RecordField {
+        name: "h",
+        ty: Type::scalar(Kind::Int),
+        off: layout::rect::H_OFFSET,
+    },
+];
+
 /// Fields of the predeclared `Diagnostic` record, at the offsets `abi::layout`
 /// fixes. The kernel writes the same fields directly.
 const DIAGNOSTIC_FIELDS: [RecordField<'static>; 8] = [
@@ -994,6 +1023,15 @@ fn build_tables<'a>(
             size: layout::event::SIZE,
         })
         .map_err(|_| arena_full(path, name, 1, 1))?;
+    // The predeclared `Rect` is the third record entry; the window service
+    // returns geometry through it (spec 0011, W3).
+    records
+        .push(RecordDef {
+            name: "Rect",
+            fields: &RECT_FIELDS,
+            size: layout::rect::SIZE,
+        })
+        .map_err(|_| arena_full(path, name, 1, 1))?;
 
     // The predeclared `ExitReason` is the first sum type
     // (`Ok | Killed | Faulted(code: FaultCode)`); its tag/payload layout is
@@ -1009,7 +1047,7 @@ fn build_tables<'a>(
     for decl in unit.types {
         if matches!(
             decl.name,
-            "Status" | "FaultCode" | "Diagnostic" | "ExitReason" | "EventKind" | "Event"
+            "Status" | "FaultCode" | "Diagnostic" | "ExitReason" | "EventKind" | "Event" | "Rect"
         ) {
             return Err(diag(
                 path,
@@ -5889,6 +5927,145 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::scalar(Kind::Uint)))
             }
+            // Window service (spec 0011). The kernel owns the table, the
+            // geometry, the z-order, the focus and the ownership rules; the
+            // compiler checks the staged signatures only. `Rect` is predeclared,
+            // so the rect reads need no new type name from the application.
+            "syslib.window_open" => {
+                if args.len() != 6 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`syslib.window_open` expects 6 arguments, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                for (index, name) in ["x", "y", "w", "h"].iter().enumerate() {
+                    let value = self.expr_scalar(args[index])?;
+                    if value.kind != Kind::Int {
+                        return Err(self.err_at(
+                            args[index],
+                            format_args!(
+                                "`syslib.window_open` expects an `int` {name}, found `{value}`"
+                            ),
+                        ));
+                    }
+                }
+                let title = self.emit_ref(args[4], Some(Kind::String))?;
+                if title.kind != Kind::String {
+                    let found = self.type_name(title);
+                    return Err(self.err_at(
+                        args[4],
+                        format_args!(
+                            "`syslib.window_open` expects a `string` title, found `{found}`"
+                        ),
+                    ));
+                }
+                let id = self.emit_scalar_ref(args[5])?;
+                if id.kind != Kind::Int {
+                    let found = self.type_name(id);
+                    return Err(self.err_at(
+                        args[5],
+                        format_args!("`syslib.window_open` expects `var id: int`, found `{found}`"),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::WINDOW_OPEN)?;
+                self.pop(6)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "syslib.window_close" | "syslib.window_raise" => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`{target}` expects 1 argument, got {}", args.len()),
+                    ));
+                }
+                self.window_id(target, args[0])?;
+                let id = if target == "syslib.window_close" {
+                    builtin::WINDOW_CLOSE
+                } else {
+                    builtin::WINDOW_RAISE
+                };
+                self.one(opcodes::BUILTIN, id)?;
+                self.pop(1)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "syslib.window_move" => {
+                if args.len() != 3 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`syslib.window_move` expects 3 arguments, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                self.window_id(target, args[0])?;
+                for (index, name) in ["x", "y"].iter().enumerate() {
+                    let value = self.expr_scalar(args[index + 1])?;
+                    if value.kind != Kind::Int {
+                        return Err(self.err_at(
+                            args[index + 1],
+                            format_args!(
+                                "`syslib.window_move` expects an `int` {name}, found `{value}`"
+                            ),
+                        ));
+                    }
+                }
+                self.one(opcodes::BUILTIN, builtin::WINDOW_MOVE)?;
+                self.pop(3)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "syslib.window_frame_rect" | "syslib.window_content_rect" => {
+                if args.len() != 2 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`{target}` expects 2 arguments, got {}", args.len()),
+                    ));
+                }
+                self.window_id(target, args[0])?;
+                let rect = Type::record(RECT_RECORD, layout::rect::SIZE);
+                let destination = self.emit_aggregate_ref(args[1], true, "`var rect`")?;
+                if destination != rect {
+                    let found = self.type_name(destination);
+                    return Err(self.err_at(
+                        args[1],
+                        format_args!("`{target}` expects `var rect: Rect`, found `{found}`"),
+                    ));
+                }
+                let id = if target == "syslib.window_frame_rect" {
+                    builtin::WINDOW_FRAME_RECT
+                } else {
+                    builtin::WINDOW_CONTENT_RECT
+                };
+                self.one(opcodes::BUILTIN, id)?;
+                self.pop(2)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "syslib.window_focus" => {
+                if !args.is_empty() {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`syslib.window_focus` expects 0 arguments, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::WINDOW_FOCUS)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Int)))
+            }
             // Ring operations (spec 0003, "Rings") are compiler-recognised
             // built-in procedures, not host builtins: they lower to the
             // ordinary reference/copy/branch instructions over the ring's
@@ -6482,6 +6659,20 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             return Err(self.err_at(
                 expr,
                 format_args!("expected an `int` task id, found `{found}`"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Checks and emits one window id operand (spec 0011): an `int` where `0`
+    /// is never valid at run time. The service owns the value and the error.
+    fn window_id(&mut self, what: &str, expr: &'a Expr<'a>) -> Result<(), Diagnostic> {
+        let found = self.expr_scalar(expr)?;
+        if found.kind != Kind::Int {
+            let found = self.type_name(found);
+            return Err(self.err_at(
+                expr,
+                format_args!("`{what}` expects an `int` window id, found `{found}`"),
             ));
         }
         Ok(())

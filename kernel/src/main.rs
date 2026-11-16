@@ -20,6 +20,7 @@ mod stream;
 mod sync;
 mod task;
 mod usb;
+mod window;
 
 use arch_x86_64::{apic, gdt, idt, ioapic, keyboard, serial};
 
@@ -39,6 +40,11 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
     // boot, and the console attaches once the shadow exists (spec 0009).
     frame::init(mb2_info as usize, fb);
     let graphics = gfx::init(fb);
+    // The window service narrows this clip when it repaints a window (spec
+    // 0011, W10). Check the save/narrow/restore arithmetic before the console
+    // paints, while the shadow is still the zeroed image, so the restored
+    // pixels are exact and nothing is presented.
+    let clip_check = gfx::clip_self_check();
     console::init();
 
     // The keyboard decoder feeds the console byte stream and the event queue
@@ -96,6 +102,27 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
         frame::total_frames(),
         frame::free_frames() * frame::FRAME_SIZE / (1024 * 1024)
     );
+
+    // The window table's policy (spec 0011): geometry, z-order, focus,
+    // ownership and the limits, run on a scratch table with fixed geometry.
+    // A mismatch halts, so a broken rule cannot pass silently.
+    match clip_check {
+        Some(true) => println!("graphics: clip ok"),
+        Some(false) => {
+            println!("graphics: clip FAIL");
+            arch_x86_64::halt();
+        }
+        // Graphics disabled or the mode too small for the test region: there
+        // is no clip to exercise and every window call is already `Invalid`.
+        None => {}
+    }
+    match window::self_check() {
+        Ok(()) => println!("window: rules ok"),
+        Err(step) => {
+            println!("window: rules FAIL at step {step}");
+            arch_x86_64::halt();
+        }
+    }
 
     // The pointer device and the software cursor (spec 0010). This needs the
     // shadow (screen size, cursor compositing) and the console (boot log), and

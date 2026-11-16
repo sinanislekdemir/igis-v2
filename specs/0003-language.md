@@ -4,7 +4,7 @@
 - **Scope:** application language, type system, memory model, standard library
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0002, 0004, 0005, 0007, 0010, 0011, 0016, 0018, 0021
+- **ADRs:** 0002, 0004, 0005, 0007, 0010, 0011, 0016, 0018, 0021, 0024
 - **Updated:** 2026-11-16
 
 ## Context
@@ -749,8 +749,22 @@ the text byte is the ASCII/control byte (0 for a non-text key or a release), the
 bits are Shift 1 / Ctrl 2 / Alt 4 / Caps 8 at the time of the transition, and the key code
 is the unshifted ASCII (letters uppercase) or a `0x100`-range code for Escape,
 Backspace, Tab, Enter, arrows, Home/End/Page keys, Insert/Delete, F1–F12 and the modifier
-keys. Declaring `Event`, `EventKind`, `Diagnostic`, `ExitReason`, `Status` or `FaultCode`
-is a compile error.
+keys. Declaring `Event`, `EventKind`, `Diagnostic`, `ExitReason`, `Status`, `FaultCode` or
+`Rect` is a compile error.
+
+`Rect` is also predeclared (spec 0011, W3), as a record of four `int` fields (size 32 at
+`abi::layout::rect`). It is the geometry value the window service returns; it is an
+ordinary value that can be declared, copied and passed to `stdlib` helpers, and it holds
+no reference to a window.
+
+```text
+type Rect = record        // offsets, size 32
+  x: int;                 // 0
+  y: int;                 // 8
+  w: int;                 // 16
+  h: int;                 // 24
+end;
+```
 
 There are **no user-defined generics**. The parametric types above are built in; the
 compiler knows their layout and operations. Generic algorithms are either built-ins
@@ -1103,6 +1117,31 @@ The queue is machine-wide; a task that calls `next_event` blocks in `WaitFor::In
 is woken by an insertion on any core. The keyboard still feeds the console byte stream
 (`core.read_line`) unchanged: one key byte produces the console byte and a key event.
 
+**Window surface (spec 0011, M2.3.1).** `Rect` is predeclared, so geometry is returned
+through a value instead of a row of out-parameters:
+
+```text
+syslib.window_open(x: int, y: int, w: int, h: int, title: const string[0],
+                   var id: int) -> Status
+syslib.window_close(id: int) -> Status
+syslib.window_raise(id: int) -> Status
+syslib.window_move(id: int, x: int, y: int) -> Status
+syslib.window_frame_rect(id: int, var rect: Rect) -> Status
+syslib.window_content_rect(id: int, var rect: Rect) -> Status
+syslib.window_focus() -> int
+```
+
+`(x, y)` is the frame origin and `(w, h)` the content size; the service derives the frame
+(content plus a 1-pixel border and a 16-pixel title bar) and both rectangles are readable
+through the predeclared `Rect`. Window ids are `int`
+with `0` invalid, assigned by the service and never reused. `open` reports `Invalid` for a
+refused geometry or disabled graphics and `Full` at 16 windows; `close`/`move` are
+owner-only (`Invalid` for another task's window, `NotFound` for an unknown id) while
+`raise` is allowed to any task; the rect reads report `NotFound`/`Invalid`. An
+out-parameter is written only on `Ok`. When graphics are disabled, `open` and the rect
+reads are `Invalid`, `close`/`raise`/`move` are `NotFound` and `window_focus` is `0`. The
+window model is fixed by spec 0011 and ADR 0024; no opcode is added.
+
 ## Constants and manifests
 
 `const` declarations are compile-time expressions over literals, other constants, and the
@@ -1382,3 +1421,4 @@ buffer indexing, adding no opcode.
 | 2026-11-16 | Staged input surface (spec 0010): `syslib.pointer_x() -> int`, `pointer_y() -> int`, `pointer_buttons() -> uint` and the debug-only `inject_pointer(dx: int, dy: int, buttons: uint) -> Status`. The pointer is a machine-wide value read through the host, not a device handle; `inject_pointer` moves by screen deltas with the same clamping as a real report and returns `Invalid` above `0b111` without changing anything. Raw device bytes stay out of the language: the keyboard remains the console byte stream for `core.read_line`, and key events (M2.2.3) and the event queue (M2.2.4) are future slices. |
 | 2026-11-16 | Event surface (spec 0010, M2.2.3–M2.2.5): `EventKind` and `Event` are predeclared (`PointerMove`/`PointerDown`/`PointerUp`/`KeyDown`/`KeyUp`; `kind,x,y,code,window`, 40 bytes at `abi::layout::event`), and `syslib.next_event`/`poll_event`/`inject_event`/`event_drops`/`event_flush` are host builtins. A key event packs text, modifiers and the stable key code into `code` (`abi::key`), and one key byte still feeds the console stream for `core.read_line`. `next_event` blocks in the new `WaitFor::Input`. |
 | 2026-11-16 | `syslib.pointer_source() -> uint` added (spec 0010, I27): 0 none, 1 PS/2, 2 absolute USB tablet. It is a read-only machine value next to the pointer, a host builtin (id 26) with no new opcode, and `inject_pointer` keeps working regardless of source. |
+| 2026-11-16 | Window surface (spec 0011, M2.3.1): `Rect` is a predeclared record (`x, y, w, h: int`, 32 bytes at `abi::layout::rect`) and `syslib.window_open`/`close`/`raise`/`move`/`frame_rect`/`content_rect`/`focus` are host builtins. `open` takes the frame origin and the content size; ids are `int` with `0` invalid, monotonic and never reused; `close`/`move` are owner-only while `raise` is any task's; the rect reads write a `Rect` only on `Ok`; 16 windows, a 64-byte title and an 8×8 minimum content. No new opcode. |

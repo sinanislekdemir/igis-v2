@@ -464,6 +464,98 @@ pub fn size() -> (u32, u32) {
     }
 }
 
+/// Narrows the shadow clip to `(x, y, w, h)`, intersected with the screen.
+///
+/// This is a kernel-internal operation for the window service (spec 0011,
+/// W10): the service saves the clip by narrowing it for the rectangle it is
+/// painting and calls [`reset_clip`] afterwards. There is no `syslib` binding,
+/// so an application cannot read or change it. Returns `false` when graphics
+/// are disabled and nothing was changed.
+pub fn set_clip(x: i64, y: i64, w: i64, h: i64) -> bool {
+    let mut guard = SCREEN.lock();
+    let Some(screen) = guard.as_mut() else {
+        return false;
+    };
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = x.saturating_add(w).min(screen.width as i64);
+    let y1 = y.saturating_add(h).min(screen.height as i64);
+    screen.clip = if x1 <= x0 || y1 <= y0 {
+        Rect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        }
+    } else {
+        Rect {
+            x: x0 as i32,
+            y: y0 as i32,
+            w: (x1 - x0) as i32,
+            h: (y1 - y0) as i32,
+        }
+    };
+    true
+}
+
+/// Restores the full-screen clip (spec 0011, W10).
+pub fn reset_clip() {
+    let mut guard = SCREEN.lock();
+    let Some(screen) = guard.as_mut() else {
+        return;
+    };
+    screen.clip = Rect {
+        x: 0,
+        y: 0,
+        w: screen.width as i32,
+        h: screen.height as i32,
+    };
+}
+
+/// Boot self-check for the clip save/narrow/restore the window service needs
+/// (spec 0011, W10): narrows the clip, paints across its edge, verifies that
+/// nothing outside was written, then restores the clip and the pixels.
+///
+/// Returns `None` when graphics are disabled or the mode is too small to hold
+/// the test region, `Some(true)` when the arithmetic is correct, and
+/// `Some(false)` on a mismatch. It runs before the console paints, so the
+/// restored pixels are the zeroed shadow; it never presents.
+pub fn clip_self_check() -> Option<bool> {
+    let (screen_w, screen_h) = size();
+    let (screen_w, screen_h) = (screen_w as i64, screen_h as i64);
+    if screen_w < 32 || screen_h < 32 {
+        return None;
+    }
+    const X: i64 = 16;
+    const Y: i64 = 16;
+    const W: i64 = 4;
+    const H: i64 = 4;
+    let mut saved = [[0u32; W as usize]; H as usize];
+    for (row, line) in saved.iter_mut().enumerate() {
+        for (col, pixel) in line.iter_mut().enumerate() {
+            *pixel = get_pixel(X + col as i64, Y + row as i64);
+        }
+    }
+
+    if !set_clip(X, Y, W, H) {
+        return Some(false);
+    }
+    let painted = MAX_COLOR;
+    let status = fill_rect(X - 2, Y - 2, W + 4, H + 4, painted);
+    let inside = get_pixel(X, Y) == painted && get_pixel(X + W - 1, Y + H - 1) == painted;
+    let outside = get_pixel(X - 1, Y) != painted && get_pixel(X + W, Y) != painted;
+    reset_clip();
+
+    for (row, line) in saved.iter().enumerate() {
+        for (col, pixel) in line.iter().enumerate() {
+            let _ = fill_rect(X + col as i64, Y + row as i64, 1, 1, *pixel);
+        }
+    }
+    let restored = get_pixel(X, Y) == saved[0][0];
+
+    Some(status == Status::Ok && inside && outside && restored)
+}
+
 /// Applies a pointer delta with clamping to the screen (spec 0010, I4).
 ///
 /// `dy` is screen-oriented: positive moves down. A zero-sized screen clamps to

@@ -1,0 +1,169 @@
+unit windows;
+
+// M2.3.1 proof app: window records, geometry, z-order, focus and ownership
+// (spec 0011). Nothing here draws: composition, damage and `expose` are M2.3.2
+// and M2.3.3, so this app proves the model through the rect and focus reads.
+//
+//   run windows
+//
+// The run is deterministic and independent of the pointer:
+//
+//   1. Two windows: ids, focus, frame/content rectangles.
+//   2. `window_raise` moves the lower one to the top and focuses it.
+//   3. `window_move` changes the frame origin (and the content origin with it)
+//      without changing the focus.
+//   4. A spawned child opens its own window and exits after a delay: the parent
+//      observes the child's id through `window_focus`, cannot close or move it
+//      (it is not the owner), and after `core.wait` the window is gone and the
+//      focus has fallen back to the parent's top window.
+//   5. Closing the focused window falls back to the next one, closing the last
+//      leaves focus 0, and every unknown id is `NotFound`.
+//
+// The first failed check names itself and sets `ok` false; the last line is
+// `windows: ok` only when every check passed.
+
+uses core, syslib;
+
+var
+  ok: bool;
+  status: Status;
+  diag: Diagnostic;
+  reason: ExitReason;
+  exited_ok: bool;
+  child: int;
+  child_win: int;
+  one: int;
+  two: int;
+  rect: Rect;
+  text: string[16];
+  used: int;
+  screen_w: uint;
+
+procedure say(line: const string[0]);
+begin
+  core.write(line);
+end;
+
+procedure check(label: const string[0]; passed: bool);
+begin
+  if ok then
+  begin
+    if passed then
+    begin
+      say("windows: ");
+      say(label);
+      say(" ok\n");
+    end
+    else
+    begin
+      ok := false;
+      say("windows: FAIL ");
+      say(label);
+      say("\n");
+    end;
+  end;
+end;
+
+procedure classify_reason();
+begin
+  exited_ok := false;
+  case reason of
+    Ok: exited_ok := true
+    Killed: exited_ok := false
+    Faulted(code): exited_ok := false
+  end;
+end;
+
+procedure main(args: const string[1024]);
+begin
+  ok := true;
+  screen_w := syslib.screen_width();
+  if screen_w = uint(0) then
+    say("windows: no graphics\n")
+  else
+  begin
+    // 1. Two windows. The frame is the content plus a 1-px border and a 16-px
+    // title bar: (w + 2, h + 17).
+    status := syslib.window_open(40, 40, 200, 120, "one", one);
+    check("open one", status = Ok and one > 0);
+    check("focus is one", syslib.window_focus() = one);
+
+    status := syslib.window_frame_rect(one, rect);
+    check(
+      "frame one",
+      status = Ok and rect.x = 40 and rect.y = 40 and rect.w = 202 and rect.h = 137);
+    status := syslib.window_content_rect(one, rect);
+    check(
+      "content one",
+      status = Ok and rect.x = 41 and rect.y = 56 and rect.w = 200 and rect.h = 120);
+
+    status := syslib.window_open(300, 200, 160, 90, "two", two);
+    check("open two", status = Ok and two > one);
+    check("focus is two", syslib.window_focus() = two);
+    status := syslib.window_frame_rect(two, rect);
+    check(
+      "frame two",
+      status = Ok and rect.x = 300 and rect.y = 200 and rect.w = 162 and rect.h = 107);
+
+    // 2. Raise the lower window: it goes on top and takes the focus.
+    status := syslib.window_raise(one);
+    check("raise one", status = Ok and syslib.window_focus() = one);
+    status := syslib.window_frame_rect(one, rect);
+    check(
+      "raise keeps frame",
+      status = Ok and rect.x = 40 and rect.y = 40 and rect.w = 202 and rect.h = 137);
+
+    // 3. Move: a new frame origin, the same size, focus unchanged.
+    status := syslib.window_move(one, 60, 50);
+    check("move one", status = Ok and syslib.window_focus() = one);
+    status := syslib.window_frame_rect(one, rect);
+    check(
+      "moved frame",
+      status = Ok and rect.x = 60 and rect.y = 50 and rect.w = 202 and rect.h = 137);
+    status := syslib.window_content_rect(one, rect);
+    check(
+      "moved content",
+      status = Ok and rect.x = 61 and rect.y = 66 and rect.w = 200 and rect.h = 120);
+
+    // 4. Ownership across tasks. The child opens its own window, then tries to
+    // close and move the parent's `one` (passed as its argument); both must be
+    // refused. It exits `Ok` only when every step succeeded, so the parent's
+    // `ExitReason` check proves the refusals. Window ids are monotonic and this
+    // app is the only window client, so the child's window is the one after
+    // `two`: after the child exits, that id must be `NotFound` (the window went
+    // with the task) and the focus must fall back to `one`.
+    used := core.format_int_into(text, one, uint(10), uint(0));
+    check("format parent window id", used > 0);
+    status := core.spawn("windows_child", text, diag, child);
+    check("spawn child", status = Ok and child > 0);
+    status := core.wait(child, reason);
+    classify_reason();
+    check("child ownership checks passed", status = Ok and exited_ok);
+    child_win := two + 1;
+    check("child window id is fresh", child_win <> one and child_win <> two);
+    status := syslib.window_frame_rect(child_win, rect);
+    check("child window gone", status = NotFound);
+    check("focus fell back to one", syslib.window_focus() = one);
+
+    // 5. Close order and focus fallback. `one` is still on top after the
+    // raise, so closing it focuses `two`; closing `two` leaves no focus.
+    status := syslib.window_close(one);
+    check("close one", status = Ok and syslib.window_focus() = two);
+    status := syslib.window_close(two);
+    check("close two", status = Ok and syslib.window_focus() = 0);
+    check("focus none", syslib.window_focus() = 0);
+
+    // 6. Unknown ids and invalid geometry.
+    check("close unknown", syslib.window_close(two) = NotFound);
+    check("raise unknown", syslib.window_raise(one) = NotFound);
+    check("move unknown", syslib.window_move(one, 0, 0) = NotFound);
+    check("rect unknown", syslib.window_frame_rect(9999, rect) = NotFound);
+    status := syslib.window_open(0, 0, 7, 20, "small", one);
+    check("size below minimum", status = Invalid);
+    status := syslib.window_open(0, 0, int(screen_w), 50, "wide", one);
+    check("frame wider than screen", status = Invalid);
+
+    if ok then
+      say("windows: ok\n");
+  end;
+end;

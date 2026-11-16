@@ -5,7 +5,7 @@
   `arch/x86_64` framebuffer access; M2 of the desktop milestone
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0020
+- **ADRs:** 0020, 0024
 - **Updated:** 2026-11-16
 
 ## Context
@@ -147,7 +147,7 @@ line.
 | Slice | Content | Uses this slice |
 |-------|---------|-----------------|
 | M2.2 | PS/2 mouse, a composited cursor, pointer state and the `syslib` pointer surface (spec 0010); the console stays a kernel device | shadow, `present`, clip |
-| M2.3 | Kernel window service: windows with a frame, title bar, content rectangle and z-order; `expose` marks a window dirty; the service repaints from application-owned *content* drawn through the clipped `syslib` calls, presents the affected union | shadow, clip, `present` |
+| M2.3 | Kernel window service (spec 0011): windows with a frame, title bar, content rectangle and z-order, single focus and task ownership (M2.3.1); then frame chrome, damage union and `present` (M2.3.2), and event routing plus `expose` repaint under the service-owned clip (M2.3.3) | shadow, clip, `present` |
 
 The window service repaints on `expose`; it does not keep per-window canvases. An
 application redraws its window's content into the clipped shadow when asked, and the
@@ -235,7 +235,7 @@ an `Info` (width, height, pitch, bpp, shadow address/size/frames, free-frame del
 
 | # | Question | Trigger / owner |
 |---|----------|-----------------|
-| 1 | Clip-region exposure to applications (`set_clip`/`reset_clip`) | M2.3, with the window service |
+| 1 | ~~Clip-region exposure to applications (`set_clip`/`reset_clip`)~~ | Resolved: no application-facing clip. The clip stays service-owned with an internal save/narrow/restore (spec 0011, W10) |
 | 2 | ~~Cursor and pointer rendering: soft cursor in the shadow, or a hardware sprite~~ | Resolved: composited at present time, never in the shadow (spec 0010, ADR 0021) |
 | 3 | Dirty-rectangle accumulation for `present` | M2.3, with `expose` |
 | 4 | A second font or a proportional font | only if the desktop needs one |
@@ -246,3 +246,4 @@ an `Info` (width, height, pitch, bpp, shadow address/size/frames, free-frame del
 |------|--------|
 | 2026-11-16 | Initial accepted version: shadow screen, clipping, the nine `syslib` primitives, console through the shadow, disabled-graphics rules, and forward references to M2.2/M2.3. |
 | 2026-11-16 | M2.2: `present` composites the software cursor into the framebuffer after the row copy (G5), so `get_pixel` stays uncomposited and headless self-checks stay deterministic; the cursor model itself is spec 0010. M2.2 row of the forward-reference table updated; cursor question resolved. |
+| 2026-11-16 | M2.3.0/M2.3.1: spec 0011 and ADR 0024 fix the window model (content-size geometry, one z-order, one focus, ownership, 16/64/8×8 limits). `gfx` gains the kernel-internal `set_clip`/`reset_clip` used by the service, with a boot self-check (`graphics: clip ok`); no application clip primitive is added (open question 1 resolved). The `syslib` drawing surface is unchanged; chrome, damage and `present` of a union are M2.3.2. |

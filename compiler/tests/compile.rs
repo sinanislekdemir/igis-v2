@@ -5491,3 +5491,216 @@ end;
         );
     }
 }
+
+// ---- syslib window service (spec 0011, M2.3.1) ------------------------------
+
+#[test]
+fn syslib_window_surface_is_accepted_and_emits_its_builtins() {
+    use abi::opcodes::{self, builtin};
+
+    let source = br#"
+unit t;
+
+uses core, syslib;
+
+var
+  id: int;
+  other: int;
+  status: Status;
+  rect: Rect;
+  focus: int;
+
+procedure main(args: const string[1024]);
+begin
+  status := syslib.window_open(10, 20, 100, 50, "one", id);
+  status := syslib.window_raise(id);
+  status := syslib.window_move(id, 30, 40);
+  status := syslib.window_frame_rect(id, rect);
+  other := rect.x;
+  status := syslib.window_content_rect(id, rect);
+  other := rect.h;
+  status := syslib.window_close(id);
+  focus := syslib.window_focus();
+end;
+"#;
+    let package = compile(source, "t.ig").expect("the window surface compiles");
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+    let mut seen = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        if op == opcodes::BUILTIN {
+            seen.push(u32::from_le_bytes(
+                instructions[pc + 4..pc + 8].try_into().unwrap(),
+            ));
+        }
+        pc += words * 4;
+    }
+    assert_eq!(
+        seen,
+        vec![
+            builtin::WINDOW_OPEN,
+            builtin::WINDOW_RAISE,
+            builtin::WINDOW_MOVE,
+            builtin::WINDOW_FRAME_RECT,
+            builtin::WINDOW_CONTENT_RECT,
+            builtin::WINDOW_CLOSE,
+            builtin::WINDOW_FOCUS,
+        ]
+    );
+}
+
+#[test]
+fn syslib_window_argument_types_and_arity_are_checked() {
+    let cases = [
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.window_open(1, 2, 3, 4, "x");
+end;
+"#,
+            "`syslib.window_open` expects 6 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+var id: int;
+var raw: bytes[8];
+procedure main(args: const string[1024]);
+begin
+  status := syslib.window_open(1, 2, 3, 4, raw, id);
+end;
+"#,
+            "expected `string`, found `bytes[8]`",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+var id: int;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.window_open(1, 2, 3, 4, "x", id, id);
+end;
+"#,
+            "`syslib.window_open` expects 6 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+var id: int;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.window_open(1, 2, 3, 4, "x", status);
+end;
+"#,
+            "`syslib.window_open` expects `var id: int`",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.window_close(uint(1));
+end;
+"#,
+            "`syslib.window_close` expects an `int` window id",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+var id: int;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.window_move(id, 1);
+end;
+"#,
+            "`syslib.window_move` expects 3 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+var id: int;
+var focus: int;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.window_frame_rect(id, focus);
+end;
+"#,
+            "`var rect` expects a record, sum, array, ring or map value",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+var id: int;
+var rect: Rect;
+procedure poke(r: const Rect);
+begin
+  status := syslib.window_content_rect(id, r);
+end;
+procedure main(args: const string[1024]);
+begin
+end;
+"#,
+            "cannot pass `const` value `r` as `var`",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+var focus: int;
+procedure main(args: const string[1024]);
+begin
+  focus := syslib.window_focus(uint(1));
+end;
+"#,
+            "`syslib.window_focus` expects 0 arguments",
+        ),
+    ];
+    for (source, expected) in cases {
+        let error = compile(source.as_bytes(), "t.ig").expect_err("must be a compile error");
+        assert!(
+            error.message.contains(expected),
+            "expected `{expected}`, got `{}`",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn rect_is_predeclared_and_cannot_be_redeclared() {
+    let source = br#"
+unit t;
+type Rect = record x: int; end;
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("must be a compile error");
+    assert!(
+        error.message.contains("`Rect` is predeclared"),
+        "{}",
+        error.message
+    );
+}

@@ -143,6 +143,57 @@ pub mod event {
     }
 }
 
+/// `Rect`: the predeclared window-rectangle record (spec 0011, W3).
+///
+/// Four `int` fields in declaration order, each 8-byte aligned; the size is 32
+/// bytes. The compiler's predeclared `Rect` type and the window service write
+/// exactly this image.
+pub mod rect {
+    use super::write_i64;
+    use crate::Rect;
+
+    /// Record size in bytes.
+    pub const SIZE: u32 = 32;
+
+    /// Record alignment in bytes.
+    pub const ALIGN: u32 = 8;
+
+    /// Offset of `x`.
+    pub const X_OFFSET: u32 = 0;
+
+    /// Offset of `y`.
+    pub const Y_OFFSET: u32 = 8;
+
+    /// Offset of `w`.
+    pub const W_OFFSET: u32 = 16;
+
+    /// Offset of `h`.
+    pub const H_OFFSET: u32 = 24;
+
+    /// Writes a rectangle into a record-sized slice. A short slice is untouched.
+    pub fn write(dst: &mut [u8], rect: Rect) {
+        let Some(dst) = dst.get_mut(..SIZE as usize) else {
+            return;
+        };
+        write_i64(dst, X_OFFSET, rect.x);
+        write_i64(dst, Y_OFFSET, rect.y);
+        write_i64(dst, W_OFFSET, rect.w);
+        write_i64(dst, H_OFFSET, rect.h);
+    }
+
+    /// Reads a rectangle from a record-sized slice. Returns `None` for a short
+    /// slice.
+    pub fn read(src: &[u8]) -> Option<Rect> {
+        let src = src.get(..SIZE as usize)?;
+        Some(Rect {
+            x: i64::from_le_bytes(src[0..8].try_into().ok()?),
+            y: i64::from_le_bytes(src[8..16].try_into().ok()?),
+            w: i64::from_le_bytes(src[16..24].try_into().ok()?),
+            h: i64::from_le_bytes(src[24..32].try_into().ok()?),
+        })
+    }
+}
+
 /// `ExitReason`: the predeclared sum type `Ok | Killed | Faulted(code)`.
 pub mod exit_reason {
     use super::write_i64;
@@ -220,6 +271,26 @@ mod tests {
     use super::*;
     use crate::key;
     use crate::{Event, EventKind, ExitReason, FaultCode};
+
+    #[test]
+    fn rect_offsets_and_round_trip_match_the_spec() {
+        assert_eq!(rect::X_OFFSET, 0);
+        assert_eq!(rect::Y_OFFSET, 8);
+        assert_eq!(rect::W_OFFSET, 16);
+        assert_eq!(rect::H_OFFSET, 24);
+        assert_eq!(rect::SIZE, 32);
+
+        let value = crate::Rect {
+            x: -3,
+            y: 4,
+            w: 200,
+            h: 120,
+        };
+        let mut bytes = [0xAAu8; rect::SIZE as usize];
+        rect::write(&mut bytes, value);
+        assert_eq!(rect::read(&bytes), Some(value));
+        assert_eq!(rect::read(&bytes[..24]), None);
+    }
 
     #[test]
     fn event_offsets_match_the_spec() {

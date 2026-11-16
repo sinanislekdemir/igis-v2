@@ -5,7 +5,7 @@ Parked decisions for igis-v2. This is the working register; each spec's own
 resolved, record the answer in the relevant spec or in a new ADR, then remove it here.
 
 **Status:** implementation phase. Last updated: 2026-11-16.
-**Snapshot:** specs 0001–0010, ADRs 0001–0022.
+**Snapshot:** specs 0001–0011, ADRs 0001–0024.
 
 ## How to use
 

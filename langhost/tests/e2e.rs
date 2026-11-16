@@ -995,3 +995,41 @@ end;
             .to_vec()
     );
 }
+
+#[test]
+fn window_calls_on_a_host_without_graphics_are_invalid() {
+    let source = br#"
+unit t;
+
+uses core, syslib;
+
+var
+  id: int;
+  status: Status;
+  rect: Rect;
+  focus: int;
+
+procedure main(args: const string[1024]);
+begin
+  status := syslib.window_open(10, 10, 100, 50, "one", id);
+  if status = Invalid then
+    core.write("open invalid\n");
+  status := syslib.window_frame_rect(id, rect);
+  if status = Invalid then
+    core.write("rect invalid\n");
+  focus := syslib.window_focus();
+  if focus = 0 then
+    core.write("focus zero\n");
+  status := syslib.window_close(id);
+  if status = NotFound then
+    core.write("close notfound\n");
+end;
+"#;
+    let package = langhost::compile(source, "t.ig").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(
+        result.output,
+        b"open invalid\nrect invalid\nfocus zero\nclose notfound\n".to_vec()
+    );
+}

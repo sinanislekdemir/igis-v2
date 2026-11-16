@@ -386,10 +386,18 @@ on the same table; the machine, not the compiler, owns the runtime checks.
 | 29 | `inject_event` | 1 → 1 | event record ref; debug-only; unknown kind is `Invalid` |
 | 30 | `event_drops` | 0 → 1 | newest events dropped since boot |
 | 31 | `event_flush` | 0 → 1 | discard the queue, return the count |
+| 32 | `window_open` | 6 → 1 | x, y, w, h, title ref, id ref; `Status` |
+| 33 | `window_close` | 1 → 1 | window id; owner-only |
+| 34 | `window_raise` | 1 → 1 | window id; any task may raise |
+| 35 | `window_move` | 3 → 1 | id, x, y; owner-only |
+| 36 | `window_frame_rect` | 2 → 1 | id, `Rect` ref; writes on `Ok` |
+| 37 | `window_content_rect` | 2 → 1 | id, `Rect` ref; writes on `Ok` |
+| 38 | `window_focus` | 0 → 1 | focused window id or 0 |
 
 Graphics builtins add no opcode, so ABI v1 stays at **75** opcodes (spec 0009). The input
-builtins (spec 0010) add none either; the interpreter owns the button-mask rule, the host
-owns the pointer state and the event queue.
+builtins (spec 0010) and the window builtins (spec 0011) add none either; the interpreter
+owns the button-mask rule and the operand decoding, the host owns the pointer state, the
+event queue and the window table.
 
 ### Compiler / runtime split
 
@@ -551,3 +559,4 @@ pub fn run(task: &mut Task);
 | 2026-11-16 | Input builtins add no opcode (spec 0010): ids 22–25 are `pointer_x`, `pointer_y`, `pointer_buttons` and the debug-only `inject_pointer`, with effects `(0,1)`, `(0,1)`, `(0,1)` and `(3,1)`. The interpreter rejects `buttons > 0b111` before calling the host; ABI v1 stays at **75** opcodes. |
 | 2026-11-16 | Builtin id **26** `pointer_source` (0 → 1) reports the active pointer source, 0 none / 1 PS/2 / 2 absolute USB tablet (spec 0010, I27). No opcode is added; ABI v1 stays at **75**. |
 | 2026-11-16 | Event builtins (spec 0010, I18/I19): `next_event` (27, 1 → 1; blocks on an empty queue with `Blocked(WaitKind::Input)`), `poll_event` (28, 1 → 1; pushes `WouldBlock`), `inject_event` (29, 1 → 1; debug-only, unknown kind is `Invalid`), `event_drops` (30, 0 → 1) and `event_flush` (31, 0 → 1). The host writes a 40-byte `abi::layout::event` image; no opcode is added and ABI v1 stays at **75**. |
+| 2026-11-16 | Window builtins add no opcode (spec 0011, M2.3.1): ids 32–38 are `window_open` (6 → 1), `window_close` (1 → 1), `window_raise` (1 → 1), `window_move` (3 → 1), `window_frame_rect` (2 → 1), `window_content_rect` (2 → 1) and `window_focus` (0 → 1). The interpreter decodes the operands, resolves the title and the out-parameters and writes the 32-byte `abi::layout::rect` image only on `Ok`; the kernel host owns the table and the policy. `Rect` is a predeclared record, so no new type or opcode is needed; ABI v1 stays at **75**. |

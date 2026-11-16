@@ -305,6 +305,38 @@ impl Host for KernelHost<'_> {
         crate::event::flush()
     }
 
+    // Window service (spec 0011). The kernel table owns the geometry, z-order,
+    // focus and ownership; the host supplies the calling task id as the owner,
+    // because the interpreter has no task identity. A disabled screen makes
+    // every call the service's disabled result (W13).
+    fn window_open(&mut self, x: i64, y: i64, w: i64, h: i64, title: &[u8]) -> Result<u64, Status> {
+        crate::window::open(self.current, x, y, w, h, title)
+    }
+
+    fn window_close(&mut self, id: u64) -> Status {
+        crate::window::close(self.current, id)
+    }
+
+    fn window_raise(&mut self, id: u64) -> Status {
+        crate::window::raise(id)
+    }
+
+    fn window_move(&mut self, id: u64, x: i64, y: i64) -> Status {
+        crate::window::move_to(self.current, id, x, y)
+    }
+
+    fn window_frame_rect(&mut self, id: u64) -> Result<abi::Rect, Status> {
+        crate::window::frame_rect(id)
+    }
+
+    fn window_content_rect(&mut self, id: u64) -> Result<abi::Rect, Status> {
+        crate::window::content_rect(id)
+    }
+
+    fn window_focus(&mut self) -> u64 {
+        crate::window::focus()
+    }
+
     // Streams (spec 0006): the kernel table owns the buffer and the generation
     // check. The machine turns `WouldBlock` into a block for the blocking
     // opcodes and into a staged status for `try_*`; the host is always

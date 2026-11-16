@@ -539,6 +539,53 @@ pub mod builtin {
     /// many were discarded. The drop counter is not reset.
     pub const EVENT_FLUSH: u32 = 31;
 
+    // ---- window service (spec 0011) -------------------------------------
+    //
+    // The window table and its policy live in the kernel (`kernel/src/window.rs`).
+    // These builtins are the whole application surface: an id is an `int`,
+    // `0` is never valid, and every result is a `Status` except the focus read
+    // and the two rectangle reads, which write the predeclared `Rect` image
+    // (`abi::layout::rect`) only on success. The host defaults describe a
+    // disabled service, so a host mock and `langhost` need no screen.
+
+    /// `syslib.window_open(x, y, w, h, title, var id) -> Status`: open a window
+    /// with frame origin `(x, y)` and content size `(w, h)`. Pushes `Ok` and
+    /// writes the new id on success; `Invalid` when graphics are disabled, the
+    /// content is below the minimum or the frame does not fit the screen;
+    /// `Full` when the table is full. `a`, `b` and `c` are reserved. Operands:
+    /// `[x][y][w][h][title reference][id reference]`.
+    pub const WINDOW_OPEN: u32 = 32;
+
+    /// `syslib.window_close(id) -> Status`: close a window owned by the calling
+    /// task. `Ok`; `NotFound` for an unknown id; `Invalid` for a live window
+    /// owned by another task.
+    pub const WINDOW_CLOSE: u32 = 33;
+
+    /// `syslib.window_raise(id) -> Status`: move a window to the top of the
+    /// z-order and focus it. Any task may raise any window. `Ok` or `NotFound`.
+    pub const WINDOW_RAISE: u32 = 34;
+
+    /// `syslib.window_move(id, x, y) -> Status`: set the frame origin of a
+    /// window owned by the calling task, clamped so the frame stays on screen.
+    /// `Ok`; `NotFound` for an unknown id; `Invalid` for another task's window.
+    /// Operands: `[id][x][y]`.
+    pub const WINDOW_MOVE: u32 = 35;
+
+    /// `syslib.window_frame_rect(id, var rect) -> Status`: write the frame
+    /// rectangle through the `Rect` reference. `Ok`; `NotFound` for an unknown
+    /// id; `Invalid` when graphics are disabled. Operands: `[id][rect
+    /// reference]`.
+    pub const WINDOW_FRAME_RECT: u32 = 36;
+
+    /// `syslib.window_content_rect(id, var rect) -> Status`: write the content
+    /// rectangle (where the application draws) through the `Rect` reference.
+    /// Same results as [`WINDOW_FRAME_RECT`].
+    pub const WINDOW_CONTENT_RECT: u32 = 37;
+
+    /// `syslib.window_focus() -> int`: push the focused window id, or `0` when
+    /// no window exists or graphics are disabled. No operands.
+    pub const WINDOW_FOCUS: u32 = 38;
+
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
         match id {
@@ -573,6 +620,13 @@ pub mod builtin {
             INJECT_EVENT => Some((1, 1)),
             EVENT_DROPS => Some((0, 1)),
             EVENT_FLUSH => Some((0, 1)),
+            WINDOW_OPEN => Some((6, 1)),
+            WINDOW_CLOSE => Some((1, 1)),
+            WINDOW_RAISE => Some((1, 1)),
+            WINDOW_MOVE => Some((3, 1)),
+            WINDOW_FRAME_RECT => Some((2, 1)),
+            WINDOW_CONTENT_RECT => Some((2, 1)),
+            WINDOW_FOCUS => Some((0, 1)),
             _ => None,
         }
     }

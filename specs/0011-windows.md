@@ -92,16 +92,18 @@ an `int`; `0` is never a valid id.
 - **W12 (MUST):** `Expose` is delivered to the owning task as a machine event with
   `kind = Expose`, `window = id`, `x = 0`, `y = 0`, `code = 0`, and it always asks for the
   **whole content rectangle**; M2 has no partial-damage rectangles. `EventKind.Expose`
-  and its ordinal are added when M2.3.3 implements routing, together with spec 0010's
-  window field. The service never blocks on a client: one that does not repaint leaves
-  its previous pixels (stale content), and the repair pass still presents the union.
+  and its ordinal are added when M2.3.3 implements routing, together with the routing
+  that fills spec 0010's `Event.window` field. The service never blocks on a client: one
+  that does not repaint leaves its previous pixels (stale content), and the repair pass
+  still presents the union.
 - **W13 (MUST):** With graphics disabled (`screen_width() == 0`), `window_open` is
   `Status.Invalid`, `close`/`raise`/`move` are `Status.NotFound` (no window can exist),
   `window_frame_rect`/`window_content_rect` are `Status.Invalid`, and `window_focus` is
   `0`. Nothing hangs and no allocation is attempted.
 - **W14 (MUST):** The window service is entered through host builtins; `Host` defaults
-  describe a disabled service (`Invalid` at `open`, `Invalid` reads, focus `0`) so
-  `langhost`, host tests and a kernel without graphics behave identically. No bytecode
+  describe a disabled service (`Invalid` at `open` and on the rect reads, `NotFound` at
+  `close`/`raise`/`move`, focus `0`), exactly the kernel's disabled-table results (W13),
+  so `langhost`, host tests and a kernel without graphics behave identically. No bytecode
   opcode is added.
 - **W15 (MUST):** The table and its focus/z-order state are one machine-wide value behind
   one lock. Any core may serve any window call; the result is the same as if calls were
@@ -266,9 +268,9 @@ by the service.
 // `Rect` is `abi::Rect`; the host fills it only on `Ok`.
 fn window_open(&mut self, x: i64, y: i64, w: i64, h: i64, title: &[u8])
     -> Result<u64, Status> { Err(Status::Invalid) }
-fn window_close(&mut self, id: u64) -> Status { Status::Invalid }
-fn window_raise(&mut self, id: u64) -> Status { Status::Invalid }
-fn window_move(&mut self, id: u64, x: i64, y: i64) -> Status { Status::Invalid }
+fn window_close(&mut self, id: u64) -> Status { Status::NotFound }
+fn window_raise(&mut self, id: u64) -> Status { Status::NotFound }
+fn window_move(&mut self, id: u64, x: i64, y: i64) -> Status { Status::NotFound }
 fn window_frame_rect(&mut self, id: u64) -> Result<Rect, Status> { Err(Status::Invalid) }
 fn window_content_rect(&mut self, id: u64) -> Result<Rect, Status> { Err(Status::Invalid) }
 fn window_focus(&mut self) -> u64 { 0 }
@@ -353,3 +355,4 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | Date | Change |
 |------|--------|
 | 2026-11-16 | Initial accepted version: frame/content geometry, z-order, single focus, ownership and close-on-termination, the 16/64/8×8 limits, the internal clip save/restore, damage/`Expose` shape, the `window_*` surface plus the predeclared `Rect`, and the disabled-graphics rules. Implementation slices M2.3.1–M2.3.3 named. |
+| 2026-11-16 | M2.3.1 implemented: the kernel `window` table with lifecycle, z-order, focus, ownership and `close_task` on `Task::reclaim`; builtins 32–38 with disabled-service defaults; the predeclared `Rect` record; the internal `gfx` clip save/narrow/restore with a boot self-check; the `windows` proof app and child. Chrome, damage and the damage-union `present` are M2.3.2; routing, `Expose` and `window_present` are M2.3.3. |

@@ -235,6 +235,24 @@ pub struct Event {
     pub window: i64,
 }
 
+/// A rectangle in screen pixels (spec 0011, W3).
+///
+/// `x`/`y` is the top-left corner, `w`/`h` the positive extent. The layout is
+/// fixed by [`layout::rect`], which the compiler's predeclared `Rect` record
+/// matches field for field. Window geometry is returned through this value:
+/// the frame rectangle and the content rectangle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    /// Left edge in screen pixels.
+    pub x: i64,
+    /// Top edge in screen pixels.
+    pub y: i64,
+    /// Width in pixels (positive).
+    pub w: i64,
+    /// Height in pixels (positive).
+    pub h: i64,
+}
+
 /// Keyboard key codes and the packed `Event.code` for `KeyDown`/`KeyUp`
 /// (spec 0010, I18).
 ///
