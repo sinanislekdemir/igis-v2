@@ -759,7 +759,7 @@ samples moved to `samples/apps/base|system`; `xtask image` stages the tree. Boot
 adds `ext2: tree ok`. The language side (`uses lib.math;` compiled as another
 unit, `SourceReader`, unit ids 0/1/2.., 384 KiB/16 MiB caps) is M3.2 (done and
 host-proven); M3.3 wires the reader into the kernel and proves `run module_demo`;
-M3.4 gives the browser tree navigation. M3.5 (docs) closes the milestone.
+M3.4 gives the browser tree navigation. M3 is complete.
 
 ## Ground rules
 
