@@ -14,9 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `68d7ba1` (M2.6.1 proportional font, spec 0015 and ADR 0030, the
-  `font` proof and its screenshot) plus the M2.6.2 commit (damage coalescing, present
-  batching, spec 0016/ADR 0031 and the `perf` sample) and this docs/resume commit on top.
+- **Last commit:** `2c0df71` (M2.6.2 performance: damage coalescing, present batching,
+  spec 0016, ADR 0031 and the `perf` sample) plus this docs/resume commit on top.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -39,7 +38,7 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   plus its check/shot modes, `langhost` test and screenshot harness, M2.5.5 the
   terminal window, M2.5.6 boot to the desktop, M2.6.1 the proportional font
   (`68d7ba1`), and M2.6.2 the coalesced damage repair, batched console present and
-  the `perf` measurement (this commit).
+  the `perf` measurement (`2c0df71`).
 - **Verified at that point (M2.6.2):** **375 host tests** (abi 18, compiler 153,
   interpreter 131, langhost 71, including doctests); `cargo xtask build`/`image` and
   `cargo xtask image --shell` clean; boot self-checks gain
