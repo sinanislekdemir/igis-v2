@@ -2,8 +2,8 @@ unit editor;
 
 // M2.5.3: a windowed text editor over the read-only application file API.
 //
-//   run editor               // interactive, opens `child`
-//   run editor <file>        // interactive, opens that root file
+//   run editor               // interactive, opens `base/child`
+//   run editor <file>        // interactive, opens that image file
 //   run editor check         // deterministic checks, prints `editor: ok`
 //   run editor shot [file]   // draws the file, prints `editor: ready` and
 //                            // holds ~5 s for the QMP screenshot harness
@@ -14,7 +14,7 @@ unit editor;
 // checks the size first (`core.fs_size`), reads it in the API's 256-byte
 // chunks into a staged `bytes[8192]`, and publishes the whole buffer with one
 // `core.substr_into` (a `bytes` source is the strict UTF-8 conversion), so a
-// missing name, a directory, an unsupported path, an over-size file or
+// missing name, a directory, a malformed path, an over-size file or
 // invalid UTF-8 leaves the previous document byte-identical. The buffer limit
 // is 8192 bytes; a larger file is refused with a status line, not truncated.
 //
@@ -418,7 +418,7 @@ begin
   return Invalid;
 end;
 
-// Loads one root file. On success it replaces the document and the path; on
+// Loads one image file. On success it replaces the document and the path; on
 // every failure the document and the path are unchanged and the status line
 // names the class of failure.
 function open_path(name: const string[0]): Status;
@@ -1221,12 +1221,12 @@ var
   size: uint;
   value: Status;
 begin
-  value := open_path("child");
+  value := open_path("base/child");
   verify("open child",
-    value = Ok and path = "child" and int(core.len(text)) > 0);
+    value = Ok and path = "base/child" and int(core.len(text)) > 0);
   verify("child prefix", stdlib.starts_with(text, "unit child;"));
   keep_length := int(core.len(text));
-  value := core.fs_size("child", size);
+  value := core.fs_size("base/child", size);
   verify("child size", value = Ok and int(core.len(text)) = int(size));
   verify("child lines", line_count(text) > 5);
 
@@ -1235,10 +1235,10 @@ begin
     value = NotFound and int(core.len(text)) = keep_length);
   value := open_path(".");
   verify("directory", value = Invalid and int(core.len(text)) = keep_length);
-  value := open_path("child/x");
-  verify("subdirectory path",
+  value := open_path("base/child/x");
+  verify("file as directory",
     value = Invalid and int(core.len(text)) = keep_length);
-  value := open_path("widgets");
+  value := open_path("base/widgets");
   verify("too large",
     value = CapacityExceeded and int(core.len(text)) = keep_length);
   verify("child intact", stdlib.starts_with(text, "unit child;"));
@@ -1338,7 +1338,7 @@ begin
   verify("save kept", text = "keep");
 end;
 
-// Vertical scrolling on `child` (28 lines in 26 rows) and horizontal scrolling
+// Vertical scrolling on `base/child` (28 lines in 26 rows) and horizontal scrolling
 // on a 100-byte line.
 procedure scroll_checks();
 var
@@ -1606,7 +1606,7 @@ var
   got: int;
 begin
   mode := 0;
-  path := "child";
+  path := "base/child";
   if stdlib.starts_with(args, "check") then
     mode := 1
   else if stdlib.starts_with(args, "shot") then

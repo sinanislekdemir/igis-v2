@@ -445,11 +445,11 @@ impl Host for KernelHost<'_> {
         crate::sched::reboot()
     }
 
-    // Application files (spec 0013, M2.5.1): the read-only ext2 mount the REPL
-    // service already compiles from. The machine has validated the path syntax;
-    // the host re-checks the M2.5.1 root subset defensively, converts the
-    // language `string` to `str` and lets the driver stream the blocks. No
-    // allocation, no writable path and no subdirectory traversal.
+    // Application files (spec 0013, spec 0018): the read-only ext2 tree the
+    // REPL service already compiles from. The machine has validated the path
+    // syntax; the host re-checks it defensively, converts the language `string`
+    // to `str` and lets the driver walk the tree. No allocation and no writable
+    // path.
     fn fs_list(
         &mut self,
         path: &[u8],
@@ -457,12 +457,12 @@ impl Host for KernelHost<'_> {
         name: &mut [u8],
     ) -> Result<interpreter::FsEntry, Status> {
         let path = core::str::from_utf8(path).map_err(|_| Status::Invalid)?;
-        let status = abi::fs::validate_root(path);
+        let status = abi::fs::validate_dir(path);
         if status != Status::Ok {
             return Err(status);
         }
         let index = u32::try_from(index).map_err(|_| Status::NotFound)?;
-        let entry = self.image.list_entry(index, name)?;
+        let entry = self.image.list_entry(path, index, name)?;
         Ok(interpreter::FsEntry {
             name_len: entry.name_len,
             kind: entry.kind,
@@ -472,7 +472,7 @@ impl Host for KernelHost<'_> {
 
     fn fs_read(&mut self, path: &[u8], offset: u64, dst: &mut [u8]) -> Result<usize, Status> {
         let path = core::str::from_utf8(path).map_err(|_| Status::Invalid)?;
-        match abi::fs::validate_root_name(path) {
+        match abi::fs::validate_path(path) {
             Status::Ok => self.image.read_at(path, offset, dst),
             status => Err(status),
         }
@@ -480,7 +480,7 @@ impl Host for KernelHost<'_> {
 
     fn fs_size(&mut self, path: &[u8]) -> Result<u64, Status> {
         let path = core::str::from_utf8(path).map_err(|_| Status::Invalid)?;
-        match abi::fs::validate_root_name(path) {
+        match abi::fs::validate_path(path) {
             Status::Ok => self.image.file_size(path),
             status => Err(status),
         }

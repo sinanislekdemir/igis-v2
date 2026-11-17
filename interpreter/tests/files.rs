@@ -2,8 +2,8 @@
 //!
 //! The interpreter does not own the image: it validates the path syntax and
 //! the destination regions, decodes the operands, calls the host and publishes
-//! results only on `Ok`. These tests pin that contract, the root-only M2.5.1
-//! limits and the "out-parameters untouched on failure" rule without the
+//! results only on `Ok`. These tests pin that contract, the spec 0018 path
+//! rule and the "out-parameters untouched on failure" rule without the
 //! kernel. The disabled defaults every other host inherits are covered too.
 
 use abi::opcodes;
@@ -247,16 +247,29 @@ fn fs_list_not_found_leaves_every_destination_untouched() {
 }
 
 #[test]
-fn fs_list_rejects_a_non_root_path_before_the_host_call() {
-    let mut state = list_state(b"child");
+fn fs_list_rejects_a_malformed_path_before_the_host_call() {
+    let mut state = list_state(b"..");
     let mut host = FileHost::new();
     assert_eq!(
         run(&list_program(), &mut state, &mut host),
         Outcome::Exited(ExitReason::Ok)
     );
     assert_eq!(state_word(&state, 104), Status::Invalid as u64);
-    assert_eq!(host.calls, 0, "the interpreter owns the root-only rule");
+    assert_eq!(host.calls, 0, "the interpreter owns the path rule");
     assert_eq!(state_word(&state, 16), 0);
+}
+
+#[test]
+fn fs_list_passes_a_nested_directory_path_to_the_host() {
+    let mut state = list_state(b"base");
+    let mut host = FileHost::new();
+    assert_eq!(
+        run(&list_program(), &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(host.calls, 1);
+    assert_eq!(host.last_path, b"base");
+    assert_eq!(state_word(&state, 104), Status::Ok as u64);
 }
 
 /// State layout used by the `fs_read` tests:
@@ -338,8 +351,23 @@ fn fs_read_failure_leaves_the_destination_and_count_untouched() {
 }
 
 #[test]
-fn fs_read_rejects_a_subdirectory_path_before_the_host_call() {
-    let mut state = read_state(b"child/x");
+fn fs_read_passes_a_nested_file_path_to_the_host() {
+    let mut state = read_state(b"base/child");
+    let mut host = FileHost::new();
+    host.read = Ok(11);
+    host.read_bytes = b"unit child;".to_vec();
+    assert_eq!(
+        run(&read_program(), &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(host.last_path, b"base/child");
+    assert_eq!(state_word(&state, 288), Status::Ok as u64);
+    assert_eq!(state_word(&state, 16), 11);
+}
+
+#[test]
+fn fs_read_rejects_a_malformed_path_before_the_host_call() {
+    let mut state = read_state(b"../child");
     let mut host = FileHost::new();
     assert_eq!(
         run(&read_program(), &mut state, &mut host),

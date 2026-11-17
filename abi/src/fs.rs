@@ -1,19 +1,30 @@
-//! The application file API's fixed limits and path rules (spec 0013).
+//! The application file API's fixed limits and path rules (spec 0013, spec
+//! 0018).
 //!
-//! M2.5.1 exposes the read-only ext2 image to applications through three
-//! `core` builtins. The view is the image root only: this module holds the
-//! limits shared by the compiler and the interpreter, and the one path-syntax
-//! validator the REPL service also uses for `core.spawn`, so a malformed path
-//! means the same thing at every call site. There is no writable API and no
-//! subdirectory traversal in this slice.
+//! Three read-only `core` builtins expose the image tree to applications
+//! (`fs_list`, `fs_read`, `fs_size`), and `core.spawn`/`core.run` resolve their
+//! launch path against the same tree. This module holds the limits shared by
+//! the compiler and the interpreter, and the one path-syntax validator every
+//! call site uses, so a malformed path means the same thing everywhere. There
+//! is no writable API.
+//!
+//! Paths are relative to the image root (`spec 0018`, L6): `base/shell`,
+//! `lib/ui/menu.ig`, `home/readme.txt`. They never start or end with `/`, never
+//! contain an empty, `.` or `..` component, are at most [`PATH_MAX`] bytes, use
+//! at most [`MAX_COMPONENTS`] components and each component is at most
+//! [`NAME_CAP`] bytes.
 
 use crate::Status;
 
-/// Longest accepted path in bytes (spec 0005; spec 0013).
+/// Longest accepted path in bytes (spec 0018, L6).
 pub const PATH_MAX: usize = 256;
 
-/// Longest name a listing can return in bytes (spec 0013).
+/// Longest name a listing can return, and the longest accepted single path
+/// component, in bytes (spec 0013, spec 0018 L6).
 pub const NAME_CAP: usize = 64;
+
+/// Most components a path may have (spec 0018, L6). The ext2 walker stops here.
+pub const MAX_COMPONENTS: usize = 8;
 
 /// The fixed read chunk in bytes: `core.fs_read` never copies more than this
 /// per call, and the compiler requires a destination at least this large
@@ -30,9 +41,14 @@ pub const KIND_DIR: u64 = 1;
 /// listed but cannot be read through the API.
 pub const KIND_OTHER: u64 = 2;
 
-/// Validates a relative path (spec 0005, spec 0013): at most [`PATH_MAX`]
-/// bytes, not empty, no leading or trailing `/`, and no empty or `..`
-/// component. The bytes must already be valid UTF-8; callers convert first.
+/// Validates a relative image path (spec 0018, L6): at most [`PATH_MAX`]
+/// bytes, not empty, no leading or trailing `/`, no empty, `.` or `..`
+/// component, at most [`MAX_COMPONENTS`] components and each at most
+/// [`NAME_CAP`] bytes. The bytes must already be valid UTF-8; callers convert
+/// first.
+///
+/// Over-long paths are [`Status::CapacityExceeded`]; every other syntax error
+/// is [`Status::Invalid`].
 pub fn validate_path(path: &str) -> Status {
     if path.len() > PATH_MAX {
         return Status::CapacityExceeded;
@@ -40,31 +56,26 @@ pub fn validate_path(path: &str) -> Status {
     if path.is_empty() || path.starts_with('/') || path.ends_with('/') {
         return Status::Invalid;
     }
-    if path.split('/').any(|part| part.is_empty() || part == "..") {
+    let mut components = 0usize;
+    for part in path.split('/') {
+        if part.is_empty() || part == "." || part == ".." || part.len() > NAME_CAP {
+            return Status::Invalid;
+        }
+        components += 1;
+    }
+    if components > MAX_COMPONENTS {
         return Status::Invalid;
     }
     Status::Ok
 }
 
-/// Validates the M2.5.1 root-directory path for `core.fs_list`: exactly `""`
-/// or `"."`. Every other path addresses a subdirectory the subset does not
-/// support, so it is [`Status::Invalid`] (spec 0013).
-pub fn validate_root(path: &str) -> Status {
+/// Validates a `core.fs_list` directory path: the root (`""` or `"."`) or a
+/// path that passes [`validate_path`] (spec 0018, A4).
+pub fn validate_dir(path: &str) -> Status {
     if path.is_empty() || path == "." {
         Status::Ok
     } else {
-        Status::Invalid
-    }
-}
-
-/// Validates the M2.5.1 root-entry path for `core.fs_read` and
-/// `core.fs_size`: one relative component with no `/`. A path with a
-/// separator addresses a subdirectory and is [`Status::Invalid`]; the other
-/// syntax rules are [`validate_path`]'s.
-pub fn validate_root_name(path: &str) -> Status {
-    match validate_path(path) {
-        Status::Ok if path.contains('/') => Status::Invalid,
-        status => status,
+        validate_path(path)
     }
 }
 
@@ -73,40 +84,68 @@ mod tests {
     use super::*;
 
     #[test]
-    fn path_syntax_matches_the_spawn_rule() {
-        for path in ["child", "a.b", "x_y", ".", ".."] {
-            if path == ".." {
-                assert_eq!(validate_path(path), Status::Invalid);
-            } else {
-                assert_eq!(validate_path(path), Status::Ok, "{path}");
-            }
+    fn path_syntax_is_the_one_tree_rule() {
+        for path in [
+            "child",
+            "a.b",
+            "x_y",
+            "base/child",
+            "lib/ui/menu.ig",
+            "a/b/c/d/e/f/g/h",
+        ] {
+            assert_eq!(validate_path(path), Status::Ok, "{path}");
         }
-        for path in ["", "/child", "child/", "a//b", "../child", "a/../b"] {
+        for path in [
+            "",
+            ".",
+            "..",
+            "/child",
+            "child/",
+            "a//b",
+            "../child",
+            "a/../b",
+            "base/./child",
+            "a/b/c/d/e/f/g/h/i",
+        ] {
             assert_eq!(validate_path(path), Status::Invalid, "{path}");
         }
-        assert_eq!(validate_path("a/b"), Status::Ok);
         let long = "x".repeat(PATH_MAX + 1);
         assert_eq!(validate_path(&long), Status::CapacityExceeded);
-        let exact = "x".repeat(PATH_MAX);
+        // Exactly PATH_MAX bytes over the eight-component cap still fits.
+        let first = "x".repeat(32);
+        let rest = "y".repeat(31);
+        let exact = [
+            first.as_str(),
+            rest.as_str(),
+            rest.as_str(),
+            rest.as_str(),
+            rest.as_str(),
+            rest.as_str(),
+            rest.as_str(),
+            rest.as_str(),
+        ]
+        .join("/");
+        assert_eq!(exact.len(), PATH_MAX);
         assert_eq!(validate_path(&exact), Status::Ok);
+        let too_long_component = core::str::from_utf8(&[b'x'; NAME_CAP + 1]).unwrap();
+        assert_eq!(validate_path(too_long_component), Status::Invalid);
+        let longest_component = core::str::from_utf8(&[b'x'; NAME_CAP]).unwrap();
+        assert_eq!(validate_path(longest_component), Status::Ok);
     }
 
     #[test]
-    fn the_root_and_root_entry_views_are_the_m251_subset() {
-        assert_eq!(validate_root(""), Status::Ok);
-        assert_eq!(validate_root("."), Status::Ok);
-        for path in ["child", "a/b", "..", "/"] {
-            assert_eq!(validate_root(path), Status::Invalid, "{path}");
+    fn a_directory_path_is_the_root_or_a_valid_path() {
+        assert_eq!(validate_dir(""), Status::Ok);
+        assert_eq!(validate_dir("."), Status::Ok);
+        for path in ["base", "base/child", "lib/ui"] {
+            assert_eq!(validate_dir(path), Status::Ok, "{path}");
         }
-
-        assert_eq!(validate_root_name("child"), Status::Ok);
-        assert_eq!(validate_root_name("."), Status::Ok);
-        for path in ["a/b", "", "..", "/child", "child/"] {
-            assert_eq!(validate_root_name(path), Status::Invalid, "{path}");
+        for path in ["..", "/", "base/", "base//child", "../base"] {
+            assert_eq!(validate_dir(path), Status::Invalid, "{path}");
         }
         let long = "x".repeat(PATH_MAX + 1);
         assert_eq!(
-            validate_root_name(&long),
+            validate_dir(&long),
             Status::CapacityExceeded,
             "syntax errors keep their specific status"
         );
@@ -116,6 +155,7 @@ mod tests {
     fn limits_are_the_spec_constants() {
         assert_eq!(PATH_MAX, 256);
         assert_eq!(NAME_CAP, 64);
+        assert_eq!(MAX_COMPONENTS, 8);
         assert_eq!(READ_CHUNK, 256);
         assert_eq!((KIND_FILE, KIND_DIR, KIND_OTHER), (0, 1, 2));
     }

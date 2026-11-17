@@ -41,14 +41,7 @@ fn main() -> ExitCode {
 fn build() -> ExitCode {
     let status = Command::new(cargo())
         .current_dir(root())
-        .args([
-            "build",
-            "-p",
-            "kernel",
-            "--release",
-            "--target",
-            TARGET,
-        ])
+        .args(["build", "-p", "kernel", "--release", "--target", TARGET])
         .status()
         .expect("failed to run cargo");
 
@@ -129,17 +122,41 @@ fn image(shell: bool) -> ExitCode {
 ///
 /// The staging directory and the image live under `build/`; `mke2fs -d` copies
 /// the staged tree into a fresh 4 MiB ext2 filesystem with 1 KiB blocks. The
-/// image carries source files only (ADR 0019).
+/// image carries source files only (ADR 0019) and preserves the source tree
+/// (spec 0018, X1): `lib`, `base`, `home` and `system` become real directories,
+/// and no file sits at the image root.
 ///
-/// The boot entry is `entrypoint` (spec 0012, M2.5.6): the desktop source is
-/// staged a second time under that name so the boot unit can be the desktop
-/// without duplicating it in `samples/apps`. The file name is the load path; the
+/// The boot entry is `system/entrypoint` (spec 0018, A3): `base/desktop_shell`
+/// is staged a second time under that name so the boot unit can be the desktop
+/// without a duplicate source. The file name is the load path; the
 /// `unit desktop_shell;` name is only diagnostic identity. `--shell` omits the
-/// alias so the REPL falls back to `shell`, exactly as an older image would.
+/// alias so the REPL falls back to `base/shell`, exactly as an older image
+/// would.
 fn apps_image(shell: bool) -> Result<PathBuf, String> {
     let source = root().join("samples").join("apps");
     if !source.is_dir() {
         return Err(format!("{} is not a directory", source.display()));
+    }
+    // Spec 0018, L1: the source root holds exactly the four directories.
+    let top_level = ["lib", "base", "home", "system"];
+    let entries =
+        fs::read_dir(&source).map_err(|error| format!("{}: {error}", source.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("{}: {error}", source.display()))?;
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if name.starts_with('.') {
+            continue;
+        }
+        if !path.is_dir() || !top_level.contains(&name) {
+            return Err(format!(
+                "{}: the image root holds only lib, base, home and system",
+                path.display()
+            ));
+        }
     }
 
     let staging = root().join("build").join(if shell {
@@ -151,15 +168,22 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
         fs::remove_dir_all(&staging).map_err(|error| format!("{}: {error}", staging.display()))?;
     }
     fs::create_dir_all(&staging).map_err(|error| format!("{}: {error}", staging.display()))?;
-    stage_files(&source, &staging)?;
+    stage_tree(&source, &staging)?;
+    // X3: the four top-level directories exist even when empty (lib is empty
+    // until M3.2).
+    for name in top_level {
+        fs::create_dir_all(staging.join(name))
+            .map_err(|error| format!("{}: {error}", staging.join(name).display()))?;
+    }
 
     if !shell {
-        let desktop = staging.join("desktop_shell");
+        let desktop = staging.join("base").join("desktop_shell");
         if !desktop.is_file() {
             return Err(format!("{}: missing desktop source", desktop.display()));
         }
-        fs::copy(&desktop, staging.join("entrypoint"))
-            .map_err(|error| format!("{}: {error}", desktop.display()))?;
+        let entrypoint = staging.join("system").join("entrypoint");
+        fs::copy(&desktop, &entrypoint)
+            .map_err(|error| format!("{}: {error}", entrypoint.display()))?;
     }
 
     let image = root()
@@ -189,30 +213,31 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
     Ok(image)
 }
 
-/// Copies the regular files of `source` into `destination` (recursively).
+/// Copies the tree under `source` into `destination`, creating real
+/// directories (spec 0018, X1).
 ///
-/// The ext2 reader only serves the image root, so a nested directory would be
-/// unreachable from an application. Refusing it here keeps the image honest.
-fn stage_files(source: &Path, destination: &Path) -> Result<(), String> {
+/// Files whose name starts with `.` are repository bookkeeping (`.gitkeep`),
+/// not image content, and are skipped.
+fn stage_tree(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::create_dir_all(destination)
+        .map_err(|error| format!("{}: {error}", destination.display()))?;
     let entries = fs::read_dir(source).map_err(|error| format!("{}: {error}", source.display()))?;
     for entry in entries {
         let entry = entry.map_err(|error| format!("{}: {error}", source.display()))?;
         let path = entry.path();
-        if path.is_dir() {
-            return Err(format!(
-                "{}: directories below the image root are not supported",
-                path.display()
-            ));
-        }
-        if !path.is_file() {
-            continue;
-        }
         let name = match path.file_name() {
             Some(name) => name,
             None => return Err(format!("{}: no file name", path.display())),
         };
-        fs::copy(&path, destination.join(name))
-            .map_err(|error| format!("{}: {error}", path.display()))?;
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let target = destination.join(name);
+        if path.is_dir() {
+            stage_tree(&path, &target)?;
+        } else if path.is_file() {
+            fs::copy(&path, &target).map_err(|error| format!("{}: {error}", path.display()))?;
+        }
     }
     Ok(())
 }
@@ -232,7 +257,10 @@ fn run(args: &[String]) -> ExitCode {
     // single-core path, `-smp 2` proves absent APIC ids are tolerated.
     let mut cores = 4u32;
     if let Some(position) = args.iter().position(|arg| arg == "--cores") {
-        match args.get(position + 1).and_then(|value| value.parse::<u32>().ok()) {
+        match args
+            .get(position + 1)
+            .and_then(|value| value.parse::<u32>().ok())
+        {
             Some(value) if value >= 1 => cores = value,
             _ => {
                 eprintln!("--cores needs a number of at least 1");

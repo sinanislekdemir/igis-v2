@@ -5,10 +5,10 @@ This is a verification harness, not part of the kernel, and deliberately not
 part of the normal regression suite: both modes stop or reset the machine.
 
     halt    boots `build/igis-shell.iso` with `-no-shutdown -no-reboot`, runs
-            `run system_probe halt`, waits for the stop summary, then sends
+            `run system/system_probe halt`, waits for the stop summary, then sends
             another command and requires that serial produces no reply: every
             core really stopped (spec 0017).
-    reboot  boots without `-no-reboot`, runs `run system_probe reboot`, and
+    reboot  boots without `-no-reboot`, runs `run system/system_probe reboot`, and
             requires the `igis-v2: long mode entered` banner to appear a second
             time: the platform reset restarted the machine (spec 0017).
 
@@ -85,7 +85,7 @@ def stop(process):
 def run_halt(iso, cores, timeout):
     process, serial = boot(iso, cores, reboot=False, timeout=timeout)
     try:
-        process.stdin.write(b"run system_probe halt\n")
+        process.stdin.write(b"run system/system_probe halt\n")
         process.stdin.flush()
         serial.wait_for(r"system_probe: halt requested", timeout=timeout)
         serial.wait_for(r"system: halt requested", timeout=timeout)
@@ -119,7 +119,7 @@ def run_reboot(iso, cores, timeout):
     process, serial = boot(iso, cores, reboot=True, timeout=timeout)
     try:
         first = len(serial.lines)
-        process.stdin.write(b"run system_probe reboot\n")
+        process.stdin.write(b"run system/system_probe reboot\n")
         process.stdin.flush()
         serial.wait_for(r"system_probe: reboot requested", timeout=timeout)
         serial.wait_for(r"system: reboot requested", timeout=timeout)

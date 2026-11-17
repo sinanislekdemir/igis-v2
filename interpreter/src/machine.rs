@@ -75,7 +75,7 @@ pub struct WindowInfo {
 /// The fixed title capacity of `window_info` (spec 0011, W9; spec 0012, D15).
 pub const WINDOW_TITLE_CAP: usize = layout::window::TITLE_CAP as usize;
 
-/// One root-directory entry returned by [`Host::fs_list`] (spec 0013).
+/// One directory entry returned by [`Host::fs_list`] (spec 0013).
 ///
 /// The name is staged in the caller's buffer because the interpreter cannot
 /// return a borrowed slice from a host call: the machine passes a local
@@ -441,20 +441,20 @@ pub trait Host {
         Status::Invalid
     }
 
-    // ---- application files (spec 0013) ----------------------------------
+    // ---- application files (spec 0013, spec 0018) -----------------------
     //
-    // The M2.5.1 view is the read-only image root. The machine validates the
-    // path syntax and the destination buffers, so every host agrees that a
-    // malformed path is `Invalid`; the host resolves the entry and copies the
+    // The view is the read-only image tree. The machine validates the path
+    // syntax and the destination buffers, so every host agrees that a
+    // malformed path is `Invalid`; the host walks the path and copies the
     // bytes. The defaults model a machine with no filesystem: every call is
     // `NotFound`, which is what `langhost`'s bare mock reports and what the
     // interpreter's own tests inherit.
 
-    /// One root-directory entry (`core.fs_list`): `index` is 0-based in
-    /// directory order, `.` and `..` excluded. `name` is a local buffer of at
-    /// least [`FS_NAME_CAP`] bytes; the host copies the name and returns its
-    /// length. A missing index is `NotFound`, a name that does not fit is
-    /// `CapacityExceeded`, an unsupported path is `Invalid`. The default is
+    /// One directory entry (`core.fs_list`): `index` is 0-based in directory
+    /// order, `.` and `..` excluded. `name` is a local buffer of at least
+    /// [`FS_NAME_CAP`] bytes; the host copies the name and returns its length.
+    /// A missing index or directory is `NotFound`, a name that does not fit is
+    /// `CapacityExceeded`, a malformed path is `Invalid`. The default is
     /// `NotFound`.
     fn fs_list(&mut self, _path: &[u8], _index: u64, _name: &mut [u8]) -> Result<FsEntry, Status> {
         Err(Status::NotFound)
@@ -2046,8 +2046,8 @@ impl Machine {
                             }
                         }
                     }
-                    // Application files (spec 0013). The M2.5.1 view is the
-                    // read-only image root. The machine validates the path
+                    // Application files (spec 0013, spec 0018). The view is the
+                    // read-only image tree. The machine validates the path
                     // syntax and the destination regions before the host call,
                     // so every host agrees on a malformed path; a failure
                     // leaves every out-parameter untouched.
@@ -2101,7 +2101,7 @@ impl Machine {
                             )?;
                             match core::str::from_utf8(path) {
                                 Err(_) => Err(Status::Invalid),
-                                Ok(text) => match abi::fs::validate_root(text) {
+                                Ok(text) => match abi::fs::validate_dir(text) {
                                     Status::Ok => {
                                         let mut name = [0u8; FS_NAME_CAP];
                                         match host.fs_list(text.as_bytes(), index, &mut name) {
@@ -2190,7 +2190,7 @@ impl Machine {
                             )?;
                             match core::str::from_utf8(path) {
                                 Err(_) => Err(Status::Invalid),
-                                Ok(text) => match abi::fs::validate_root_name(text) {
+                                Ok(text) => match abi::fs::validate_path(text) {
                                     Status::Ok => host.fs_read(text.as_bytes(), offset, &mut chunk),
                                     status => Err(status),
                                 },
@@ -2247,7 +2247,7 @@ impl Machine {
                             )?;
                             match core::str::from_utf8(path) {
                                 Err(_) => Err(Status::Invalid),
-                                Ok(text) => match abi::fs::validate_root_name(text) {
+                                Ok(text) => match abi::fs::validate_path(text) {
                                     Status::Ok => host.fs_size(text.as_bytes()),
                                     status => Err(status),
                                 },

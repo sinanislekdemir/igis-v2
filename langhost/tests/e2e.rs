@@ -8,6 +8,19 @@ fn sample(name: &str) -> Vec<u8> {
     std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"))
 }
 
+/// Path of a staged application sample (spec 0018): applications live under
+/// `samples/apps/base`, kernel/boot-owned probes under `samples/apps/system`.
+fn app_path(name: &str) -> String {
+    let root = format!("{}/../samples/apps", env!("CARGO_MANIFEST_DIR"));
+    for directory in ["base", "system"] {
+        let path = format!("{root}/{directory}/{name}");
+        if std::path::Path::new(&path).is_file() {
+            return path;
+        }
+    }
+    panic!("sample `{name}` is not under samples/apps/base or samples/apps/system")
+}
+
 fn run_sample(name: &str, args: &[u8]) -> langhost::RunResult {
     let source = sample(name);
     let package = langhost::compile(&source, name).expect("compiles");
@@ -208,7 +221,7 @@ fn stage_app_samples_compile_with_the_spawn_builtins() {
         "desktop",
         "ui_layout",
     ] {
-        let path = format!("{}/../samples/apps/{name}", env!("CARGO_MANIFEST_DIR"));
+        let path = app_path(name);
         let source = std::fs::read(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
         let package = langhost::compile(&source, name).unwrap_or_else(|error| {
             panic!("{name} fails to compile: {error}");
@@ -219,7 +232,7 @@ fn stage_app_samples_compile_with_the_spawn_builtins() {
 
 #[test]
 fn clock_app_prints_zeroed_time_with_the_mock_ports() {
-    let path = format!("{}/../samples/apps/clock", env!("CARGO_MANIFEST_DIR"));
+    let path = app_path("clock");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
     let package = langhost::compile(&source, "clock").expect("clock compiles");
     let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
@@ -232,7 +245,7 @@ fn clock_app_prints_zeroed_time_with_the_mock_ports() {
 
 #[test]
 fn shell_spawns_and_waits_for_the_child_on_the_host() {
-    let path = format!("{}/../samples/apps/shell", env!("CARGO_MANIFEST_DIR"));
+    let path = app_path("shell");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
     let package = langhost::compile(&source, "shell").expect("shell compiles");
     let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
@@ -277,7 +290,7 @@ fn shell_spawns_and_waits_for_the_child_on_the_host() {
 
 #[test]
 fn shell_edits_the_line_with_backspace_on_the_host() {
-    let path = format!("{}/../samples/apps/shell", env!("CARGO_MANIFEST_DIR"));
+    let path = app_path("shell");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
     let package = langhost::compile(&source, "shell").expect("shell compiles");
     // Type `helpzz`, delete the two `z`s with DEL, then submit `help`.
@@ -740,7 +753,7 @@ missing=no\n"
 
 #[test]
 fn a_kernel_sample_uses_the_stdlib_on_its_argument() {
-    let path = format!("{}/../samples/apps/text", env!("CARGO_MANIFEST_DIR"));
+    let path = app_path("text");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "text").expect("compiles");
     let result =
@@ -1142,10 +1155,7 @@ end;
 
 #[test]
 fn windows_demo_compiles_and_reports_no_graphics_on_the_host() {
-    let path = format!(
-        "{}/../samples/apps/windows_demo",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = app_path("windows_demo");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "windows_demo").expect("compiles");
     let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
@@ -1155,10 +1165,7 @@ fn windows_demo_compiles_and_reports_no_graphics_on_the_host() {
 
 #[test]
 fn windows_events_compiles_and_reports_no_graphics_on_the_host() {
-    let path = format!(
-        "{}/../samples/apps/windows_events",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = app_path("windows_events");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "windows_events").expect("compiles");
     let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
@@ -1168,10 +1175,7 @@ fn windows_events_compiles_and_reports_no_graphics_on_the_host() {
 
 #[test]
 fn windows_proof_compiles_and_reports_no_graphics_on_the_host() {
-    let path = format!(
-        "{}/../samples/apps/windows_proof",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = app_path("windows_proof");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "windows_proof").expect("compiles");
     let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
@@ -1181,10 +1185,7 @@ fn windows_proof_compiles_and_reports_no_graphics_on_the_host() {
 
 #[test]
 fn windows_proof_a_compiles_and_reports_no_graphics_on_the_host() {
-    let path = format!(
-        "{}/../samples/apps/windows_proof_a",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = app_path("windows_proof_a");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "windows_proof_a").expect("compiles");
     let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
@@ -1194,10 +1195,7 @@ fn windows_proof_a_compiles_and_reports_no_graphics_on_the_host() {
 
 #[test]
 fn windows_proof_b_compiles_and_reports_no_graphics_on_the_host() {
-    let path = format!(
-        "{}/../samples/apps/windows_proof_b",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = app_path("windows_proof_b");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "windows_proof_b").expect("compiles");
     let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
@@ -1289,7 +1287,7 @@ end;
 
 #[test]
 fn ui_layout_compiles_and_reports_the_host_path() {
-    let path = format!("{}/../samples/apps/ui_layout", env!("CARGO_MANIFEST_DIR"));
+    let path = app_path("ui_layout");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "ui_layout").expect("compiles");
     let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
@@ -1299,7 +1297,7 @@ fn ui_layout_compiles_and_reports_the_host_path() {
 
 #[test]
 fn ui_controls_compiles_and_reports_the_host_path() {
-    let path = format!("{}/../samples/apps/ui_controls", env!("CARGO_MANIFEST_DIR"));
+    let path = app_path("ui_controls");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "ui_controls").expect("compiles");
     let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
@@ -1309,7 +1307,7 @@ fn ui_controls_compiles_and_reports_the_host_path() {
 
 #[test]
 fn text_edit_compiles_and_edits_utf8_text_on_the_host() {
-    let path = format!("{}/../samples/apps/text_edit", env!("CARGO_MANIFEST_DIR"));
+    let path = app_path("text_edit");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "text_edit").expect("compiles");
     let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
@@ -1698,7 +1696,7 @@ end;
 
 #[test]
 fn ui_menus_compiles_and_reports_the_host_path() {
-    let path = format!("{}/../samples/apps/ui_menus", env!("CARGO_MANIFEST_DIR"));
+    let path = app_path("ui_menus");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "ui_menus").expect("compiles");
     let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
@@ -1858,7 +1856,7 @@ end;
 
 #[test]
 fn ui_dialogs_compiles_and_reports_the_host_path() {
-    let path = format!("{}/../samples/apps/ui_dialogs", env!("CARGO_MANIFEST_DIR"));
+    let path = app_path("ui_dialogs");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "ui_dialogs").expect("compiles");
     let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
@@ -2054,7 +2052,7 @@ end;
 
 #[test]
 fn ui_icons_compiles_and_reports_the_host_path() {
-    let path = format!("{}/../samples/apps/ui_icons", env!("CARGO_MANIFEST_DIR"));
+    let path = app_path("ui_icons");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "ui_icons").expect("compiles");
     let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
@@ -2186,7 +2184,7 @@ end;
 
 #[test]
 fn widgets_compiles_and_reports_the_host_path() {
-    let path = format!("{}/../samples/apps/widgets", env!("CARGO_MANIFEST_DIR"));
+    let path = app_path("widgets");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "widgets").expect("compiles");
     let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
@@ -2196,10 +2194,7 @@ fn widgets_compiles_and_reports_the_host_path() {
 
 #[test]
 fn clock_window_compiles_and_reports_the_host_path() {
-    let path = format!(
-        "{}/../samples/apps/clock_window",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = app_path("clock_window");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "clock_window").expect("compiles");
     let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
@@ -2400,7 +2395,7 @@ end;
 /// edit, capacity, UTF-8 and read-only logic the kernel's check mode runs.
 #[test]
 fn the_editor_sample_checks_its_logic_on_the_host() {
-    let path = format!("{}/../samples/apps/editor", env!("CARGO_MANIFEST_DIR"));
+    let path = app_path("editor");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "editor").expect("the editor sample compiles");
     let result =
@@ -2414,7 +2409,7 @@ fn the_editor_sample_checks_its_logic_on_the_host() {
 /// kernel check, without a window or a child launch.
 #[test]
 fn the_browser_sample_lists_and_previews_on_the_host() {
-    let path = format!("{}/../samples/apps/browser", env!("CARGO_MANIFEST_DIR"));
+    let path = app_path("browser");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "browser").expect("the browser sample compiles");
     let result =
@@ -2423,12 +2418,12 @@ fn the_browser_sample_lists_and_previews_on_the_host() {
     assert_eq!(result.output, b"browser: host ok\n".to_vec());
 }
 
-/// The M2.5.1 proof sample against `langhost`'s root-only file host (spec
-/// 0013): listing, `fs_size`, chunked reads, offsets and error paths all run
-/// on the host with the same 256-byte chunk the kernel uses.
+/// The file-API proof sample against `langhost`'s tree file host (spec 0013,
+/// spec 0018): listing, `fs_size`, chunked reads, offsets and error paths all
+/// run on the host with the same 256-byte chunk the kernel uses.
 #[test]
 fn the_files_sample_lists_and_reads_the_application_directory() {
-    let path = format!("{}/../samples/apps/files", env!("CARGO_MANIFEST_DIR"));
+    let path = app_path("files");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "files").expect("the files sample compiles");
     let result =
@@ -2542,7 +2537,7 @@ end;
 /// 0/invalid contract and prints the host transcript.
 #[test]
 fn the_font_sample_reports_the_host_path() {
-    let path = format!("{}/../samples/apps/font", env!("CARGO_MANIFEST_DIR"));
+    let path = app_path("font");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "font").expect("the font sample compiles");
     let result =
@@ -2556,7 +2551,7 @@ fn the_font_sample_reports_the_host_path() {
 /// the host path and exits instead of spinning.
 #[test]
 fn the_perf_sample_reports_the_host_path() {
-    let path = format!("{}/../samples/apps/perf", env!("CARGO_MANIFEST_DIR"));
+    let path = app_path("perf");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "perf").expect("the perf sample compiles");
     let result =
@@ -2573,7 +2568,7 @@ fn the_perf_sample_reports_the_host_path() {
 /// prints the host transcript (spec 0009, "Visual proof").
 #[test]
 fn the_visual_sample_reports_the_host_path() {
-    let path = format!("{}/../samples/apps/visual", env!("CARGO_MANIFEST_DIR"));
+    let path = app_path("visual");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "visual").expect("the visual sample compiles");
     let result =
@@ -2587,10 +2582,7 @@ fn the_visual_sample_reports_the_host_path() {
 /// no-graphics contract (spec 0012, spec 0017).
 #[test]
 fn the_desktop_shell_reports_the_host_path() {
-    let path = format!(
-        "{}/../samples/apps/desktop_shell",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = app_path("desktop_shell");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "desktop_shell").expect("the desktop sample compiles");
     let result = langhost::run(&package.code, b"check", langhost::DEFAULT_BUDGET)
@@ -2604,10 +2596,7 @@ fn the_desktop_shell_reports_the_host_path() {
 /// (spec 0017).
 #[test]
 fn the_system_probe_reports_no_kernel_authority() {
-    let path = format!(
-        "{}/../samples/apps/system_probe",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = app_path("system_probe");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "system_probe").expect("the probe compiles");
     let result =

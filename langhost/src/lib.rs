@@ -25,9 +25,14 @@ pub const DEFAULT_BUDGET: u64 = 100_000_000;
 /// runs a child synchronously inside its parent, so it needs one.
 pub const MAX_SPAWN_DEPTH: u32 = 8;
 
-/// Directory `core.spawn` resolves paths against, unless `IGIS_APP_DIR` is
-/// set. It matches the source directory `xtask image` stages (ADR 0019).
+/// Directory the file API and `core.spawn` resolve image paths against, unless
+/// `IGIS_APP_DIR` is set. It is the source tree `xtask image` stages, so the
+/// host and the kernel see the same `lib`/`base`/`home`/`system` layout
+/// (spec 0018).
 const DEFAULT_APP_DIR: &str = "samples/apps";
+
+/// Prefix a bare launch name resolves against (spec 0018, A1).
+const LAUNCH_PREFIX: &str = "base/";
 
 /// A package with owned buffers, produced by [`compile`].
 ///
@@ -105,6 +110,32 @@ struct ConsoleHost {
 impl ConsoleHost {
     fn new(depth: u32) -> Self {
         Self::with_input(depth, HOST_INPUT)
+    }
+
+    /// Resolves an image path under the sample tree, component by component,
+    /// so a file used as a directory reports `Invalid` exactly as the ext2
+    /// walker does (spec 0018, L6). `""` and `"."` are the root.
+    fn resolve_path(&self, path: &str) -> Result<PathBuf, Status> {
+        let mut current = self.source_dir.clone();
+        if path.is_empty() || path == "." {
+            return Ok(current);
+        }
+        let mut parts = path.split('/').peekable();
+        while let Some(part) = parts.next() {
+            current.push(part);
+            match std::fs::symlink_metadata(&current) {
+                Ok(metadata) => {
+                    if parts.peek().is_some() && !metadata.is_dir() {
+                        return Err(Status::Invalid);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(Status::NotFound)
+                }
+                Err(_) => return Err(Status::IoError),
+            }
+        }
+        Ok(current)
     }
 
     fn with_input(depth: u32, input: &[u8]) -> Self {
@@ -263,7 +294,21 @@ impl Host for ConsoleHost {
             return Err(Status::Invalid);
         }
 
-        let source = match std::fs::read(self.source_dir.join(path)) {
+        // A bare name lives under `base/`; a path with `/` is used as written
+        // (spec 0018, A1).
+        let resolved = if path.contains('/') {
+            path.to_string()
+        } else {
+            format!("{LAUNCH_PREFIX}{path}")
+        };
+        let status = abi::fs::validate_path(&resolved);
+        if status != Status::Ok {
+            eprintln!("langhost: spawn refused: malformed resolved path `{resolved}`");
+            describe(diag, b"resolved path is not a valid image path");
+            return Err(status);
+        }
+
+        let source = match std::fs::read(self.source_dir.join(&resolved)) {
             Ok(source) => source,
             Err(error) => {
                 let status = if error.kind() == std::io::ErrorKind::NotFound {
@@ -271,7 +316,7 @@ impl Host for ConsoleHost {
                 } else {
                     Status::IoError
                 };
-                eprintln!("langhost: spawn `{path}`: {error}");
+                eprintln!("langhost: spawn `{resolved}`: {error}");
                 describe(
                     diag,
                     if status == Status::NotFound {
@@ -283,10 +328,10 @@ impl Host for ConsoleHost {
                 return Err(status);
             }
         };
-        let package = match compile(&source, path) {
+        let package = match compile(&source, &resolved) {
             Ok(package) => package,
             Err(diagnostic) => {
-                eprintln!("langhost: spawn `{path}`: {diagnostic}");
+                eprintln!("langhost: spawn `{resolved}`: {diagnostic}");
                 abi::layout::diagnostic::write(
                     diag,
                     diagnostic.unit.as_str().as_bytes(),
@@ -309,7 +354,7 @@ impl Host for ConsoleHost {
                 Ok(id)
             }
             Err(diagnostic) => {
-                eprintln!("langhost: spawn `{path}`: verifier rejected it: {diagnostic}");
+                eprintln!("langhost: spawn `{resolved}`: verifier rejected it: {diagnostic}");
                 describe(diag, b"verifier rejected the package");
                 Err(Status::Invalid)
             }
@@ -328,26 +373,45 @@ impl Host for ConsoleHost {
         Status::NotFound
     }
 
-    // Application files (spec 0013). `langhost` has a real filesystem, so it
-    // implements the same root-only view over the sample source directory the
-    // image is built from: listing is sorted by name (the ext2 order is not
-    // sorted, so no program may depend on it), reads are chunked at the same
-    // 256 bytes, and subdirectories/symlinks are refused exactly as the kernel
-    // subset does.
+    // Application files (spec 0013, spec 0018). `langhost` has a real
+    // filesystem, so it implements the same tree view over the sample source
+    // directory the image is built from: listing is sorted by name (the ext2
+    // order is not sorted, so no program may depend on it), reads are chunked
+    // at the same 256 bytes, and symlinks and other non-file entries are
+    // refused exactly as the kernel subset does.
     fn fs_list(&mut self, path: &[u8], index: u64, name: &mut [u8]) -> Result<FsEntry, Status> {
         let path = std::str::from_utf8(path).map_err(|_| Status::Invalid)?;
-        let status = abi::fs::validate_root(path);
+        let status = abi::fs::validate_dir(path);
         if status != Status::Ok {
             return Err(status);
         }
         let index = usize::try_from(index).map_err(|_| Status::NotFound)?;
+        let directory = if path.is_empty() || path == "." {
+            self.source_dir.clone()
+        } else {
+            self.source_dir.join(path)
+        };
         let mut entries = Vec::new();
-        for entry in std::fs::read_dir(&self.source_dir).map_err(|_| Status::IoError)? {
+        let read_dir = std::fs::read_dir(&directory).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Status::NotFound
+            } else if error.kind() == std::io::ErrorKind::NotADirectory {
+                Status::Invalid
+            } else {
+                Status::IoError
+            }
+        })?;
+        for entry in read_dir {
             let entry = entry.map_err(|_| Status::IoError)?;
             let entry_name = entry
                 .file_name()
                 .into_string()
                 .map_err(|_| Status::Invalid)?;
+            // The image stager skips repository bookkeeping (`.gitkeep`), so
+            // the host view does too.
+            if entry_name.starts_with('.') {
+                continue;
+            }
             let file_type = entry.file_type().map_err(|_| Status::IoError)?;
             let kind = if file_type.is_file() {
                 abi::fs::KIND_FILE
@@ -377,18 +441,12 @@ impl Host for ConsoleHost {
 
     fn fs_read(&mut self, path: &[u8], offset: u64, dst: &mut [u8]) -> Result<usize, Status> {
         let path = std::str::from_utf8(path).map_err(|_| Status::Invalid)?;
-        let status = abi::fs::validate_root_name(path);
+        let status = abi::fs::validate_path(path);
         if status != Status::Ok {
             return Err(status);
         }
-        let target = self.source_dir.join(path);
-        let metadata = match std::fs::symlink_metadata(&target) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(Status::NotFound)
-            }
-            Err(_) => return Err(Status::IoError),
-        };
+        let target = self.resolve_path(path)?;
+        let metadata = std::fs::symlink_metadata(&target).map_err(|_| Status::IoError)?;
         if !metadata.is_file() {
             return Err(Status::Invalid);
         }
@@ -415,18 +473,12 @@ impl Host for ConsoleHost {
 
     fn fs_size(&mut self, path: &[u8]) -> Result<u64, Status> {
         let path = std::str::from_utf8(path).map_err(|_| Status::Invalid)?;
-        let status = abi::fs::validate_root_name(path);
+        let status = abi::fs::validate_path(path);
         if status != Status::Ok {
             return Err(status);
         }
-        let target = self.source_dir.join(path);
-        let metadata = match std::fs::symlink_metadata(&target) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(Status::NotFound)
-            }
-            Err(_) => return Err(Status::IoError),
-        };
+        let target = self.resolve_path(path)?;
+        let metadata = std::fs::symlink_metadata(&target).map_err(|_| Status::IoError)?;
         if !metadata.is_file() {
             return Err(Status::Invalid);
         }

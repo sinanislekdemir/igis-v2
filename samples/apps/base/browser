@@ -2,30 +2,32 @@ unit browser;
 
 // M2.5.4: a windowed file browser over the read-only application file API.
 //
-//   run browser         // interactive: list the image root, open and launch
+//   run browser         // interactive: list `base`, open and launch
 //   run browser check   // deterministic checks, prints `browser: ok`
 //   run browser shot    // lists and previews, prints `browser: ready` and
 //                       // holds ~5 s for the QMP screenshot harness
 //
-// The listing is the M2.5.1 root view (`core.fs_list`), read from index 0
-// until `NotFound` into fixed arrays (64 names, kinds and sizes). `.` and `..`
-// are already excluded. The ext2 image root also carries `mke2fs`'s
-// `lost+found`: it is shown as a folder (kind 1) and opening or launching it is
-// refused with a clear status, because M2.5.1 has no subdirectory traversal.
-// A kind-2 entry (device, socket, symlink) is shown but cannot be opened.
+// The listing is the image's `base` directory (`core.fs_list`), read from index
+// 0 until `NotFound` into fixed arrays (96 names, kinds and sizes). `.` and `..`
+// are already excluded. Previews address the full image path
+// (`base/child`, `base/text`). Descending into `lib`, `home`, `system` or a
+// `lost+found` is M3.4 work, so opening or launching a directory is still
+// refused with a clear status line. A kind-2 entry (device, socket, symlink) is
+// shown but cannot be opened.
 //
 // Preview: a regular file at most 2048 bytes is read with `core.fs_size` plus
 // 256-byte `core.fs_read` chunks into a staged `bytes[2048]` and published with
 // one strict-UTF-8 `core.substr_into` (a `bytes` source is the checked
-// conversion). A missing name, a directory, an unsupported path, a file over
-// the preview cap and invalid UTF-8 all set the status line and leave the old
+// conversion). A missing name, a directory, a malformed path, a file over the
+// preview cap and invalid UTF-8 all set the status line and leave the old
 // preview byte-identical. This is a preview, not a second editor: there is no
 // cursor and no write path.
 //
 // Launch is a blocking launcher: Ctrl+L spawns the selected regular source app
-// with `core.spawn` and then blocks in `core.wait` until it exits. A directory
-// or a kind-2 entry is refused. The `check` proof launches `editor` with the
-// argument `check`, which terminates on its own, so no child is left running.
+// with `core.spawn` and then blocks in `core.wait` until it exits. A bare name
+// resolves under `base/` (spec 0018, A1). A directory or a kind-2 entry is
+// refused. The `check` proof launches `editor` with the argument `check`,
+// which terminates on its own, so no child is left running.
 //
 // The application owns the selected index, the first visible row, the status
 // line and the preview state. Rows are drawn by the app (a marker, the name and
@@ -37,8 +39,9 @@ unit browser;
 // before one `window_present`, and an owner `Expose` repaints the whole content.
 //
 // `langhost` and a kernel without a framebuffer model a disabled screen, so the
-// sample runs the same listing, preview and selection logic there and prints
-// `browser: host ok`. The host path never launches a child.
+// sample runs the same listing, preview and selection logic over the same
+// `base` directory and prints `browser: host ok`. The host path never launches
+// a child.
 
 uses core, stdlib, syslib;
 
@@ -48,9 +51,8 @@ const
   ContentW = 680;
   ContentH = 480;
 
-  // Root listing capacity. The image has grown past 64 staged sources (the
-  // Q39 multiplex samples pushed the shell image over the old 64-entry bound);
-  // 96 leaves room without a growth path (there is no allocation).
+  // Listing capacity. The base directory holds the staged applications; 96
+  // leaves room without a growth path (there is no allocation).
   EntryCapacity = 96;
 
   // Preview cap and per-character layout of the M2.5.1 chunked read.
@@ -170,8 +172,7 @@ end;
 
 // ---- listing --------------------------------------------------------------
 
-// Reads the root in directory order until `NotFound`. The path is always the
-// image root; a name or a subdirectory path is `Invalid` (spec 0013, F3).
+// Reads the fixed `base` view in directory order until `NotFound`.
 procedure load_root();
 var
   i: int;
@@ -179,7 +180,7 @@ begin
   entry_count := 0;
   truncated := false;
   index := uint(0);
-  st := core.fs_list("", index, name, kind, size);
+  st := core.fs_list("base", index, name, kind, size);
   while st = Ok and entry_count < EntryCapacity do
   begin
     names[entry_count] := name;
@@ -187,7 +188,7 @@ begin
     sizes[entry_count] := size;
     entry_count := entry_count + 1;
     index := index + uint(1);
-    st := core.fs_list("", index, name, kind, size);
+    st := core.fs_list("base", index, name, kind, size);
   end;
   if entry_count >= EntryCapacity and st = Ok then
   begin
@@ -215,6 +216,21 @@ begin
   while i < entry_count do
   begin
     if names[i] = target then
+      return i;
+    i := i + 1;
+  end;
+  return -1;
+end;
+
+// The first non-file row in the view, or -1 when every row is a regular file.
+function find_first_dir(): int;
+var
+  i: int;
+begin
+  i := 0;
+  while i < entry_count do
+  begin
+    if kinds[i] <> uint(0) then
       return i;
     i := i + 1;
   end;
@@ -251,10 +267,38 @@ begin
     status_line := "file error";
 end;
 
-// Opens one root entry. A folder is refused before any read (M2.5.1 has no
-// traversal), a kind-2 entry is not openable, a regular file is size-checked,
+// Builds the image path of a view entry: the fixed `base` prefix plus the
+// listed name. Returns false when the result would not fit the destination.
+function view_path(entry_name: const string[0]; out: var string[64]): bool;
+var
+  stage: bytes[64];
+  name_len: int;
+  i: int;
+  copied: int;
+begin
+  name_len := int(core.len(entry_name));
+  if name_len + 5 > 64 then
+    return false;
+  stage[0] := byte(98);   // b
+  stage[1] := byte(97);   // a
+  stage[2] := byte(115);  // s
+  stage[3] := byte(101);  // e
+  stage[4] := byte(47);   // /
+  i := 0;
+  while i < name_len do
+  begin
+    stage[5 + i] := entry_name[i];
+    i := i + 1;
+  end;
+  copied := core.substr_into(out, stage, 0, 5 + name_len);
+  return copied = 5 + name_len;
+end;
+
+// Opens one `base` entry. A folder is refused before any read (M3.1 does not
+// navigate), a kind-2 entry is not openable, a regular file is size-checked,
 // read in 256-byte chunks and published through the strict-UTF-8 conversion.
-// Every failure sets the status line and leaves preview/title/size unchanged.
+// The preview title is the full image path (`base/child`). Every failure sets
+// the status line and leaves preview/title/size unchanged.
 function open_entry(entry_name: const string[0]; entry_kind: uint): Status;
 var
   total: uint;
@@ -263,10 +307,11 @@ var
   err: Status;
   i: int;
   chunk: bytes[256];
+  path: string[64];
 begin
   if entry_kind = uint(1) then
   begin
-    status_line := "folder (subdirectories unsupported)";
+    status_line := "folder (no navigation yet)";
     return Invalid;
   end;
   if entry_kind <> uint(0) then
@@ -274,8 +319,13 @@ begin
     status_line := "not a regular file";
     return Invalid;
   end;
+  if not view_path(entry_name, path) then
+  begin
+    status_line := "path too long";
+    return CapacityExceeded;
+  end;
 
-  err := core.fs_size(entry_name, size);
+  err := core.fs_size(path, size);
   if err <> Ok then
   begin
     set_error(err);
@@ -292,7 +342,7 @@ begin
   err := Ok;
   while offset < total and err = Ok do
   begin
-    err := core.fs_read(entry_name, offset, chunk, got);
+    err := core.fs_read(path, offset, chunk, got);
     if err = Ok then
     begin
       if got <= 0 then
@@ -327,7 +377,7 @@ begin
     return err;
   end;
   preview_size := total;
-  preview_title := entry_name;
+  preview_title := path;
   status_line := "opened";
   return Ok;
 end;
@@ -575,11 +625,11 @@ procedure draw_path();
 var
   width: int;
 begin
-  st := syslib.draw_text(rect.x + 8, rect.y + 4, "igis:/", black);
+  st := syslib.draw_text(rect.x + 8, rect.y + 4, "igis:/base", black);
   used := core.format_int_into(digits, entry_count, uint(10), uint(0));
-  st := syslib.draw_text(rect.x + 80, rect.y + 4, digits, black);
+  st := syslib.draw_text(rect.x + 96, rect.y + 4, digits, black);
   st := syslib.draw_text(
-    rect.x + 80 + used * 8, rect.y + 4, " entries", gray);
+    rect.x + 96 + used * 8, rect.y + 4, " entries", gray);
   width := stdlib.ui_text_width("read-only");
   st := syslib.draw_text(
     rect.x + ContentW - 8 - width, rect.y + 4, "read-only", gray);
@@ -855,10 +905,8 @@ begin
   verify("editor listed", has_kind("editor", uint(0)));
   verify("widgets listed", has_kind("widgets", uint(0)));
   verify("child listed", has_kind("child", uint(0)));
-  // The kernel image has `mke2fs`'s lost+found; the host directory does not.
-  verify("folder kind",
-    has_kind("lost+found", uint(1))
-      or (syslib.screen_width() = uint(0) and find_name("lost+found") < 0));
+  verify("text listed", has_kind("text", uint(0)));
+  verify("base is flat", find_first_dir() < 0);
 
   child_at := find_name("child");
   verify("child found", child_at >= 0);
@@ -867,7 +915,7 @@ begin
     selected := child_at;
     ensure_visible();
     activate_selected();
-    verify("preview child", preview_title = "child");
+    verify("preview child", preview_title = "base/child");
     verify("preview prefix", stdlib.starts_with(preview, "unit child;"));
     verify("preview size", int(core.len(preview)) = int(preview_size));
     verify("preview lines", preview_line_end(0) > 0);
@@ -875,8 +923,9 @@ begin
 
   keep_length := int(core.len(preview));
 
-  // A listed folder is refused before any read; the status explains why.
-  value := open_entry("lost+found", uint(1));
+  // A folder is refused before any read; M3.1 does not navigate. `base`
+  // itself is a directory in both the image and the host tree.
+  value := open_entry("base", uint(1));
   verify("folder refused",
     value = Invalid and stdlib.starts_with(status_line, "folder"));
   verify("folder keeps preview", int(core.len(preview)) = keep_length);
@@ -887,18 +936,18 @@ begin
     value = Invalid and status_line = "not a regular file");
   verify("kind two keeps preview", int(core.len(preview)) = keep_length);
 
-  // `widgets` is 57,388 bytes: over the preview cap, refused without a read.
+  // `base/widgets` is 57,388 bytes: over the preview cap, refused without a read.
   value := open_name("widgets");
   verify("preview too large", value = CapacityExceeded);
   verify("too large keeps preview", int(core.len(preview)) = keep_length);
 
-  // Missing, root and subdirectory paths are the M2.5.1 error classes.
+  // Missing, malformed and file-as-directory paths are the error classes.
   value := open_name("no_such_file");
   verify("missing file", value = NotFound and status_line = "no such file");
   value := open_name(".");
-  verify("directory path", value = Invalid);
+  verify("malformed path", value = Invalid);
   value := open_name("child/x");
-  verify("subdirectory path", value = Invalid);
+  verify("file as directory", value = Invalid);
   verify("errors keep preview", int(core.len(preview)) = keep_length);
 
   // The checked bytes -> string publish rejects invalid UTF-8 atomically.
@@ -918,7 +967,7 @@ begin
     selected := text_at;
     ensure_visible();
     activate_selected();
-    verify("preview text", preview_title = "text");
+    verify("preview text", preview_title = "base/text");
     verify("preview text prefix", stdlib.starts_with(preview, "unit text;"));
   end;
 end;
@@ -1006,7 +1055,7 @@ begin
   before_opens := opens;
   selected := child_at;
   ensure_visible();
-  preview_title := "text";
+  preview_title := "base/text";
   preview := "unit text;";
   auto_draw := false;
   last_click_ns := uint(0);
@@ -1020,20 +1069,20 @@ begin
   pointer_up();
   auto_draw := true;
   verify("double click opens",
-    preview_title = "child" and opens = before_opens + 1);
+    preview_title = "base/child" and opens = before_opens + 1);
 
   // Enter on the (already selected) text row previews it.
   selected := text_at;
   ensure_visible();
   inject_key(0x103, 0);
-  verify("enter opens", preview_title = "text" and opens = before_opens + 2);
+  verify("enter opens", preview_title = "base/text" and opens = before_opens + 2);
 
   // Selection and view are back on a file whose first line draws a known
   // glyph; build the frame the pixel probes describe.
   selected := text_at;
   ensure_visible();
   value := open_entry(names[text_at], kinds[text_at]);
-  verify("text reopened", value = Ok and preview_title = "text");
+  verify("text reopened", value = Ok and preview_title = "base/text");
   draw_all();
   present_frame();
 
@@ -1092,7 +1141,7 @@ begin
 
   // A folder and a kind-2 entry cannot launch; `editor check` is a real
   // terminating source app, so the blocking launcher leaves no child behind.
-  value := launch_name("lost+found", "", uint(1));
+  value := launch_name("base", "", uint(1));
   verify("launch folder refused",
     value = Invalid and status_line = "cannot launch a folder");
   value := launch_name("child", "", uint(2));

@@ -1,10 +1,18 @@
-//! A read-only ext2 reader over an in-memory block device (spec 0002, ADR 0015).
+//! A read-only ext2 reader over an in-memory block device (spec 0002,
+//! spec 0018, ADR 0015).
 //!
 //! The supported subset is deliberately small: 1 KiB and 4 KiB blocks, revision
 //! 1 filesystems without incompatible features beyond directory file types,
-//! regular files in the image root, and direct plus single and double indirect
-//! blocks. Anything outside the subset refuses the mount rather than returning
-//! a best-effort read.
+//! regular files anywhere in the tree, and direct plus single and double
+//! indirect blocks. Anything outside the subset refuses the mount rather than
+//! returning a best-effort read.
+//!
+//! Paths are relative to the image root (spec 0018, L6): `base/shell`,
+//! `lib/ui/menu.ig`, `home/readme.txt`. The reader walks one directory at a
+//! time, never follows a symbolic link, and refuses a path deeper than
+//! [`abi::fs::MAX_COMPONENTS`] components. The caller validates the syntax with
+//! `abi::fs`; the walker repeats the structural checks so a bad path is a
+//! lookup failure, never a fault.
 //!
 //! The device is a byte range in identity-mapped physical memory, so reads are
 //! subslices: no block buffer, no copying and no allocation. Every block
@@ -77,10 +85,10 @@ struct Inode {
     blocks: [u32; INODE_WORDS],
 }
 
-/// One root-directory entry as the application file API reports it (spec
-/// 0013). `kind` is an `abi::fs::KIND_*` value; `size` is the inode byte size.
+/// One directory entry as the application file API reports it (spec 0013).
+/// `kind` is an `abi::fs::KIND_*` value; `size` is the inode byte size.
 #[derive(Clone, Copy)]
-pub struct RootEntry {
+pub struct Entry {
     /// Used bytes of the name the caller asked for.
     pub name_len: usize,
     /// `abi::fs::KIND_FILE`, `KIND_DIR` or `KIND_OTHER`.
@@ -246,13 +254,14 @@ impl<'a> Ext2<'a> {
         self.blocks_count as u64 * self.block_size as u64
     }
 
-    /// Reads a whole file by exact, case-sensitive name.
+    /// Reads a whole file by image-relative path.
     ///
     /// Returns the byte count written. A file larger than `out` is
-    /// [`Status::CapacityExceeded`]; a name that is not a regular file is
-    /// [`Status::Invalid`]; a missing name is [`Status::NotFound`].
-    pub fn read_file(&self, name: &str, out: &mut [u8]) -> Result<usize, Status> {
-        let inode = self.regular_inode(name)?;
+    /// [`Status::CapacityExceeded`]; a path that is not a regular file is
+    /// [`Status::Invalid`]; a missing component is [`Status::NotFound`]; a
+    /// malformed path (empty, `.`/`..`, over-deep) is [`Status::Invalid`].
+    pub fn read_file(&self, path: &str, out: &mut [u8]) -> Result<usize, Status> {
+        let inode = self.regular_inode(path)?;
         if inode.size > out.len() as u64 {
             return Err(Status::CapacityExceeded);
         }
@@ -277,11 +286,11 @@ impl<'a> Ext2<'a> {
     ///
     /// The data blocks are streamed in order; nothing is buffered or
     /// allocated. An offset at or past the file's end returns `Ok(0)`, so
-    /// end-of-file is not an error. A missing name is [`Status::NotFound`] and
-    /// a non-regular entry is [`Status::Invalid`], exactly as in
-    /// [`Ext2::read_file`].
-    pub fn read_at(&self, name: &str, offset: u64, out: &mut [u8]) -> Result<usize, Status> {
-        let inode = self.regular_inode(name)?;
+    /// end-of-file is not an error. A missing component is
+    /// [`Status::NotFound`] and a non-regular entry is [`Status::Invalid`],
+    /// exactly as in [`Ext2::read_file`].
+    pub fn read_at(&self, path: &str, offset: u64, out: &mut [u8]) -> Result<usize, Status> {
+        let inode = self.regular_inode(path)?;
         if offset >= inode.size || out.is_empty() {
             return Ok(0);
         }
@@ -314,23 +323,22 @@ impl<'a> Ext2<'a> {
         Ok(written)
     }
 
-    /// Reads one named root-directory entry by 0-based index (spec 0013,
+    /// Reads one entry of the directory at `path` by 0-based index (spec 0013,
     /// `core.fs_list`).
     ///
-    /// `.` and `..` are excluded and entries are visited in directory order
-    /// (which is not sorted). The name is copied into `name`; a name longer
-    /// than the destination is [`Status::CapacityExceeded`]. An index at or
-    /// past the last entry is [`Status::NotFound`].
-    pub fn list_entry(&self, index: u32, name: &mut [u8]) -> Result<RootEntry, Status> {
-        let root = self.inode(ROOT_INODE)?;
-        if root.mode & S_IFMT != S_IFDIR {
-            return Err(Status::Invalid);
-        }
+    /// `""` and `"."` name the image root. `.` and `..` are excluded and
+    /// entries are visited in directory order (which is not sorted). The name
+    /// is copied into `name`; a name longer than the destination is
+    /// [`Status::CapacityExceeded`]. An index at or past the last entry is
+    /// [`Status::NotFound`]; a path that is not a directory is
+    /// [`Status::Invalid`].
+    pub fn list_entry(&self, path: &str, index: u32, name: &mut [u8]) -> Result<Entry, Status> {
+        let (_, directory) = self.directory(path)?;
 
         let mut seen = 0u32;
         let mut found = None;
         let mut error = None;
-        self.each_dir_entry(&root, &mut |number, _, entry| {
+        self.each_dir_entry(&directory, &mut |number, _, entry| {
             // `each_dir_entry` cannot stop the block walk, so a `done` check
             // keeps a later directory block from overwriting the result.
             if found.is_some() || error.is_some() {
@@ -349,7 +357,7 @@ impl<'a> Ext2<'a> {
                         error = Some(Status::CapacityExceeded);
                     } else {
                         name[..entry.len()].copy_from_slice(entry);
-                        found = Some(RootEntry {
+                        found = Some(Entry {
                             name_len: entry.len(),
                             kind: entry_kind(inode.mode),
                             size: inode.size,
@@ -369,21 +377,140 @@ impl<'a> Ext2<'a> {
     }
 
     /// Size in bytes of a regular file.
-    pub fn file_size(&self, name: &str) -> Result<u64, Status> {
-        Ok(self.regular_inode(name)?.size)
+    pub fn file_size(&self, path: &str) -> Result<u64, Status> {
+        Ok(self.regular_inode(path)?.size)
     }
 
-    /// Visits every named entry in the root directory.
+    /// Boot self-check for the image tree (spec 0018, L1/L6).
+    ///
+    /// Proves that the path walk works before the REPL serves anything: the
+    /// four top-level directories exist and are directories, `base/shell`,
+    /// `home/readme.txt` and `system/system_probe` are readable files, an
+    /// empty `lib` lists as `NotFound`, a missing component is `NotFound`, and
+    /// `..`, an over-deep path and a file used as a directory are `Invalid`.
+    /// Returns the failed step number; the caller halts.
+    pub fn tree_self_check(&self) -> Result<(), u32> {
+        let mut name = [0u8; abi::fs::NAME_CAP];
+
+        // 1: base/shell exists and is a regular file.
+        match self.file_size("base/shell") {
+            Ok(size) if size > 0 => {}
+            _ => return Err(1),
+        }
+
+        // 2: the first byte of it can be streamed.
+        let mut byte = [0u8; 1];
+        match self.read_at("base/shell", 0, &mut byte) {
+            Ok(1) => {}
+            _ => return Err(2),
+        }
+
+        // 3: the root lists the four directories (and mke2fs's lost+found).
+        let mut seen = 0u8;
+        let mut index = 0u32;
+        loop {
+            match self.list_entry("", index, &mut name) {
+                Ok(entry) => {
+                    if entry.kind != abi::fs::KIND_DIR {
+                        return Err(3);
+                    }
+                    for (bit, directory) in ["base", "home", "lib", "system"].iter().enumerate() {
+                        if &name[..entry.name_len] == directory.as_bytes() {
+                            seen |= 1 << bit;
+                        }
+                    }
+                    index += 1;
+                    if index > 16 {
+                        return Err(3);
+                    }
+                }
+                Err(Status::NotFound) => break,
+                Err(_) => return Err(3),
+            }
+        }
+        if seen != 0b1111 {
+            return Err(3);
+        }
+
+        // 4: a subdirectory lists its own entries.
+        let mut listed_shell = false;
+        let mut index = 0u32;
+        loop {
+            match self.list_entry("base", index, &mut name) {
+                Ok(entry) => {
+                    if &name[..entry.name_len] == b"shell" {
+                        listed_shell = entry.kind == abi::fs::KIND_FILE && entry.size > 0;
+                    }
+                    index += 1;
+                    if index > 256 {
+                        return Err(4);
+                    }
+                }
+                Err(Status::NotFound) => break,
+                Err(_) => return Err(4),
+            }
+        }
+        if !listed_shell {
+            return Err(4);
+        }
+
+        // 5: the other staged paths are readable files.
+        if !matches!(self.file_size("home/readme.txt"), Ok(size) if size > 0) {
+            return Err(5);
+        }
+        if !matches!(self.file_size("system/system_probe"), Ok(size) if size > 0) {
+            return Err(5);
+        }
+
+        // 6: `lib` is an empty directory in this milestone.
+        match self.list_entry("lib", 0, &mut name) {
+            Err(Status::NotFound) => {}
+            _ => return Err(6),
+        }
+
+        // 7: a missing component is NotFound.
+        match self.file_size("base/no_such_file") {
+            Err(Status::NotFound) => {}
+            _ => return Err(7),
+        }
+
+        // 8: `..`, an empty component and an over-deep path are Invalid.
+        for path in [
+            "base/../shell",
+            "base//shell",
+            "base/./shell",
+            "base/a/b/c/d/e/f/g/h",
+        ] {
+            match self.file_size(path) {
+                Err(Status::Invalid) => {}
+                _ => return Err(8),
+            }
+        }
+
+        // 9: a file used as a directory, and a directory used as a file.
+        match self.list_entry("base/shell", 0, &mut name) {
+            Err(Status::Invalid) => {}
+            _ => return Err(9),
+        }
+        match self.file_size("base") {
+            Err(Status::Invalid) => {}
+            _ => return Err(9),
+        }
+
+        Ok(())
+    }
+
+    /// Visits every named entry in the directory at `path`.
+    ///
+    /// The root is `""` or `"."`. `.` and `..` are skipped.
     pub fn list(
         &self,
+        path: &str,
         visit: &mut impl FnMut(&[u8], u32, u64) -> Result<(), Status>,
     ) -> Result<(), Status> {
-        let root = self.inode(ROOT_INODE)?;
-        if root.mode & S_IFMT != S_IFDIR {
-            return Err(Status::Invalid);
-        }
+        let (_, directory) = self.directory(path)?;
         let mut error = None;
-        self.each_dir_entry(&root, &mut |number, _, name| {
+        self.each_dir_entry(&directory, &mut |number, _, name| {
             if name == b"." || name == b".." {
                 return Ok(true);
             }
@@ -406,34 +533,82 @@ impl<'a> Ext2<'a> {
         }
     }
 
-    fn regular_inode(&self, name: &str) -> Result<Inode, Status> {
-        let (_, inode) = self.find(name)?;
+    fn regular_inode(&self, path: &str) -> Result<Inode, Status> {
+        let (_, inode) = self.find(path)?;
         if inode.mode & S_IFMT != S_IFREG {
             return Err(Status::Invalid);
         }
         Ok(inode)
     }
 
-    /// Finds a root-directory entry, returning its inode number and inode.
-    fn find(&self, name: &str) -> Result<(u32, Inode), Status> {
-        let root = self.inode(ROOT_INODE)?;
-        if root.mode & S_IFMT != S_IFDIR {
+    fn directory(&self, path: &str) -> Result<(u32, Inode), Status> {
+        let (number, inode) = self.find(path)?;
+        if inode.mode & S_IFMT != S_IFDIR {
+            return Err(Status::Invalid);
+        }
+        Ok((number, inode))
+    }
+
+    /// Finds an image path, returning its inode number and inode.
+    ///
+    /// The root is `""` or `"."`. Every other path is split on `/` and walked
+    /// one directory at a time; the walker refuses an empty, `.` or `..`
+    /// component, a component longer than [`abi::fs::NAME_CAP`], more than
+    /// [`abi::fs::MAX_COMPONENTS`] components, and a component that resolves
+    /// through a non-directory. A missing entry is [`Status::NotFound`].
+    /// Symbolic links are never followed: a link inode is neither a regular
+    /// file nor a directory, so it fails the next step with
+    /// [`Status::Invalid`].
+    fn find(&self, path: &str) -> Result<(u32, Inode), Status> {
+        if path.is_empty() || path == "." {
+            let inode = self.inode(ROOT_INODE)?;
+            if inode.mode & S_IFMT != S_IFDIR {
+                return Err(Status::Invalid);
+            }
+            return Ok((ROOT_INODE, inode));
+        }
+        if path.len() > abi::fs::PATH_MAX {
+            return Err(Status::CapacityExceeded);
+        }
+        // Validate the whole syntax (including the depth) before walking, so a
+        // too-deep path is `Invalid` even when an early component is missing.
+        let mut components = 0usize;
+        for part in path.split('/') {
+            if part.is_empty() || part == "." || part == ".." || part.len() > abi::fs::NAME_CAP {
+                return Err(Status::Invalid);
+            }
+            components += 1;
+        }
+        if components > abi::fs::MAX_COMPONENTS {
             return Err(Status::Invalid);
         }
 
+        let mut number = ROOT_INODE;
+        let mut inode = self.inode(number)?;
+        for part in path.split('/') {
+            if inode.mode & S_IFMT != S_IFDIR {
+                return Err(Status::Invalid);
+            }
+            number = self
+                .entry_inode(&inode, part.as_bytes())?
+                .ok_or(Status::NotFound)?;
+            inode = self.inode(number)?;
+        }
+        Ok((number, inode))
+    }
+
+    /// Finds one named entry inside `directory`, if present.
+    fn entry_inode(&self, directory: &Inode, name: &[u8]) -> Result<Option<u32>, Status> {
         let mut found = None;
-        self.each_dir_entry(&root, &mut |number, _, entry| {
-            if entry == name.as_bytes() {
+        self.each_dir_entry(directory, &mut |number, _, entry| {
+            if entry == name {
                 found = Some(number);
                 Ok(false)
             } else {
                 Ok(true)
             }
         })?;
-
-        let number = found.ok_or(Status::NotFound)?;
-        let inode = self.inode(number)?;
-        Ok((number, inode))
+        Ok(found)
     }
 
     /// Reads an inode by number.

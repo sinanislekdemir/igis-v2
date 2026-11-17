@@ -331,7 +331,7 @@ begin
         else
           say("terminal: no rect\n");
 
-        st := core.run("terminal_probe", "", diag, reason);
+        st := core.run("system/terminal_probe", "", diag, reason);
         if st = Ok then
           report(reason)
         else

@@ -376,7 +376,7 @@ extern "C" fn kmain_on_stack(mb2_info: u64) -> ! {
                         fs.size_bytes() / 1024
                     );
                     let mut entries = 0u32;
-                    let listed = fs.list(&mut |name, inode, size| {
+                    let listed = fs.list("", &mut |name, inode, size| {
                         let name = core::str::from_utf8(name).unwrap_or("<non-utf8>");
                         println!("  {name:<24} inode {inode:>4} {size:>6} bytes");
                         entries += 1;
@@ -386,9 +386,20 @@ extern "C" fn kmain_on_stack(mb2_info: u64) -> ! {
                         Ok(()) => println!("  {entries} root entries"),
                         Err(status) => println!("  root listing failed: {}", status.name()),
                     }
-                    match fs.file_size("shell") {
-                        Ok(size) => println!("ext2: shell is {size} bytes"),
-                        Err(status) => println!("ext2: shell: {}", status.name()),
+                    match fs.file_size("base/shell") {
+                        Ok(size) => println!("ext2: base/shell is {size} bytes"),
+                        Err(status) => println!("ext2: base/shell: {}", status.name()),
+                    }
+
+                    // Spec 0018, L1/L6: the image is a real tree and the file
+                    // API walks paths. Prove the walk before any request can be
+                    // served; a mismatch halts like the other boot self-checks.
+                    match fs.tree_self_check() {
+                        Ok(()) => println!("ext2: tree ok"),
+                        Err(step) => {
+                            println!("ext2: tree FAIL at step {step}");
+                            arch_x86_64::halt();
+                        }
                     }
 
                     // Publish the read-only mount for every core's scheduler

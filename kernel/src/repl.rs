@@ -327,18 +327,18 @@ impl ExitRing {
 
 static EXITS: SpinLock<ExitRing> = SpinLock::new(ExitRing::new());
 
-/// Boots the first application: the desktop `entrypoint`, else `shell`, else
-/// `no entry`.
+/// Boots the first application: the desktop `system/entrypoint`, else
+/// `base/shell`, else `no entry` (spec 0018, A3).
 ///
-/// The image stages the desktop source under `entrypoint` (spec 0012, M2.5.6);
-/// an image without it falls back to the text shell, so a machine with no
-/// entry point and every pre-M2.5.6 image keep working.
+/// The image stages the desktop source as `system/entrypoint`; an image
+/// without it (the `--shell` image) falls back to the text shell, so a machine
+/// with no entry point and every pre-M2.5.6 image keep working.
 ///
 /// Returns the id of the task left in the runnable set. A failed attempt
 /// burns its reserved id (ids are never reused) and falls through to the next
 /// name, as before.
 pub fn boot(image: &Ext2<'_>) -> u64 {
-    for name in ["entrypoint", "shell"] {
+    for name in ["system/entrypoint", "base/shell"] {
         let id = task::reserve_id();
         let mut diag = [0u8; DIAG_BYTES];
         if load(image, name, id, &[], &mut diag).is_ok() {
@@ -350,22 +350,50 @@ pub fn boot(image: &Ext2<'_>) -> u64 {
     arch_x86_64::halt();
 }
 
-/// Validates a `core.spawn` path (spec 0005): relative, at most
-/// [`PATH_BYTES`], no leading/trailing `/`, no empty or `..` component.
+/// Validates an image path (spec 0018, L6): relative, at most
+/// [`PATH_BYTES`], no leading/trailing `/`, no empty, `.` or `..` component,
+/// at most eight components and each at most 64 bytes.
 pub fn validate_path(path: &str) -> Status {
     abi::fs::validate_path(path)
 }
 
-/// The kernel side of `core.spawn`: validate, fill the diagnostic, reserve an
-/// id, enqueue.
+/// Prefix a bare launch name resolves against (spec 0018, A1).
+const LAUNCH_PREFIX: &[u8] = b"base/";
+
+/// Resolves a launch path (spec 0018, A1): a name with no `/` lives under
+/// `base/`, a path with `/` is used as written. The result is written into
+/// `out` and its length returned.
+fn resolve_launch(path: &str, out: &mut [u8; PATH_BYTES]) -> Result<usize, Status> {
+    let total = if path.contains('/') {
+        path.len()
+    } else {
+        LAUNCH_PREFIX.len() + path.len()
+    };
+    if total > PATH_BYTES {
+        return Err(Status::CapacityExceeded);
+    }
+    if path.contains('/') {
+        out[..path.len()].copy_from_slice(path.as_bytes());
+    } else {
+        out[..LAUNCH_PREFIX.len()].copy_from_slice(LAUNCH_PREFIX);
+        out[LAUNCH_PREFIX.len()..total].copy_from_slice(path.as_bytes());
+    }
+    Ok(total)
+}
+
+/// The kernel side of `core.spawn`: resolve, validate, fill the diagnostic,
+/// reserve an id, enqueue.
 ///
-/// The path is checked against ext2 now so a missing or non-regular file is
-/// reported as a `Status` immediately, as spec 0005 requires. Every synchronous
-/// failure fills `diag` with the `Diagnostic` record fields at
-/// [`layout::diagnostic`] offsets; success clears it. A compile error is only
-/// discovered by the service; it is printed, recorded as `Faulted(IoError)` and
-/// carries the compiler's diagnostic in the exit record, which `core.run`
-/// copies into the caller's `diag` (spec 0005, "Implemented ABI").
+/// A path with no `/` resolves to `base/<name>` first (spec 0018, A1), so a
+/// bare name and its full path name the same application. The resolved path is
+/// checked against ext2 now so a missing or non-regular file is reported as a
+/// `Status` immediately, as spec 0005 requires, and it is the path the request
+/// carries (and every later message names). Every synchronous failure fills
+/// `diag` with the `Diagnostic` record fields at [`layout::diagnostic`]
+/// offsets; success clears it. A compile error is only discovered by the
+/// service; it is printed, recorded as `Faulted(IoError)` and carries the
+/// compiler's diagnostic in the exit record, which `core.run` copies into the
+/// caller's `diag` (spec 0005, "Implemented ABI").
 pub fn request_spawn(
     image: &Ext2<'_>,
     requester: u64,
@@ -376,24 +404,42 @@ pub fn request_spawn(
     let describe = |diag: &mut [u8], message: &[u8]| {
         layout::diagnostic::write(diag, b"", message, 0, 0);
     };
-    let path = match core::str::from_utf8(path) {
+    let original = match core::str::from_utf8(path) {
         Ok(path) => path,
         Err(_) => {
             describe(diag, b"path is not valid UTF-8");
             return Err(Status::Invalid);
         }
     };
-    match validate_path(path) {
+    let mut resolved_buf = [0u8; PATH_BYTES];
+    let resolved_len = match resolve_launch(original, &mut resolved_buf) {
+        Ok(len) => len,
+        Err(status) => {
+            describe(diag, b"path is longer than 256 bytes");
+            return Err(status);
+        }
+    };
+    let resolved = match core::str::from_utf8(&resolved_buf[..resolved_len]) {
+        Ok(path) => path,
+        Err(_) => {
+            describe(diag, b"path is not valid UTF-8");
+            return Err(Status::Invalid);
+        }
+    };
+    let mut message = compiler::FixedBuf::<96>::new();
+    match validate_path(resolved) {
         Status::Ok => {}
         Status::Invalid => {
-            describe(
-                diag,
-                b"path must be relative with no empty or `..` component",
+            let _ = write!(
+                message,
+                "path must be relative with no empty or `..` component: {resolved}"
             );
+            describe(diag, message.as_str().as_bytes());
             return Err(Status::Invalid);
         }
         Status::CapacityExceeded => {
-            describe(diag, b"path is longer than 256 bytes");
+            let _ = write!(message, "path is longer than 256 bytes: {resolved}");
+            describe(diag, message.as_str().as_bytes());
             return Err(Status::CapacityExceeded);
         }
         status => {
@@ -410,14 +456,18 @@ pub fn request_spawn(
         return Err(Status::Invalid);
     }
     // `file_size` also refuses a directory with `Invalid`.
-    match image.file_size(path) {
+    match image.file_size(resolved) {
         Ok(_) => {}
         Err(Status::NotFound) => {
-            describe(diag, b"No such application");
+            message.clear();
+            let _ = write!(message, "No such application: {resolved}");
+            describe(diag, message.as_str().as_bytes());
             return Err(Status::NotFound);
         }
         Err(Status::Invalid) => {
-            describe(diag, b"not a regular application file");
+            message.clear();
+            let _ = write!(message, "not a regular application file: {resolved}");
+            describe(diag, message.as_str().as_bytes());
             return Err(Status::Invalid);
         }
         Err(status) => {
@@ -430,8 +480,8 @@ pub fn request_spawn(
     let mut request = EMPTY_REQUEST;
     request.reserved_id = id;
     request.requester = requester;
-    request.path_len = path.len() as u16;
-    request.path[..path.len()].copy_from_slice(path.as_bytes());
+    request.path_len = resolved_len as u16;
+    request.path[..resolved_len].copy_from_slice(&resolved_buf[..resolved_len]);
     request.args_len = args.len() as u16;
     request.args[..8].copy_from_slice(&(args.len() as u64).to_le_bytes());
     request.args[8..8 + args.len()].copy_from_slice(args);
@@ -441,7 +491,11 @@ pub fn request_spawn(
     }
 
     layout::diagnostic::clear(diag);
-    println!("repl: task {requester} requested `{path}` as task {id}");
+    if original == resolved {
+        println!("repl: task {requester} requested `{resolved}` as task {id}");
+    } else {
+        println!("repl: task {requester} requested `{original}` -> `{resolved}` as task {id}");
+    }
     // A queued request is work: wake one idle core so it services and runs it.
     crate::smp::kick_one();
     Ok(id)

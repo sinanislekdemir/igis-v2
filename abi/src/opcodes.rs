@@ -606,21 +606,23 @@ pub mod builtin {
     /// compile-checked capacity is at least the title cap.
     pub const WINDOW_INFO: u32 = 40;
 
-    // ---- application files (spec 0013) ---------------------------------
+    // ---- application files (spec 0013, spec 0018) -----------------------
     //
-    // The read-only ext2 image is reachable through three `core` builtins.
-    // M2.5.1 is root-only: `fs_list` accepts `""`/`"."`, and `fs_read`/
-    // `fs_size` accept one root component with no `/`. No opcode is added:
-    // the machine validates the path syntax and the destinations, the host
-    // resolves the entry and copies the bytes.
+    // The read-only ext2 image tree is reachable through three `core`
+    // builtins. Paths are image-relative (`base/shell`, `lib/ui/menu.ig`);
+    // `fs_list` takes the root (`""`/`"."`) or a directory path and
+    // `fs_read`/`fs_size` take a file path. No opcode is added: the machine
+    // validates the path syntax and the destinations, the host walks the path
+    // and copies the bytes.
 
     /// `core.fs_list(path, index, var name, var kind, var size) -> Status`: the
-    /// `index`-th named entry of the image root (`0`-based, directory order,
-    /// `.` and `..` excluded). `Ok` writes the name (at most [`crate::fs::NAME_CAP`]
-    /// bytes), the kind (`0` regular file, `1` directory, `2` other) and the
-    /// inode size, and pushes `Ok`; an index past the end is `NotFound`; a path
-    /// other than `""`/`"."` is `Invalid`; a name longer than the destination
-    /// is `CapacityExceeded`. Every destination is untouched on failure.
+    /// `index`-th named entry of the directory at `path` (`0`-based, directory
+    /// order, `.` and `..` excluded). `Ok` writes the name (at most
+    /// [`crate::fs::NAME_CAP`] bytes), the kind (`0` regular file, `1`
+    /// directory, `2` other) and the inode size, and pushes `Ok`; an index past
+    /// the end or a missing directory is `NotFound`; a malformed path is
+    /// `Invalid`; a name longer than the destination is `CapacityExceeded`.
+    /// Every destination is untouched on failure.
     /// Operands: `[path reference][index][name reference][kind reference][size
     /// reference]`.
     pub const FS_LIST: u32 = 41;
