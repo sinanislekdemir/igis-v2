@@ -14,8 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `9d9b0f1` (the M2.4.6 widgets demo, screenshot harness and
-  `langhost` tests) plus this docs/resume commit on top.
+- **Last commit:** `03064f2` (the M2.5.1 read-only application file API, the `files`
+  proof, spec 0013 and ADR 0027) plus this docs/resume commit on top.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -30,13 +30,17 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   layer plus the `ui_controls` proof (`320d086`), M2.4.3 the `stdlib` menus layer
   plus the `ui_menus` proof (`9fa9fd0`), M2.4.4 the `stdlib` dialogs layer plus the
   `ui_dialogs` proof (`f03559b`), M2.4.5 the `stdlib` icons and desktop layer plus
-  the `ui_icons` proof (`fb452bd`), and M2.4.6 the widgets demo window plus the
-  `widgets` proof (`9d9b0f1`).
-- **Verified at that point:** **347 host tests** (abi 15, compiler 151, interpreter 117,
-  langhost 64, including doctests); `cargo xtask build`/`image` clean; the boot prints
+  the `ui_icons` proof (`fb452bd`), M2.4.6 the widgets demo window plus the
+  `widgets` proof (`9d9b0f1`), and M2.5.1 the root-only read-only file API plus the
+  `files` proof (`03064f2`).
+- **Verified at that point:** **362 host tests** (abi 18, compiler 152, interpreter 127,
+  langhost 65, including doctests); `cargo xtask build`/`image` clean; the boot prints
   `console: terminal ok`, `console: log ok`, `console: route ok`, `graphics: clip ok`,
   `window: rules ok`, `window: paint ok` and `window: route ok` on `-smp 4` and
-  `-smp 1`; `run text_edit` → `text_edit: ok` on both; `run ui_layout` → `ui_layout: ok`
+  `-smp 1`; `run files` → `files: root listing ok`, `files: root dot ok`,
+  `files: size agrees ok`, `files: chunked read ok`, `files: read 559/559`,
+  `files: offset rules ok`, `files: error paths ok`, `files: ok` on both; `run text_edit`
+  → `text_edit: ok` on both; `run ui_layout` → `ui_layout: ok`
   on both; `run ui_controls` → `ui_controls: ok` on both; `run ui_menus` →
   `ui_menus: ok` on both; `run ui_dialogs` → `ui_dialogs: ok` on both; `run ui_icons` →
   `ui_icons: open Document` then `ui_icons: ok` on both; `run widgets` (or
@@ -50,20 +54,25 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `frames`, `streams`, `deep`, `utf8`, `realtime`, `cores` pass on `-smp 4` (the UI
   samples also on `-smp 1`);
   `scripts/tablet_qmp.py` 7/7, `--no-tablet` → `mouse: ok`,
-  `scripts/mouse_burst_qmp.py` → 600/600; the embedded `stdlib` is 114,823 B of source,
-  84,920 B of code and 4,134,600 B of compile scratch with a minimal application (the
-  `ui_icons` pair needs 5,386,584 B, the `widgets` pair 6,546,928 B with a 57,388 B
-  application; the source cap is 128 KiB and the arena cap 8 MiB). The `widgets` task
-  package is 165,424 B of code (41 frames), 9,608 B of state and a 25,360 B stack.
-  Screenshots `/home/sinan/Desktop/igis-desktop.png` (1024×768, 31555
-  bytes), `igis-windows.png` (1024×768, 28169 bytes), `igis-m23-proof.png`
-  (1024×768, 30901 bytes), `igis-controls.png` (1024×768, 32967 bytes),
-  `igis-menus.png` (1024×768, 27590 bytes), `igis-dialogs.png`
+  `scripts/mouse_burst_qmp.py --cores 1` → 600/600; the embedded `stdlib` is 114,823 B
+  of source, 84,920 B of code and 4,134,600 B of compile scratch with a minimal
+  application (the `ui_icons` pair needs 5,386,584 B, the `widgets` pair 6,546,928 B
+  with a 57,388 B application; the source cap is 128 KiB and the arena cap 8 MiB). The
+  `widgets` task package is 165,424 B of code (41 frames), 9,608 B of state and a
+  25,360 B stack; the `files` package is 6,936 B of code (2 frames), 520 B of state and
+  664 B of stack, and the image root lists 52 entries (51 staged source files plus the
+  `mke2fs` `lost+found` directory). Screenshots `/home/sinan/Desktop/igis-desktop.png`
+  (1024×768, 31555 bytes), `igis-windows.png` (1024×768, 28169 bytes),
+  `igis-m23-proof.png` (1024×768, 30901 bytes), `igis-controls.png` (1024×768, 32967
+  bytes), `igis-menus.png` (1024×768, 27590 bytes), `igis-dialogs.png`
   (1024×768, 29544 bytes), `igis-icons.png` (1024×768, 33991 bytes) and
   `igis-widgets.png` (1024×768, 25894 bytes).
-- **Next slice (not started):** **M2.5.1** — the read-only file API for applications
-  (`core.fs_list`/`core.fs_read` with bounded buffers and `Status` errors). The M2.4
-  UI toolkit is complete; the M2.4.6 demo is its integration proof.
+- **Next slice (not started):** **M2.5.2** — the clock window: a digital and an analog
+  face ticking from `core.clock()`, as an ordinary application over the window service.
+- **M2.5.1 complete:** applications can read the image through `core.fs_list`,
+  `core.fs_read` and `core.fs_size` (builtins 41–43, no opcode), root-only, with the
+  shared `core.spawn` path syntax, a 64-byte name, 256-byte chunks and `Status` errors.
+  The editor and browser can now be built on it.
 - **M2.4 complete:** the language-level UI toolkit now has the layout/chrome (M2.4.0),
   string editing (M2.4.1), controls (M2.4.2), menus (M2.4.3), dialogs (M2.4.4), icons
   (M2.4.5) and the one composed widgets demo (M2.4.6).
@@ -82,30 +91,33 @@ Trust the repository, not a summary. On a fresh start:
 
 1. `git status --short` and `git log --oneline -8` — the tree should be clean and the top
    commit should match the "Last commit" line above; if not, stop and reconcile first.
-2. `cargo test -q -p abi -p compiler -p interpreter -p langhost` — expect **347** tests
+2. `cargo test -q -p abi -p compiler -p interpreter -p langhost` — expect **362** tests
    plus the doctests, all green.
 3. `cargo xtask build` — expect a clean kernel build.
 4. Read, in this order: this file, `AGENTS.md` (status paragraph + decisions table),
    `specs/0009-graphics-and-windows.md`, `specs/0010-input-and-events.md`,
-   `specs/0011-windows.md`, `specs/0012-desktop-shell.md`, `adr/0020`, `adr/0021`,
-   `adr/0022`, `adr/0023`, `adr/0024`, `adr/0025`, `adr/0026` (the `stdlib` UI layer).
+   `specs/0011-windows.md`, `specs/0012-desktop-shell.md`,
+   `specs/0013-application-files.md`, `adr/0020`, `adr/0021`, `adr/0022`, `adr/0023`,
+   `adr/0024`, `adr/0025`, `adr/0026` (the `stdlib` UI layer) and `adr/0027` (the
+   stateless file API).
 5. Baseline kernel checks (headless, no chat needed):
    - Combined boot (no window-injecting proof app, so the shared event queue stays
      quiet between samples):
-     `( sleep 6; printf 'run text_edit\n'; sleep 10; printf 'run ui_layout\n'; sleep 6; \
+     `( sleep 6; printf 'run files\n'; sleep 8; \
+       printf 'run text_edit\n'; sleep 10; printf 'run ui_layout\n'; sleep 6; \
        printf 'run ui_controls\n'; sleep 10; printf 'run ui_menus\n'; sleep 10; \
        printf 'run ui_dialogs\n'; sleep 10; printf 'run ui_icons\n'; sleep 12; \
        printf 'run widgets check\n'; sleep 20; \
        printf 'run desktop_shell check\n'; sleep 20; printf 'run desktop\n'; sleep 4; \
        printf 'run events\n'; sleep 8; printf 'run windows\n'; sleep 6; \
        printf 'run windows_events\n'; sleep 6; printf 'run windows_demo\n'; sleep 22; \
-       printf 'exit\n' ) | timeout 280s \
+       printf 'exit\n' ) | timeout 300s \
        qemu-system-x86_64 -cdrom build/igis.iso -m 256M -serial stdio -monitor none \
        -no-reboot -no-shutdown -accel tcg -vga std -display none -smp 4 -usb \
        -device usb-tablet`
      → `console: terminal ok`, `console: log ok`, `console: route ok`,
      `graphics: clip ok`, `window: rules ok`, `window: paint ok`, `window: route ok`,
-     `text_edit: ok`, `ui_layout: ok`, `ui_controls: ok`, `ui_menus: ok`,
+     `files: ok`, `text_edit: ok`, `ui_layout: ok`, `ui_controls: ok`, `ui_menus: ok`,
      `ui_dialogs: ok`, `ui_icons: open Document`, `ui_icons: ok`, `widgets: ok`,
      `desktop_shell: ok`, `desktop: ok`, `keyboard: decoder ok`, `events: ok`,
      `windows: ok`, `windows_events: ok`, `windows_demo: checks ok`,
@@ -141,19 +153,14 @@ Trust the repository, not a summary. On a fresh start:
    - `python3 scripts/tablet_qmp.py build/igis.iso --no-tablet` → `mouse: ok` fallback.
    - `python3 scripts/mouse_burst_qmp.py build/igis.iso` → `600/600` px with a
      `mouse: aux IRQ12 delivered ...` line; `--cores 1` is the single-core variant.
-6. The next slice is **M2.5.1** (the read-only file API for applications:
-   `core.fs_list`/`core.fs_read` with bounded buffers and `Status` errors). The M2.4 UI
-   toolkit is complete: M2.4.0 added the `stdlib` metrics, palette and client chrome;
-   M2.4.1 the atomic, code-point-safe string editing and selection helpers a text field
-   needs; M2.4.2 the controls; M2.4.3 the menu bar, pull-downs, `uint` masks and the
-   keyboard mapping; M2.4.4 the dialogs and alerts; M2.4.5 the 32×32 icon bitmaps, grid
-   geometry, double-click threshold, drag offsets, rubber-band selection and the trash
-   drop rule; and M2.4.6 the composed widgets demo (`samples/apps/widgets`) that proves
-   the whole toolkit in one window and one event loop. The M2 limitations still in force:
-   an app that ignores an `Expose` keeps stale content, a full-screen `syslib.clear`
-   erases the kernel windows' pixels, there is no per-task clip (a covered client must
-   repaint only its visible part), and there is no global work area (an app at `y = 0`
-   covers the menu bar until the shell's next event).
+6. The next slice is **M2.5.2** (the clock window: a digital and an analog face ticking
+   from `core.clock()`, as an ordinary application over the window service). M2.5.1
+   landed the read-only file API the editor and browser need: `core.fs_list`,
+   `core.fs_read` and `core.fs_size` over the image root, no handle or writable path.
+   The M2 limitations still in force: an app that ignores an `Expose` keeps stale
+   content, a full-screen `syslib.clear` erases the kernel windows' pixels, there is no
+   per-task clip (a covered client must repaint only its visible part), and there is no
+   global work area (an app at `y = 0` covers the menu bar until the shell's next event).
 
 If anything in this file disagrees with the code or the specs, the code and specs win and
 this file must be corrected in the same commit.
@@ -317,9 +324,9 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
 
 ### M2.5 — applications
 
-- [ ] **M2.5.1** Read-only file API for applications (`core.fs_list`/`core.fs_read`, bounded
-  buffers, `Status` errors); today only the kernel reads ext2. Prerequisite for the browser
-  and the editor.
+- [x] **M2.5.1** Read-only file API for applications (`core.fs_list`/`core.fs_read`,
+  bounded buffers, `Status` errors); today only the kernel reads ext2. Prerequisite for
+  the browser and the editor.
 - [ ] **M2.5.2** Clock window (digital + analog face), ticking from `core.clock()`.
 - [ ] **M2.5.3** Text editor: in-memory buffer with the M2.4.1 helpers, cursor, scrolling,
   open via the file API; save disabled until a writable filesystem exists.
