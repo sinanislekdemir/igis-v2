@@ -14,8 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `ee34a8b` (M2.5.5 terminal window) plus the M2.5.6 boot-to-desktop
-  commit and the docs/resume commit on top.
+- **Last commit:** `76a2196` (M2.5.6 boot to the desktop, the menu-launched shell, the
+  `--shell` image and the boot QMP proof) plus this docs/resume commit on top.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
