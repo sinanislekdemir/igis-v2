@@ -136,8 +136,12 @@ The interface is split into two namespaces:
   kernel paints it into a kernel-owned terminal window instead of the whole screen;
   kernel `println!` diagnostics go to a separate system-log window. The serial mirror is
   unchanged and both windows are text-only targets, not a change to this host contract.
-- There is no `poll` or `select`: a task cannot wait on the console and a stream at the
-  same time. It blocks on one source at a time (open question 12).
+- Since Q39 a task may wait on several input sources at once. `core.poll_any` is a
+  non-blocking readiness probe and `core.next_any` blocks on the whole set; both inspect
+  a `const array[uint, 8]` whose entries are `0` (completed console line), `1` (input
+  event) or a stream handle (`core.stream_source`). Readiness is a snapshot, not a
+  reservation: the following `read_line`/`next_event`/`recv` is authoritative if another
+  task consumed the source in between (see "Multi-source waits").
 - `send` is atomic (`0006-streams.md`): it either enqueues the whole slice or returns an
   error. A slice larger than the endpoint capacity can never succeed and is a
   `CapacityExceeded` status.
@@ -264,7 +268,37 @@ layer:
   terminal window (spec 0014) but does not replace it; application-side editing remains
   M2.5.3/M2.6 (Q44), and the `stdlib` editing primitives it needs are already in place.
 
-#### Implemented ABI: application files (M2.5.1)
+#### Multi-source waits (Q39, implemented)
+
+The language surface is spec 0003, "Multi-source waits"; this is the host contract.
+
+| Primitive | Implemented signature | Result |
+|-----------|-----------------------|--------|
+| `core.poll_any` | `(sources: const array[uint, 8], count: int, var ready: int) -> Status` | `Ok` with the zero-based index of the first ready source written through `ready`; `WouldBlock` when none is ready; `Invalid` when `count` is outside `1..=8`. `ready` is untouched on a non-`Ok` result |
+| `core.next_any` | same | identical readiness report; when none is ready the task blocks on the set and retries the instruction after a wake-up |
+
+- Source `0` is one completed line (`core.read_line`), `1` is one input event
+  (`syslib.next_event`, including a pending window `Expose`), and any other value is a
+  stream handle whose data or close is ready. This is a read select; send-space
+  readiness is not included.
+- The interpreter validates `count` and the array region, then calls one `Host` probe per
+  source in caller order: `console_line_ready()`, `input_ready()` and
+  `stream_readable(handle)`. All three default to `false`, so a host with no sources
+  reports `WouldBlock` and `next_any` blocks exactly like an absent source.
+- The kernel host maps them to `console::has_line`, `event::has_event() ||
+  window::has_expose(current)` and `stream::readable(task, handle)`. `stream::readable`
+  is data-or-close on the caller's receive side; a stale or foreign handle reports ready
+  so the following receive errors instead of sleeping.
+- `core.stream_source(ep) -> uint` is compiler-lowered (a value reference plus
+  `load_ref`, no builtin) and is the only way to name a stream in the array. It does not
+  change the endpoint rules: every other use as a value is still a compile error.
+- `core.read_line` and `syslib.next_event` keep their signatures, their single-source
+  waits and their wake paths. A finished line, an event insertion and a stream
+  send/receive/close now also wake a matching `WaitFor::Any` set (spec 0006, spec 0007).
+- Readiness is not consumption. Another task may take the source before the caller's
+  read; that read's `WouldBlock`, `Closed` or short count is the authoritative result.
+
+
 
 The read-only image is reachable through three host builtins (41–43; spec 0013, ADR
 0027). There is no handle, no per-task file state and no writable operation: every call
@@ -430,6 +464,11 @@ trait Host {
     // blocking opcodes and maps it to the staged status for try_*.
     fn stream_send(&mut self, handle: u64, bytes: &[u8]) -> Result<(), StreamError>;
     fn stream_recv(&mut self, handle: u64, dst: &mut [u8]) -> Result<usize, StreamError>;
+    // Readiness probes for `core.poll_any`/`core.next_any` (Q39); all default
+    // to `false` on a host with no sources.
+    fn console_line_ready(&mut self) -> bool;
+    fn input_ready(&mut self) -> bool;
+    fn stream_readable(&mut self, handle: u64) -> bool;
     fn monotonic_ns(&self) -> u64;
     fn sleep_until(&mut self, deadline_ns: u64);
     fn realtime_on(&mut self) -> Status;
@@ -508,7 +547,7 @@ signal for origin and cost (`0003-language.md`).
 | 9 | ~~Parent death with live children~~ | **Resolved** — children continue (ADR 0017 addendum). |
 | 10 | ~~Exit-reason ring size (64?) and whether `run` blocks on a full queue~~ | **Resolved** — ring default 64; a full request queue returns `Status.Full`. |
 | 11 | ~~Whether the argument string is `core.arguments` or a `main` parameter~~ | **Resolved** — `main(args: const string[1024])`. |
-| 12 | Multiplexing: a task cannot wait on the console and a stream at the same time | When an application must serve input from more than one source; a `poll`-style primitive would widen the ABI. |
+| 12 | ~~Multiplexing: a task cannot wait on the console and a stream at the same time~~ | **Resolved (Q39)** — `core.poll_any` (non-blocking) and `core.next_any` (blocking) inspect up to eight sources: console line, input event and stream read readiness. One `WaitFor::Any` set, no callback or shared memory; readiness is a snapshot and the following read is authoritative. |
 | 13 | ~~Path validation: may a request name a directory, start with `/`, or contain `..`?~~ | **Resolved** — relative to the image root, no leading/trailing `/`, no empty or `..` component, regular files only; malformed is `Invalid`, absent is `NotFound`. |
 
 ## Changelog
@@ -539,3 +578,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-17 | Application files (spec 0013, M2.5.1): `Host::fs_list` (`Result<FsEntry, Status>`), `Host::fs_read` (`Result<usize, Status>`) and `Host::fs_size` (`Result<u64, Status>`), all defaulting to `NotFound`, and builtins 41–43. The interpreter validates the shared `core.spawn` path syntax and the root-only M2.5.1 subset, stages a 64-byte name and a 256-byte chunk and publishes only on `Ok`; the kernel host uses the existing ext2 mount, `langhost` the sample directory. No opcode, no handle, no writable path. |
 | 2026-11-17 | Terminal window (spec 0014, M2.5.5): `Host::terminal_attach(window: u64) -> Status` (builtin 44, default `Invalid`) binds the one machine-wide console terminal to a window owned by the calling task. The kernel host passes its task id, checks ownership and geometry under `CONSOLE → WINDOW`, releases the owner-0 boot terminal on first attach and detaches when the owner's window disappears. `console_write`/`read_line` signatures and semantics are unchanged; the line discipline is not replaced. No opcode. |
 | 2026-11-17 | System control (spec 0017, M2.6.4): `Host::halt`/`Host::reboot` (0 → 1, builtins 48/49, default `Invalid`) drive `sched::halt_system`/`sched::reboot`. The shutdown flag plus the existing `0x40` wake IPI stop every other core in the handler (acknowledge then halt), the wait is bounded by the clock and a spin ceiling, and `reboot` resets through `0xCF9` and the 8042 pulse command, halting if the firmware ignores both. No opcode. |
+| 2026-11-17 | Multi-source waits (Q39, ADR 0036): `Host::console_line_ready`/`input_ready`/`stream_readable` (all default `false`) back `core.poll_any`/`core.next_any` (builtins 51/52, no opcode). Sources are `0` console line, `1` input event and `>= 2` stream read readiness; `core.stream_source` is compiler-lowered and adds no host method. The kernel maps the probes to `console::has_line`, `event::has_event`/`window::has_expose` and `stream::readable`, and a single `WaitFor::Any` set carries the block; `read_line`/`next_event` are unchanged. |

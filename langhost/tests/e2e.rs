@@ -2598,3 +2598,77 @@ fn the_system_probe_reports_no_kernel_authority() {
             .to_vec()
     );
 }
+
+#[test]
+fn poll_any_and_next_any_report_console_stream_and_input_on_the_host() {
+    // The host models every endpoint as one loopback FIFO, so `out`/`in` can be
+    // two names here even though the kernel would pair them separately. The
+    // point is the builtin contract: a ready stream, a queued event and the
+    // scripted console line are each reported by index.
+    let source = br#"
+unit mh;
+
+uses core, syslib;
+
+var
+  out: out_stream[16];
+  inp: in_stream[16];
+  sources: array[uint, 8];
+  count: int;
+  ready: int;
+  st: Status;
+  line: string[32];
+  dst: bytes[16];
+  got: int;
+  ev: Event;
+
+procedure main(args: const string[1024]);
+begin
+  st := core.send(out, "ping");
+  sources[0] := core.stream_source(inp);
+  sources[1] := uint(1);
+  count := 2;
+  ready := -1;
+  st := core.next_any(sources, count, ready);
+  if st = Ok and ready = 0 then core.write("stream ok\n") else core.write("stream FAIL\n");
+  got := core.recv(inp, dst);
+  if got = 4 then core.write("recv ok\n") else core.write("recv FAIL\n");
+
+  ev.kind := KeyDown;
+  ev.x := 0;
+  ev.y := 0;
+  ev.code := uint(88 * 65536);
+  ev.window := 0;
+  st := syslib.inject_event(ev);
+  sources[0] := uint(1);
+  count := 1;
+  ready := -1;
+  st := core.next_any(sources, count, ready);
+  if st = Ok and ready = 0 then core.write("input ok\n") else core.write("input FAIL\n");
+  st := syslib.next_event(ev);
+  if st = Ok and ev.code = uint(88 * 65536) then core.write("event ok\n") else core.write("event FAIL\n");
+
+  sources[0] := uint(0);
+  count := 1;
+  ready := -1;
+  st := core.poll_any(sources, count, ready);
+  if st = Ok and ready = 0 then core.write("console ready ok\n") else core.write("console ready FAIL\n");
+  got := core.read_line(line);
+  if got = 4 then core.write("console line ok\n") else core.write("console line FAIL\n");
+  core.write("multiplex_host: ok\n");
+end;
+"#;
+    let package = langhost::compile(source, "mh").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(
+        String::from_utf8(result.output).expect("UTF-8 output"),
+        "stream ok\n\
+         recv ok\n\
+         input ok\n\
+         event ok\n\
+         console ready ok\n\
+         console line ok\n\
+         multiplex_host: ok\n"
+    );
+}

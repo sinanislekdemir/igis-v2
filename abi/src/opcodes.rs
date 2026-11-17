@@ -728,6 +728,39 @@ pub mod builtin {
     /// `[src reference][value reference]`.
     pub const PARSE_F64: u32 = 50;
 
+    // ---- multi-source waits (spec 0003, spec 0007; Q39, ADR 0036) ----
+    //
+    // `poll_any` and `next_any` inspect a `const array[uint, 8]` of source
+    // values and report the index of the first ready one. Source `0` is one
+    // completed console line, `1` is one machine-wide input event (including a
+    // pending window `Expose`) and any value `>= 2` is a stream endpoint handle
+    // whose data or close is ready (a read select). The array reference and the
+    // caller's `count` are staged; the interpreter validates the count and the
+    // region, then calls one `Host` readiness probe per source in order.
+    //
+    // `WouldBlock` means no source is ready and leaves the `ready`
+    // out-parameter untouched. `Ok` writes the zero-based index of the source
+    // that was ready *at the probe*; another task may consume it before the
+    // caller performs the corresponding read, so that read's status is
+    // authoritative. `next_any` blocks on the same set instead of returning
+    // `WouldBlock`; the wait is one `WaitFor::Any` condition and every producer
+    // wakes a set that contains its source.
+
+    /// `core.poll_any(sources, count, var ready) -> Status`: non-blocking
+    /// multi-source readiness probe. Pops `[sources reference][count][ready
+    /// reference]`; on `Ok` writes the zero-based index of the first ready
+    /// source through `ready`. `WouldBlock` (nothing ready) leaves `ready`
+    /// untouched and is the only non-`Ok` result for a well-formed call;
+    /// `count` outside `1..=8` is `Invalid`, also leaving `ready` untouched.
+    pub const POLL_ANY: u32 = 51;
+
+    /// `core.next_any(sources, count, var ready) -> Status`: the blocking form
+    /// of [`POLL_ANY`]. It reports a ready source exactly like `poll_any`; when
+    /// none is ready it blocks the task on the same source set and retries the
+    /// instruction after a wake-up. The operand boundary is unchanged on the
+    /// block, so the retry re-reads the caller's array and `count`.
+    pub const NEXT_ANY: u32 = 52;
+
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
         match id {
@@ -781,6 +814,8 @@ pub mod builtin {
             HALT => Some((0, 1)),
             REBOOT => Some((0, 1)),
             PARSE_F64 => Some((2, 1)),
+            POLL_ANY => Some((3, 1)),
+            NEXT_ANY => Some((3, 1)),
             _ => None,
         }
     }

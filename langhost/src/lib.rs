@@ -96,6 +96,8 @@ struct ConsoleHost {
     next_line: usize,
     /// One loopback FIFO for every endpoint (see `stream_send`).
     stream: Vec<u8>,
+    /// Record-shaped events queued by `syslib.inject_event`, oldest first.
+    events: Vec<Vec<u8>>,
 }
 
 impl ConsoleHost {
@@ -108,6 +110,7 @@ impl ConsoleHost {
             next_id: 1,
             next_line: 0,
             stream: Vec::new(),
+            events: Vec::new(),
         }
     }
 }
@@ -170,6 +173,55 @@ impl Host for ConsoleHost {
         dst[..copied].copy_from_slice(&self.stream[..copied]);
         self.stream.drain(..copied);
         Ok(copied)
+    }
+
+    // Multi-source waits (spec 0003, spec 0007; Q39). The host has no
+    // scheduler, so a blocking `next_any` on a source that never arrives is
+    // still a host-side block (`IllegalOperation`), exactly like `read_line`'s
+    // stalled script or an empty loopback receive. The probes model the three
+    // source kinds faithfully: a scripted line remains, an injected event is
+    // queued, or the loopback FIFO has bytes.
+    fn console_line_ready(&mut self) -> bool {
+        self.next_line < HOST_LINES.len()
+    }
+
+    fn input_ready(&mut self) -> bool {
+        !self.events.is_empty()
+    }
+
+    fn stream_readable(&mut self, _handle: u64) -> bool {
+        !self.stream.is_empty()
+    }
+
+    // A small in-memory event queue so `inject_event`/`poll_event`/`next_event`
+    // and the input source of `poll_any` can be exercised on the host. The
+    // kernel owns the real 64-event machine-wide queue (spec 0010); this one
+    // never overflows in a host test.
+    fn poll_event(&mut self, event: &mut [u8]) -> Status {
+        let Some(first) = self.events.first().cloned() else {
+            return Status::WouldBlock;
+        };
+        if event.len() < abi::layout::event::SIZE as usize {
+            return Status::Invalid;
+        }
+        event[..abi::layout::event::SIZE as usize].copy_from_slice(&first);
+        self.events.remove(0);
+        Status::Ok
+    }
+
+    fn inject_event(&mut self, event: &[u8]) -> Status {
+        if abi::layout::event::read(event).is_none() {
+            return Status::Invalid;
+        }
+        let size = abi::layout::event::SIZE as usize;
+        self.events.push(event[..size].to_vec());
+        Status::Ok
+    }
+
+    fn event_flush(&mut self) -> u64 {
+        let flushed = self.events.len() as u64;
+        self.events.clear();
+        flushed
     }
 
     fn spawn(&mut self, path: &[u8], args: &[u8], diag: &mut [u8]) -> Result<u64, Status> {

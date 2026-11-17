@@ -454,6 +454,28 @@ pub fn ready_for(task: u64, handle: u64) -> bool {
     true
 }
 
+/// True when a receive on `handle` would not block (`core.poll_any`/`next_any`).
+///
+/// A select is a **read** wait, so readiness is data-or-close, not
+/// space-or-data like [`ready_for`]. A handle that is not live, or not this
+/// task's receive side, reports ready: the subsequent receive then returns
+/// `Invalid` instead of sleeping, which is the only way a stale source could
+/// ever be observed.
+pub fn readable(task: u64, handle: u64) -> bool {
+    let streams = STREAMS.lock();
+    let Some((index, _)) = lookup(&streams, handle) else {
+        return true;
+    };
+    let record = &streams.records[index];
+    if record.closed {
+        return true;
+    }
+    if record.receiver_live && record.receiver_task == task {
+        return record.count > 0;
+    }
+    true
+}
+
 /// Closes every endpoint `task` owns. Queued bytes are discarded immediately,
 /// the peer is woken to observe `Closed`, and the buffer returns to the arena
 /// once the record has no live side. Called from [`crate::task::Task::reclaim`]

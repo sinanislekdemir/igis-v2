@@ -219,6 +219,24 @@ Blocking transitions the task to `Blocked(stream)` and removes it from the runna
 When data or space becomes available, or the peer closes, the task is re-enqueued; if all
 cores are halted, an IPI wakes one (`0007-scheduler.md`).
 
+#### Multi-source read readiness (Q39)
+
+A stream endpoint handle may be one entry in a `core.next_any` wait set. That entry is a
+**read** select: `stream::readable(task, handle)` is true when data is queued, the record
+is closed, or the handle is not a live receive endpoint for the caller (so the following
+`core.recv` reports an error rather than blocking). Send-space readiness is deliberately
+not part of the primitive; a task that needs to send waits on `core.send` alone.
+
+- A send, a receive that frees space, and a close all call `wake_stream(handle)`, which
+  now wakes a `WaitFor::Any` set containing that handle in addition to the single
+  `WaitFor::Stream(handle)` waiter. The lock rule is unchanged: the stream lock is
+  dropped before any task slot lock is taken.
+- Closing a stream wakes a waiting select, which then reports the handle ready and lets
+  `core.recv` observe `Closed`.
+- Readiness is a snapshot: another task may consume the queued bytes between the ready
+  report and the caller's receive. The receive's own `WouldBlock`/`Closed`/count is
+  authoritative.
+
 ### What is not a stream
 
 - The console is a host-interface primitive (`0005-host-interface.md`), not a stream. An
@@ -250,6 +268,7 @@ fn try_receive(ep: Endpoint, buf: &mut [u8]) -> Result<usize, Status>;
 | Peer task terminates | Queue discarded; surviving endpoint returns `Closed` |
 | A stream closes (one owner terminates) | Closing is terminal for both logical sides: discard queued bytes, release the buffer, wake the peer with `Closed`. The table record stays until the surviving endpoint's owner ends |
 | Blocked peer at close | Wakes with `Closed` |
+| Stream in a multi-source wait | A send, receive or close wakes the set; data or close is "read ready", space is not |
 | Endpoint with no live peer yet | Created and waiting; sends fill up to capacity, receives block on empty |
 | Two senders (or two receivers) for one name | Load error for the arriving task; the existing stream is untouched |
 | Capacity mismatch between peers | Load error for the arriving task, naming both capacities; the existing stream is untouched |
@@ -277,3 +296,4 @@ fn try_receive(ep: Endpoint, buf: &mut [u8]) -> Result<usize, Status>;
 | 2026-11-13 | Stream names are `string[32]` matching `[a-z][a-z0-9_]*` and capacities are `1..=65536` bytes (S12). |
 | 2026-11-15 | Implemented. Dynamic loading replaces the static "unmatched is a load error" rule (S8): an endpoint is created when its task loads and waits for a later peer, so a sender may fill a waiting stream and a receiver blocks on it. A same-direction duplicate, a capacity mismatch, or a declaration against a closed stream is the load error. Handles are `(generation, index)`; termination closes the owner's sides, discards queued bytes and frees the buffer when no side remains. Explicit close is still v2. |
 | 2026-11-15 | The `stdlib` framing layer is implemented as ordinary language code over `const in_stream[1]`/`const out_stream[1]` parameters (the declared capacity is a lower bound the compiler does not check, so one helper serves every capacity): `recv_exact`, `send_frame`, `recv_frame_into`, `send_line`, `recv_line_into`, `send_u64`, `recv_u64` and `send_bytes`. Each is atomic at its boundary — a destination is written only by the one copy that publishes a whole value — so a failure never exposes a partial value. The "Receive" pseudocode is corrected: a receive returns up to the destination capacity, so a view must never ask for more than the bytes it still needs; without runtime-capacity buffer parameters a view reads one byte per receive. `samples/apps/streams` now runs through `send_line`/`recv_line_into`, and `samples/apps/frames` (`frame_in` + `frame_out`) proves the length prefix, the typed `u64` view, the `CapacityExceeded` paths and the close. |
+| 2026-11-17 | Multi-source read readiness (Q39, ADR 0036): a stream handle can be a source of `core.poll_any`/`core.next_any`. Readiness is data-or-close on the caller's receive side (a stale or foreign handle is ready-as-error); send-space readiness is not part of it. `wake_stream` also wakes a `WaitFor::Any` set containing the handle, so a send, a receive that frees space and a close reach a waiting select; the stream lock is still dropped before any slot lock. Readiness is a snapshot and the following receive is authoritative. |

@@ -6541,6 +6541,79 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::scalar(Kind::Int)))
             }
+            // `core.stream_source(ep) -> uint` (Q39). The endpoint handle
+            // already lives in `state` (or behind a `const` stream parameter);
+            // this is the only way an application can name a stream inside a
+            // multi-source wait array. It is compiler-lowered to a value
+            // reference plus `load_ref`, so there is no builtin or opcode.
+            "core.stream_source" => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`core.stream_source` expects 1 argument, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                let place = self.stream_place(args[0], "core.stream_source")?;
+                self.push_value_ref(&place)?;
+                self.simple(opcodes::LOAD_REF)?;
+                Ok(Some(Type::scalar(Kind::Uint)))
+            }
+            // `core.poll_any`/`core.next_any` (Q39, ADR 0036). Operands are the
+            // source array reference, the `int` count and the `var int` ready
+            // index. The array is exactly `array[uint, 8]`: its nominal count
+            // makes the machine's `count * 8` read bounded without a second
+            // immediate.
+            "core.poll_any" | "core.next_any" => {
+                if args.len() != 3 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`{target}` expects 3 arguments, got {}", args.len()),
+                    ));
+                }
+                let sources = self.emit_aggregate_ref(args[0], false, "`sources`")?;
+                let array_ok = array_of(self.arrays.as_slice(), sources).is_some_and(|array| {
+                    array.elem.kind == Kind::Uint && array.count == abi::wait::MAX_SOURCES as u32
+                });
+                if !array_ok {
+                    let found = self.type_name(sources);
+                    return Err(self.err_at(
+                        args[0],
+                        format_args!(
+                            "`{target}` expects `sources: const array[uint, 8]`, found `{found}`"
+                        ),
+                    ));
+                }
+                let count = self.expr_scalar(args[1])?;
+                if count.kind != Kind::Int {
+                    let found = self.type_name(count);
+                    return Err(self.err_at(
+                        args[1],
+                        format_args!("`{target}` expects an `int` count, found `{found}`"),
+                    ));
+                }
+                let ready = self.emit_scalar_ref(args[2])?;
+                if ready.kind != Kind::Int {
+                    let found = self.type_name(ready);
+                    return Err(self.err_at(
+                        args[2],
+                        format_args!("`{target}` expects `var ready: int`, found `{found}`"),
+                    ));
+                }
+                let id = if target == "core.poll_any" {
+                    builtin::POLL_ANY
+                } else {
+                    builtin::NEXT_ANY
+                };
+                self.one(opcodes::BUILTIN, id)?;
+                self.pop(3)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
             // `Spawn`/`wait`/`kill` return the predeclared `Status` enum and
             // write their results through `var` out-parameters (spec 0003,
             // E1; spec 0005). `Status` ordinals are the `abi::Status`

@@ -1659,6 +1659,152 @@ end;
 }
 
 #[test]
+fn poll_any_and_next_any_check_types_and_emit_their_builtins() {
+    let source = br#"
+unit t;
+
+uses core;
+
+var
+  demo: in_stream[16];
+  sources: array[uint, 8];
+  count: int;
+  ready: int;
+  st: Status;
+
+procedure main(args: const string[1024]);
+begin
+  sources[0] := uint(0);
+  sources[1] := core.stream_source(demo);
+  count := 2;
+  st := core.poll_any(sources, count, ready);
+  st := core.next_any(sources, count, ready);
+end;
+"#;
+    let package = compile(source, "t.ig").expect("compiles");
+    assert_eq!(
+        builtin_count(&package, abi::opcodes::builtin::POLL_ANY),
+        1,
+        "one poll_any builtin"
+    );
+    assert_eq!(
+        builtin_count(&package, abi::opcodes::builtin::NEXT_ANY),
+        1,
+        "one next_any builtin"
+    );
+
+    let wrong_arity = br#"
+unit t;
+
+uses core;
+
+var
+  sources: array[uint, 8];
+  ready: int;
+  st: Status;
+
+procedure main(args: const string[1024]);
+begin
+  st := core.poll_any(sources, ready);
+end;
+"#;
+    let error = compile(wrong_arity, "t.ig").expect_err("three arguments are required");
+    assert!(
+        error.message.contains("expects 3 arguments, got 2"),
+        "{}",
+        error.message
+    );
+
+    let wrong_array = br#"
+unit t;
+
+uses core;
+
+var
+  sources: array[uint, 4];
+  count: int;
+  ready: int;
+  st: Status;
+
+procedure main(args: const string[1024]);
+begin
+  st := core.poll_any(sources, count, ready);
+end;
+"#;
+    let error = compile(wrong_array, "t.ig").expect_err("the array must have eight elements");
+    assert!(
+        error.message.contains("array[uint, 8]"),
+        "{}",
+        error.message
+    );
+
+    let wrong_count = br#"
+unit t;
+
+uses core;
+
+var
+  sources: array[uint, 8];
+  ready: int;
+  st: Status;
+
+procedure main(args: const string[1024]);
+begin
+  st := core.next_any(sources, uint(2), ready);
+end;
+"#;
+    let error = compile(wrong_count, "t.ig").expect_err("the count must be an int");
+    assert!(error.message.contains("`int` count"), "{}", error.message);
+
+    let const_ready = br#"
+unit t;
+
+uses core;
+
+var
+  sources: array[uint, 8];
+  count: int;
+  st: Status;
+
+function f(ready: const int): Status;
+begin
+  st := core.poll_any(sources, count, ready);
+  return st;
+end;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile(const_ready, "t.ig").expect_err("ready must be writable");
+    assert!(
+        error.message.contains("cannot pass `const` parameter"),
+        "{}",
+        error.message
+    );
+
+    let wrong_source = br#"
+unit t;
+
+uses core;
+
+var
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := int(core.stream_source(n));
+end;
+"#;
+    let error = compile(wrong_source, "t.ig").expect_err("a stream endpoint is required");
+    assert!(
+        error.message.contains("stream endpoint"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
 fn syslib_ports_are_accepted_and_emit_their_builtins() {
     use abi::opcodes::{self, builtin};
 

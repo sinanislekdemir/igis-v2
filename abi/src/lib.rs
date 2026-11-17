@@ -47,6 +47,7 @@ pub mod fs;
 pub mod layout;
 pub mod opcodes;
 pub mod refs;
+pub mod wait;
 
 /// ABI version carried by every code blob and manifest.
 pub const ABI_VERSION: u16 = 1;

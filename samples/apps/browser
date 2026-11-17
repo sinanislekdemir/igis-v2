@@ -48,10 +48,10 @@ const
   ContentW = 680;
   ContentH = 480;
 
-  // Root listing capacity. The image has 56 entries (57 with the boot
-  // `entrypoint` alias); 64 leaves room without a growth path (there is no
-  // allocation).
-  EntryCapacity = 64;
+  // Root listing capacity. The image has grown past 64 staged sources (the
+  // Q39 multiplex samples pushed the shell image over the old 64-entry bound);
+  // 96 leaves room without a growth path (there is no allocation).
+  EntryCapacity = 96;
 
   // Preview cap and per-character layout of the M2.5.1 chunked read.
   PreviewCapacity = 2048;
@@ -192,7 +192,7 @@ begin
   if entry_count >= EntryCapacity and st = Ok then
   begin
     truncated := true;
-    status_line := "listing truncated (64)"
+    status_line := "listing truncated (96)"
   end
   else if st <> NotFound then
     status_line := "listing failed"

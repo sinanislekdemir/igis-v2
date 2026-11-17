@@ -361,6 +361,21 @@ impl Host for KernelHost<'_> {
         crate::event::flush()
     }
 
+    // Multi-source waits (spec 0003, spec 0007; Q39, ADR 0036). The probes are
+    // the same readiness functions the scheduler's post-block recheck uses, so
+    // a source cannot be "ready" for the builtin and "not ready" for the wake.
+    fn console_line_ready(&mut self) -> bool {
+        crate::console::has_line()
+    }
+
+    fn input_ready(&mut self) -> bool {
+        crate::event::has_event() || crate::window::has_expose(self.current)
+    }
+
+    fn stream_readable(&mut self, handle: u64) -> bool {
+        crate::stream::readable(self.current, handle)
+    }
+
     /// Presents a window's content, clipped to its visible parts (spec 0011,
     /// W17). The host supplies the caller as the owner; the window table takes
     /// its own lock and no graphics lock is held on entry.
@@ -714,6 +729,21 @@ fn loop_body(core: usize, image: &Ext2<'_>) -> ! {
                                     // empty read and the block above.
                                     if crate::event::has_event() || crate::window::has_expose(id) {
                                         task::wake_input();
+                                    }
+                                }
+                                WaitKind::Any(set) => {
+                                    println!(
+                                        "sched: task {} blocked on {} source(s)",
+                                        task.id,
+                                        set.len()
+                                    );
+                                    let id = task.id;
+                                    task::block(task, WaitFor::Any(set));
+                                    // A source may have become ready between
+                                    // the failed probe and the block; the
+                                    // wake-up path then found nobody to wake.
+                                    if task::wait_any_ready(id, set) {
+                                        task::wake_any_sources(set);
                                     }
                                 }
                             }

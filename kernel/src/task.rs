@@ -18,6 +18,7 @@
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use abi::wait::{WaitSet, SOURCE_CONSOLE, SOURCE_INPUT};
 use abi::Status;
 use interpreter::Machine;
 
@@ -67,6 +68,10 @@ pub enum WaitFor {
     Stream(u64),
     /// One event in the machine-wide input queue (`syslib.next_event`).
     Input,
+    /// Any source in the set (`core.next_any`, spec 0007; Q39). One condition
+    /// carries the whole set so both the interpreter and the scheduler see the
+    /// same value.
+    Any(WaitSet),
 }
 
 /// The scheduling class of a task (spec 0007, ADR 0016).
@@ -571,9 +576,69 @@ pub fn wake(child: u64) {
     wake_matching(|wait| wait == WaitFor::Child(child));
 }
 
+/// Whether `wait` is satisfied by `source` becoming ready.
+///
+/// A single-source wait matches its own source; an `Any` set matches when it
+/// contains the source. `Child` is never source-driven.
+fn waits_on_source(wait: WaitFor, source: u64) -> bool {
+    match wait {
+        WaitFor::Console => source == SOURCE_CONSOLE,
+        WaitFor::Input => source == SOURCE_INPUT,
+        WaitFor::Stream(handle) => handle == source,
+        WaitFor::Any(set) => set.contains(source),
+        WaitFor::Child(_) => false,
+    }
+}
+
+/// True when one source is ready for `task` (`core.next_any`).
+fn source_ready(task: u64, source: u64) -> bool {
+    if source == SOURCE_CONSOLE {
+        crate::console::has_line()
+    } else if source == SOURCE_INPUT {
+        // `syslib.next_event` also returns a pending `Expose` (spec 0011,
+        // W16), so the input source means "next_event would not block".
+        crate::event::has_event() || crate::window::has_expose(task)
+    } else {
+        crate::stream::readable(task, source)
+    }
+}
+
+/// True when any source in `set` is ready for `task`. The scheduler calls this
+/// after putting a task to sleep on `WaitFor::Any`, closing the window between
+/// the failed probe and the block (spec 0007).
+pub fn wait_any_ready(task: u64, set: WaitSet) -> bool {
+    for index in 0..set.len() {
+        let Some(source) = set.get(index) else {
+            break;
+        };
+        if source_ready(task, source) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Makes every task whose wait intersects `set` runnable. Used by the
+/// scheduler's post-block recheck: at least one source in `set` is ready, so a
+/// task waiting on any of them must get a chance to observe it.
+pub fn wake_any_sources(set: WaitSet) {
+    wake_matching(|wait| {
+        (0..set.len()).any(|index| {
+            set.get(index)
+                .is_some_and(|source| waits_on_source(wait, source))
+        })
+    });
+}
+
+/// Makes every task blocked on `source` runnable, including an `Any` set that
+/// contains it.
+fn wake_source(source: u64) {
+    wake_matching(|wait| waits_on_source(wait, source));
+}
+
 /// Makes every task blocked on the console runnable again.
 pub fn wake_console() {
-    wake_matching(|wait| wait == WaitFor::Console);
+    wake_source(SOURCE_CONSOLE);
 }
 
 /// Makes every task blocked on `handle` runnable again.
@@ -583,7 +648,7 @@ pub fn wake_console() {
 /// lock first: this takes the slot locks, and the stream path never nests the
 /// two.
 pub fn wake_stream(handle: u64) {
-    wake_matching(|wait| wait == WaitFor::Stream(handle));
+    wake_source(handle);
 }
 
 /// Makes every task blocked in `syslib.next_event` runnable again.
@@ -591,7 +656,7 @@ pub fn wake_stream(handle: u64) {
 /// The event queue calls this after it inserts an event, with its own lock
 /// dropped so the slot locks are never nested inside the queue lock.
 pub fn wake_input() {
-    wake_matching(|wait| wait == WaitFor::Input);
+    wake_source(SOURCE_INPUT);
 }
 
 fn wake_matching(matches: impl Fn(WaitFor) -> bool) {

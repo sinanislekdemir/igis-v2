@@ -30,6 +30,7 @@
 
 use abi::layout;
 use abi::opcodes::{self, builtin, value_kind};
+use abi::wait::{self, WaitSet};
 use abi::{refs, ExitReason, FaultCode, Rect, Status};
 
 use crate::program::Program;
@@ -314,6 +315,34 @@ pub trait Host {
         0
     }
 
+    // ---- multi-source waits (spec 0003, spec 0007; Q39, ADR 0036) ----
+    //
+    // The three probes back `core.poll_any`/`core.next_any`. They are separate
+    // methods so a host can answer each source kind cheaply and so the kernel
+    // can reuse its existing readiness functions (`console::has_line`,
+    // `event::has_event`/`window::has_expose`, `stream::readable`). A host with
+    // no source models "never ready", which is also the bare `langhost`
+    // default: `poll_any` returns `WouldBlock` and `next_any` blocks.
+
+    /// True when at least one completed console line is waiting
+    /// (`core.read_line` would not block).
+    fn console_line_ready(&mut self) -> bool {
+        false
+    }
+
+    /// True when `syslib.next_event` would not block: an event is queued, or
+    /// the caller has a pending window `Expose`.
+    fn input_ready(&mut self) -> bool {
+        false
+    }
+
+    /// True when a receive on `handle` would not block: data is queued, the
+    /// stream is closed, or the handle is not a live receive endpoint for the
+    /// caller (so the receive will report an error instead of sleeping).
+    fn stream_readable(&mut self, _handle: u64) -> bool {
+        false
+    }
+
     // ---- window service (spec 0011) -------------------------------------
     //
     // The defaults are a disabled service: a host with no screen cannot open a
@@ -517,6 +546,10 @@ pub enum WaitKind {
     /// Wait for one event in the machine-wide input queue
     /// (`syslib.next_event`, spec 0010, I19).
     Input,
+    /// Wait for any source in the set (`core.next_any`, spec 0007; Q39). The
+    /// first source that reports ready wins; the builtin is retried whole, so
+    /// it re-reads the caller's array and count after the wake-up.
+    Any(WaitSet),
 }
 
 /// Result of [`Host::wait`].
@@ -1920,6 +1953,51 @@ impl Machine {
                             None => self.push(stack, Status::Invalid as u64)?,
                         }
                     }
+                    // Multi-source waits (spec 0003, spec 0007; Q39, ADR 0036).
+                    // Operands: `[sources reference][count][ready reference]`.
+                    // A count outside `1..=8` is `Invalid` and writes nothing.
+                    // `poll_any` reports `WouldBlock` with `ready` untouched;
+                    // `next_any` blocks on the same source set and retries this
+                    // instruction whole after the wake-up.
+                    builtin::POLL_ANY | builtin::NEXT_ANY => {
+                        let ready_bits = self.pop(stack)?;
+                        let count_bits = self.pop(stack)?;
+                        let sources_bits = self.pop(stack)?;
+                        match self.wait_set(
+                            count_bits,
+                            sources_bits,
+                            state,
+                            stack,
+                            constants,
+                            args,
+                        )? {
+                            None => self.push(stack, Status::Invalid as u64)?,
+                            Some(set) => match self.first_ready_source(&set, host) {
+                                Some(index) => {
+                                    self.write_ref(
+                                        ready_bits,
+                                        index as u64,
+                                        state,
+                                        stack,
+                                        constants,
+                                        args,
+                                    )?;
+                                    self.push(stack, Status::Ok as u64)?;
+                                }
+                                None if id == builtin::POLL_ANY => {
+                                    self.push(stack, Status::WouldBlock as u64)?;
+                                }
+                                None => {
+                                    // Restore the instruction boundary like
+                                    // `read_line` and `next_event` do: the
+                                    // retry sees unchanged operands and `pc`.
+                                    self.pc = pc;
+                                    self.sp = saved_sp;
+                                    return Ok(Step::Blocked(WaitKind::Any(set)));
+                                }
+                            },
+                        }
+                    }
                     // Read-only enumeration (spec 0011, W19; spec 0012, D15).
                     // The title destination is a `var string[64]` data
                     // reference: its length word sits 8 bytes before the data.
@@ -3216,6 +3294,57 @@ impl Machine {
         region_write_u64(map_region, hole_off, 0, state, stack, code, args)?;
         region_write_u64(map_region, hole_off + 8, 0, state, stack, code, args)?;
         Ok(())
+    }
+
+    /// Reads a `core.poll_any`/`core.next_any` source array into a [`WaitSet`].
+    ///
+    /// Returns `Ok(None)` when `count` is outside `1..=8` (the builtin pushes
+    /// `Invalid`); a reference outside its region is a fault, exactly like any
+    /// other malformed reference. Only the first `count` of the eight array
+    /// elements are read.
+    fn wait_set(
+        &self,
+        count_bits: u64,
+        sources_bits: u64,
+        state: &[u8],
+        stack: &[u8],
+        code: &[u8],
+        args: &[u8],
+    ) -> Result<Option<WaitSet>, FaultCode> {
+        let count = count_bits as i64;
+        if !(1..=wait::MAX_SOURCES as i64).contains(&count) {
+            return Ok(None);
+        }
+        let count = count as usize;
+        let (region, offset) = self.resolve(sources_bits, state, stack, code, args)?;
+        let length = count.checked_mul(8).ok_or(FaultCode::OutOfBounds)?;
+        let end = offset.checked_add(length).ok_or(FaultCode::OutOfBounds)?;
+        if end > region_len(region, state, stack, code, args).ok_or(FaultCode::OutOfBounds)? {
+            return Err(FaultCode::OutOfBounds);
+        }
+        let bytes = buffer_slice(region, offset, length, state, stack, code, args)?;
+        let mut sources = [0u64; wait::MAX_SOURCES];
+        for (index, slot) in sources.iter_mut().take(count).enumerate() {
+            *slot = read_u64(bytes, index * 8)?;
+        }
+        Ok(WaitSet::from_slice(&sources[..count]))
+    }
+
+    /// The index of the first source in `set` that reports ready, in the
+    /// caller's order. One `Host` probe per source; no source is consumed.
+    fn first_ready_source<H: Host>(&self, set: &WaitSet, host: &mut H) -> Option<usize> {
+        for index in 0..set.len() {
+            let source = set.get(index)?;
+            let ready = match source {
+                wait::SOURCE_CONSOLE => host.console_line_ready(),
+                wait::SOURCE_INPUT => host.input_ready(),
+                handle => host.stream_readable(handle),
+            };
+            if ready {
+                return Some(index);
+            }
+        }
+        None
     }
 
     fn buffer_len(

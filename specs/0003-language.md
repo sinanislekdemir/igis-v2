@@ -751,6 +751,43 @@ var
   `send` on an `in_stream`, `recv` on an `out_stream`, and a non-`bytes` receive
   destination.
 
+#### Multi-source waits (implemented, Q39)
+
+A task normally blocks on one condition at a time. Two primitives let it wait on up to
+eight input sources at once without a thread, a callback or a second stack:
+
+```text
+core.stream_source(ep: in_stream[N] | out_stream[N]) -> uint
+core.poll_any(sources: const array[uint, 8]; count: int; var ready: int) -> Status
+core.next_any(sources: const array[uint, 8]; count: int; var ready: int) -> Status
+```
+
+- `sources` is exactly `array[uint, 8]`; the first `count` entries are meaningful and
+  `count` must be in `1..=8`. A different array type is a compile error; a runtime
+  `count` outside `1..=8` is `Invalid`. Only the first `count` elements are read.
+- The source encoding is fixed: `0` is one completed console line (`core.read_line` would
+  not block), `1` is one machine-wide input event (`syslib.next_event` would not block,
+  including a pending window `Expose`), and any other value is a stream endpoint handle
+  whose **data or close** is ready. This is a read select: send-space readiness is not
+  part of it. Stream handles are never `0` or `1` (their generation starts at one).
+- `core.stream_source` is the only way to name a stream in the array. It returns the
+  opaque handle as a `uint` and is compiler-lowered to a value reference plus
+  `load_ref`; it adds no builtin, opcode or `Host` method and does not make the endpoint
+  data (every other value use stays a compile error).
+- `poll_any` is non-blocking. It probes the sources in caller order and, on the first
+  ready one, writes its zero-based index through `ready` and returns `Ok`. With nothing
+  ready it returns `WouldBlock` and leaves `ready` untouched. `next_any` is the same
+  probe, but blocks on the whole set when nothing is ready and retries the instruction
+  after a wake-up.
+- Readiness is a **snapshot**, not a reservation. Another task may consume the source
+  between the ready report and the caller's `read_line`/`next_event`/`recv`; that read's
+  own status is authoritative (`WouldBlock`, `Closed`, a short count, and so on). A
+  stream handle that is not a live receive endpoint reports ready so the following
+  receive returns an error instead of sleeping forever.
+- A console line, an event insertion and a stream send/close each wake a task blocked in
+  `next_any` whose set contains that source; the wait is one scheduler condition (spec
+  0007). There is still no callback, no event object and no data shared between tasks.
+
 #### Predeclared records and sum type
 
 `Diagnostic` and `ExitReason` exist in every unit, with the fixed layout below
@@ -1144,6 +1181,12 @@ application may stop or reset the machine (vision R14, "no capability model").
 - **C9 (MUST):** The argument passed to `run`/`spawn` is a fixed `string[1024]`, delivered
   as `main(args: const string[1024])`. Splitting, quoting and interpreting it is the
   child's decision; the kernel never parses it. An empty string means no arguments.
+- **C10 (MUST):** `core.poll_any`/`core.next_any` inspect up to eight sources at once
+  (console line, input event, or stream read readiness) and report the first ready index.
+  A task still has one wait condition: the blocking form is one `WaitFor::Any` set, not a
+  set of independent callbacks. Readiness does not consume the source; the following
+  read's status is authoritative (`0003-language.md`, "Multi-source waits"; `0007`,
+  "Blocking and wake-up").
 
 ## Hardware access (`syslib`)
 
@@ -2075,3 +2118,4 @@ controls and input dialog for the QMP screenshot harness.
 | 2026-11-17 | M2.5.3 records application buffers above the 256-byte `stdlib` editing capacity. The M2.4.1 mutators stay fixed at 256 bytes; `samples/apps/editor` holds one `string[8192]` and implements one app-local atomic mutator with the SE2/SE3/SE4 rules (boundary-checked, staged in a local `bytes[8192]`, one strict-UTF-8 publish, `CapacityExceeded` without a partial write), while `str_boundary`, `str_cursor_*` and `str_selection_normalize`/`all`/`collapse` run unchanged on the larger buffer. 8192 is an application constant, not a language limit; a larger file is refused by size before it is read, and saving stays disabled until a writable filesystem exists. |
 | 2026-11-17 | M2.6.4 adds system control (spec 0017, ADR 0033): `core.halt() -> Status` and `core.reboot() -> Status` as host builtins 48/49, no operands and no capability check (vision R14). The kernel sets the shutdown flag, wakes and stops every other core on the existing IPI vector, and halts the caller; `reboot` then drives the platform reset channels and halts if they are ignored. A bare host defaults both to `Invalid`. The desktop shell's `System` pull-down and the `Ctrl+A`/`Ctrl+R`/`Ctrl+H` shortcuts call the same surface. No new opcode; ABI v1 stays at 75. |
 | 2026-11-17 | Correctly rounded decimal → binary64 parsing (Q41). `core.parse_f64_into(src, var value: f64) -> Status` is builtin 50 and pure interpreter code: it checks the spec grammar over the source bytes and converts with `core`'s `f64: FromStr`, which is allocation-free and correctly rounded (round half to even) over the whole mantissa, including subnormals and the overflow/underflow boundaries. `nan` writes one canonical quiet NaN, `-0.0`/`-inf` keep their sign, malformed text (including non-UTF-8) is `Invalid` with `value` untouched, and the cost does not grow with the exponent. `stdlib.parse_f64_into` keeps its signature and `stdlib` function count and now only delegates, so existing callers and the format→parse round trip are unchanged. `samples/apps/f64parse` proves 52 cases in the kernel (hard ties, `1e-7`, the smallest normal, both sides of the smallest-subnormal half ulp, max finite and overflow, underflow to `-0`, a 38-digit mantissa and every rejected form); the reader is pinned by exact bit tables and an exact shortest-text round trip in `interpreter/src/f64parse.rs`, builtin tests in `interpreter/tests/f64parse.rs`, compiler signature/encoding tests and a `langhost` boundary test. No new opcode; ABI v1 stays at 75. |
+| 2026-11-17 | Q39 adds multi-source waits. `core.poll_any` (builtin 51) and `core.next_any` (builtin 52) inspect `const array[uint, 8]` with `count` in `1..=8` and write the first ready index through `var ready`; source `0` is one completed console line, `1` one input event (including a pending `Expose`) and every other value a stream handle whose data or close is ready (a read select; send space is not included). `core.stream_source(ep) -> uint` is compiler-lowered and is the only way to name a stream in the array. `poll_any` returns `WouldBlock` (destination untouched) when nothing is ready; `next_any` blocks on the whole set. Readiness is a snapshot, not a reservation: the following `read_line`/`next_event`/`recv` is authoritative. C10 states the one-wait rule. Spec 0007, ADR 0036. |
