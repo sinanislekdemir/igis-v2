@@ -37,37 +37,52 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   check/shot modes and screenshot harness (`648e1de`), M2.5.4 the file browser
   plus its check/shot modes, `langhost` test and screenshot harness, M2.5.5 the
   terminal window, M2.5.6 boot to the desktop, M2.6.1 the proportional font
-  (`68d7ba1`), and M2.6.2 the coalesced damage repair, batched console present and
-  the `perf` measurement (`2c0df71`).
-- **Verified at that point (M2.6.2):** **375 host tests** (abi 18, compiler 153,
-  interpreter 131, langhost 71, including doctests); `cargo xtask build`/`image` and
-  `cargo xtask image --shell` clean; boot self-checks gain
-  `window: damage ok (present 4 -> 2 rects, 510874 -> 55348 px)` beside
-  `font: glyphs ok`, `console: terminal/log/route ok`, `graphics: clip ok` and
-  `window: rules/paint/route ok`. `run perf` on `build/igis-shell.iso` (representative
-  runs; TCG timings vary between boots): `-smp 4` idle frames 60 total 18–27 ms (avg
-  300–450 µs), idle events 200 total 17–34 ms (avg 85–170 µs), load frames 60 total
-  109–121 ms (avg 1.8–2.0 ms, max 6–37 ms), load events 200 total 22–31 ms (avg
-  110–155 µs); `-smp 1` idle frames 13–14 ms (avg 216–233 µs), idle events 21–27 ms
-  (avg 105–135 µs), load frames 175–177 ms (avg 2.9 ms, max 163–165 ms — the realtime
-  controller is not preempted), load events 19–23 ms (avg 95–115 µs); every run
-  delivered 200/200 injected events and reaped all four children. The damage self-check measures
-  the diagonal-move repair: 4 rectangles / 510 874 px as a bounding box become
-  2 rectangles / 55 348 px (89 % less present area). The event-injecting suite
-  (`terminal`, `files`, `text_edit`, `ui_layout`, `ui_controls`, `ui_menus`,
-  `ui_dialogs`, `ui_icons`, `widgets check`, `clock_window check`, `editor check`,
-  `browser check`, `desktop_shell check`, `windows`, `windows_events`, `windows_demo`,
-  `events`, `text 42 hi`, `frames`, `streams`, `deep`, `utf8`, `realtime`, `cores`,
-  `font`, `perf`) passes on `-smp 4` and `-smp 1` and `windows_proof` in its own boot on
-  both; `scripts/tablet_qmp.py` 7/7, `--no-tablet` → `mouse: ok`,
-  `scripts/mouse_burst_qmp.py --cores 1 --batch 300` 600/600; the boot desktop still
-  reaches `desktop_shell: ready` → `terminal: ok` and refreshes
-  `igis-boot-desktop.png` (31777 bytes, 1024×768; `igis-font.png` 33080 stays).
-  The desktop image root now lists 59 entries (58 staged files, including the
-  `entrypoint` copy, plus `lost+found`); the shell image lists 58. `stdlib`
-  stays at 125 functions and no cap changed.
-- **Next slice (not started):** **M2.6.3** — visual regression harness: screenshot dump
-  plus a hash/compare of known frames, run headless.
+  (`68d7ba1`), M2.6.2 the coalesced damage repair, batched console present and
+  the `perf` measurement (`2c0df71`), and M2.6.3 the deterministic specimen plus the
+  headless golden-frame harness (`tests/golden/visual.png`).
+- **Verified at that point (M2.6.3):** **376 host tests** (abi 18, compiler 155,
+  interpreter 131, langhost 72, including doctests); `cargo xtask build`/`image` and
+  `cargo xtask image --shell` clean; boot self-checks unchanged (`font: glyphs ok`,
+  `console: terminal/log/route ok`, `graphics: clip ok`, `window: rules/paint/route ok`,
+  `window: damage ok (present 4 -> 2 rects, 510874 -> 55348 px)`). The visual harness
+  reports `visual: ok (1024x768, sha256 37802052…e9e81c9f)` on both `-smp 4` and
+  `-smp 1` (the captured PNG is 9,439 bytes and the decoded RGB SHA-256 is identical);
+  `--tamper` reports one differing pixel and `tamper check ok`; a consistent alternate
+  golden produces a one-pixel diff, a bounding box, the differing tile and exit 1; a
+  golden PNG that disagrees with its manifest is refused before boot. The
+  event-injecting suite (`terminal`, `files`, `visual`, `text_edit`, `ui_layout`,
+  `ui_controls`, `ui_menus`, `ui_dialogs`, `ui_icons`, `widgets check`,
+  `clock_window check`, `editor check`, `browser check`, `desktop_shell check`, `windows`,
+  `windows_events`, `windows_demo`, `events`, `text 42 hi`, `frames`, `streams`, `deep`,
+  `utf8`, `realtime`, `cores`, `font`, `perf`) passes on `-smp 4` and `-smp 1` and
+  `windows_proof` in its own boot on both; `scripts/tablet_qmp.py` 7/7,
+  `--no-tablet` → `mouse: ok`, `scripts/mouse_burst_qmp.py --cores 1 --batch 300`
+  600/600. The desktop image root lists 60 entries (58 staged files plus the
+  `entrypoint` alias and `lost+found`); the shell image lists 59. `stdlib` stays at
+  125 functions and no cap changed.
+- **Next slice (not started):** **M2.6.4** — the system menu (About box, restart,
+  halt) with keyboard shortcuts.
+- **M2.6.3 complete:** the headless visual-regression harness (spec 0009 "Visual proof",
+  G21; ADR 0032) and the resolution of M2.1.2. `samples/apps/visual` opens a window whose
+  frame is exactly the screen (content `screen_w - 2` × `screen_h - 17` at `(0, 0)`), so
+  the service chrome plus the specimen cover both kernel text windows and every boot
+  line. The specimen has no clock, animation, event or host input: it draws a fixed
+  composition (focused prop title bar, prop and 8×8 font specimens, a nine-colour swatch
+  row, a `(X + Y)` dither patch, a framed box, a diagonal raster and alternating bars),
+  checks representative pixels (chrome, both fonts, palette, dither parity, outlines),
+  presents the whole content once, prints `visual: ok` then `visual: ready`, and holds
+  without drawing. `scripts/visual_regression.py` boots `build/igis-shell.iso` headless,
+  runs `visual shot`, waits for the complete present, captures through QMP `screendump`,
+  decodes to RGB and compares exactly with `tests/golden/visual.png` plus
+  `tests/golden/visual.json` (SHA-256 of the raw pixels and one hash per 64×64 tile). A
+  mismatch prints the differing pixel count, bounding box, first pixel and tiles and
+  exits 1; `--update` is the only writer, `--tamper` corrupts one captured pixel in
+  memory and requires the comparator to reject it, and `--expect-mismatch` inverts the
+  result. The golden matches on `-smp 4` and `-smp 1` (SHA-256
+  `37802052…e9e81c9f`, 1024×768). M2.1.2 is resolved by this host-side whole-framebuffer
+  dump; no kernel serial dump or debug builtin is added. `langhost` runs the
+  disabled-screen path (`visual: host ok`). No new opcode, builtin, `syslib` primitive,
+  kernel table or cap change; `stdlib` stays at 125 functions. **376 host tests.**
 - **M2.6.2 complete:** performance (spec 0016, ADR 0031). `kernel/src/window.rs`
   coalesces the two bounded damage lists before painting (empty/contained dropped,
   touching/overlapping merged; erase requests merge only within one coverage limit and a
@@ -203,7 +218,7 @@ Trust the repository, not a summary. On a fresh start:
 
 1. `git status --short` and `git log --oneline -8` — the tree should be clean and the top
    commit should match the "Last commit" line above; if not, stop and reconcile first.
-2. `cargo test -q -p abi -p compiler -p interpreter -p langhost` — expect **365** tests
+2. `cargo test -q -p abi -p compiler -p interpreter -p langhost` — expect **376** tests
    plus the doctests, all green.
 3. `cargo xtask build` — expect a clean kernel build.
 4. Read, in this order: this file, `AGENTS.md` (status paragraph + decisions table),
@@ -287,8 +302,16 @@ Trust the repository, not a summary. On a fresh start:
    - `python3 scripts/tablet_qmp.py build/igis-shell.iso --no-tablet` → `mouse: ok` fallback.
    - `python3 scripts/mouse_burst_qmp.py build/igis-shell.iso` → `600/600` px with a
      `mouse: aux IRQ12 delivered ...` line; `--cores 1` is the single-core variant.
-6. The next slice is **M2.6.3** (the visual regression harness: screenshot dump plus a
-   hash/compare of known frames, run headless). **M2.6.2 is complete**: damage is
+   - `python3 scripts/visual_regression.py build/igis-shell.iso` → `visual: ok
+     (1024x768, sha256 3780…)` for the deterministic specimen; `--cores 1` must match
+     the same golden, `--tamper` must report a mismatch and exit 0, and a wrong
+     `--golden-dir` must exit 1 with a pixel/tile diff.
+6. The next slice is **M2.6.4** (the system menu: About box, restart, halt and keyboard
+   shortcuts). **M2.6.3 is complete**: the deterministic full-screen specimen
+   (`samples/apps/visual`) and `scripts/visual_regression.py` compare a headless QMP
+   `screendump` pixel-exactly with `tests/golden/visual.png` + `visual.json` on `-smp 4`
+   and `-smp 1`; `--tamper` proves the compare fails; M2.1.2 is resolved by this
+   host-side dump (spec 0009 G21, ADR 0032). **M2.6.2 is complete**: damage is
    coalesced before repair and presented as a tight rectangle set (89 % less present area
    on the measured diagonal move), the console batches cells into one present per byte
    run, and `samples/apps/perf` measures frame time and event latency under the realtime
@@ -329,8 +352,11 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
 
 - [x] **M2.1.1** Shadow screen + nine `syslib` drawing primitives + console through the
   shadow + `samples/apps/desktop` self-check (`f57e39e`). Spec 0009, ADR 0020.
-- [ ] **M2.1.2** Screenshot/debug dump: write a rectangle (or the whole shadow) to a stream
-  or serial so the UI can be verified without a display. Needed for CI-style visual proof.
+- [x] **M2.1.2** Screenshot/debug dump: a whole-framebuffer visual proof for CI-style
+  checks. Resolved by the **host-side** QMP `screendump` of the deterministic specimen
+  plus an exact golden compare (`scripts/visual_regression.py`, spec 0009 G21, ADR 0032,
+  M2.6.3); no kernel serial dump or debug builtin is added, because the display surface
+  already carries the presented framebuffer and a serial dump would duplicate it.
 - [ ] **M2.1.3** Optional mode request: an `xtask`/kernel parameter to ask GRUB for a
   chosen resolution (e.g. 1280×1024), verified against `syslib.screen_width/height`.
 
@@ -538,8 +564,15 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
 - [x] **M2.6.2** Performance: damage coalescing, present batching, measured event latency
   and frame time under load (realtime controller + UI together). Specs 0011 (W21) and
   0012 (D3), spec 0016, ADR 0031, `samples/apps/perf`.
-- [ ] **M2.6.3** Visual regression harness: screenshot dump (M2.1.2) plus a hash/compare
-  of known frames, run headless.
+- [x] **M2.6.3** Visual regression harness: `samples/apps/visual` draws a deterministic
+  full-screen specimen (fixed chrome, prop and 8×8 fonts, palette, dither, outlines) with
+  no clock or input and covers the kernel text windows; `scripts/visual_regression.py`
+  boots `build/igis-shell.iso` headless, captures through QMP `screendump` and compares
+  the decoded RGB pixels exactly with `tests/golden/visual.png` + `visual.json` (SHA-256
+  plus 64×64 tile hashes) on `-smp 4` and `-smp 1`. `--update` is the only writer;
+  `--tamper`/`--expect-mismatch` prove the compare fails; a mismatch prints the pixel
+  count, bounding box, first pixel and tiles and exits 1. Resolves M2.1.2 as the
+  host-side dump. Spec 0009 G21, ADR 0032.
 - [ ] **M2.6.4** System menu: About box, restart, halt; keyboard shortcuts.
 
 ## Deferred (not UI; pick up when they matter)
@@ -567,4 +600,6 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
    `syslib.get_pixel` for drawing and `syslib.inject_event` for input.
 3. `-smp 4` and `--cores 1` both.
 4. Regression set: `streams`, `frames`, `text`, `realtime`, `deep`, `cores`, `utf8`.
-5. A screenshot dump once M2.1.2 lands, for the actual framebuffer pixels.
+5. The golden-frame harness (`scripts/visual_regression.py`) for the actual framebuffer
+   pixels: `samples/apps/visual` is deterministic and the committed golden must match on
+   `-smp 4` and `-smp 1`; `--tamper` proves the compare rejects a changed pixel.

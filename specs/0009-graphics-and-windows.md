@@ -5,7 +5,7 @@
   `arch/x86_64` framebuffer access; M2 of the desktop milestone
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0020, 0024, 0030
+- **ADRs:** 0020, 0024, 0030, 0032
 - **Updated:** 2026-11-17
 
 ## Context
@@ -114,6 +114,16 @@ grows down. Colours are `0x00RRGGBB`.
   at or above `0x80`). The same clipping, colour and disabled-screen rules as G9/G15
   apply. `draw_text` (G13) is unchanged and remains the 8×8 primitive; the console and
   the `stdlib.ui_*` helpers keep using it in M2.6.1. No opcode is added.
+- **G21 (MUST):** The framebuffer is proved without a display by a **host-side
+  whole-screen dump**, not by a kernel serial dump: QEMU's QMP `screendump` captures the
+  display surface that `present` writes, and `scripts/visual_regression.py` compares the
+  decoded RGB pixels **exactly** against a committed golden (`tests/golden/visual.png`
+  plus a SHA-256/tile manifest). The captured frame must be deterministic: the specimen
+  (`samples/apps/visual`) opens a window whose frame is exactly the screen, contains no
+  clock, animation, event or host input, covers the kernel text windows and holds after
+  `visual: ready` without changing a pixel. The same golden MUST match on `-smp 4` and
+  `-smp 1`. A normal harness run MUST NOT rewrite the golden; only an explicit,
+  reviewed `--update` may. No kernel debug builtin or serial dump is added (ADR 0032).
 
 ## Design
 
@@ -179,6 +189,46 @@ application redraws its window's content into the clipped shadow when asked, and
 service decides when to present. Mouse/event delivery and the exact `expose` protocol
 belong to M2.2/M2.3 and will be specified there.
 
+### Visual proof and golden frames (M2.6.3)
+
+```
+build/igis-shell.iso ──QEMU (headless)──▶ serial: shell> ──▶ run visual shot
+                                                    │
+                                   full-screen deterministic window_present
+                                                    │
+                          QMP screendump ──▶ decoded RGB ──▶ exact compare
+                                                    │              │
+                                     tests/golden/visual.png   match / diff
+                                     tests/golden/visual.json  (exit code)
+```
+
+- The specimen window's frame is `frame = content + (2, 17)`, so opening it with content
+  `(screen_w - 2, screen_h - 17)` at `(0, 0)` makes the frame exactly the screen. The
+  service paints the border and the focused title bar (in the proportional face), and
+  the application paints every content pixel; the two kernel text windows and all boot
+  output underneath are covered. The app then checks representative pixels with
+  `get_pixel` (chrome, both fonts, palette, dither parity, outlines) and prints
+  `visual: ok`, so a broken primitive fails before the golden is consulted.
+- Nothing in the shot is time- or input-dependent. Printing `visual: ok`/`visual: ready`
+  goes to the shell's terminal window, which is fully covered: the console paints only
+  its visible parts, so the lines change no pixel of the specimen. The hold after
+  `visual: ready` is a bounded clock loop that also draws nothing.
+- The pointer cursor is composited into the framebuffer by `present` and stays at the
+  boot position `(0, 0)` because the harness injects no events. It is therefore part of
+  the deterministic golden, not a source of noise.
+- The golden is stored as a PNG container and a JSON manifest with the exact SHA-256 of
+  the decoded RGB bytes, the dimensions and a SHA-256 per 64×64 tile. A compare failure
+  prints the differing pixel count, the bounding box, the first differing pixel and the
+  differing tiles; `--update` is the only writer, and a manifest that disagrees with its
+  PNG is a hard error (a corrupt golden cannot silently pass).
+- The harness supports a negative check: `--tamper` flips one captured pixel in memory
+  and requires the comparator to reject it; `--expect-mismatch` inverts the comparison
+  result for a deliberately wrong golden. Both are diagnostics, and neither is used by
+  a normal run.
+- The golden is tied to the bootloader's returned mode and the QEMU display path. A mode
+  or QEMU conversion change, or an intended visual change, is a reviewed `--update`
+  (ADR 0032); the golden is not regenerated automatically.
+
 ## Interfaces
 
 ### Language surface
@@ -226,6 +276,28 @@ fn clear(&mut self, color: u32) -> Status { Status::Invalid }
 The kernel implements these over `kernel/src/gfx.rs`. The defaults describe a machine
 with no screen, which is also the kernel's disabled state, so both paths agree.
 
+### Visual harness
+
+```text
+python3 scripts/visual_regression.py build/igis-shell.iso            # compare, -smp 4
+python3 scripts/visual_regression.py build/igis-shell.iso --cores 1  # compare, -smp 1
+python3 scripts/visual_regression.py build/igis-shell.iso --update   # rewrite golden
+python3 scripts/visual_regression.py build/igis-shell.iso --tamper   # negative check
+```
+
+```text
+visual: ok
+visual: ready
+[harness] capture 1024x768 (9439 bytes png) sha256 3780...
+visual: ok (1024x768, sha256 3780...)
+```
+
+Exit code 0 means the decoded frame matched the golden; 1 means a mismatch (with the
+pixel/tile diff), a missing or corrupt golden, a boot/ready timeout, or a specimen
+self-check failure. `run visual` without `shot` performs the same composition and
+checks, closes the window and prints `visual: ok`; with graphics disabled it prints
+`visual: host ok`.
+
 ### Kernel contract
 
 `gfx::init(fb: Option<Framebuffer>)` runs after the frame allocator and returns either
@@ -253,6 +325,13 @@ an `Info` (width, height, pitch, bpp, shadow address/size/frames, free-frame del
 | Graphics disabled and a primitive is called | `Status.Invalid`; the application may ignore it |
 | Two cores draw at once | The graphics lock serialises each primitive; output interleaves at primitive boundaries |
 | Screen mode is larger than 1024×768 | Works: shadow and clip derive from the actual geometry |
+| Visual specimen: graphics disabled | `visual: no graphics`; the harness refuses to capture |
+| Visual specimen: screen below 640×480 | `visual: screen too small`; the harness refuses to capture |
+| Visual specimen self-check fails | `visual: FAIL at step N: label`, no `ready`; the harness exits 1 |
+| Golden missing | `visual: missing golden ...; run --update once`, no boot |
+| Golden manifest disagrees with its PNG | hard error naming the mismatch; no compare |
+| Captured frame differs from the golden | differing pixel count, bounding box, first pixel and tiles; exit 1 |
+| `--tamper` comparison still matches | `EXPECTED a mismatch` and exit 1 |
 
 ## Alternatives considered
 
@@ -284,3 +363,4 @@ an `Info` (width, height, pitch, bpp, shadow address/size/frames, free-frame del
 | 2026-11-16 | M2.3.2: the window service draws chrome and restores the desktop through the same shadow and internal clip (narrowed per visible part), then presents the damage union once; `syslib.present`/`clear` and the nine drawing primitives are unchanged. The service desktop is white with the `(X + Y)` black dither. `window: paint ok` checks the damage arithmetic at boot. |
 | 2026-11-16 | M2.3.4 (spec 0012, ADR 0025): the console paints two kernel-owned text windows (owner `0`, terminal and system log) instead of the whole screen, with per-window grids and scrolling; expose repair is pulled by `console::pump` at the service opportunity. The whole-screen console helpers and the shadow scroll are removed from `gfx`; the nine drawing primitives, `present`, `clear` and the clip are unchanged. A full-screen `clear` erases the console windows' pixels; their grids survive and repaint on the next expose/output. |
 | 2026-11-17 | M2.6.1 (spec 0015, ADR 0030): G20 adds the three proportional-text builtins (`text_width_prop`, `text_height_prop`, `draw_text_prop`, ids 45–47) and the window-service title bar uses the proportional face; `draw_text`, the console and the `stdlib.ui_*` helpers stay 8×8. No opcode; ABI v1 stays at 75. |
+| 2026-11-17 | M2.6.3 (ADR 0032): G21 resolves M2.1.2 with a host-side QMP `screendump` of a deterministic full-screen specimen (`samples/apps/visual`) compared exactly against `tests/golden/visual.png` + a SHA-256/tile manifest (`scripts/visual_regression.py`). No kernel serial dump or debug builtin is added. The specimen covers the kernel text windows, has no clock/input, checks its own pixels and holds after `visual: ready`; the same golden matches on `-smp 4` and `-smp 1`, `--tamper` proves the comparator rejects a changed pixel, and only `--update` rewrites the golden. 376 host tests. |

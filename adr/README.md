@@ -56,3 +56,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0029 | [Boot into the desktop; launch the shell from its Terminal item](0029-boot-to-desktop.md) | Accepted | 2026-11-17 |
 | 0030 | [A kernel-owned 12-pixel proportional bitmap font with a lazy glyph cache](0030-proportional-font.md) | Accepted | 2026-11-17 |
 | 0031 | [Coalesce damage before repair and batch console cells into one present](0031-damage-coalescing-present-batching.md) | Accepted | 2026-11-17 |
+| 0032 | [Visual regression uses exact host-side framebuffer goldens](0032-visual-regression-goldens.md) | Accepted | 2026-11-17 |

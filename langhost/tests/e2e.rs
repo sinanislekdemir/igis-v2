@@ -2459,3 +2459,17 @@ fn the_perf_sample_reports_the_host_path() {
     assert_eq!(result.reason, ExitReason::Ok);
     assert_eq!(result.output, b"perf: no graphics\nperf: host ok\n".to_vec());
 }
+
+/// The M2.6.3 visual-regression specimen against `langhost`'s disabled screen:
+/// there is no frame to compare, so it checks the 0/`Invalid` contract and
+/// prints the host transcript (spec 0009, "Visual proof").
+#[test]
+fn the_visual_sample_reports_the_host_path() {
+    let path = format!("{}/../samples/apps/visual", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "visual").expect("the visual sample compiles");
+    let result =
+        langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies and runs");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"visual: host ok\n".to_vec());
+}
