@@ -2290,6 +2290,20 @@ end;
     assert!(host.texts.contains(&(672, 376, b"Cancel".to_vec(), BLACK)));
 }
 
+/// The M2.5.3 editor sample against `langhost`'s disabled screen: it loads a
+/// small file through the host file view (spec 0013) and checks the same line,
+/// edit, capacity, UTF-8 and read-only logic the kernel's check mode runs.
+#[test]
+fn the_editor_sample_checks_its_logic_on_the_host() {
+    let path = format!("{}/../samples/apps/editor", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "editor").expect("the editor sample compiles");
+    let result =
+        langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies and runs");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"editor: host ok\n".to_vec());
+}
+
 /// The M2.5.1 proof sample against `langhost`'s root-only file host (spec
 /// 0013): listing, `fs_size`, chunked reads, offsets and error paths all run
 /// on the host with the same 256-byte chunk the kernel uses.

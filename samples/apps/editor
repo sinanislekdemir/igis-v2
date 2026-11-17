@@ -1,0 +1,1690 @@
+unit editor;
+
+// M2.5.3: a windowed text editor over the read-only application file API.
+//
+//   run editor               // interactive, opens `child`
+//   run editor <file>        // interactive, opens that root file
+//   run editor check         // deterministic checks, prints `editor: ok`
+//   run editor shot [file]   // draws the file, prints `editor: ready` and
+//                            // holds ~5 s for the QMP screenshot harness
+//
+// The document is one `string[8192]` buffer (valid UTF-8 by construction) and
+// the view is derived from it on demand: a byte cursor, a scalar selection
+// anchor, a first visible line and a horizontal byte offset. Opening a file
+// checks the size first (`core.fs_size`), reads it in the API's 256-byte
+// chunks into a staged `bytes[8192]`, and publishes the whole buffer with one
+// `core.substr_into` (a `bytes` source is the strict UTF-8 conversion), so a
+// missing name, a directory, an unsupported path, an over-size file or
+// invalid UTF-8 leaves the previous document byte-identical. The buffer limit
+// is 8192 bytes; a larger file is refused with a status line, not truncated.
+//
+// Editing is app-local because the M2.4.1 `str_*` mutators declare a 256-byte
+// working capacity while this editor's buffer is 8 KiB. The read-only helpers
+// (`str_boundary`, `str_cursor_*`, `str_selection_normalize/all/collapse`) take
+// `const string[0]` and are reused unchanged; the one mutator is
+// `ed_replace`, the same checked prefix/insert/suffix staging rule as
+// `str_insert_into`/`str_delete_into` but with this buffer's capacity. It
+// requires both range ends to be code-point boundaries, stages into a local
+// `bytes[8192]`, converts with `core.substr_into` and publishes with one copy,
+// so a rejected edit changes nothing and the document stays valid UTF-8.
+//
+// There is no writable filesystem yet, so saving is disabled: the File menu's
+// Save row is disabled and Ctrl+S only reports "read-only" in the status line.
+// Nothing in this app calls a write primitive (there is none).
+//
+// The File menu's Open re-reads the current path (there is no file picker
+// until M2.5.4), Ctrl+O does the same, Ctrl+Q quits and Ctrl+A selects all.
+// The scrollbar uses `ui_scrollbar`/`ui_scrollbar_hit`: a click on the track
+// pages the view; dragging the thumb is not implemented (the M2.4 scrollbar
+// helper defers thumb dragging). Tab inserts two spaces, the repository's
+// source indentation.
+//
+// Drawing is client content only: the window service owns the frame, this app
+// paints inside its content rectangle and never calls `syslib.clear`. Every
+// frame is complete before one `window_present`; an owner `Expose` repaints the
+// whole content. The interactive loop blocks in `syslib.next_event` while idle.
+//
+// `langhost` and a kernel without a framebuffer model a disabled screen, so the
+// sample runs the same load/edit/line logic there and prints `editor: host ok`.
+
+uses core, stdlib, syslib;
+
+const
+  WindowX = 180;
+  WindowY = 90;
+  ContentW = 640;
+  ContentH = 480;
+
+  // Document capacity. The ext2 sources the editor opens in the samples are
+  // far below this; `widgets` (57 KiB) is the documented too-large case.
+  BufferCapacity = 8192;
+  PathCapacity = 64;
+
+  // Client layout inside the content rectangle.
+  MenuBarH = 22;
+  MenuW = 160;
+  PathTop = 22;
+  PathH = 16;
+  TextTop = 38;
+  LineH = 16;
+  Rows = 26;
+  TextLeft = 4;
+  TextW = 612;
+  VisibleCols = 76;
+  ScrollLeft = 620;
+  ScrollTop = 38;
+  ScrollW = 16;
+  ScrollH = 416;
+  StatusTop = 456;
+
+  HoldSeconds = 5;
+  NanosPerSecond = 1000000000;
+
+var
+  // Document and loading.
+  text: string[BufferCapacity];
+  load_stage: bytes[BufferCapacity];
+  path: string[PathCapacity];
+  status_line: string[64];
+
+  // View state: caret and selection anchor are byte offsets (code-point
+  // boundaries); the selection is the ordered pair, normalized on use.
+  caret: int;
+  anchor: int;
+  top_line: int;
+  left_byte: int;
+
+  // File menu.
+  open_menu: int;
+  selected: int;
+  file_items: array[string[64], 16];
+  file_keys: array[string[32], 16];
+  file_disabled: uint;
+  titles: array[string[32], 8];
+
+  // Window and absolute layout.
+  id: int;
+  rect: Rect;
+  text_x: int;
+  text_y: int;
+  scroll_x: int;
+  scroll_y: int;
+  status_y: int;
+
+  // Palette.
+  black: uint;
+  white: uint;
+  gray: uint;
+  accent: uint;
+
+  // Mode and scratch.
+  mode: int;
+  running: bool;
+  failed: bool;
+  step: int;
+  step_text: string[16];
+  ev: Event;
+  st: Status;
+  used: int;
+  copied: int;
+  tail_buf: string[256];
+  digits_line: string[24];
+  digits_col: string[24];
+  slice_buf: string[512];
+  one: bytes[2];
+  ch: string[8];
+  scratch_bytes: bytes[4];
+  scratch_text: string[8];
+
+procedure say(line: const string[0]);
+begin
+  core.write(line);
+end;
+
+// Silent check: the first failure is printed with its step number and label.
+procedure verify(label: const string[0]; passed: bool);
+begin
+  step := step + 1;
+  if not passed then
+  begin
+    failed := true;
+    say("editor: failed check ");
+    used := core.format_int_into(step_text, step, uint(10), uint(0));
+    say(step_text);
+    say(" (");
+    say(label);
+    say(")\n");
+  end;
+end;
+
+// ---- text geometry (pure over any capacity) ------------------------------
+
+function is_continuation(value: byte): bool;
+begin
+  return value >= byte(0x80) and value <= byte(0xBF);
+end;
+
+// One line per '\n', plus a final empty line when the text ends with one; an
+// empty document is one empty line.
+function line_count(t: const string[0]): int;
+var
+  length: int;
+  i: int;
+  count: int;
+begin
+  length := int(core.len(t));
+  count := 1;
+  i := 0;
+  while i < length do
+  begin
+    if t[i] = byte(10) then
+      count := count + 1;
+    i := i + 1;
+  end;
+  return count;
+end;
+
+// Byte offset of the first byte of `line` (0-based); past the last line yields
+// the text length.
+function line_start_of(t: const string[0]; line: int): int;
+var
+  length: int;
+  i: int;
+  seen: int;
+begin
+  length := int(core.len(t));
+  if line <= 0 then
+    return 0;
+  i := 0;
+  seen := 0;
+  while i < length do
+  begin
+    if t[i] = byte(10) then
+    begin
+      seen := seen + 1;
+      if seen = line then
+        return i + 1;
+    end;
+    i := i + 1;
+  end;
+  return length;
+end;
+
+// Byte offset of the line's terminating '\n', or the text length.
+function line_end_of(t: const string[0]; start: int): int;
+var
+  length: int;
+  i: int;
+begin
+  length := int(core.len(t));
+  if start >= length then
+    return length;
+  i := start;
+  while i < length do
+  begin
+    if t[i] = byte(10) then
+      return i;
+    i := i + 1;
+  end;
+  return length;
+end;
+
+// 0-based line containing byte offset `pos`.
+function line_of_pos(t: const string[0]; pos: int): int;
+var
+  length: int;
+  i: int;
+  line: int;
+begin
+  length := int(core.len(t));
+  if pos > length then
+    pos := length;
+  line := 0;
+  i := 0;
+  while i < pos do
+  begin
+    if t[i] = byte(10) then
+      line := line + 1;
+    i := i + 1;
+  end;
+  return line;
+end;
+
+// Code-point column (draw_text advances one cell per byte; this is the
+// human-readable column used by the Ln/Col readout).
+function column_of(t: const string[0]; start: int; pos: int): int;
+var
+  length: int;
+  i: int;
+  column: int;
+begin
+  length := int(core.len(t));
+  if pos > length then
+    pos := length;
+  column := 0;
+  i := start;
+  while i < pos do
+  begin
+    if not is_continuation(t[i]) then
+      column := column + 1;
+    i := i + 1;
+  end;
+  return column;
+end;
+
+// Moves `at` back to the nearest code-point boundary at or after `from`.
+function snap_boundary(t: const string[0]; from: int; at: int): int;
+var
+  length: int;
+  i: int;
+begin
+  length := int(core.len(t));
+  i := at;
+  if i > length then
+    i := length;
+  while i > from and i < length and is_continuation(t[i]) do
+    i := i - 1;
+  return i;
+end;
+
+// ---- editing over the 8 KiB buffer ---------------------------------------
+
+// The single checked mutator: replaces `count` bytes at boundary `at` with
+// `ins` (any valid `string`). Both range ends must be boundaries; the result
+// is staged in a local `bytes[BufferCapacity]`, converted with
+// `core.substr_into` (strict UTF-8) and published with one whole-buffer copy.
+// `Invalid` and `CapacityExceeded` change nothing.
+function ed_replace(buf: var string[BufferCapacity]; at: int; count: int;
+                    ins: const string[0]): Status;
+var
+  length: int;
+  add: int;
+  new_length: int;
+  i: int;
+  raw: bytes[BufferCapacity];
+begin
+  length := int(core.len(buf));
+  if at < 0 or at > length then
+    return Invalid;
+  if count < 0 or count > length - at then
+    return Invalid;
+  if not stdlib.str_boundary(buf, at) then
+    return Invalid;
+  if not stdlib.str_boundary(buf, at + count) then
+    return Invalid;
+  add := int(core.len(ins));
+  new_length := length - count + add;
+  if new_length > BufferCapacity then
+    return CapacityExceeded;
+
+  i := 0;
+  while i < at do
+  begin
+    raw[i] := buf[i];
+    i := i + 1;
+  end;
+  i := 0;
+  while i < add do
+  begin
+    raw[at + i] := ins[i];
+    i := i + 1;
+  end;
+  i := at + count;
+  while i < length do
+  begin
+    raw[i - count + add] := buf[i];
+    i := i + 1;
+  end;
+
+  copied := core.substr_into(buf, raw, 0, new_length);
+  if copied <> new_length then
+    return Invalid;
+  return Ok;
+end;
+
+// Deletes the code point before the clamped cursor and moves it to that code
+// point's first byte; at 0 it is an Ok no-op.
+function ed_backspace(buf: var string[BufferCapacity]; cursor: var int): Status;
+var
+  at: int;
+  previous: int;
+  result: Status;
+begin
+  at := stdlib.str_cursor_clamp(buf, cursor);
+  if at = 0 then
+  begin
+    cursor := 0;
+    return Ok;
+  end;
+  previous := at - 1;
+  while previous > 0 and is_continuation(buf[previous]) do
+    previous := previous - 1;
+  result := ed_replace(buf, previous, at - previous, "");
+  if result = Ok then
+    cursor := previous;
+  return result;
+end;
+
+// Deletes the code point after the cursor; at the end it is an Ok no-op.
+function ed_delete_forward(buf: var string[BufferCapacity]; cursor: var int): Status;
+var
+  at: int;
+  next: int;
+  value: Status;
+begin
+  at := stdlib.str_cursor_clamp(buf, cursor);
+  if at >= int(core.len(buf)) then
+  begin
+    cursor := at;
+    return Ok;
+  end;
+  next := at;
+  next := stdlib.str_cursor_right(buf, next);
+  if next <= at then
+  begin
+    cursor := at;
+    return Ok;
+  end;
+  value := ed_replace(buf, at, next - at, "");
+  return value;
+end;
+
+// ---- document load --------------------------------------------------------
+
+procedure set_error(value: Status);
+begin
+  if value = NotFound then
+    status_line := "no such file"
+  else if value = Invalid then
+    status_line := "not a readable file"
+  else if value = CapacityExceeded then
+    status_line := "too large (8192 max)"
+  else
+    status_line := "read error";
+end;
+
+// Publishes the first `size` bytes of the staged read as the document. The
+// conversion is the API's only bytes -> string path, so invalid UTF-8 leaves
+// the old document untouched.
+function publish_staged(size: int): Status;
+var
+  got: int;
+begin
+  got := core.substr_into(text, load_stage, 0, size);
+  if got = size then
+    return Ok;
+  if got = -6 then
+    return CapacityExceeded;
+  return Invalid;
+end;
+
+// Loads one root file. On success it replaces the document and the path; on
+// every failure the document and the path are unchanged and the status line
+// names the class of failure.
+function open_path(name: const string[0]): Status;
+var
+  size: uint;
+  offset: uint;
+  read: int;
+  value: Status;
+  chunk: bytes[256];
+  i: int;
+  total: int;
+begin
+  if int(core.len(name)) > PathCapacity then
+  begin
+    status_line := "path too long";
+    return CapacityExceeded;
+  end;
+  value := core.fs_size(name, size);
+  if value <> Ok then
+  begin
+    set_error(value);
+    return value;
+  end;
+  if size > uint(BufferCapacity) then
+  begin
+    status_line := "too large (8192 max)";
+    return CapacityExceeded;
+  end;
+  total := int(size);
+  offset := uint(0);
+  value := Ok;
+  while offset < size and value = Ok do
+  begin
+    value := core.fs_read(name, offset, chunk, read);
+    if value = Ok then
+    begin
+      if read <= 0 then
+        value := IoError
+      else
+      begin
+        i := 0;
+        while i < read do
+        begin
+          load_stage[int(offset) + i] := chunk[i];
+          i := i + 1;
+        end;
+        offset := offset + uint(read);
+      end;
+    end;
+  end;
+  if value <> Ok then
+  begin
+    set_error(value);
+    return value;
+  end;
+  if int(offset) <> total then
+  begin
+    status_line := "read error";
+    return IoError;
+  end;
+  value := publish_staged(total);
+  if value <> Ok then
+  begin
+    status_line := "invalid UTF-8";
+    return value;
+  end;
+  used := core.substr_into(path, name, 0, int(core.len(name)));
+  caret := 0;
+  anchor := 0;
+  top_line := 0;
+  left_byte := 0;
+  status_line := "opened";
+  return Ok;
+end;
+
+// Saving is disabled until a writable filesystem exists (M2.5.3 scope).
+procedure try_save();
+begin
+  status_line := "read-only: no writable filesystem";
+end;
+
+// ---- selection and cursor movement ---------------------------------------
+
+procedure selection_bounds(out_first: var int; out_last: var int);
+var
+  first: int;
+  last: int;
+begin
+  first := anchor;
+  last := caret;
+  used := stdlib.str_selection_normalize(text, first, last);
+  out_first := first;
+  out_last := last;
+end;
+
+procedure collapse_to(position: int);
+begin
+  caret := position;
+  anchor := position;
+end;
+
+// Keeps the caret line inside the vertical window and the caret column inside
+// the horizontal window; both offsets snap back to code-point boundaries.
+procedure ensure_visible();
+var
+  length: int;
+  line: int;
+  start: int;
+  column: int;
+  absolute: int;
+  i: int;
+  total: int;
+begin
+  length := int(core.len(text));
+  line := line_of_pos(text, caret);
+  start := line_start_of(text, line);
+  column := caret - start;
+  if column < left_byte then
+    left_byte := column;
+  if column - left_byte >= VisibleCols then
+    left_byte := column - VisibleCols + 1;
+  if left_byte < 0 then
+    left_byte := 0;
+  absolute := start + left_byte;
+  i := absolute;
+  while i > start and i < length and is_continuation(text[i]) do
+    i := i - 1;
+  left_byte := i - start;
+
+  if line < top_line then
+    top_line := line;
+  if line >= top_line + Rows then
+    top_line := line - Rows + 1;
+  total := line_count(text);
+  top_line := stdlib.ui_scrollbar_clamp(top_line, Rows, total);
+  if top_line < 0 then
+    top_line := 0;
+end;
+
+// Replaces the ordered selection with `ins` and collapses the selection just
+// past the inserted text. The failure paths leave everything untouched.
+procedure replace_selection(ins: const string[0]);
+var
+  first: int;
+  last: int;
+  value: Status;
+begin
+  selection_bounds(first, last);
+  value := ed_replace(text, first, last - first, ins);
+  if value = Ok then
+  begin
+    caret := first + int(core.len(ins));
+    anchor := caret;
+    status_line := "";
+  end
+  else if value = CapacityExceeded then
+    status_line := "buffer full (8192 bytes)"
+  else
+    status_line := "edit refused";
+  ensure_visible();
+end;
+
+// One printable byte from a key event, converted through the checked
+// bytes -> string path (ASCII, so it is always valid).
+procedure type_char(value: byte);
+var
+  got: int;
+begin
+  one[0] := value;
+  got := core.substr_into(ch, one, 0, 1);
+  if got = 1 then
+    replace_selection(ch)
+  else
+    status_line := "bad character";
+end;
+
+// Plain left/right: collapse a live selection to the edge in that direction,
+// otherwise move one whole code point.
+procedure move_horizontal(delta: int);
+var
+  first: int;
+  last: int;
+begin
+  selection_bounds(first, last);
+  if first <> last then
+  begin
+    if delta < 0 then
+      collapse_to(first)
+    else
+      collapse_to(last);
+  end
+  else if delta < 0 then
+    caret := stdlib.str_cursor_left(text, caret)
+  else
+    caret := stdlib.str_cursor_right(text, caret);
+  anchor := caret;
+  ensure_visible();
+end;
+
+// Shift+left/right: keep the anchor and move the active end.
+procedure extend_horizontal(delta: int);
+begin
+  if delta < 0 then
+    caret := stdlib.str_cursor_left(text, caret)
+  else
+    caret := stdlib.str_cursor_right(text, caret);
+  ensure_visible();
+end;
+
+// Moves the caret `delta` lines, keeping the byte column when it fits; a
+// target inside a multi-byte code point snaps back to its first byte.
+procedure move_vertical(delta: int; extend: bool);
+var
+  line: int;
+  start: int;
+  column: int;
+  total: int;
+  target: int;
+  target_start: int;
+  target_end: int;
+  position: int;
+begin
+  line := line_of_pos(text, caret);
+  start := line_start_of(text, line);
+  column := caret - start;
+  total := line_count(text);
+  target := line + delta;
+  if target < 0 then
+    target := 0;
+  if target > total - 1 then
+    target := total - 1;
+  target_start := line_start_of(text, target);
+  target_end := line_end_of(text, target_start);
+  position := target_start + column;
+  if position > target_end then
+    position := target_end;
+  position := snap_boundary(text, target_start, position);
+  if not extend then
+    anchor := position;
+  caret := position;
+  ensure_visible();
+end;
+
+// Home/End; `to_file` jumps to the document ends (Ctrl+Home/Ctrl+End).
+procedure line_home(extend: bool; to_file: bool);
+var
+  line: int;
+  start: int;
+begin
+  if to_file then
+    start := 0
+  else
+  begin
+    line := line_of_pos(text, caret);
+    start := line_start_of(text, line);
+  end;
+  if not extend then
+    anchor := start;
+  caret := start;
+  ensure_visible();
+end;
+
+procedure line_end_move(extend: bool; to_file: bool);
+var
+  line: int;
+  start: int;
+  stop: int;
+begin
+  if to_file then
+    stop := int(core.len(text))
+  else
+  begin
+    line := line_of_pos(text, caret);
+    start := line_start_of(text, line);
+    stop := line_end_of(text, start);
+  end;
+  if not extend then
+    anchor := stop;
+  caret := stop;
+  ensure_visible();
+end;
+
+procedure delete_selection_or_backspace();
+var
+  first: int;
+  last: int;
+  value: Status;
+begin
+  if anchor <> caret then
+  begin
+    selection_bounds(first, last);
+    value := ed_replace(text, first, last - first, "");
+    if value = Ok then
+      collapse_to(first)
+    else
+      status_line := "edit refused";
+  end
+  else
+  begin
+    value := ed_backspace(text, caret);
+    if value = CapacityExceeded then
+      status_line := "buffer full"
+    else if value <> Ok then
+      status_line := "edit refused";
+    anchor := caret;
+  end;
+  ensure_visible();
+end;
+
+procedure delete_selection_or_next();
+var
+  first: int;
+  last: int;
+  value: Status;
+begin
+  if anchor <> caret then
+  begin
+    selection_bounds(first, last);
+    value := ed_replace(text, first, last - first, "");
+    if value = Ok then
+      collapse_to(first)
+    else
+      status_line := "edit refused";
+  end
+  else
+  begin
+    value := ed_delete_forward(text, caret);
+    if value = CapacityExceeded then
+      status_line := "buffer full"
+    else if value <> Ok then
+      status_line := "edit refused";
+    anchor := caret;
+  end;
+  ensure_visible();
+end;
+
+// ---- menu model ----------------------------------------------------------
+
+procedure setup_menu();
+begin
+  titles[0] := "File";
+  file_items[0] := "Open";
+  file_items[1] := "Save";
+  file_items[2] := "-";
+  file_items[3] := "Quit";
+  file_keys[0] := "Ctrl+O";
+  file_keys[1] := "";
+  file_keys[2] := "";
+  file_keys[3] := "Ctrl+Q";
+  // Save is disabled: there is no writable filesystem in M2.
+  file_disabled := stdlib.ui_menu_set(uint(0), 1, true);
+end;
+
+procedure close_menu();
+begin
+  open_menu := stdlib.ui_menu_close();
+  selected := -1;
+end;
+
+procedure open_file_menu();
+begin
+  open_menu := stdlib.ui_menu_open(0, 4, file_items, file_disabled, selected);
+end;
+
+procedure activate_menu(index: int);
+begin
+  if index = 0 then
+  begin
+    close_menu();
+    st := open_path(path);
+  end
+  else if index = 1 then
+  begin
+    close_menu();
+    try_save();
+  end
+  else if index = 3 then
+  begin
+    close_menu();
+    running := false;
+  end;
+end;
+
+// ---- key handling --------------------------------------------------------
+
+procedure handle_key();
+var
+  key: int;
+  mods: int;
+  ctrl: bool;
+  shift: bool;
+  action: int;
+  text_byte: byte;
+begin
+  key := stdlib.ui_key_code(ev.code);
+  mods := stdlib.ui_key_modifiers(ev.code);
+  ctrl := (mods div 2) mod 2 = 1;
+  shift := mods mod 2 = 1;
+
+  if open_menu >= 0 then
+  begin
+    action := stdlib.ui_menu_key(ev.code, true);
+    if action = 6 then
+      close_menu()
+    else if action = 1 then
+      selected := stdlib.ui_menu_move(selected, 4, -1, file_items, file_disabled)
+    else if action = 2 then
+      selected := stdlib.ui_menu_move(selected, 4, 1, file_items, file_disabled)
+    else if action = 5 then
+    begin
+      if selected >= 0 and
+         stdlib.ui_menu_selectable(file_items[selected], file_disabled, selected) then
+        activate_menu(selected);
+    end;
+    return;
+  end;
+
+  if ctrl then
+  begin
+    if key = 0x73 then
+    begin
+      try_save();
+      return;
+    end;
+    if key = 0x71 then
+    begin
+      running := false;
+      return;
+    end;
+    if key = 0x6F then
+    begin
+      st := open_path(path);
+      return;
+    end;
+    if key = 0x61 then
+    begin
+      used := stdlib.str_selection_all(text, anchor, caret);
+      ensure_visible();
+      return;
+    end;
+  end;
+
+  if key = 0x100 then
+    return;
+
+  if stdlib.ui_key_is_backspace(ev.code) then
+    delete_selection_or_backspace()
+  else if stdlib.ui_key_is_delete(ev.code) then
+    delete_selection_or_next()
+  else if stdlib.ui_key_is_enter(ev.code) then
+    replace_selection("\n")
+  else if stdlib.ui_key_is_tab(ev.code) then
+    replace_selection("  ")
+  else if stdlib.ui_key_is_left(ev.code) then
+  begin
+    if shift then
+      extend_horizontal(-1)
+    else
+      move_horizontal(-1);
+  end
+  else if stdlib.ui_key_is_right(ev.code) then
+  begin
+    if shift then
+      extend_horizontal(1)
+    else
+      move_horizontal(1);
+  end
+  else if stdlib.ui_key_is_up(ev.code) then
+    move_vertical(-1, shift)
+  else if stdlib.ui_key_is_down(ev.code) then
+    move_vertical(1, shift)
+  else if key = 0x116 then
+    move_vertical(0 - Rows, shift)
+  else if key = 0x117 then
+    move_vertical(Rows, shift)
+  else if stdlib.ui_key_is_home(ev.code) then
+    line_home(shift, ctrl)
+  else if stdlib.ui_key_is_end(ev.code) then
+    line_end_move(shift, ctrl)
+  else
+  begin
+    text_byte := stdlib.ui_key_text(ev.code);
+    if text_byte >= byte(32) and text_byte < byte(127) then
+      type_char(text_byte);
+  end;
+end;
+
+// ---- pointer handling ----------------------------------------------------
+
+procedure click_text(px: int; py: int);
+var
+  row: int;
+  line: int;
+  total: int;
+  start: int;
+  stop: int;
+  column: int;
+  position: int;
+begin
+  row := (py - text_y) div LineH;
+  if row < 0 then
+    row := 0;
+  line := top_line + row;
+  total := line_count(text);
+  if line > total - 1 then
+    line := total - 1;
+  if line < 0 then
+    line := 0;
+  start := line_start_of(text, line);
+  stop := line_end_of(text, start);
+  column := (px - text_x) div 8 + left_byte;
+  if column < left_byte then
+    column := left_byte;
+  position := start + column;
+  if position > stop then
+    position := stop;
+  if position < start then
+    position := start;
+  position := snap_boundary(text, start, position);
+  collapse_to(position);
+  ensure_visible();
+end;
+
+procedure page_scroll(action: int);
+var
+  total: int;
+begin
+  total := line_count(text);
+  if action = 1 then
+    top_line := stdlib.ui_scrollbar_clamp(top_line - Rows, Rows, total)
+  else if action = 2 then
+    top_line := stdlib.ui_scrollbar_clamp(top_line + Rows, Rows, total);
+end;
+
+procedure handle_pointer();
+var
+  bar: int;
+  row: int;
+  action: int;
+begin
+  if ev.kind = PointerDown then
+  begin
+    bar := stdlib.ui_menu_bar_hit(rect.x, rect.y, ContentW, titles, 1, ev.x, ev.y);
+    if bar = 0 then
+    begin
+      if open_menu = 0 then
+        close_menu()
+      else
+        open_file_menu();
+      return;
+    end;
+    if open_menu >= 0 then
+    begin
+      row := stdlib.ui_menu_hit(
+        rect.x + 4, rect.y + MenuBarH, MenuW, file_items, 4, ev.x, ev.y);
+      if row >= 0 then
+      begin
+        if stdlib.ui_menu_selectable(file_items[row], file_disabled, row) then
+          selected := row
+        else if row = 1 then
+          status_line := "read-only: no writable filesystem";
+      end
+      else
+        close_menu();
+      return;
+    end;
+    if stdlib.ui_rect_hit(text_x, text_y, TextW, ScrollH, ev.x, ev.y) then
+    begin
+      click_text(ev.x, ev.y);
+      return;
+    end;
+    if stdlib.ui_rect_hit(scroll_x, scroll_y, ScrollW, ScrollH, ev.x, ev.y) then
+    begin
+      action := stdlib.ui_scrollbar_hit(
+        scroll_x, scroll_y, ScrollW, ScrollH, ev.x, ev.y,
+        top_line, Rows, line_count(text));
+      page_scroll(action);
+      return;
+    end;
+  end
+  else if ev.kind = PointerUp then
+  begin
+    if open_menu >= 0 then
+    begin
+      row := stdlib.ui_menu_hit(
+        rect.x + 4, rect.y + MenuBarH, MenuW, file_items, 4, ev.x, ev.y);
+      if row >= 0 and row = selected and
+         stdlib.ui_menu_selectable(file_items[row], file_disabled, row) then
+        activate_menu(row)
+      else if row < 0 then
+        close_menu();
+      return;
+    end;
+  end
+  else if ev.kind = PointerMove then
+  begin
+    if open_menu >= 0 then
+    begin
+      row := stdlib.ui_menu_hit(
+        rect.x + 4, rect.y + MenuBarH, MenuW, file_items, 4, ev.x, ev.y);
+      if row >= 0 and stdlib.ui_menu_selectable(file_items[row], file_disabled, row) then
+        selected := row;
+    end;
+    return;
+  end;
+end;
+
+// ---- drawing -------------------------------------------------------------
+
+procedure compute_layout();
+begin
+  text_x := rect.x + TextLeft;
+  text_y := rect.y + TextTop;
+  scroll_x := rect.x + ScrollLeft;
+  scroll_y := rect.y + ScrollTop;
+  status_y := rect.y + StatusTop;
+end;
+
+// One horizontal slice of the current line, from `left` (the byte shown at
+// text_x, used for x) to `to`; both ends are boundaries and the range is at
+// most `VisibleCols` bytes.
+procedure draw_segment(left: int; from: int; to: int; y: int; color: uint);
+var
+  got: int;
+  at: int;
+begin
+  if to <= from then
+    return;
+  at := snap_boundary(text, from, to);
+  if at <= from then
+    return;
+  got := core.substr_into(slice_buf, text, from, at - from);
+  if got > 0 then
+    st := syslib.draw_text(text_x + (from - left) * 8, y + 4, slice_buf, color);
+end;
+
+// One document line with its selection band. The accent is painted behind the
+// glyphs and the selected cells are redrawn white, so the band and its text
+// stay readable; the unselected parts are black.
+procedure draw_line(start: int; stop: int; y: int);
+var
+  from: int;
+  to: int;
+  first: int;
+  last: int;
+  band_from: int;
+  band_to: int;
+begin
+  from := start + left_byte;
+  if from > stop then
+    from := stop;
+  to := stop;
+  if to > from + VisibleCols then
+    to := from + VisibleCols;
+  to := snap_boundary(text, from, to);
+  if to < from then
+    to := from;
+  selection_bounds(first, last);
+  band_from := from;
+  if first > band_from then
+    band_from := first;
+  band_to := to;
+  if last < band_to then
+    band_to := last;
+  if band_from < band_to then
+  begin
+    st := syslib.fill_rect(
+      text_x + (band_from - from) * 8, y + 2,
+      (band_to - band_from) * 8, 12, accent);
+    draw_segment(from, from, band_from, y, black);
+    draw_segment(from, band_from, band_to, y, white);
+    draw_segment(from, band_to, to, y, black);
+  end
+  else
+    draw_segment(from, from, to, y, black);
+end;
+
+procedure draw_lines();
+var
+  total: int;
+  length: int;
+  start: int;
+  stop: int;
+  row: int;
+  line: int;
+  y: int;
+  column: int;
+  caret_line: int;
+  caret_start: int;
+begin
+  length := int(core.len(text));
+  total := line_count(text);
+  start := line_start_of(text, top_line);
+  row := 0;
+  while row < Rows do
+  begin
+    line := top_line + row;
+    if line < total then
+    begin
+      stop := line_end_of(text, start);
+      y := text_y + row * LineH;
+      draw_line(start, stop, y);
+      if stop < length then
+        start := stop + 1
+      else
+        start := length;
+    end;
+    row := row + 1;
+  end;
+
+  caret_line := line_of_pos(text, caret);
+  if caret_line >= top_line and caret_line < top_line + Rows then
+  begin
+    caret_start := line_start_of(text, caret_line);
+    column := caret - caret_start;
+    if column >= left_byte and column - left_byte <= VisibleCols then
+    begin
+      y := text_y + (caret_line - top_line) * LineH;
+      st := syslib.fill_rect(
+        text_x + (column - left_byte) * 8, y + 3, 1, 10, black);
+    end;
+  end;
+end;
+
+procedure draw_path_line();
+var
+  width: int;
+begin
+  if int(core.len(path)) = 0 then
+    st := syslib.draw_text(rect.x + 8, rect.y + PathTop + 4, "(no file)", gray)
+  else
+    st := syslib.draw_text(rect.x + 8, rect.y + PathTop + 4, path, black);
+  width := stdlib.ui_text_width("read-only");
+  st := syslib.draw_text(
+    rect.x + ContentW - 8 - width, rect.y + PathTop + 4, "read-only", gray);
+  st := stdlib.ui_separator(rect.x, rect.y + PathTop + PathH - 1, ContentW);
+end;
+
+procedure draw_status();
+var
+  line: int;
+  start: int;
+  column: int;
+  label_w: int;
+  x: int;
+begin
+  st := stdlib.ui_separator(rect.x, status_y - 2, ContentW);
+  st := syslib.draw_text(rect.x + 8, status_y + 4, status_line, black);
+
+  line := line_of_pos(text, caret);
+  start := line_start_of(text, line);
+  column := column_of(text, start, caret);
+  used := core.format_int_into(digits_line, line + 1, uint(10), uint(0));
+  used := core.format_int_into(digits_col, column + 1, uint(10), uint(0));
+  label_w := (3 + int(core.len(digits_line)) + 6 + int(core.len(digits_col))) * 8;
+  x := rect.x + ContentW - 8 - label_w;
+  st := syslib.draw_text(x, status_y + 4, "Ln ", gray);
+  st := syslib.draw_text(x + 24, status_y + 4, digits_line, black);
+  st := syslib.draw_text(
+    x + 24 + int(core.len(digits_line)) * 8, status_y + 4, ", Col ", gray);
+  st := syslib.draw_text(
+    x + 24 + int(core.len(digits_line)) * 8 + 48, status_y + 4, digits_col, black);
+end;
+
+procedure draw_dropdown();
+begin
+  st := stdlib.ui_menu_dropdown(
+    rect.x + 4, rect.y + MenuBarH, MenuW, file_items, file_keys, 4,
+    selected, uint(0), file_disabled, true);
+end;
+
+// One complete frame: background, menu, path line, text view, carets,
+// scrollbar, status line, then the open pull-down on top. The caller presents
+// once afterwards.
+procedure draw_all();
+begin
+  st := syslib.fill_rect(rect.x, rect.y, ContentW, ContentH, white);
+  st := stdlib.ui_menu_bar(rect.x, rect.y, ContentW, titles, 1, open_menu);
+  draw_path_line();
+  draw_lines();
+  st := stdlib.ui_scrollbar(
+    scroll_x, scroll_y, ScrollW, ScrollH, top_line, Rows, line_count(text), false);
+  draw_status();
+  if open_menu >= 0 then
+    draw_dropdown();
+end;
+
+procedure present_frame();
+begin
+  st := syslib.window_present(id);
+end;
+
+// ---- shared checks -------------------------------------------------------
+
+// Loads `child`, checks the chunked read and size agreement, then proves that
+// every error class leaves the document intact.
+procedure file_checks();
+var
+  keep_length: int;
+  size: uint;
+  value: Status;
+begin
+  value := open_path("child");
+  verify("open child",
+    value = Ok and path = "child" and int(core.len(text)) > 0);
+  verify("child prefix", stdlib.starts_with(text, "unit child;"));
+  keep_length := int(core.len(text));
+  value := core.fs_size("child", size);
+  verify("child size", value = Ok and int(core.len(text)) = int(size));
+  verify("child lines", line_count(text) > 5);
+
+  value := open_path("no_such_file");
+  verify("missing file",
+    value = NotFound and int(core.len(text)) = keep_length);
+  value := open_path(".");
+  verify("directory", value = Invalid and int(core.len(text)) = keep_length);
+  value := open_path("child/x");
+  verify("subdirectory path",
+    value = Invalid and int(core.len(text)) = keep_length);
+  value := open_path("widgets");
+  verify("too large",
+    value = CapacityExceeded and int(core.len(text)) = keep_length);
+  verify("child intact", stdlib.starts_with(text, "unit child;"));
+end;
+
+// Line geometry, app-local editing (insert, delete, backspace, Enter, a 2-byte
+// code point), the capacity boundary, invalid UTF-8 and the read-only rule.
+procedure buffer_checks();
+var
+  i: int;
+  value: Status;
+begin
+  text := "alpha\nbeta\ngamma";
+  verify("line count", line_count(text) = 3);
+  verify("line starts",
+    line_start_of(text, 0) = 0 and line_start_of(text, 1) = 6
+      and line_start_of(text, 2) = 11 and line_start_of(text, 3) = 16);
+  verify("line ends",
+    line_end_of(text, 0) = 5 and line_end_of(text, 6) = 10
+      and line_end_of(text, 11) = 16);
+  verify("line of pos",
+    line_of_pos(text, 0) = 0 and line_of_pos(text, 6) = 1
+      and line_of_pos(text, 16) = 2);
+  verify("column", column_of(text, 0, 5) = 5 and column_of(text, 6, 10) = 4);
+
+  collapse_to(0);
+  replace_selection("X");
+  verify("insert char",
+    int(core.len(text)) = 17 and text[0] = byte(88) and caret = 1);
+  delete_selection_or_backspace();
+  verify("backspace char",
+    text = "alpha\nbeta\ngamma" and caret = 0);
+
+  move_vertical(1, false);
+  verify("vertical down", caret = 6);
+  move_vertical(1, false);
+  verify("vertical down again", caret = 11);
+  line_end_move(false, false);
+  verify("end of line", caret = 16);
+  replace_selection("\n");
+  verify("enter splits", int(core.len(text)) = 17 and line_count(text) = 4);
+  delete_selection_or_backspace();
+  verify("backspace joins", int(core.len(text)) = 16 and line_count(text) = 3);
+  line_home(false, false);
+  verify("home line", caret = 11);
+  line_end_move(false, true);
+  verify("file end", caret = 16);
+
+  text := "héllo";
+  verify("multibyte length", int(core.len(text)) = 6);
+  verify("boundary start",
+    stdlib.str_boundary(text, 0) and stdlib.str_boundary(text, 1));
+  verify("boundary inside", not stdlib.str_boundary(text, 2));
+  verify("boundary after", stdlib.str_boundary(text, 3));
+  collapse_to(3);
+  value := ed_backspace(text, caret);
+  anchor := caret;
+  verify("backspace code point",
+    value = Ok and text = "hllo" and caret = 1);
+  scratch_bytes[0] := byte(0xC3);
+  scratch_bytes[1] := byte(0xA9);
+  copied := core.substr_into(scratch_text, scratch_bytes, 0, 2);
+  verify("code point staged", copied = 2 and int(core.len(scratch_text)) = 2);
+  replace_selection(scratch_text);
+  verify("insert code point",
+    int(core.len(text)) = 6 and text = "héllo" and caret = 3);
+  collapse_to(3);
+  verify("cursor left codepoint",
+    stdlib.str_cursor_left(text, caret) = 1);
+  verify("cursor right codepoint",
+    stdlib.str_cursor_right(text, caret) = 3);
+
+  i := 0;
+  while i < BufferCapacity do
+  begin
+    load_stage[i] := byte(97);
+    i := i + 1;
+  end;
+  value := publish_staged(BufferCapacity);
+  verify("full buffer",
+    value = Ok and int(core.len(text)) = BufferCapacity);
+  value := ed_replace(text, 0, 0, "x");
+  verify("capacity refused", value = CapacityExceeded);
+  verify("capacity intact",
+    int(core.len(text)) = BufferCapacity and text[0] = byte(97));
+
+  text := "keep";
+  load_stage[0] := byte(0xC3);
+  load_stage[1] := byte(0x28);
+  value := publish_staged(2);
+  verify("invalid utf8", value = Invalid);
+  verify("invalid kept", text = "keep");
+
+  try_save();
+  verify("save read-only",
+    status_line = "read-only: no writable filesystem");
+  verify("save kept", text = "keep");
+end;
+
+// Vertical scrolling on `child` (28 lines in 26 rows) and horizontal scrolling
+// on a 100-byte line.
+procedure scroll_checks();
+var
+  total: int;
+  i: int;
+  value: Status;
+begin
+  total := line_count(text);
+  verify("child scrollable", total > Rows);
+  caret := int(core.len(text));
+  anchor := caret;
+  ensure_visible();
+  verify("view follows caret", top_line = total - Rows);
+
+  move_vertical(0 - Rows, false);
+  verify("page up caret", line_of_pos(text, caret) < total - 1);
+  verify("page up view", top_line >= 0 and top_line <= total - Rows);
+
+  line_home(false, true);
+  verify("home top", caret = 0 and top_line = 0);
+
+  i := 0;
+  while i < 100 do
+  begin
+    load_stage[i] := byte(97);
+    i := i + 1;
+  end;
+  value := publish_staged(100);
+  verify("long line", value = Ok and int(core.len(text)) = 100);
+  caret := int(core.len(text));
+  anchor := caret;
+  ensure_visible();
+  verify("horizontal scroll",
+    left_byte > 0 and caret - left_byte <= VisibleCols);
+  verify("horizontal boundary", stdlib.str_boundary(text, left_byte));
+  line_home(false, true);
+  verify("horizontal reset", caret = 0 and left_byte = 0);
+end;
+
+// Drop queued events and any coalesced owner expose.
+procedure drain_quiet();
+var
+  i: int;
+begin
+  i := 0;
+  while i < 8 do
+  begin
+    st := syslib.poll_event(ev);
+    if st <> Ok then
+      i := 8
+    else
+      i := i + 1;
+  end;
+end;
+
+// ---- modes ---------------------------------------------------------------
+
+// The disabled-screen path: the same file, editing and view logic without a
+// window or a pixel.
+procedure host_path();
+begin
+  file_checks();
+  scroll_checks();
+  buffer_checks();
+  if failed then
+    say("editor: host failed\n")
+  else
+    say("editor: host ok\n");
+end;
+
+procedure check_mode();
+var
+  i: int;
+  found: bool;
+  a: int;
+  b: int;
+begin
+  file_checks();
+  scroll_checks();
+  buffer_checks();
+
+  // A deterministic document for the drawing probes.
+  text := "IGIS editor\nline two\nline three";
+  status_line := "check mode";
+  collapse_to(0);
+  top_line := 0;
+  left_byte := 0;
+  draw_all();
+  present_frame();
+
+  verify("menu rule", syslib.get_pixel(rect.x + 300, rect.y + 21) = black);
+  verify("path rule", syslib.get_pixel(rect.x + 300, rect.y + 37) = black);
+  verify("glyph ink", syslib.get_pixel(text_x + 1, text_y + 4) = black);
+  verify("glyph hole", syslib.get_pixel(text_x + 4, text_y + 5) = white);
+  verify("caret", syslib.get_pixel(text_x, text_y + 8) = black);
+
+  anchor := 0;
+  caret := 2;
+  draw_all();
+  present_frame();
+  verify("selection band", syslib.get_pixel(text_x + 8, text_y + 2) = accent);
+  collapse_to(0);
+  draw_all();
+  present_frame();
+
+  verify("scrollbar border", syslib.get_pixel(scroll_x, scroll_y) = black);
+  verify("scrollbar thumb", syslib.get_pixel(scroll_x + 4, scroll_y + 3) = gray);
+  verify("status rule", syslib.get_pixel(rect.x + 300, status_y - 2) = black);
+
+  // One injected key event proves the queue/routing path: it must arrive with
+  // this window's id and flow through handle_key.
+  drain_quiet();
+  ev.kind := KeyDown;
+  ev.x := 0;
+  ev.y := 0;
+  ev.code := uint(0x58 + 0x58 * 65536);
+  ev.window := 0;
+  st := syslib.inject_event(ev);
+  verify("event injected", st = Ok);
+  found := false;
+  i := 0;
+  while i < 8 and not found do
+  begin
+    st := syslib.poll_event(ev);
+    if st = Ok then
+    begin
+      if ev.kind = Expose then
+      begin
+        if ev.window = id then
+        begin
+          draw_all();
+          present_frame();
+        end;
+      end
+      else if ev.kind = KeyDown then
+      begin
+        verify("event routed", ev.window = id);
+        handle_key();
+        found := true;
+      end;
+    end
+    else
+      i := 8;
+    i := i + 1;
+  end;
+  verify("event handled", found);
+  verify("event text", stdlib.starts_with(text, "XIGIS"));
+  delete_selection_or_backspace();
+  verify("event undone", stdlib.starts_with(text, "IGIS"));
+
+  st := syslib.window_close(id);
+  if failed then
+    say("editor: failed\n")
+  else
+    say("editor: ok\n");
+end;
+
+procedure interactive_mode();
+begin
+  st := open_path(path);
+  draw_all();
+  present_frame();
+  running := true;
+  while running do
+  begin
+    st := syslib.next_event(ev);
+    if st <> Ok then
+      running := false
+    else if ev.kind = Expose then
+    begin
+      if ev.window = id then
+      begin
+        draw_all();
+        present_frame();
+      end;
+    end
+    else if ev.kind = KeyDown then
+    begin
+      if ev.window = id then
+      begin
+        handle_key();
+        if running then
+        begin
+          draw_all();
+          present_frame();
+        end;
+      end;
+    end
+    else if ev.kind = PointerDown or ev.kind = PointerUp or ev.kind = PointerMove then
+    begin
+      if ev.window = id then
+      begin
+        handle_pointer();
+        draw_all();
+        present_frame();
+      end;
+    end;
+  end;
+  st := syslib.window_close(id);
+end;
+
+procedure shot_mode();
+var
+  deadline: uint;
+  dirty: bool;
+  i: int;
+begin
+  st := open_path(path);
+  draw_all();
+  present_frame();
+  say("editor: ready\n");
+  deadline := core.clock() + uint(HoldSeconds) * uint(NanosPerSecond);
+  while core.clock() < deadline and running do
+  begin
+    dirty := false;
+    i := 0;
+    while i < 16 do
+    begin
+      st := syslib.poll_event(ev);
+      if st <> Ok then
+        i := 16
+      else
+      begin
+        i := i + 1;
+        if ev.kind = Expose then
+        begin
+          if ev.window = id then
+            dirty := true;
+        end
+        else if ev.kind = KeyDown then
+        begin
+          if ev.window = id then
+          begin
+            handle_key();
+            dirty := true;
+          end;
+        end
+        else if ev.kind = PointerDown or ev.kind = PointerUp
+                or ev.kind = PointerMove then
+        begin
+          if ev.window = id then
+          begin
+            handle_pointer();
+            dirty := true;
+          end;
+        end;
+        if not running then
+          i := 16;
+      end;
+    end;
+    if dirty then
+    begin
+      draw_all();
+      present_frame();
+    end;
+  end;
+  st := syslib.window_close(id);
+  say("editor: done\n");
+end;
+
+procedure parse_args(args: const string[1024]);
+var
+  space: int;
+  trimmed: string[256];
+  got: int;
+begin
+  mode := 0;
+  path := "child";
+  if stdlib.starts_with(args, "check") then
+    mode := 1
+  else if stdlib.starts_with(args, "shot") then
+  begin
+    mode := 2;
+    space := core.find(args, byte(32));
+    if space >= 0 and space + 1 < int(core.len(args)) then
+    begin
+      used := core.substr_into(
+        tail_buf, args, space + 1, int(core.len(args)) - space - 1);
+      got := stdlib.trim_into(trimmed, tail_buf);
+      if got > 0 and got <= PathCapacity then
+        used := core.substr_into(path, trimmed, 0, got)
+      else if got > PathCapacity then
+        status_line := "path too long";
+    end;
+  end
+  else if int(core.len(args)) > 0 then
+  begin
+    used := core.substr_into(tail_buf, args, 0, int(core.len(args)));
+    got := stdlib.trim_into(trimmed, tail_buf);
+    if got > 0 and got <= PathCapacity then
+      used := core.substr_into(path, trimmed, 0, got)
+    else if got > PathCapacity then
+      status_line := "path too long";
+  end;
+end;
+
+procedure main(args: const string[1024]);
+var
+  screen_w: uint;
+  screen_h: uint;
+begin
+  failed := false;
+  step := 0;
+  running := true;
+  open_menu := -1;
+  selected := -1;
+  caret := 0;
+  anchor := 0;
+  top_line := 0;
+  left_byte := 0;
+  text := "";
+  status_line := "";
+  black := stdlib.ui_black();
+  white := stdlib.ui_white();
+  gray := stdlib.ui_gray();
+  accent := stdlib.ui_accent();
+  setup_menu();
+  parse_args(args);
+
+  screen_w := syslib.screen_width();
+  screen_h := syslib.screen_height();
+  if screen_w = uint(0) then
+    host_path()
+  else if screen_w < uint(WindowX + ContentW + 40) or
+          screen_h < uint(WindowY + ContentH + 60) then
+    say("editor: screen too small\n")
+  else
+  begin
+    st := syslib.window_open(WindowX, WindowY, ContentW, ContentH, "Editor", id);
+    if st <> Ok then
+      say("editor: no window\n")
+    else
+    begin
+      st := syslib.window_content_rect(id, rect);
+      if st <> Ok then
+        say("editor: no content rect\n")
+      else
+      begin
+        compute_layout();
+        if mode = 1 then
+          check_mode()
+        else if mode = 2 then
+          shot_mode()
+        else
+          interactive_mode();
+      end;
+    end;
+  end;
+end;
