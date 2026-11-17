@@ -131,8 +131,9 @@ mount table. `stdlib` stays embedded and is not moved into the image.
   boot (`base/shell`) is exercised.
 - **X3 (MUST):** `home` must exist in the image even when empty; if the stager
   cannot create an empty directory, a small `home/readme.txt` is staged.
-- **X4 (MUST):** The desktop is staged once, as `system/entrypoint`; its unit name
-  stays `desktop_shell`.
+- **X4 (MUST):** The desktop source stays an ordinary base application
+  (`base/desktop_shell`) and is staged once more as `system/entrypoint` for the
+  boot path; its unit name stays `desktop_shell`.
 - **X5 (MUST):** `langhost` resolves `lib.*` through the same reader interface over
   the `samples/apps` tree, and its tests use an in-memory reader.
 

@@ -59,7 +59,9 @@ We will:
    scratch arena (one static `.bss` buffer each), because `/lib` adds source and
    ASTs to a package that already used 6.55 MiB of an 8 MiB arena.
 8. **Boot from `system/entrypoint`,** falling back to `base/shell`; the
-   root-level `entrypoint` alias is removed.
+   root-level `entrypoint` alias is removed and the alias lives under `system/`.
+   `desktop_shell` itself stays an ordinary base application, so `run
+   desktop_shell` keeps working on the shell image.
 
 Module sources are read into the caller's arena once, so the AST's source
 borrows stay valid and the compiler still allocates nothing and performs no I/O

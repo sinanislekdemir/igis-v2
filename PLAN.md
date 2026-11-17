@@ -724,12 +724,15 @@ application's package. One ticket per session; the parent verifies each.
   - `kernel/src/sched.rs` `KernelHost::fs_*` and `langhost` `ConsoleHost::fs_*`
     pass paths through; `langhost` resolves a bare run name under `base` and
     module paths from the `samples/apps` root.
-  - `xtask/src/main.rs`: stage the four directories with real directories; stage
-    the desktop once as `system/entrypoint`; `--shell` omits it; no file at the
-    image root.
-  - Samples that address paths or counts: `files` (root lists 5, `base/child`),
-    `browser` (`base/child`, `base/text`), `editor` (`base/child`), `terminal`
-    (`system/terminal_probe`); update printed counts and status text.
+  - `xtask/src/main.rs`: stage the four directories with real directories; keep
+    `base/desktop_shell` and copy it to `system/entrypoint` (the `--shell` image
+    omits the copy); stage `system_probe`/`terminal_probe` under `system/`; no
+    file at the image root.
+  - Samples/scripts that address paths or counts: `files` (root lists 5,
+    `base/child`), `browser` (`base/child`, `base/text`), `editor`
+    (`base/child`), `terminal` (spawns `system/terminal_probe`),
+    `scripts/system_control_qmp.py` (`run system/system_probe ...`); update
+    printed counts and status text.
   - Verification: `cargo test -p abi -p compiler -p interpreter -p langhost`;
     `cargo xtask build`/`image`/`image --shell`; a typed serial transcript on
     `-smp 4` and `-smp 1` (`help`, `run files`, `run child world`, `run
