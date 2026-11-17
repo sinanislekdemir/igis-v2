@@ -79,7 +79,7 @@ self-check proves the rule (`stack: layout ok`). Spec 0004 C6, spec 0002 H2.
 
 | # | Question | Options / recommendation | Trigger |
 |---|----------|--------------------------|---------|
-| Q51 | Application file API: subdirectories, writable save, and a handle model | M2.5.1 implements the read-only root-only view (`core.fs_list`/`fs_read`/`fs_size`, spec 0013, ADR 0027): no handle, no writable path, a path with `/` is `Invalid`. `lost+found` is listed as a directory and refused by reads. The editor can save only when a writable filesystem exists; the browser may need subdirectory listing if the image ever grows one. A per-open handle model is rejected for M2 but can be revisited if per-read root lookup measures badly | M2.5.4 (browser) for subdirectories; when a writable filesystem exists for save |
+| Q51 | Application file API: writable save and a handle model (subdirectories resolved) | Subdirectories and path traversal are **resolved** by spec 0018 (M3.1: the image is a tree and `abi::fs`/`Ext2` walk paths; M3.4: the browser navigates it). What remains: there is no writable path, so the editor cannot save; the editor and browser still re-resolve a path on every call (no per-open handle). ADR 0027 rejected handles for M2 and can be revisited if the per-call path walk measures badly | when a writable filesystem exists for save; if the path walk becomes measurable |
 
 ## Decided in the 2026-11-16 guards session
 

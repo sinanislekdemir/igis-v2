@@ -14,9 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `9d0b666` (M3.2: `uses lib.*` compiles `/lib` modules into the
-  package; `SourceReader`, unit ids 0/1/2.., caps 384 KiB / 16 MiB,
-  `samples/apps/lib/math.ig`) plus this docs commit. The tree is clean.
+- **Last commit:** `d669146` (M3.4: browser tree navigation) plus this docs commit
+  closing M3. The tree is clean.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -42,24 +41,23 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   the `perf` measurement (`2c0df71`), M2.6.3 the deterministic specimen plus the
   headless golden-frame harness (`tests/golden/visual.png`), and M2.6.4 the System
   menu, About panel, `core.halt`/`core.reboot` and the halt/reboot probes.
-- **Verified at that point (M3.3, independently by the parent):** **439 host tests**
+- **Verified at that point (M3.4, independently by the parent):** **439 host tests**
   (abi 23, compiler 184, interpreter 150, langhost 81, 1 doctest); `cargo xtask
-  build`/`image`/`image --shell` clean; boot still prints `ext2: tree ok`
-  (`frames: 57899 free`; the kernel image grew ~17 KiB of newly linked compiler
-  code, `.bss` unchanged). `cargo run -p langhost -- samples/apps/base/module_demo`
-  prints `module_demo: ok`, and `run module_demo` prints it in the kernel on
-  `-smp 4` and `-smp 1`. The 27-command regression batch passes on both core
-  counts; `boot_desktop_qmp.py` reaches `terminal: ok` on both; the visual golden
-  still matches on both (`37802052…e9e81c9f`). Error paths stay clean: a missing
-  app reports `No such application: base/...`, and `run lib/math.ig` reports the
-  compiler's `missing main` diagnostic, then `child: faulted IoError`, and
-  returns the prompt. No panic.
-- **Next slice:** **M3.4 — browser subdirectory navigation (Q51 partial)** (spec
-  0013 "The file browser", spec 0018 A4). A fresh subagent teaches
-  `samples/apps/base/browser` to enter a directory (`Enter`/double-click), go up
-  with a parent-path rule (paths forbid `..`, so truncate the current path),
-  preview a file at any depth, and launch the selected file by its full path;
-  amend spec 0013 accordingly and prove it on `-smp 4`/`-smp 1` plus `langhost`.
+  build`/`image`/`image --shell` clean; boot `ext2: tree ok`. `run browser check`
+  prints `browser: ok` on `-smp 4` and `-smp 1` (the check asserts the root's
+  five entries, `base` preview `base/child`, up, `system/system_probe`,
+  `home/readme.txt`, `lib/math.ig` as kind 0, a 255-byte path refused, Ctrl+L
+  descent, Ctrl+Up, kind-2 refusal and `base/editor check` launched by full
+  path); the 27-command batch passes on both; `boot_desktop_qmp.py` reaches
+  `terminal: ok` on both; the visual golden matches on both
+  (`37802052…e9e81c9f`); the browser screenshot harness writes a 1024×768
+  `/home/sinan/Desktop/igis-browser.png`.
+- **Next slice:** **M3 is complete** (M3.1–M3.5). The next milestone is not yet
+  planned. The deferred backlog (below) is the input: `f32`/Q40, writable
+  `/home`/Q51 (save), MMIO/DMA/Q45, a nominal `TaskId`/Q43, runtime-capacity
+  buffer parameters/Q46, an explicit stream close/Q10, the guard-recovery
+  blocker/Q47, the compile-arena headroom (16 MiB with `/lib` now in use) and
+  the `cargo fmt`/CI housekeeping.
 
 - **M2.6.3 complete:** the headless visual-regression harness (spec 0009 "Visual proof",
   G21; ADR 0032) and the resolution of M2.1.2. `samples/apps/visual` opens a window whose
@@ -766,16 +764,24 @@ application's package. One ticket per session; the parent verifies each.
   both; the kernel image grew ~17 KiB of linked code (`.bss` unchanged, free
   frames 57899).
 
-- [ ] **M3.4 Browser subdirectory navigation (Q51 partial).**
+- [x] **M3.4 Browser subdirectory navigation (Q51 partial).**
   `samples/apps/base/browser` descends into directories (`Enter` opens a
-  directory, `Backspace`/`..`-equivalent goes up within the content view),
-  previews files at any depth, and keeps the 2048-byte preview cap. Spec 0013
-  "The file browser" amended; proof on both core counts.
+  directory, `Backspace`/`Ctrl+Up` truncates the current path to go up),
+  previews and launches files at any depth by full path, and keeps the
+  2048-byte preview cap. Spec 0013 amended; proof on both core counts.
+  **Done (`d669146`):** 439 host tests; `run browser check` → `browser: ok` on
+  `-smp 4`/`-smp 1` (root → `base` preview → up → `system` → `home/readme.txt` →
+  `lib/math.ig` → long-path refusal → Ctrl+L descent → Ctrl+Up → kind-2 refusal
+  → `base/editor check` launched by full path); the 27-command batch, visual
+  golden and `boot_desktop_qmp.py` pass on both; the browser screenshot harness
+  writes `/home/sinan/Desktop/igis-browser.png` (33,016 B, 1024×768).
 
-- [ ] **M3.5 Docs, spec amendments and AGENTS status row.**
-  Apply the 0018 amendments to specs 0003 (units/`uses`), 0008 (unit ids, caps),
-  0012/0013 (boot path, file paths), refresh this resume point and add the
-  AGENTS.md status row.
+- [x] **M3.5 Docs, spec amendments and AGENTS status row.**
+  Applied the 0018 amendments to spec 0003 (modules M2a/M3/M4/M5, the file-API
+  tree paragraph), spec 0008 (multi-unit and caps, in M3.2), spec 0012 (D9 boot
+  path), spec 0013 (tree view and browser navigation), spec 0018 (Implemented),
+  OPEN-QUESTIONS Q51 (subdirectories resolved) and the AGENTS narrative plus the
+  M3.1–M3.4 status rows. Done by the parent; see the docs commit.
 
 ## Deferred (not UI; pick up when they matter)
 

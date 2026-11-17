@@ -217,8 +217,10 @@ tree view:
 - `Ctrl+L` launches the selected regular file by its **full image path**
   (`dir + "/" + name`, or the name at the root) with `core.spawn` + `core.wait`;
   a directory is entered instead, and a kind-2 entry is refused. Launching a
-  `/lib` source reports the compiler's `missing main` diagnostic; that is the
-  compiler's classification, not a browser rule;
+  `/lib` source is allowed; the spawn-time compile failure appears in the System
+  Log and the browser reports a fault (`core.run` copies the compiler diagnostic
+  into `diag`, `core.spawn` + `wait` does not); that is the compiler's
+  classification, not a browser rule;
 - a kind-2 entry is shown but cannot be opened, entered or launched;
 - path construction is bounded by `PATH_MAX`: a name that would not fit sets a
   status line and is not opened;

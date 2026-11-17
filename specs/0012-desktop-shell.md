@@ -6,7 +6,7 @@
 - **Supersedes:** the full-screen console of spec 0009 G14 (superseded in part)
 - **Superseded by:** none
 - **ADRs:** 0020, 0024, 0025, 0029, 0030
-- **Updated:** 2026-11-17
+- **Updated:** 2026-11-18
 
 ## Context
 
@@ -91,13 +91,14 @@ resize. Those are M2.4/M2.5.
 
 ### Desktop shell
 
-- **D9 (MUST):** `samples/apps/desktop_shell` is an ordinary application. It is also the
-  boot entry from M2.5.6: the image stages the same source under the file name
-  `entrypoint`, and the REPL tries `entrypoint` first and `shell` second. The file name
-  is the load path; the source keeps `unit desktop_shell;`, which is only diagnostic
-  identity. An image without `entrypoint` therefore boots the text `shell` exactly as
-  before M2.5.6. The desktop never attaches the console terminal; the `shell` it
-  launches does (spec 0014, the one-terminal rule).
+- **D9 (MUST):** `samples/apps/base/desktop_shell` is an ordinary base application. It is
+  also the boot entry from M2.5.6: `xtask image` stages a second copy under the file name
+  `system/entrypoint`, and the REPL tries `system/entrypoint` first and `base/shell`
+  second (spec 0018, A3). The file name is the load path; the source keeps
+  `unit desktop_shell;`, which is only diagnostic identity. An image without
+  `system/entrypoint` (the `--shell` image) therefore boots the text `base/shell`
+  exactly as before M2.5.6. The desktop never attaches the console terminal; the
+  `shell` it launches does (spec 0014, the one-terminal rule).
 - **D10 (MUST):** The shell draws a System 7.5-style menu bar at the top of the screen:
   a white bar 22 pixels high, a black 8×8 Apple square, the labels `File`, `Apps`,
   `Windows` and `Terminal`, a black baseline on row 21, and the `core.clock()` `HH:MM`

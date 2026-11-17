@@ -64,8 +64,9 @@ const
   ContentW = 680;
   ContentH = 480;
 
-  // Listing capacity. The `base` directory holds the staged applications; 96
-  // leaves room without a growth path (there is no allocation).
+  // Listing capacity: 96 entries in any directory (the root has five, `base`
+  // holds the most staged applications); 96 leaves room without a growth path
+  // (there is no allocation).
   EntryCapacity = 96;
 
   // Path capacity: `abi::fs::PATH_MAX` (spec 0013 F2 / spec 0018 L6).

@@ -5,7 +5,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0002, 0004, 0005, 0007, 0010, 0011, 0016, 0018, 0021, 0024, 0030
-- **Updated:** 2026-11-17
+- **Updated:** 2026-11-18
 
 ## Context
 
@@ -1084,12 +1084,13 @@ core.fs_read(path: const string[0]; offset: uint;
 core.fs_size(path: const string[0]; var size: uint) -> Status
 ```
 
-They are host builtins (41–43), not opcodes. The M2.5.1 view is the **root directory
-only**: `fs_list` accepts `""` or `"."`, and `fs_read`/`fs_size` accept one root
-component with no `/`. Paths use the same syntax as `core.spawn` (relative, at most 256
-bytes, no leading/trailing `/`, no empty or `..` component); a malformed path is
-`Invalid` and an over-long one is `CapacityExceeded`. A path with a separator addresses
-a subdirectory, which is unsupported and also `Invalid` — not a silent `NotFound`.
+They are host builtins (41–43), not opcodes. The view is the read-only image tree
+(spec 0018, L6): `fs_list` accepts `""`/`"."` or any directory path, and
+`fs_read`/`fs_size` accept any regular-file path. Paths use the same syntax as
+`core.spawn` (relative, at most 256 bytes, at most eight components of at most 64
+bytes each, no leading/trailing `/`, no empty or `.`/`..` component); a malformed
+path is `Invalid` and an over-long one is `CapacityExceeded`. A missing component is
+`NotFound`; a directory or other non-regular inode is `Invalid` for a read or size.
 
 `fs_list` returns entry `index` in directory order (not sorted), excluding `.` and `..`;
 `NotFound` past the end. `kind` is `0` regular file, `1` directory and `2` other; an
@@ -1148,14 +1149,25 @@ application may stop or reset the machine (vision R14, "no capability model").
 ## Modules
 
 - **M1 (MUST):** One source file is one `unit`.
-- **M2 (MUST):** A unit imports with `uses core, stdlib;`. `stdlib` and `syslib` are
+- **M2 (MUST):** A unit imports with `uses core, stdlib;` (or `syslib`). `stdlib` and `syslib` are
   always named explicitly; there is no implicit prelude beyond `core`'s basic types.
+- **M2a (MUST):** A unit may additionally import a `/lib` module by a dotted name whose
+  first component is `lib` (`uses lib.math;`, `uses lib.ui.menu;`). The source is read
+  from the image at `lib/math.ig` (or `lib/ui/menu.ig`) and compiled into the same
+  package as another unit; the module declares `unit math;` (the last dotted component)
+  and its declarations are called as `math.<name>`. Modules may import each other and
+  `stdlib`; a cycle is a compile error (M4). A module may not declare `main`, top-level
+  `var` state or a stream endpoint. The package-wide unit cap and the source/arena caps
+  are spec 0018 M8/M11; `stdlib` stays embedded and is never read from the image.
 - **M3 (MUST):** The three roots are distinct namespaces: `core.*` (native builtins),
-  `stdlib.*` (written in the language), `syslib.*` (hardware). The namespace tells the
-  reader where the code and the cost come from.
-- **M4 (MUST):** Import cycles are a compile error.
+  `stdlib.*` (written in the language), `syslib.*` (hardware), plus the imported
+  module's own unit name (`math.*`). The namespace tells the reader where the code and
+  the cost come from.
+- **M4 (MUST):** Import cycles, including a self-import, are a compile error naming the
+  chain.
 - **M5 (MUST):** Every top-level declaration is visible to importers. The language has no
   `private`, `protected` or `public` modifier; visibility is not part of the type system.
+  Within one package, unit names are unique (spec 0018 M4).
 
 ### Entry point
 

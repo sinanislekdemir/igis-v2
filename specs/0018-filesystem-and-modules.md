@@ -1,12 +1,12 @@
 # 0018: The image filesystem and importable library modules
 
-- **Status:** Accepted
+- **Status:** Implemented
 - **Scope:** abi, compiler, interpreter, kernel ext2/repl/sched, langhost, xtask,
   samples/apps, stdlib (unchanged)
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0038
-- **Updated:** 2026-11-17
+- **Updated:** 2026-11-18
 
 ## Context
 
@@ -265,3 +265,4 @@ preallocated (ADR 0007).
 | Date | Change |
 |------|--------|
 | 2026-11-17 | Initial draft, decided with the project owner: `uses lib.x` dotted imports, header-name qualification, read-only `/home`, embedded `stdlib`, same-image `/system`, short names resolving under `base`, caps 384 KiB / 16 MiB. |
+| 2026-11-18 | Implemented: M3.1 (tree, ext2 paths, boot, short names), M3.2 (compiler `SourceReader`/units/caps), M3.3 (kernel `ImageReader`, `module_demo`) and M3.4 (browser navigation). The kernel keeps a 128 KiB application-source buffer and copies module sources into the 16 MiB arena; `abi::MAX_UNIT_ID` is 16. |
