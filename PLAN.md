@@ -14,8 +14,9 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `2c0df71` (M2.6.2 performance: damage coalescing, present batching,
-  spec 0016, ADR 0031 and the `perf` sample) plus this docs/resume commit on top.
+- **Last commit:** `5ac7b56` (M2.6.3: the deterministic `visual` specimen, the
+  `scripts/visual_regression.py` golden-frame harness, spec 0009 G21, ADR 0032 and the
+  committed golden under `tests/golden/`) plus this docs/resume commit on top.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
