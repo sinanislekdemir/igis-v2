@@ -2421,9 +2421,9 @@ fn the_editor_sample_checks_its_logic_on_the_host() {
     assert_eq!(result.output, b"editor: host ok\n".to_vec());
 }
 
-/// The M2.5.4 browser sample against `langhost`'s disabled screen: it runs the
-/// same root listing, sorted host order, preview and selection logic as the
-/// kernel check, without a window or a child launch.
+/// The M2.5.4/M3.4 browser sample against `langhost`'s disabled screen: it runs
+/// the same navigation (root, enter, full-path preview, up), listing, preview
+/// and selection logic as the kernel check, without a window or a child launch.
 #[test]
 fn the_browser_sample_lists_and_previews_on_the_host() {
     let path = app_path("browser");
@@ -2432,7 +2432,26 @@ fn the_browser_sample_lists_and_previews_on_the_host() {
     let result =
         langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies and runs");
     assert_eq!(result.reason, ExitReason::Ok);
-    assert_eq!(result.output, b"browser: host ok\n".to_vec());
+    let output = String::from_utf8(result.output).expect("UTF-8 output");
+    // The host path proves the tree walk: it starts in `base` (from the data
+    // checks), previews by full path, goes up to the root, then enters `system`,
+    // `home` and `lib` and previews a file in each.
+    assert!(output.contains("browser: nav dir=base\n"), "{output}");
+    assert!(output.contains("browser: nav preview=base/child\n"), "{output}");
+    assert!(output.contains("browser: nav dir=/\n"), "{output}");
+    assert!(output.contains("browser: nav preview=system/system_probe\n"), "{output}");
+    assert!(output.contains("browser: nav preview=home/readme.txt\n"), "{output}");
+    assert!(output.contains("browser: nav lib=math.ig\n"), "{output}");
+    assert_eq!(
+        output,
+        "browser: nav dir=base\n\
+         browser: nav preview=base/child\n\
+         browser: nav dir=/\n\
+         browser: nav preview=system/system_probe\n\
+         browser: nav preview=home/readme.txt\n\
+         browser: nav lib=math.ig\n\
+         browser: host ok\n"
+    );
 }
 
 /// The file-API proof sample against `langhost`'s tree file host (spec 0013,
