@@ -10,7 +10,7 @@ unit kill_stress;
 //   run kill_stress quick    // 40 iterations (a smoke run for a harness)
 //
 // Each iteration spawns a fresh `kill_victim` (a task that immediately blocks in
-// `core.read_line`, `core.recv` or `syslib.next_event`), waits a varying delay
+// `core.next_any` on console source 0, `core.recv` or `syslib.next_event`), waits a varying delay
 // so the kill lands across the victim's start, its first quanta and the block
 // transition (the kernel prints its block trace before parking the task, which
 // is the multi-millisecond window Q50 names), kills it, and waits. Every wait
@@ -61,10 +61,9 @@ var
   used: int;
   started: uint;
   elapsed_ms: uint;
-  // The host has no scheduler and no blocking, so it runs the line mode only
-  // (its `read_line` returns immediately, the victim exits `Ok` and `wait`
-  // still completes). A graphics-disabled kernel boot takes the same path;
-  // the kernel cycles all three wait kinds.
+  // The host has no scheduler and no blocking, so it names the console mode
+  // only; a graphics-disabled kernel boot takes the same path, while the
+  // kernel cycles all three wait kinds.
   host_like: bool;
 
 procedure say(text: const string[0]);

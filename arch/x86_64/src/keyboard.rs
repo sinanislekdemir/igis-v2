@@ -67,7 +67,11 @@ pub struct KeyEvent {
 /// event (Enter, for example), one of them, or nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Decoded {
-    /// The console byte stream byte, if any.
+    /// The console byte this key would produce under the retired line
+    /// discipline. The kernel no longer consumes it (ADR 0037: the keyboard is
+    /// events only and serial is the byte stream); the decoder self-check still
+    /// pins the historical mapping, and the event's text byte is what a key
+    /// consumer uses.
     pub console: Option<u8>,
     /// The key event, if any.
     pub key: Option<KeyEvent>,

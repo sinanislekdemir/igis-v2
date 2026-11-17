@@ -18,7 +18,7 @@
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use abi::wait::{WaitSet, SOURCE_CONSOLE, SOURCE_INPUT};
+use abi::wait::{WaitSet, SOURCE_CONSOLE_BYTE, SOURCE_INPUT};
 use abi::Status;
 use interpreter::Machine;
 
@@ -61,8 +61,6 @@ pub enum TaskState {
 pub enum WaitFor {
     /// The child task with this global id has terminated (`core.wait`).
     Child(u64),
-    /// One finished console line (`core.read_line`).
-    Console,
     /// Space, data or `Closed` on the stream with this endpoint handle
     /// (`core.send`/`core.recv`).
     Stream(u64),
@@ -582,7 +580,6 @@ pub fn wake(child: u64) {
 /// contains the source. `Child` is never source-driven.
 fn waits_on_source(wait: WaitFor, source: u64) -> bool {
     match wait {
-        WaitFor::Console => source == SOURCE_CONSOLE,
         WaitFor::Input => source == SOURCE_INPUT,
         WaitFor::Stream(handle) => handle == source,
         WaitFor::Any(set) => set.contains(source),
@@ -592,8 +589,8 @@ fn waits_on_source(wait: WaitFor, source: u64) -> bool {
 
 /// True when one source is ready for `task` (`core.next_any`).
 fn source_ready(task: u64, source: u64) -> bool {
-    if source == SOURCE_CONSOLE {
-        crate::console::has_line()
+    if source == SOURCE_CONSOLE_BYTE {
+        crate::console::has_byte()
     } else if source == SOURCE_INPUT {
         // `syslib.next_event` also returns a pending `Expose` (spec 0011,
         // W16), so the input source means "next_event would not block".
@@ -636,9 +633,9 @@ fn wake_source(source: u64) {
     wake_matching(|wait| waits_on_source(wait, source));
 }
 
-/// Makes every task blocked on the console runnable again.
-pub fn wake_console() {
-    wake_source(SOURCE_CONSOLE);
+/// Makes every task blocked on console input runnable again.
+pub fn wake_console_input() {
+    wake_source(SOURCE_CONSOLE_BYTE);
 }
 
 /// Makes every task blocked on `handle` runnable again.
@@ -864,7 +861,7 @@ pub fn kill_self_check() -> Result<(), u8> {
     };
     task.slot = index;
     KILL_ID[index].store(id, Ordering::SeqCst);
-    block(task, WaitFor::Console);
+    block(task, WaitFor::Any(WaitSet::single(SOURCE_CONSOLE_BYTE)));
     let killed_ok = {
         let guard = SLOTS[index].lock();
         guard.as_ref().is_some_and(|held| {
@@ -901,7 +898,7 @@ pub fn kill_self_check() -> Result<(), u8> {
         return Err(14);
     };
     task.slot = index;
-    block(task, WaitFor::Console);
+    block(task, WaitFor::Any(WaitSet::single(SOURCE_CONSOLE_BYTE)));
     if request_kill(id) != Status::Ok {
         return Err(15);
     }

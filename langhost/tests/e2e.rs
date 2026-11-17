@@ -250,25 +250,53 @@ fn shell_spawns_and_waits_for_the_child_on_the_host() {
     ] {
         assert!(text.contains(line), "missing {line:?} in {text:?}");
     }
-    // The host `read_line` stub scripts `help`, `run child world`,
-    // `echo hi there`, `exit`, so the same command loop the kernel runs prints
-    // four prompts and exits without an unknown command.
+    // The host console scripts `help`, `run child world`, `echo hi there`,
+    // `exit`, so the same command loop the kernel runs prints four prompts and
+    // exits without an unknown command. The shell, not the kernel, now echoes
+    // each typed byte, so the typed text appears after the prompt.
     assert_eq!(
         text.matches("shell> ").count(),
         4,
         "the shell prompts once per scripted line: {text:?}"
     );
     assert!(
-        text.contains("shell> shell: help, echo <text>, run <app> [args], exit\n"),
+        text.contains("shell> help\nshell: help, echo <text>, run <app> [args], exit\n"),
         "{text:?}"
     );
-    assert!(text.contains("shell> hi there\n"), "{text:?}");
     assert!(
-        text.ends_with("shell> bye\n"),
+        text.contains("shell> echo hi there\nhi there\n"),
+        "{text:?}"
+    );
+    assert!(
+        text.ends_with("shell> exit\nbye\n"),
         "the shell exits after the scripted `exit`: {text:?}"
     );
     assert!(!text.contains("unknown"), "{text:?}");
     assert!(!text.contains("spawn failed"), "{text:?}");
+}
+
+#[test]
+fn shell_edits_the_line_with_backspace_on_the_host() {
+    let path = format!("{}/../samples/apps/shell", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
+    let package = langhost::compile(&source, "shell").expect("shell compiles");
+    // Type `helpzz`, delete the two `z`s with DEL, then submit `help`.
+    let result = langhost::run_with_input(
+        &package.code,
+        b"",
+        b"helpzz\x7f\x7f\nexit\n",
+        langhost::DEFAULT_BUDGET,
+    )
+    .expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    let text = String::from_utf8(result.output).expect("UTF-8 output");
+    assert!(
+        text.contains(
+            "shell> helpzz\x08 \x08\x08 \x08\nshell: help, echo <text>, run <app> [args], exit\n"
+        ),
+        "the shell echoes the deletion and runs the edited line: {text:?}"
+    );
+    assert!(text.ends_with("shell> exit\nbye\n"), "{text:?}");
 }
 
 #[test]
@@ -2604,7 +2632,7 @@ fn poll_any_and_next_any_report_console_stream_and_input_on_the_host() {
     // The host models every endpoint as one loopback FIFO, so `out`/`in` can be
     // two names here even though the kernel would pair them separately. The
     // point is the builtin contract: a ready stream, a queued event and the
-    // scripted console line are each reported by index.
+    // scripted console bytes are each reported by index.
     let source = br#"
 unit mh;
 
@@ -2617,7 +2645,7 @@ var
   count: int;
   ready: int;
   st: Status;
-  line: string[32];
+  raw: bytes[16];
   dst: bytes[16];
   got: int;
   ev: Event;
@@ -2653,13 +2681,17 @@ begin
   ready := -1;
   st := core.poll_any(sources, count, ready);
   if st = Ok and ready = 0 then core.write("console ready ok\n") else core.write("console ready FAIL\n");
-  got := core.read_line(line);
-  if got = 4 then core.write("console line ok\n") else core.write("console line FAIL\n");
+  got := core.read_input(raw);
+  if got >= 4 and raw[0] = byte(116) and raw[1] = byte(105) and raw[2] = byte(99) and raw[3] = byte(107) then
+    core.write("console line ok\n")
+  else
+    core.write("console line FAIL\n");
   core.write("multiplex_host: ok\n");
 end;
 "#;
     let package = langhost::compile(source, "mh").expect("compiles");
-    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    let result = langhost::run_with_input(&package.code, b"", b"tick\n", langhost::DEFAULT_BUDGET)
+        .expect("verifies");
     assert_eq!(result.reason, ExitReason::Ok);
     assert_eq!(
         String::from_utf8(result.output).expect("UTF-8 output"),

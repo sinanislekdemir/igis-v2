@@ -458,7 +458,7 @@ fn verify_instructions(
                         return Err(invalid(base + pc + 4, "buffer capacity is out of range"));
                     }
                 }
-                opcodes::READ_LINE => {
+                opcodes::READ_INPUT => {
                     let capacity = read_u32(instructions, pc + 4)
                         .ok_or_else(|| invalid(base + pc, "truncated immediate"))?;
                     if capacity > MAX_SECTION {

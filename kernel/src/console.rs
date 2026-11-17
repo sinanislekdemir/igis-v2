@@ -4,7 +4,7 @@
 //! The M2.1 console painted at screen coordinates and scrolled the whole
 //! shadow, so any text output after the desktop composed also scrolled every
 //! window. Since M2.3.4 the console paints **two kernel-owned text windows**
-//! (owner `0`): one receives `core.write` and the staged line-discipline echo,
+//! (owner `0`): one receives `core.write` (applications echo their own input),
 //! the other receives `print!`/`println!`. Each keeps its own grid, cursor and
 //! per-window scroll, so text never moves the desktop or another window.
 //!
@@ -26,16 +26,16 @@
 //! global clip: a whole-grid repaint must not clip an application drawing on
 //! another core.
 //!
-//! # Staged input line discipline (spec 0005, Q44)
+//! # Console input (spec 0005, ADR 0037)
 //!
-//! The target design keeps the kernel out of line editing: input is a byte
-//! stream, and `stdlib`/the shell echo and assemble lines. The language still
-//! has no way to delete or insert a byte inside a buffer, so this milestone
-//! stages that work here. The service opportunity polls COM1 and the PS/2
-//! keyboard into one static FIFO; printable bytes are appended to a pending
-//! line and echoed into the terminal window, Backspace erases, Enter completes
-//! the line into a small ring, and Ctrl+C clears it. `core.read_line` pops a
-//! finished line and otherwise blocks the caller.
+//! The console is a **raw byte stream**. The service opportunity drains COM1
+//! into a fixed ring; the kernel does not echo, edit or assemble lines. The
+//! PS/2 keyboard is a different device: its bytes become key events in the
+//! machine-wide queue (spec 0010) and never enter the byte ring, so a shell
+//! that reads both sees each key once. `core.read_input` copies whatever bytes
+//! are waiting without blocking, and an application that wants to sleep does
+//! so on the Q39 source `0` ("a console byte is available"). Line editing,
+//! echo and prompts are application code.
 
 use core::fmt::{self, Write};
 
@@ -47,11 +47,12 @@ use crate::gfx;
 use crate::sync::SpinLock;
 use crate::window;
 
-/// Longest pending line. A byte that would exceed it is dropped.
-pub const LINE_BYTES: usize = 256;
-/// Finished lines held for `core.read_line`; the oldest is overwritten when
-/// the ring is full.
-pub const LINE_RING: usize = 4;
+/// Capacity of the console input ring. Serial typing is far slower than a
+/// service opportunity, so the ring only has to absorb a paste or a QMP burst.
+/// A byte that arrives when the ring is full is dropped (newest dropped) and
+/// counted; the visible transcript is unaffected because the kernel never
+/// echoes input.
+pub const INPUT_BYTES: usize = 512;
 
 /// Cell size in pixels: 8×8 glyphs at scale 1 (spec 0012 D2).
 const CELL: i64 = 8;
@@ -543,28 +544,6 @@ pub fn write_bytes(bytes: &[u8]) {
     console.term.flush();
 }
 
-/// Draws application bytes without presenting. Used by the line-discipline
-/// echo so [`poll_input`] can batch a whole service opportunity into one flush.
-fn write_bytes_pending(bytes: &[u8]) {
-    let mut console = CONSOLE.lock();
-    if !console.enabled {
-        return;
-    }
-    for byte in bytes {
-        console.term.put_byte(*byte);
-    }
-}
-
-/// Presents any cells the console drew without a flush (the input echo path).
-fn flush_pending() {
-    let mut console = CONSOLE.lock();
-    if !console.enabled {
-        return;
-    }
-    console.term.flush();
-    console.log.flush();
-}
-
 /// Attaches the console's machine-wide terminal grid to a window owned by
 /// `owner` (`core.terminal_attach`, spec 0014).
 ///
@@ -728,148 +707,141 @@ pub fn route_self_check() -> Result<bool, u32> {
     Ok(true)
 }
 
-// ---- staged input -------------------------------------------------------
+// ---- console input byte ring (spec 0005, ADR 0037) ----------------------
 
-/// One completed line.
-#[derive(Clone, Copy)]
-struct Line {
-    len: u16,
-    data: [u8; LINE_BYTES],
-}
-
-const EMPTY_LINE: Line = Line {
-    len: 0,
-    data: [0; LINE_BYTES],
-};
-
-/// Pending line, finished-line ring and the indices that make it a queue.
+/// Fixed raw byte ring. The kernel stores bytes and hands them out; it never
+/// interprets, echoes or assembles a line.
 struct Input {
-    pending_len: usize,
-    pending: [u8; LINE_BYTES],
-    lines: [Line; LINE_RING],
-    next: usize,
-    len: usize,
+    data: [u8; INPUT_BYTES],
+    head: usize,
+    count: usize,
+    /// Bytes refused because the ring was full. Diagnostic only; the boot
+    /// self-check pins the policy.
+    dropped: u64,
 }
+
+const EMPTY_INPUT: Input = Input {
+    data: [0; INPUT_BYTES],
+    head: 0,
+    count: 0,
+    dropped: 0,
+};
 
 impl Input {
     const fn new() -> Self {
-        Input {
-            pending_len: 0,
-            pending: [0; LINE_BYTES],
-            lines: [EMPTY_LINE; LINE_RING],
-            next: 0,
-            len: 0,
-        }
+        EMPTY_INPUT
     }
 
-    fn feed(&mut self, byte: u8) {
-        match byte {
-            b'\r' | b'\n' => {
-                self.complete();
-                echo(b"\n");
-            }
-            0x7F | 0x08 => {
-                if self.pending_len > 0 {
-                    self.pending_len -= 1;
-                    // Move back, overwrite the glyph with a space, move back.
-                    echo(b"\x08 \x08");
-                }
-            }
-            0x03 => {
-                self.pending_len = 0;
-                echo(b"^C\n");
-            }
-            b'\t' | 0x20..=0x7E => self.append(byte),
-            _ => {}
+    /// Appends one byte. The ring keeps the oldest `INPUT_BYTES` bytes: a byte
+    /// that arrives at capacity is dropped and counted, so the visible
+    /// sequence never rewinds and the policy is deterministic.
+    fn push(&mut self, byte: u8) {
+        if self.count == INPUT_BYTES {
+            self.dropped = self.dropped.saturating_add(1);
+            return;
         }
+        let tail = (self.head + self.count) % INPUT_BYTES;
+        self.data[tail] = byte;
+        self.count += 1;
     }
 
-    fn append(&mut self, byte: u8) {
-        if self.pending_len < LINE_BYTES {
-            self.pending[self.pending_len] = byte;
-            self.pending_len += 1;
-            echo(&[byte]);
+    /// Copies up to `out.len()` bytes in arrival order and consumes them.
+    fn pop(&mut self, out: &mut [u8]) -> usize {
+        let copied = self.count.min(out.len());
+        for (index, slot) in out.iter_mut().take(copied).enumerate() {
+            *slot = self.data[(self.head + index) % INPUT_BYTES];
         }
-        // At capacity the byte is refused: it is neither stored nor echoed,
-        // so the visible line always matches the stored one.
-    }
-
-    fn complete(&mut self) {
-        let slot = if self.len == LINE_RING {
-            // Full: overwrite the oldest finished line.
-            let slot = self.next;
-            self.next = (self.next + 1) % LINE_RING;
-            slot
-        } else {
-            let slot = (self.next + self.len) % LINE_RING;
-            self.len += 1;
-            slot
-        };
-        let line = &mut self.lines[slot];
-        line.len = self.pending_len as u16;
-        line.data[..self.pending_len].copy_from_slice(&self.pending[..self.pending_len]);
-        self.pending_len = 0;
-    }
-
-    fn pop(&mut self, out: &mut [u8]) -> Option<usize> {
-        if self.len == 0 {
-            return None;
-        }
-        let slot = self.next;
-        self.next = (self.next + 1) % LINE_RING;
-        self.len -= 1;
-        let line = &self.lines[slot];
-        let copied = (line.len as usize).min(out.len());
-        out[..copied].copy_from_slice(&line.data[..copied]);
-        Some(copied)
+        self.head = (self.head + copied) % INPUT_BYTES;
+        self.count -= copied;
+        copied
     }
 }
 
 static INPUT: SpinLock<Input> = SpinLock::new(Input::new());
 
-fn echo(bytes: &[u8]) {
-    write_bytes_pending(bytes);
-}
-
-/// Polls both byte sources into the line discipline, feeds the keyboard's
-/// decoded key events into the machine-wide event queue, and pulls pending
-/// kernel-window repaints. Called once per service opportunity, before the
-/// scheduler claims a task (spec 0012 D4).
+/// Drains COM1 into the byte ring and the PS/2 keyboard into the event queue,
+/// then pulls pending kernel-window repaints. Called once per service
+/// opportunity, before the scheduler claims a task (spec 0012 D4).
 ///
-/// The echo draws without presenting and one flush at the end presents the
-/// whole opportunity's cells (spec 0016); a repaint pulled by [`pump`] already
-/// presents the grid and clears the pending box.
+/// The device split is deliberate (ADR 0037): **serial is the byte stream and
+/// the keyboard is events**. Feeding keyboard bytes into the ring too would
+/// make a shell that reads both see every key twice.
 pub fn poll_input() {
-    let mut input = INPUT.lock();
-    for _ in 0..64 {
-        match serial::try_read_byte() {
-            Some(byte) => input.feed(byte),
-            None => break,
+    {
+        let mut input = INPUT.lock();
+        for _ in 0..64 {
+            match serial::try_read_byte() {
+                Some(byte) => input.push(byte),
+                None => break,
+            }
         }
     }
     keyboard::poll(|decoded| {
-        if let Some(byte) = decoded.console {
-            input.feed(byte);
-        }
         if let Some(key) = decoded.key {
             crate::event::push_key(key);
         }
     });
-    drop(input);
     pump();
-    flush_pending();
 }
 
-/// Pops one finished line into `out`, truncating to its length. Returns the
-/// copied length, or `None` when no line is complete. The rest of an
-/// over-long line is discarded (staged behaviour, spec 0005 Q44).
-pub fn read_line(out: &mut [u8]) -> Option<usize> {
+/// Copies the console input bytes that are waiting into `out` and returns the
+/// count (`0` when none). Raw and non-blocking: the caller sleeps on source
+/// `0` with `core.next_any` (spec 0003, "Multi-source waits").
+pub fn read_input(out: &mut [u8]) -> usize {
     INPUT.lock().pop(out)
 }
 
-/// True when at least one finished line is waiting.
-pub fn has_line() -> bool {
-    INPUT.lock().len != 0
+/// True when at least one console input byte is waiting.
+pub fn has_byte() -> bool {
+    INPUT.lock().count != 0
+}
+
+/// Boot self-check for the byte ring (pure; uses a scratch ring, not the live
+/// one). Proves FIFO order, the partial-pop split, empty reads, and the
+/// "newest dropped and counted" overflow policy.
+pub fn input_self_check() -> Result<(), u32> {
+    let mut ring = Input::new();
+    let mut out = [0u8; 4];
+
+    if ring.pop(&mut out) != 0 {
+        return Err(1);
+    }
+    ring.push(b'a');
+    ring.push(b'b');
+    ring.push(b'c');
+    if ring.pop(&mut out[..2]) != 2 || out[..2] != *b"ab" {
+        return Err(2);
+    }
+    if ring.pop(&mut out) != 1 || out[0] != b'c' {
+        return Err(3);
+    }
+    if ring.pop(&mut out) != 0 {
+        return Err(4);
+    }
+
+    let mut index = 0;
+    while index < INPUT_BYTES {
+        ring.push((index & 0xFF) as u8);
+        index += 1;
+    }
+    ring.push(b'x');
+    ring.push(b'y');
+    if ring.count != INPUT_BYTES || ring.dropped != 2 {
+        return Err(5);
+    }
+    // The oldest bytes survived; the two overflow bytes are gone.
+    if ring.pop(&mut out) != 4 || out != [0, 1, 2, 3] {
+        return Err(6);
+    }
+    let remaining = ring.count;
+    let mut last = [0u8; INPUT_BYTES];
+    if ring.pop(&mut last) != remaining {
+        return Err(7);
+    }
+    if last[remaining - 1] != ((INPUT_BYTES - 1) & 0xFF) as u8 {
+        return Err(8);
+    }
+    Ok(())
 }
 
 #[macro_export]

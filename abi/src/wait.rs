@@ -11,8 +11,10 @@
 /// Most sources one wait set may name.
 pub const MAX_SOURCES: usize = 8;
 
-/// Source value for one completed console line (`core.read_line`).
-pub const SOURCE_CONSOLE: u64 = 0;
+/// Source value for console input bytes being available (`core.read_input`
+/// would return at least one byte). The console is a raw byte stream: the
+/// source reports queued bytes, not a completed line.
+pub const SOURCE_CONSOLE_BYTE: u64 = 0;
 
 /// Source value for one machine-wide input event (`syslib.next_event`,
 /// including a pending window `Expose`).
@@ -53,6 +55,13 @@ impl WaitSet {
         Some(set)
     }
 
+    /// Builds a set from one source.
+    pub const fn single(source: u64) -> Self {
+        let mut sources = [0u64; MAX_SOURCES];
+        sources[0] = source;
+        WaitSet { count: 1, sources }
+    }
+
     /// Number of sources in the set.
     pub const fn len(&self) -> usize {
         self.count as usize
@@ -91,9 +100,9 @@ mod tests {
 
     #[test]
     fn a_set_keeps_its_first_eight_sources() {
-        let set = WaitSet::from_slice(&[SOURCE_CONSOLE, SOURCE_INPUT, 256, 257]).unwrap();
+        let set = WaitSet::from_slice(&[SOURCE_CONSOLE_BYTE, SOURCE_INPUT, 256, 257]).unwrap();
         assert_eq!(set.len(), 4);
-        assert_eq!(set.get(0), Some(SOURCE_CONSOLE));
+        assert_eq!(set.get(0), Some(SOURCE_CONSOLE_BYTE));
         assert_eq!(set.get(1), Some(SOURCE_INPUT));
         assert_eq!(set.get(2), Some(256));
         assert_eq!(set.get(3), Some(257));
@@ -111,13 +120,22 @@ mod tests {
 
     #[test]
     fn intersection_follows_membership() {
-        let a = WaitSet::from_slice(&[SOURCE_CONSOLE, 256]).unwrap();
+        let a = WaitSet::from_slice(&[SOURCE_CONSOLE_BYTE, 256]).unwrap();
         let b = WaitSet::from_slice(&[SOURCE_INPUT, 256, 257]).unwrap();
         let c = WaitSet::from_slice(&[SOURCE_INPUT]).unwrap();
         assert!(a.intersects(&b));
         assert!(b.intersects(&a));
         assert!(!a.intersects(&c));
         assert!(!a.intersects(&WaitSet::empty()));
+    }
+
+    #[test]
+    fn a_single_source_set_has_one_member() {
+        let set = WaitSet::single(SOURCE_CONSOLE_BYTE);
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.get(0), Some(SOURCE_CONSOLE_BYTE));
+        assert_eq!(set.get(1), None);
+        assert!(!set.is_empty());
     }
 
     #[test]

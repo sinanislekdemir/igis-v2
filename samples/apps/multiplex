@@ -12,8 +12,9 @@ unit multiplex;
 //   1. the stream source (index 2 in the full set, 0 in check mode), then
 //      `core.recv` takes "ping";
 //   2. a self-injected key event, then `syslib.next_event` consumes it;
-//   3. in the full mode, one console line typed by the harness, taken with
-//      `core.read_line`.
+//   3. in the full mode, console bytes typed by the harness, taken with
+//      `core.read_input` (the console is a raw byte stream; the shell, not the
+//      kernel, echoes and assembles lines).
 //
 // `core.poll_any` on an empty input queue is `WouldBlock` and leaves `ready`
 // untouched. Readiness is a snapshot, not a reservation: the corresponding
@@ -36,7 +37,6 @@ var
   diag: Diagnostic;
   reason: ExitReason;
   child: int;
-  line: string[128];
   msg: bytes[64];
   got: int;
   ev: Event;
@@ -158,8 +158,9 @@ begin
     "event consumed",
     st = Ok and ev.kind = KeyDown and ev.code = uint(KeyCode));
 
-  // 4. The console arm, full mode only: one completed line, typed by the
-  // harness after the prompt, is reported by the same blocking primitive.
+  // 4. The console arm, full mode only: console bytes typed by the harness
+  // after the prompt are reported by the same blocking primitive, and the raw
+  // read returns them (`tick\n`, so at least the four command bytes).
   if full then
   begin
     say("multiplex: waiting for console\n");
@@ -168,14 +169,14 @@ begin
     ready := -1;
     st := core.next_any(sources, count, ready);
     check("console source ready", st = Ok and ready = 0);
-    got := core.read_line(line);
+    got := core.read_input(msg);
     check(
       "console line",
-      got = 4
-        and line[0] = byte(116)
-        and line[1] = byte(105)
-        and line[2] = byte(99)
-        and line[3] = byte(107));
+      got >= 4
+        and msg[0] = byte(116)
+        and msg[1] = byte(105)
+        and msg[2] = byte(99)
+        and msg[3] = byte(107));
   end;
 
   st := core.wait(child, reason);

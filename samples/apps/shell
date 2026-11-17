@@ -1,6 +1,6 @@
 unit shell;
 
-uses core, syslib;
+uses core, stdlib, syslib;
 
 var
   banner: string[32];
@@ -11,7 +11,6 @@ var
   argv: string[256];
   st: Status;
   id: int;
-  read: int;
   space: int;
   split: int;
   done: bool;
@@ -24,10 +23,91 @@ var
   found_ink: bool;
   px: int;
   py: int;
+  // Console input is a raw byte stream (spec 0005, ADR 0037). The shell keeps
+  // the line buffer, the cursor and the echo itself; `one` is the one-byte
+  // read destination so a burst of typed bytes stays in the kernel ring until
+  // each byte is consumed.
+  one: bytes[1];
+  ch: string[2];
+  cursor: int;
+  ready: int;
+  sources: array[uint, 8];
+  got: int;
+  submitted: bool;
+  cancelled: bool;
+  ev: Event;
+  edit_st: Status;
 
 procedure say(text: const string[0]);
 begin
   core.write(text);
+end;
+
+// Inserts one printable byte at the cursor through the M2.4.1 helpers, so the
+// line stays valid UTF-8 and is published atomically. The echo is one cell,
+// and the cursor only ever sits at the end (see `handle_byte`).
+procedure insert_byte(b: byte);
+begin
+  one[0] := b;
+  split := core.substr_into(ch, one, 0, 1);
+  if split = 1 then
+  begin
+    edit_st := stdlib.str_insert_into(line, cursor, ch);
+    if edit_st = Ok then
+    begin
+      cursor := cursor + 1;
+      say(ch);
+    end;
+  end;
+end;
+
+// Applies one input byte exactly once, whether it came from the serial byte
+// stream or from a key event's text byte. Supported: printable ASCII inserts,
+// Backspace/0x7F deletes the last code point, CR/LF submits, Ctrl+C cancels,
+// and Tab inserts one space (the shell does not expand tab stops). Every other
+// byte, and every non-text key except Enter/Backspace, is ignored.
+procedure handle_byte(b: byte);
+var
+  before: int;
+begin
+  if b = byte(13) or b = byte(10) then
+  begin
+    say("\n");
+    submitted := true;
+  end
+  else if b = byte(127) or b = byte(8) then
+  begin
+    before := int(core.len(line));
+    edit_st := stdlib.str_backspace(line, cursor);
+    if int(core.len(line)) < before then
+      say("\x08 \x08");
+  end
+  else if b = byte(3) then
+  begin
+    say("^C\n");
+    line := "";
+    cursor := 0;
+    cancelled := true;
+  end
+  else if b = byte(9) then
+    insert_byte(byte(32))
+  else if b >= byte(32) and b <= byte(126) then
+    insert_byte(b);
+end;
+
+// One key event: special keys first (their text byte is 0), then the text byte
+// through the same editor. A KeyUp is ignored.
+procedure handle_key(key: const Event);
+begin
+  if key.kind = KeyDown then
+  begin
+    if stdlib.ui_key_is_enter(key.code) then
+      handle_byte(byte(13))
+    else if stdlib.ui_key_is_backspace(key.code) then
+      handle_byte(byte(127))
+    else
+      handle_byte(stdlib.ui_key_text(key.code));
+  end;
 end;
 
 // Reports the child's `ExitReason` sum value (spec 0003, "Sum types"). `case`
@@ -103,18 +183,46 @@ begin
     say("\n");
   end;
 
-  // Command loop. Staged line discipline (spec 0005, Q44): the kernel echoes
-  // the typed bytes and completes one line; `core.read_line` blocks until it
-  // is ready. `core.find` locates the first space, and `core.substr_into`
-  // splits the line into the command and its tail. With no space the whole
-  // line is the command and a zero-length slice clears the tail.
+  // Command loop (spec 0005, ADR 0037). The console is a raw byte stream and
+  // the kernel neither echoes nor assembles lines, so this loop does the line
+  // editing: it waits on console bytes (source 0) and input events (source 1)
+  // at once, applies one byte through `handle_byte`, and dispatches on Enter.
+  // `core.find` locates the first space and `core.substr_into` splits the line
+  // into the command and its tail.
   //
   // There is no `return` yet, so `main` ends by leaving the loop with `done`.
+  sources[0] := uint(0);
+  sources[1] := uint(1);
   done := false;
   while not done do
   begin
+    line := "";
+    cursor := 0;
+    submitted := false;
+    cancelled := false;
     say("shell> ");
-    read := core.read_line(line);
+    while not submitted and not cancelled do
+    begin
+      ready := -1;
+      st := core.next_any(sources, 2, ready);
+      if st = Ok then
+      begin
+        if ready = 0 then
+        begin
+          got := core.read_input(one);
+          if got = 1 then
+            handle_byte(one[0]);
+        end
+        else
+        begin
+          st := syslib.next_event(ev);
+          if st = Ok then
+            handle_key(ev);
+        end;
+      end;
+    end;
+    if submitted then
+    begin
     space := core.find(line, byte(32));
     if space < 0 then
     begin
@@ -237,6 +345,7 @@ begin
       done := true
     else
       say("unknown\n");
+    end;
   end;
 
   say("bye\n");

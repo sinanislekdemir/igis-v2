@@ -7,7 +7,7 @@
 //! `samples/apps/multiplex`; packages are hand-assembled like `f64parse.rs`.
 
 use abi::opcodes;
-use abi::wait::{WaitSet, MAX_SOURCES, SOURCE_CONSOLE, SOURCE_INPUT};
+use abi::wait::{WaitSet, MAX_SOURCES, SOURCE_CONSOLE_BYTE, SOURCE_INPUT};
 use abi::{
     CodeHeader, Function, Status, ABI_VERSION, CODE_MAGIC, NO_DIAGNOSTIC, NO_NAME,
     PROFILE_X86_64_LE,
@@ -110,7 +110,7 @@ impl Host for ProbeHost {
     fn clock(&mut self) -> u64 {
         0
     }
-    fn console_line_ready(&mut self) -> bool {
+    fn console_byte_ready(&mut self) -> bool {
         self.console
     }
     fn input_ready(&mut self) -> bool {
@@ -175,7 +175,8 @@ fn poll_any_reports_the_first_ready_index_in_caller_order() {
     host.console = true;
     host.input = true;
     host.stream_ready = true;
-    let (outcome, ready, status, _) = run(&code, &[SOURCE_CONSOLE, SOURCE_INPUT, 300], &mut host);
+    let (outcome, ready, status, _) =
+        run(&code, &[SOURCE_CONSOLE_BYTE, SOURCE_INPUT, 300], &mut host);
     assert_exited(&outcome);
     assert_eq!(status, Status::Ok as u64);
     assert_eq!(ready, 0, "the console source comes first");
@@ -187,7 +188,8 @@ fn poll_any_reports_the_first_ready_index_in_caller_order() {
     let mut host = ProbeHost::new();
     host.input = true;
     host.stream_ready = true;
-    let (outcome, ready, status, _) = run(&code, &[SOURCE_CONSOLE, SOURCE_INPUT, 300], &mut host);
+    let (outcome, ready, status, _) =
+        run(&code, &[SOURCE_CONSOLE_BYTE, SOURCE_INPUT, 300], &mut host);
     assert_exited(&outcome);
     assert_eq!(status, Status::Ok as u64);
     assert_eq!(ready, 1);
@@ -195,7 +197,8 @@ fn poll_any_reports_the_first_ready_index_in_caller_order() {
 
     let mut host = ProbeHost::new();
     host.stream_ready = true;
-    let (outcome, ready, status, _) = run(&code, &[SOURCE_CONSOLE, SOURCE_INPUT, 300], &mut host);
+    let (outcome, ready, status, _) =
+        run(&code, &[SOURCE_CONSOLE_BYTE, SOURCE_INPUT, 300], &mut host);
     assert_exited(&outcome);
     assert_eq!(status, Status::Ok as u64);
     assert_eq!(ready, 2);
@@ -223,7 +226,7 @@ fn a_count_outside_one_to_eight_is_invalid_and_probes_nothing() {
         host.console = true;
         host.input = true;
         host.stream_ready = true;
-        let (outcome, ready, status, _) = run(&code, &[SOURCE_CONSOLE], &mut host);
+        let (outcome, ready, status, _) = run(&code, &[SOURCE_CONSOLE_BYTE], &mut host);
         assert_exited(&outcome);
         assert_eq!(status, Status::Invalid as u64, "count {count}");
         assert_eq!(ready, READY_SENTINEL);
@@ -272,7 +275,7 @@ fn next_any_returns_a_ready_source_without_blocking() {
     let code = package(opcodes::builtin::NEXT_ANY, 1);
     let mut host = ProbeHost::new();
     host.console = true;
-    let (outcome, ready, status, _) = run(&code, &[SOURCE_CONSOLE], &mut host);
+    let (outcome, ready, status, _) = run(&code, &[SOURCE_CONSOLE_BYTE], &mut host);
     assert_exited(&outcome);
     assert_eq!(status, Status::Ok as u64);
     assert_eq!(ready, 0);

@@ -62,9 +62,20 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
         }
     }
 
-    // The keyboard decoder feeds the console byte stream and the event queue
-    // (spec 0010, I18). The canned scancodes prove the key layer without a real
-    // keyboard; a mismatch halts so it cannot pass silently.
+    // Console input is a raw byte ring (spec 0005, ADR 0037). FIFO order, a
+    // partial pop, empty reads and the "newest dropped and counted" overflow
+    // policy are proved on a scratch ring before the service ever runs.
+    match console::input_self_check() {
+        Ok(()) => println!("console: input ok"),
+        Err(step) => {
+            println!("console: input FAIL at step {step}");
+            arch_x86_64::halt();
+        }
+    }
+
+    // The keyboard decoder feeds the event queue (spec 0010, I18; ADR 0037).
+    // The canned scancodes prove the key layer without a real keyboard; a
+    // mismatch halts so it cannot pass silently.
     match keyboard::decoder_self_check() {
         Ok(()) => println!("keyboard: decoder ok"),
         Err(step) => {

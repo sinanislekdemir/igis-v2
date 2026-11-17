@@ -196,21 +196,8 @@ end;
 }
 
 #[test]
-fn read_line_accepts_a_var_string_and_rejects_bytes() {
+fn read_input_accepts_a_var_bytes_and_rejects_string() {
     let good = br#"
-unit t;
-
-var
-  line: string[16];
-
-procedure main(args: const string[1024]);
-begin
-  core.read_line(line);
-end;
-"#;
-    compile(good, "t.ig").expect("a var string buffer is accepted");
-
-    let bad = br#"
 unit t;
 
 var
@@ -218,11 +205,24 @@ var
 
 procedure main(args: const string[1024]);
 begin
-  core.read_line(raw);
+  core.read_input(raw);
 end;
 "#;
-    let error = compile(bad, "t.ig").expect_err("bytes is not a string buffer");
-    assert!(error.message.contains("var string"), "{}", error.message);
+    compile(good, "t.ig").expect("a var bytes buffer is accepted");
+
+    let bad = br#"
+unit t;
+
+var
+  line: string[16];
+
+procedure main(args: const string[1024]);
+begin
+  core.read_input(line);
+end;
+"#;
+    let error = compile(bad, "t.ig").expect_err("string is not a raw byte buffer");
+    assert!(error.message.contains("var bytes"), "{}", error.message);
 }
 
 #[test]

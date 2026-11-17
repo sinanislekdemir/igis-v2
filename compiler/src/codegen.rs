@@ -5287,28 +5287,29 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.pop(1)?;
                 Ok(None)
             }
-            // Staged line discipline (spec 0005, Q44): the kernel assembles
-            // one line and hands it to the caller. `var` gives the callee the
-            // caller's buffer; the declared capacity is carried in the
-            // instruction so the interpreter can bound the copy.
-            "core.read_line" => {
+            // Console input is a raw byte stream (spec 0005, ADR 0037): the
+            // caller supplies a writable `bytes` buffer, the declared capacity
+            // rides in the instruction so the interpreter can bound the copy,
+            // and the call never blocks. A caller that wants to sleep first
+            // waits on source `0` with `core.next_any`.
+            "core.read_input" => {
                 if args.len() != 1 {
                     return Err(self.err(
                         line,
                         column,
-                        format_args!("`core.read_line` expects 1 argument, got {}", args.len()),
+                        format_args!("`core.read_input` expects 1 argument, got {}", args.len()),
                     ));
                 }
                 let found = self.emit_var_buffer_ref(args[0])?;
-                if found.kind != Kind::String {
+                if found.kind != Kind::Bytes {
                     return Err(self.err_at(
                         args[0],
                         format_args!(
-                            "`core.read_line` expects a `var string` buffer, found `{found}`"
+                            "`core.read_input` expects a `var bytes` buffer, found `{found}`"
                         ),
                     ));
                 }
-                self.one(opcodes::READ_LINE, found.cap)?;
+                self.one(opcodes::READ_INPUT, found.cap)?;
                 self.pop(1)?;
                 self.push();
                 Ok(Some(Type::scalar(Kind::Int)))

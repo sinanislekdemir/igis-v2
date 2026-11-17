@@ -165,8 +165,8 @@ impl Host for KernelHost<'_> {
         crate::console::write_bytes(bytes);
     }
 
-    fn read_line(&mut self, buf: &mut [u8]) -> Option<usize> {
-        console::read_line(buf)
+    fn read_input(&mut self, dst: &mut [u8]) -> usize {
+        console::read_input(dst)
     }
 
     fn clock(&mut self) -> u64 {
@@ -364,8 +364,8 @@ impl Host for KernelHost<'_> {
     // Multi-source waits (spec 0003, spec 0007; Q39, ADR 0036). The probes are
     // the same readiness functions the scheduler's post-block recheck uses, so
     // a source cannot be "ready" for the builtin and "not ready" for the wake.
-    fn console_line_ready(&mut self) -> bool {
-        crate::console::has_line()
+    fn console_byte_ready(&mut self) -> bool {
+        crate::console::has_byte()
     }
 
     fn input_ready(&mut self) -> bool {
@@ -612,7 +612,7 @@ fn image() -> &'static Ext2<'static> {
 /// The loop ends when no task is live and no request is pending: with no
 /// console input there is no other source of work, so it prints the summary and
 /// halts. A blocked task keeps the system alive (it will be woken by a child
-/// termination or a finished console line), so the check is "no live task", not
+/// termination or console input), so the check is "no live task", not
 /// "boot task finished".
 pub fn run_forever(image: &Ext2<'_>) -> ! {
     loop_body(smp::core_index(), image)
@@ -688,8 +688,8 @@ fn loop_body(core: usize, image: &Ext2<'_>) -> ! {
                             // The blocked task keeps its slot but stops being
                             // claimable; a realtime task also keeps its
                             // admission slot while blocked. A child termination
-                            // wakes `ChildExit`; a finished console line wakes
-                            // `Console` (Sch9).
+                            // wakes `ChildExit`; console bytes wake a matching
+                            // `Any` source `0` (Sch9).
                             match kind {
                                 WaitKind::ChildExit(child) => {
                                     println!("sched: task {} blocked on task {}", task.id, child);
@@ -701,10 +701,6 @@ fn loop_body(core: usize, image: &Ext2<'_>) -> ! {
                                     if repl::has_exit(child) {
                                         task::wake(child);
                                     }
-                                }
-                                WaitKind::Console => {
-                                    println!("sched: task {} blocked on console", task.id);
-                                    task::block(task, WaitFor::Console);
                                 }
                                 WaitKind::Stream(handle) => {
                                     println!(
@@ -913,14 +909,14 @@ fn terminate(core: usize, mut task: Task, reason: ExitReason) {
 /// permanently runnable machine still services its queue.
 ///
 /// Input is polled here too: with no input the loop `hlt`s, the timer wakes it
-/// every millisecond, and this is where a typed line reaches the line ring and
-/// wakes a task blocked in `core.read_line`.
+/// every millisecond, and this is where a typed byte reaches the console ring
+/// and wakes a task blocked on source `0` (`core.next_any`).
 fn service(image: &Ext2<'_>) {
     console::poll_input();
     crate::mouse::poll();
     crate::usb::poll();
-    if console::has_line() {
-        task::wake_console();
+    if console::has_byte() {
+        task::wake_console_input();
     }
     repl::service(image);
 }
@@ -946,7 +942,7 @@ fn idle(core: usize) {
         // Input is work, and this loop is the only place a halted core can
         // notice it: the service opportunity that normally polls COM1/PS-2
         // lives in the main loop, which an idle core does not reach. Polling
-        // here is what turns a typed line into a wake-up, and what keeps the
+        // here is what turns a typed byte into a wake-up, and what keeps the
         // pointer moving while the system is otherwise idle (spec 0010, I14).
         console::poll_input();
         crate::mouse::poll();
@@ -959,7 +955,7 @@ fn idle(core: usize) {
             smp::note_stopped(core);
             arch_x86_64::halt();
         }
-        if task::has_runnable() || repl::has_pending() || console::has_line() {
+        if task::has_runnable() || repl::has_pending() || console::has_byte() {
             arch_x86_64::enable_interrupts();
             smp::mark_busy(core);
             return;
@@ -972,13 +968,13 @@ fn idle(core: usize) {
 }
 
 /// The system-wide idle decision: with no live task, no pending request and no
-/// console line anywhere, and every other core idle, the boot core stops them,
+/// console byte anywhere, and every other core idle, the boot core stops them,
 /// prints the summary and halts.
 ///
 /// Returns only when some work is still able to appear; once it decides to
 /// stop the machine it never returns.
 fn try_shutdown() {
-    if task::live_count() != 0 || repl::has_pending() || console::has_line() {
+    if task::live_count() != 0 || repl::has_pending() || console::has_byte() {
         return;
     }
     if !smp::all_idle_except(0) {

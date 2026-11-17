@@ -149,12 +149,13 @@ pub const CLEAR: u8 = 0x40;
 /// bytes to the destination. Immediate: `capacity: u32`, the destination's
 /// declared capacity. Overflow faults `CapacityExceeded`.
 pub const APPEND: u8 = 0x41;
-/// Pop a `string` buffer reference and ask the host for one finished console
-/// line (`core.read_line`). Immediate: `capacity: u32`, the destination's
-/// declared capacity. Pushes the copied length, or blocks the task with
-/// `WaitKind::Console` when no line is complete. The copied length is at most
-/// the capacity; a longer line is truncated and the rest discarded.
-pub const READ_LINE: u8 = 0x42;
+/// Pop a `bytes` buffer reference and copy the console input bytes that are
+/// available (`core.read_input`). Immediate: `capacity: u32`, the
+/// destination's declared capacity. Pushes the copied length (`0..=capacity`)
+/// and always publishes that length in the destination's header. This is a
+/// raw, non-blocking read: no bytes available returns `0`, and the caller
+/// blocks with `core.next_any` on source `0` instead (spec 0005).
+pub const READ_INPUT: u8 = 0x42;
 /// Pop a value, pop a buffer reference, push the first index of that `byte`
 /// (`core.find`). Scans `0..length` only; pushes `-1` when the byte is absent.
 /// Works for both `string` and `bytes`; a `string` is searched byte-wise, not by
@@ -732,7 +733,7 @@ pub mod builtin {
     //
     // `poll_any` and `next_any` inspect a `const array[uint, 8]` of source
     // values and report the index of the first ready one. Source `0` is one
-    // completed console line, `1` is one machine-wide input event (including a
+    // console input byte being available, `1` is one machine-wide input event (including a
     // pending window `Expose`) and any value `>= 2` is a stream endpoint handle
     // whose data or close is ready (a read select). The array reference and the
     // caller's `count` are staged; the interpreter validates the count and the
@@ -832,8 +833,8 @@ pub const fn instruction_words(op: u8) -> Option<u32> {
         | COPY_REFS | STREAM_SEND | STREAM_TRY_SEND => Some(1),
         CONST => Some(3),
         JMP | JZ | JNZ | CALL | LOAD_LOCAL | STORE_LOCAL | REF_LOCAL | LOAD_STATE | STORE_STATE
-        | REF_STATE | REF_CONST | APPEND | READ_LINE | STORE_U8 | BUILTIN | SUBSTR | FORMAT_INT
-        | ENUM_CAST | REF_OFFSET | STREAM_RECV | STREAM_TRY_RECV | FORMAT_F64
+        | REF_STATE | REF_CONST | APPEND | READ_INPUT | STORE_U8 | BUILTIN | SUBSTR
+        | FORMAT_INT | ENUM_CAST | REF_OFFSET | STREAM_RECV | STREAM_TRY_RECV | FORMAT_F64
         | FORMAT_F64_SHORT => Some(2),
         REF_ELEMENT => Some(3),
         MAP_PUT | MAP_GET | MAP_HAS | MAP_REMOVE => Some(5),
@@ -891,7 +892,7 @@ pub const fn mnemonic(op: u8) -> Option<&'static str> {
         CMP_BUFFERS => Some("cmp_buffers"),
         CLEAR => Some("clear"),
         APPEND => Some("append"),
-        READ_LINE => Some("read_line"),
+        READ_INPUT => Some("read_input"),
         FIND => Some("find"),
         SUBSTR => Some("substr"),
         FORMAT_INT => Some("format_int"),

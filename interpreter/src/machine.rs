@@ -113,15 +113,16 @@ pub trait Host {
     /// they may be arbitrary binary data.
     fn console_write(&mut self, bytes: &[u8]);
 
-    /// Pops one completed console line into `buf` (`core.read_line`).
+    /// Copies the console input bytes that are available into `dst`
+    /// (`core.read_input`).
     ///
-    /// Returns the number of bytes copied, at most `buf.len()`, or `None` when
-    /// no line is complete. The machine then returns [`Outcome::Blocked`] with
-    /// [`WaitKind::Console`] without advancing and retries the same instruction
-    /// when the scheduler wakes the task. The default is a host with no input,
-    /// so tests that only need the console and the clock stay small.
-    fn read_line(&mut self, _buf: &mut [u8]) -> Option<usize> {
-        None
+    /// Returns the number of bytes copied, at most `dst.len()`. This is a raw,
+    /// non-blocking byte read: `0` means no byte is waiting, and the caller
+    /// blocks with `core.next_any` on source `0` instead. The default is a host
+    /// with no input, so tests that only need the console and the clock stay
+    /// small.
+    fn read_input(&mut self, _dst: &mut [u8]) -> usize {
+        0
     }
 
     /// Monotonic nanoseconds since boot (or since the host process started).
@@ -319,14 +320,14 @@ pub trait Host {
     //
     // The three probes back `core.poll_any`/`core.next_any`. They are separate
     // methods so a host can answer each source kind cheaply and so the kernel
-    // can reuse its existing readiness functions (`console::has_line`,
+    // can reuse its existing readiness functions (`console::has_byte`,
     // `event::has_event`/`window::has_expose`, `stream::readable`). A host with
     // no source models "never ready", which is also the bare `langhost`
     // default: `poll_any` returns `WouldBlock` and `next_any` blocks.
 
-    /// True when at least one completed console line is waiting
-    /// (`core.read_line` would not block).
-    fn console_line_ready(&mut self) -> bool {
+    /// True when at least one console input byte is waiting
+    /// (`core.read_input` would return `>= 1`).
+    fn console_byte_ready(&mut self) -> bool {
         false
     }
 
@@ -538,8 +539,6 @@ pub trait Host {
 pub enum WaitKind {
     /// Wait for the task with this global id to terminate.
     ChildExit(u64),
-    /// Wait for one finished console line (`core.read_line`).
-    Console,
     /// Wait for space/data/close on the stream with this endpoint handle
     /// (`core.send`/`core.recv`).
     Stream(u64),
@@ -1229,7 +1228,7 @@ impl Machine {
                 let capacity = read_u32(code, pc + 4)? as usize;
                 self.append(capacity, state, stack, constants, args)?;
             }
-            opcodes::READ_LINE => {
+            opcodes::READ_INPUT => {
                 let capacity = read_u32(code, pc + 4)? as usize;
                 let bits = self.pop(stack)?;
                 let (region, offset) = self.resolve(bits, state, stack, constants, args)?;
@@ -1246,18 +1245,15 @@ impl Machine {
                 {
                     return Err(FaultCode::OutOfBounds);
                 }
+                // Raw, non-blocking console read (spec 0005). The count is
+                // published in the destination's length word even when it is
+                // zero: an empty read is a result, not a failure. A caller
+                // that wants to sleep first waits on source `0` with
+                // `core.next_any`.
                 let copied = match region {
-                    refs::REGION_STATE => host.read_line(&mut state[offset..end]),
-                    refs::REGION_STACK => host.read_line(&mut stack[offset..end]),
+                    refs::REGION_STATE => host.read_input(&mut state[offset..end]),
+                    refs::REGION_STACK => host.read_input(&mut stack[offset..end]),
                     _ => return Err(FaultCode::IllegalOperation),
-                };
-                let Some(copied) = copied else {
-                    // As with `wait`: restore the operand stack and point at
-                    // the same instruction so the retry sees an unchanged
-                    // boundary. Nothing was written to the destination.
-                    self.pc = pc;
-                    self.sp = saved_sp;
-                    return Ok(Step::Blocked(WaitKind::Console));
                 };
                 let copied = copied.min(capacity);
                 match region {
@@ -1989,8 +1985,8 @@ impl Machine {
                                 }
                                 None => {
                                     // Restore the instruction boundary like
-                                    // `read_line` and `next_event` do: the
-                                    // retry sees unchanged operands and `pc`.
+                                    // `next_event` does: the retry sees
+                                    // unchanged operands and `pc`.
                                     self.pc = pc;
                                     self.sp = saved_sp;
                                     return Ok(Step::Blocked(WaitKind::Any(set)));
@@ -3336,7 +3332,7 @@ impl Machine {
         for index in 0..set.len() {
             let source = set.get(index)?;
             let ready = match source {
-                wait::SOURCE_CONSOLE => host.console_line_ready(),
+                wait::SOURCE_CONSOLE_BYTE => host.console_byte_ready(),
                 wait::SOURCE_INPUT => host.input_ready(),
                 handle => host.stream_readable(handle),
             };

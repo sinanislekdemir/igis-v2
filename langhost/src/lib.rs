@@ -79,13 +79,14 @@ pub struct RunResult {
 /// returns that record immediately and never blocks; the scheduling difference
 /// from the kernel is invisible to a program that spawns and waits.
 ///
-/// The host has no kernel line ring, so `core.read_line` is a scripted stub:
-/// it hands out one complete line per call from [`HOST_LINES`], then an empty
-/// line forever. A host-side shell therefore runs the same code path as the
-/// kernel's, deterministically, without ever blocking. A program that keeps
-/// reading after the script is exhausted sees empty lines and either exits or
-/// is stopped by the budget watchdog.
-const HOST_LINES: [&[u8]; 4] = [b"help", b"run child world", b"echo hi there", b"exit"];
+/// The host has no kernel console ring, so `core.read_input` drains a scripted
+/// byte queue: [`HOST_INPUT`] is what a person would type at the serial line,
+/// including the newlines. A host-side shell therefore runs the same
+/// application-side line editing as the kernel's, deterministically and without
+/// ever blocking. A program that keeps reading after the script is exhausted
+/// reads zero bytes and either exits or blocks (which the host reports as
+/// `IllegalOperation`).
+const HOST_INPUT: &[u8] = b"help\nrun child world\necho hi there\nexit\n";
 
 struct ConsoleHost {
     output: Vec<u8>,
@@ -93,7 +94,8 @@ struct ConsoleHost {
     source_dir: PathBuf,
     children: HashMap<u64, ExitReason>,
     next_id: u64,
-    next_line: usize,
+    /// Bytes the scripted console has not delivered yet (`core.read_input`).
+    input: Vec<u8>,
     /// One loopback FIFO for every endpoint (see `stream_send`).
     stream: Vec<u8>,
     /// Record-shaped events queued by `syslib.inject_event`, oldest first.
@@ -102,13 +104,17 @@ struct ConsoleHost {
 
 impl ConsoleHost {
     fn new(depth: u32) -> Self {
+        Self::with_input(depth, HOST_INPUT)
+    }
+
+    fn with_input(depth: u32, input: &[u8]) -> Self {
         ConsoleHost {
             output: Vec::new(),
             depth,
             source_dir: app_dir(),
             children: HashMap::new(),
             next_id: 1,
-            next_line: 0,
+            input: input.to_vec(),
             stream: Vec::new(),
             events: Vec::new(),
         }
@@ -138,12 +144,11 @@ impl Host for ConsoleHost {
         self.output.extend_from_slice(bytes);
     }
 
-    fn read_line(&mut self, buf: &mut [u8]) -> Option<usize> {
-        let line = HOST_LINES.get(self.next_line).copied().unwrap_or(b"");
-        self.next_line += 1;
-        let copied = line.len().min(buf.len());
-        buf[..copied].copy_from_slice(&line[..copied]);
-        Some(copied)
+    fn read_input(&mut self, dst: &mut [u8]) -> usize {
+        let copied = self.input.len().min(dst.len());
+        dst[..copied].copy_from_slice(&self.input[..copied]);
+        self.input.drain(..copied);
+        copied
     }
 
     fn clock(&mut self) -> u64 {
@@ -177,12 +182,12 @@ impl Host for ConsoleHost {
 
     // Multi-source waits (spec 0003, spec 0007; Q39). The host has no
     // scheduler, so a blocking `next_any` on a source that never arrives is
-    // still a host-side block (`IllegalOperation`), exactly like `read_line`'s
-    // stalled script or an empty loopback receive. The probes model the three
-    // source kinds faithfully: a scripted line remains, an injected event is
-    // queued, or the loopback FIFO has bytes.
-    fn console_line_ready(&mut self) -> bool {
-        self.next_line < HOST_LINES.len()
+    // still a host-side block (`IllegalOperation`), exactly like an exhausted
+    // script or an empty loopback receive. The probes model the three source
+    // kinds faithfully: console bytes remain, an injected event is queued, or
+    // the loopback FIFO has bytes.
+    fn console_byte_ready(&mut self) -> bool {
+        !self.input.is_empty()
     }
 
     fn input_ready(&mut self) -> bool {
@@ -439,7 +444,22 @@ fn valid_path(path: &str) -> bool {
 /// `args` is the text delivered to `main(args)`; it may be at most 1024 bytes.
 /// `budget` bounds the total number of instructions executed.
 pub fn run(code: &[u8], args: &[u8], budget: u64) -> Result<RunResult, interpreter::Diagnostic> {
-    let mut host = ConsoleHost::new(0);
+    run_with_input(code, args, HOST_INPUT, budget)
+}
+
+/// Runs a package with a caller-supplied console byte script.
+///
+/// The default [`run`] uses [`HOST_INPUT`]; a test that needs different typed
+/// bytes (a backspace, a different command) passes its own. The script is
+/// drained by `core.read_input`, so it is exactly what a person would type,
+/// including newlines.
+pub fn run_with_input(
+    code: &[u8],
+    args: &[u8],
+    input: &[u8],
+    budget: u64,
+) -> Result<RunResult, interpreter::Diagnostic> {
+    let mut host = ConsoleHost::with_input(0, input);
     run_with_host(code, args, budget, &mut host)
 }
 
