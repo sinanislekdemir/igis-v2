@@ -1193,6 +1193,16 @@ fn ui_layout_compiles_and_reports_the_host_path() {
 }
 
 #[test]
+fn ui_controls_compiles_and_reports_the_host_path() {
+    let path = format!("{}/../samples/apps/ui_controls", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "ui_controls").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"ui_controls: host ok\n".to_vec());
+}
+
+#[test]
 fn text_edit_compiles_and_edits_utf8_text_on_the_host() {
     let path = format!("{}/../samples/apps/text_edit", env!("CARGO_MANIFEST_DIR"));
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
@@ -1395,5 +1405,188 @@ end;
             (52, 24, b"Hi".to_vec(), BLACK),
         ],
         "the centred title, then the explicit centred text"
+    );
+}
+
+#[test]
+fn ui_controls_draw_the_documented_sequence() {
+    let source = br#"
+unit uictl;
+
+uses core, stdlib, syslib;
+
+var
+  st: Status;
+  items: array[string[64], 8];
+
+procedure main(args: const string[1024]);
+begin
+  items[0] := "Alpha";
+  items[1] := "Bravo";
+  items[2] := "Charlie";
+  items[3] := "Delta";
+  items[4] := "Echo";
+  items[5] := "Foxtrot";
+  st := stdlib.ui_button(10, 20, 100, 24, "OK", true, true);
+  st := stdlib.ui_checkbox(10, 60, "On", true, true);
+  st := stdlib.ui_text_field(10, 100, 100, 22, "abc", 2, 0, 0, 1, true);
+  st := stdlib.ui_scrollbar(200, 20, 16, 160, 10, 10, 100, true);
+  st := stdlib.ui_list(10, 200, 100, 82, items, 6, 2, 0, true);
+  if st = Ok then
+    core.write("ui controls sequence ok\n");
+  if stdlib.ui_key_code(uint(72 * 65536 + 104)) = 72
+    and stdlib.ui_key_text(uint(72 * 65536 + 104)) = byte(104)
+    and stdlib.ui_key_is_backspace(uint(0x101 * 65536))
+    and stdlib.ui_key_is_tab(uint(0x102 * 65536))
+    and stdlib.ui_key_is_enter(uint(0x103 * 65536))
+    and stdlib.ui_key_is_left(uint(0x110 * 65536))
+    and stdlib.ui_key_is_right(uint(0x111 * 65536))
+    and stdlib.ui_key_is_up(uint(0x112 * 65536))
+    and stdlib.ui_key_is_down(uint(0x113 * 65536))
+    and stdlib.ui_key_is_home(uint(0x114 * 65536))
+    and stdlib.ui_key_is_end(uint(0x115 * 65536))
+    and stdlib.ui_key_is_delete(uint(0x119 * 65536))
+    and stdlib.ui_key_modifiers(uint(65 + 1 * 256)) = 1 then
+    core.write("ui keys ok\n");
+end;
+"#;
+    let package = langhost::compile(source, "uictl").expect("compiles");
+    let mut scratch = vec![0u8; package.code.len().div_ceil(32)];
+    let program = interpreter::Program::parse(&package.code, &mut scratch).expect("verifies");
+    let header = *program.header();
+    let mut state = vec![0u8; header.state_size as usize];
+    let mut stack = vec![0u8; header.stack_size as usize];
+    let args = vec![0u8; 8 + 1024];
+    let mut machine = interpreter::Machine::new();
+    let mut host = Painter {
+        fills: Vec::new(),
+        outlines: Vec::new(),
+        texts: Vec::new(),
+        output: Vec::new(),
+    };
+    let outcome = machine.run(
+        &program,
+        &mut host,
+        &mut state,
+        &mut stack,
+        &args,
+        langhost::DEFAULT_BUDGET,
+    );
+    assert_eq!(outcome, interpreter::Outcome::Exited(ExitReason::Ok));
+    assert_eq!(host.output, b"ui controls sequence ok\nui keys ok\n");
+
+    const BLACK: u32 = 0x000000;
+    const WHITE: u32 = 0x00FF_FFFF;
+    const GRAY: u32 = 0x00CC_CCCC;
+    const ACCENT: u32 = 0x0000_80;
+
+    assert_eq!(
+        host.outlines,
+        vec![
+            (10, 20, 100, 24, BLACK),
+            (10, 60, 11, 11, BLACK),
+            (10, 100, 100, 22, BLACK),
+            (200, 20, 16, 160, BLACK),
+            (202, 37, 12, 15, BLACK),
+            (10, 200, 100, 82, BLACK),
+        ],
+        "button, checkbox, field, scrollbar frame and thumb, list"
+    );
+
+    // Button: pressed gray face, focused inset ring, shifted centred label.
+    assert!(
+        host.fills.contains(&(11, 21, 98, 22, GRAY)),
+        "{:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(13, 23, 1, 1, BLACK)),
+        "ring top: {:?}",
+        host.fills
+    );
+    assert!(!host.fills.contains(&(14, 23, 1, 1, BLACK)), "dotted ring");
+
+    // Checkbox: ring first, then the box, check mark and label.
+    assert!(
+        host.fills.contains(&(42, 60, 1, 1, BLACK)),
+        "checkbox ring: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(10, 60, 11, 11, WHITE)),
+        "checkbox face: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(12, 65, 1, 1, BLACK)),
+        "check mark: {:?}",
+        host.fills
+    );
+
+    // Text field: white face, the text, the accent selection with white text,
+    // the caret and the inset ring.
+    assert!(
+        host.fills.contains(&(11, 101, 98, 20, WHITE)),
+        "field face: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(13, 107, 8, 8, ACCENT)),
+        "selection: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(29, 107, 1, 8, BLACK)),
+        "caret: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(12, 102, 1, 1, BLACK)),
+        "field ring: {:?}",
+        host.fills
+    );
+
+    // Scrollbar: white track, gray thumb at position 10 and its inset ring.
+    assert!(
+        host.fills.contains(&(201, 21, 14, 158, WHITE)),
+        "track: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(202, 37, 12, 15, GRAY)),
+        "thumb: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(201, 21, 1, 1, BLACK)),
+        "scroll ring: {:?}",
+        host.fills
+    );
+
+    // List: the selected row is accent-filled and its text is white.
+    assert!(
+        host.fills.contains(&(11, 233, 98, 16, ACCENT)),
+        "selection row: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(12, 202, 1, 1, BLACK)),
+        "list ring: {:?}",
+        host.fills
+    );
+
+    assert_eq!(
+        host.texts,
+        vec![
+            (53, 29, b"OK".to_vec(), BLACK),
+            (27, 61, b"On".to_vec(), BLACK),
+            (13, 107, b"abc".to_vec(), BLACK),
+            (13, 107, b"a".to_vec(), WHITE),
+            (14, 205, b"Alpha".to_vec(), BLACK),
+            (14, 221, b"Bravo".to_vec(), BLACK),
+            (14, 237, b"Charlie".to_vec(), WHITE),
+            (14, 253, b"Delta".to_vec(), BLACK),
+            (14, 269, b"Echo".to_vec(), BLACK),
+        ]
     );
 }

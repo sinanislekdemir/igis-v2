@@ -418,16 +418,19 @@ so a bug in one cannot silently become a feature of the other.
 Compile memory is caller-provided: source buffer, token/parse arenas, code buffer and
 constant buffer, each with a compile-time cap. One package is compiled at a time because
 the service holds the compiler lock (spec 0007), so one set of buffers is enough. The
-first-milestone caps (provisional, tuning): 64 KiB of source per unit, 256 KiB per
-application, 2 MiB of scratch. They bound memory because memory is statically placed; they
+first-milestone caps (provisional, tuning): 128 KiB of source per unit, 256 KiB per
+application, 4 MiB of scratch. They bound memory because memory is statically placed; they
 are not a time budget, and compile time is not a design constraint (ADR 0019). The scratch
-cap was 1 MiB until M2.4.0; the UI layout layer pushed the embedded library over it, so it
-was raised to 2 MiB (the kernel's static arena grows with it, spec 0007).
+cap was 1 MiB until M2.4.0 and 2 MiB until M2.4.2: the UI layout and controls layers pushed
+the embedded library over them (the library is 72,426 B of source and needs 2,428,888 B of
+scratch at M2.4.2), so the cap is now 4 MiB. The source cap rose from 64 KiB to 128 KiB in
+M2.4.2 for the same reason; the combined application cap stays 256 KiB, so an application
+still has 128 KiB of its own source. The kernel's static buffers grow with both (spec 0007).
 
 The `compiler` crate is `no_std` and allocation-free: it borrows the source, stores tokens,
 AST nodes and name tables in the caller's scratch arena, and writes the package into the
-caller's code and manifest buffers. It exports the caps as `MAX_SOURCE_BYTES` (64 KiB),
-`MAX_ARENA_BYTES` (2 MiB), `MAX_CODE_BYTES` (256 KiB) and `MAX_MANIFEST_BYTES` (4 KiB), and
+caller's code and manifest buffers. It exports the caps as `MAX_SOURCE_BYTES` (128 KiB),
+`MAX_ARENA_BYTES` (4 MiB), `MAX_CODE_BYTES` (256 KiB) and `MAX_MANIFEST_BYTES` (4 KiB), and
 `compile_into` reports exhaustion of any of them as `Status.CapacityExceeded` with a
 `Diagnostic`. The only `unsafe` in the crate is the alignment/initialisation arithmetic of
 the bump arena, isolated in `compiler/src/arena.rs`.

@@ -14,7 +14,7 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `b7b813c` (the M2.4.1 `stdlib` string editing layer) plus the docs/resume
+- **Last commit:** the M2.4.2 controls commit (`stdlib`, proof, tests) plus the docs/resume
   commit on top.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
@@ -25,27 +25,30 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   lifecycle (`ba4f93c`), M2.3.2 composition and repair (`98d3f3a`), M2.3.3 routing,
   `Expose` and `window_present` (`dc14442`), M2.3.4 the desktop shell, kernel text
   windows and `window_info` (`4f9a45e`), M2.3.5 the two-application proof
-  (`8688f88`), M2.4.0 the `stdlib` UI layout layer (`655faf1`, `d8f6609`), and M2.4.1
-  the `stdlib` string editing and selection layer (`b7b813c`).
-- **Verified at that point:** **330 host tests** (abi 15, compiler 144, interpreter 117,
-  langhost 54, including doctests); `cargo xtask build`/`image` clean; the boot prints
+  (`8688f88`), M2.4.0 the `stdlib` UI layout layer (`655faf1`, `d8f6609`), M2.4.1 the
+  `stdlib` string editing and selection layer (`b7b813c`), and M2.4.2 the `stdlib` controls
+  layer plus the `ui_controls` proof (commit hash in the docs/resume commit on top).
+- **Verified at that point:** **333 host tests** (abi 15, compiler 145, interpreter 117,
+  langhost 55, including doctests); `cargo xtask build`/`image` clean; the boot prints
   `console: terminal ok`, `console: log ok`, `console: route ok`, `graphics: clip ok`,
   `window: rules ok`, `window: paint ok` and `window: route ok` on `-smp 4` and
   `-smp 1`; `run text_edit` → `text_edit: ok` on both; `run ui_layout` → `ui_layout: ok`
-  on both; `run windows_proof` → `windows_proof: ok`; `run desktop_shell check` →
+  on both; `run ui_controls` → `ui_controls: ok` on both; `run windows_proof` →
+  `windows_proof: ok`; `run desktop_shell check` →
   `desktop_shell: ok`; `run windows` → `windows: ok`; `run windows_events` →
   `windows_events: ok`; `run windows_demo` → `windows_demo: checks ok`,
   `windows_demo: ready`, `windows_demo: ok`; `run mouse` → `mouse: ok` in its own boot
   (and through both QMP harnesses); regressions `events`, `desktop`, `text 42 hi`,
   `frames`, `streams`, `deep`, `utf8`, `realtime`, `cores` pass on both core counts;
   `scripts/tablet_qmp.py` 7/7, `--no-tablet` → `mouse: ok`,
-  `scripts/mouse_burst_qmp.py` → 600/600; the embedded `stdlib` is 46,933 B of source,
-  32,600 B of code and 1,319,272 B of compile scratch (the cap is now 2 MiB);
+  `scripts/mouse_burst_qmp.py` → 600/600; the embedded `stdlib` is 72,426 B of source,
+  54,704 B of code and 2,428,888 B of compile scratch (the source cap is 128 KiB and the
+  arena cap 4 MiB);
   screenshots `/home/sinan/Desktop/igis-desktop.png` (1024×768, 31555
-  bytes), `igis-windows.png` (1024×768, 28169 bytes) and `igis-m23-proof.png`
-  (1024×768, 30901 bytes).
-- **Next slice (not started):** **M2.4.2** — controls (button, checkbox, text field using
-  the M2.4.1 helpers, scrollbar, list; keyboard navigation and focus rings).
+  bytes), `igis-windows.png` (1024×768, 28169 bytes), `igis-m23-proof.png`
+  (1024×768, 30901 bytes) and `igis-controls.png` (1024×768, 32967 bytes).
+- **Next slice (not started):** **M2.4.3** — menus (menu-bar model, pull-down tracking,
+  keyboard equivalents, checkmarks and disabled items).
 
 ### Resuming from a fresh session (no chat history)
 
@@ -86,11 +89,13 @@ Trust the repository, not a summary. On a fresh start:
      `/home/sinan/Desktop/igis-windows.png`.
    - `python3 scripts/windows_proof_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG
      at `/home/sinan/Desktop/igis-m23-proof.png`.
+   - `python3 scripts/ui_controls_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG
+     at `/home/sinan/Desktop/igis-controls.png`.
    - `python3 scripts/tablet_qmp.py build/igis.iso` → `7/7 absolute cases passed`.
    - `python3 scripts/tablet_qmp.py build/igis.iso --no-tablet` → `mouse: ok` fallback.
    - `python3 scripts/mouse_burst_qmp.py build/igis.iso` → `600/600` px with a
      `mouse: aux IRQ12 delivered ...` line; `--cores 1` is the single-core variant.
-6. The next slice is **M2.4.2** (controls). The window service is complete for M2: the
+6. The next slice is **M2.4.3** (menus). The window service is complete for M2: the
    M2.3.5 proof covers two tasks, focus/raise by click, a scripted `window_move` drag and
    `Expose` repaint. M2.4.0 added the `stdlib` metrics, palette and client chrome; M2.4.1
    added the atomic, code-point-safe string editing and selection helpers a text field
@@ -206,8 +211,12 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
   cursor movement, selection basics; tests. Closes the language side of Q44 and unblocks
   text fields. `samples/apps/text_edit` is the proof; 13 helpers, no new opcode or builtin
   (`b7b813c`). Specs 0003/0005.
-- [ ] **M2.4.2** Controls: button (pressed/released), checkbox, text field (uses M2.4.1),
-  scrollbar, list; keyboard navigation and focus rings.
+- [x] **M2.4.2** Controls: button (pressed/released), checkbox, text field (uses M2.4.1),
+  scrollbar, list; keyboard navigation and focus rings. 32 ordinary-language helpers in
+  `stdlib` (84 total) with no new opcode, builtin or `state`; the app owns the state and
+  event loop. Proof `samples/apps/ui_controls` (injected pointer/key events, `get_pixel`)
+  and the `langhost` sequence test; the source cap rose to 128 KiB and the arena to 4 MiB
+  (spec 0008). Specs 0003/0008.
 - [ ] **M2.4.3** Menus: menu-bar model, pull-down tracking, keyboard equivalents,
   checkmarks and disabled items.
 - [ ] **M2.4.4** Dialogs and alerts: modal loop, default/cancel buttons, text input dialogs.
@@ -253,7 +262,7 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
 | Nominal `TaskId` (Q43) | OPEN-QUESTIONS Q43 | before `stdlib` exposes task primitives |
 | Runtime-capacity buffer parameters (Q46) | OPEN-QUESTIONS Q46 | when slicing/wider stream reads need it |
 | Explicit stream close (Q10) | spec 0006 | streams v2 |
-| Compile arena: ~1.32 MiB of 2 MiB used by `stdlib` | spec 0008 | watch as M2.4.2–M2.4.6 grow the library |
+| Compile arena: ~2.43 MiB of 4 MiB used by `stdlib` (72 KiB source) | spec 0008 | watch as M2.4.3–M2.4.6 grow the library |
 | Guard table cache exhaustion (32 tables) | spec 0002/spec 0009 | long-lived workloads with many stacks |
 | `cargo fmt` drift in three pre-existing files + CI fmt/clippy | repo | housekeeping |
 

@@ -1297,7 +1297,7 @@ interface: console read/write, `yield`, stream send/receive/try, monotonic clock
 string copy/compare/find, integer and `f64` math, formatting primitives (integer and
 fixed-point float), and the checked conversions. `stdlib` (written in the language)
 provides arrays, rings, maps, UTF-8 helpers, parsing (including decimal `f64`), formatting,
-typed stream views, and the UI layout/chrome layer. `syslib` (native, Rust) provides
+typed stream views, and the UI layout/chrome and controls layers. `syslib` (native, Rust) provides
 ports, MMIO handles, the drawing primitives and future block/DMA access.
 
 A function moves from `stdlib` to `core` only when measurement justifies it; the namespace
@@ -1426,6 +1426,78 @@ The M2.4.1 proof is `samples/apps/text_edit`: it exercises ASCII and 1-, 2-, 3- 
 selection helpers, prints one line per check and ends `text_edit: ok`. It runs in the
 kernel (`run text_edit`) and on `langhost` with the same transcript.
 
+#### UI controls (M2.4.2)
+
+Drawing, hit-testing and small state-transition helpers for buttons, checkboxes, text
+fields, vertical scrollbars and lists, as ordinary language code over the M2.4.0 metrics,
+palette, `ui_frame` and the `syslib` drawing primitives. There is no new opcode, builtin,
+record, sum, user enum, generic or `state`. The **application** owns the event loop and
+every state scalar (`pressed`, `checked`, the text buffer, the cursor, the selection, the
+scroll position, the list selection); the library stores nothing, takes no callback and
+runs no event pump.
+
+**Conventions.** The outer `(x, y, w, h)` is the control's full extent and the border is
+inside it, so a hit test is inclusive of `(x, y)` and exclusive of `(x + w, y + h)`. The
+focused state is a dotted one-pixel black ring inset **inside** the control's own extent
+(`ui_focus_ring`), distinct from the solid border and never drawn outside the control
+(there is no per-task clip in M2). A drawing helper returns the first `syslib` status it
+receives: `Ok`, or `Invalid` with nothing drawn when graphics are disabled; an extent too
+small for the control's border, padding and one glyph row returns `Invalid` before any
+paint (`ui_button`/`ui_text_field` need `w >= 9` and `h >= 10`, `ui_scrollbar` needs
+`w >= 5` and `h >= 5`, `ui_list` needs `w >= 4` and `h >= 4`). Drawing is clipped by
+`syslib` to the screen and never faults. Pure helpers (hit tests, clamps, transitions and
+the key decoders) keep working with a disabled screen. Labels and list items are cut at a
+code-point boundary and at most 64 bytes.
+
+**Key decoding.** `Event.code` packs `text | modifiers << 8 | key code << 16` (spec 0010)
+and the language has no bitwise operators, so the helpers use `div`/`mod` over `uint`.
+The application decides which control receives an event:
+
+| Packed field / key | Helper | Mapping used by the control model |
+|---|---|---|
+| text, bits 0–7 | `ui_key_text(code) -> byte` | printable `0x20..=0x7E` inserts at the selection (through `str_selection_replace`) |
+| modifiers, bits 8–11 | `ui_key_modifiers(code) -> int` | Shift bit 1, Ctrl 2, Alt 4, Caps 8; Shift+Tab is `ui_focus_next(current, count, -1)` |
+| key code, bits 16+ | `ui_key_code(code) -> int` | stable identity; compare or use a predicate |
+| Tab `0x102` | `ui_key_is_tab` | next focus (`ui_focus_next` with `+1`) |
+| Enter `0x103` | `ui_key_is_enter` | activate the focused button or toggle the focused checkbox |
+| Backspace `0x101` / Delete `0x119` | `ui_key_is_backspace` / `ui_key_is_delete` | edit the text field (`str_backspace` / `str_delete_into`) |
+| Left `0x110` / Right `0x111` | `ui_key_is_left` / `ui_key_is_right` | move the text-field cursor (`str_cursor_left`/`right`) |
+| Up `0x112` / Down `0x113` | `ui_key_is_up` / `ui_key_is_down` | list selection (`ui_list_move`) or scrollbar page |
+| Home `0x114` / End `0x115` | `ui_key_is_home` / `ui_key_is_end` | text-field cursor to 0 / the length |
+
+| Helper | Semantics |
+|--------|-----------|
+| `stdlib.ui_rect_hit(x, y, w, h, px, py) -> bool` | The shared hit-test rule: positive extent, `x <= px < x + w`, `y <= py < y + h`. |
+| `stdlib.ui_focus_ring(x, y, w, h) -> Status` | A dotted one-pixel black ring on the perimeter of the extent (one pixel every two positions per edge). `w < 1` or `h < 1` is `Invalid`; callers inset it so it never leaves the control. |
+| `stdlib.ui_focus_next(current, count, delta) -> int` | The next focus index for `count` controls, wrapping in both directions. `count <= 0` returns 0; a stale `current` is wrapped first. |
+| `stdlib.ui_button(x, y, w, h, label, pressed, focused) -> Status` | White face (gray while pressed), one-pixel black border, centred label cut to the interior, a dotted inset ring while focused. A pressed label is inset by one pixel when the face is large enough. |
+| `stdlib.ui_button_hit(x, y, w, h, px, py) -> bool` | `ui_rect_hit` over the button's full extent. |
+| `stdlib.ui_button_pressed(pressed, inside) -> bool` | The press/release transition: true when a release lands inside a held button, i.e. the click activates it. |
+| `stdlib.ui_checkbox(x, y, label, checked, focused) -> Status` | An 11×11 white box with a black outline, a seven-pixel check mark when checked and the label six pixels to the right, centred on the box. Focused draws the dotted ring around the control's full extent before the box. |
+| `stdlib.ui_checkbox_hit(x, y, px, py) -> bool` | The 11×11 box only (the signature has no label width). |
+| `stdlib.ui_checkbox_toggle(checked) -> bool` | The new checked value after a click (`not checked`). |
+| `stdlib.ui_text_field(x, y, w, h, text, cursor, scroll, sel_start, sel_stop, focused) -> Status` | White interior, black border, the visible slice from the `scroll` byte offset (at most 64 bytes and `(w - 6) / 8` code points), an accent band with white text for the normalized selection clipped to the slice, a one-pixel caret at the clamped cursor when focused and visible, and a dotted inset ring. Never mutates `text`. |
+| `stdlib.ui_text_field_reveal(text, cursor, scroll, width_px) -> int` | The scroll offset that keeps the clamped caret visible in `width_px` pixels: back to the caret when it is left of the scroll, forward so it sits at the right edge when it is beyond. |
+| `stdlib.ui_scrollbar(x, y, w, h, position, visible, total, focused) -> Status` | A vertical white track with a black border and a gray thumb with a black outline. `position` is clamped to `0..max(total - visible, 0)`; the thumb is at least 8 pixels tall (clamped to the track) and moves over the remaining travel. Focused adds a dotted inset ring. |
+| `stdlib.ui_scrollbar_clamp(position, visible, total) -> int` | Clamps `position` to `0..max(total - visible, 0)`; negative `total`/`visible` are treated as 0. |
+| `stdlib.ui_scrollbar_hit(x, y, w, h, px, py, position, visible, total) -> int` | `0` outside, `1` above the thumb (page up), `2` below it (page down), `3` on the thumb, using the draw helper's geometry. The caller applies the page; thumb dragging is the M2.4 pointer-drag slice. |
+| `stdlib.ui_list(x, y, w, h, items, count, selected, top, focused) -> Status` | A white interior, black border and one 16-pixel row per item from `top`; `count` is clamped to `0..8` and `top` to `0..max(count - rows, 0)`. The selected row is accent-filled with white text, other rows are black on white. Focused adds an inset ring. A list with no whole row still draws its frame. |
+| `stdlib.ui_list_rows(h) -> int` | Whole item rows in a list of height `h`: `(h - 2) / 16`, or 0. |
+| `stdlib.ui_list_hit(x, y, w, h, px, py, count, top) -> int` | The row index under the point, or `-1` outside, in the border or past the last item. `top` is clamped as `ui_list` clamps it. |
+| `stdlib.ui_list_ensure_visible(selected, top, rows) -> int` | The `top` that keeps the selected row inside the `rows` visible rows (scroll up to it, or down so it is the last row), otherwise unchanged. |
+| `stdlib.ui_list_move(selected, count, delta) -> int` | The selected row after a `delta` move, clamped to `0..count-1` without wrapping; `count <= 0` returns 0. |
+
+The M2.4.2 proof is `samples/apps/ui_controls`: it opens a window, draws every control,
+injects pointer and key events and checks the pressed face, the check mark, the caret, the
+accent selection, the thumb travel, the list selection, the focus rings and the wrap with
+`syslib.get_pixel`. It prints `ui_controls: ok` in the kernel on `-smp 4` and `-smp 1` and
+`ui_controls: host ok` on `langhost`, where the pure helpers and the disabled-screen
+`Invalid` contract still run. `langhost/tests/e2e.rs` also records the drawing sequence of
+every control with a fake host. `ui_controls shot` holds a composed frame (focused text
+field with a selection, checked box, paged scrollbar, selected list row) and
+`scripts/ui_controls_screenshot_qmp.py` captures it through QMP `screendump` to
+`/home/sinan/Desktop/igis-controls.png` (1024×768).
+
 Still missing for a complete standard library: `f32` (Q40) and the remaining float-text
 work (Q41: correctly rounded decimal-to-binary parsing and its subnormal edges); the
 fixed-point `core.format_f64_into`, the shortest round-trip
@@ -1442,8 +1514,12 @@ palette, `ui_frame`, `ui_title_bar`, `ui_close_box`, `ui_separator`, `ui_center_
 adding no opcode or builtin. The M2.4.1 string editing layer landed as ordinary language code
 over `core.substr_into`, `core.len`, buffer indexing and the UTF-8 helpers (`str_boundary`,
 the cursor helpers, `str_insert_into`, `str_delete_into`, `str_backspace` and the selection
-helpers), again with no opcode or builtin. Controls (M2.4.2), menus (M2.4.3), dialogs
-(M2.4.4), icons (M2.4.5) and the widgets demo (M2.4.6) are still ahead.
+helpers), again with no opcode or builtin. The M2.4.2 controls layer landed as ordinary
+language code over the same drawing primitives plus the M2.4.1 editing helpers
+(`ui_rect_hit`, `ui_focus_ring`, `ui_focus_next`, the key decoders, the button/checkbox/
+text-field/scrollbar/list helpers and their hit tests and transitions), again with no
+opcode or builtin. Menus (M2.4.3), dialogs (M2.4.4), icons (M2.4.5) and the widgets demo
+(M2.4.6) are still ahead.
 
 ## Failure modes
 
@@ -1583,3 +1659,4 @@ helpers), again with no opcode or builtin. Controls (M2.4.2), menus (M2.4.3), di
 | 2026-11-16 | M2.3.4 adds `syslib.window_info(index: uint, var id: int, var rect: Rect, var title: string[64]) -> Status` (spec 0012, builtin 40): the read-only topmost-first window enumeration used by the desktop shell's window list. The title destination is compile-checked at the service's 64-byte cap; no new opcode. |
 | 2026-11-17 | M2.4.0 adds the `stdlib` UI layout/chrome layer (ADR 0026): the library now says `uses core, syslib;` and the helpers draw through the nine graphics primitives as ordinary language code. Metrics (`ui_text_width` = code points × 8, `ui_text_height`, `ui_line_height`, `ui_content_inset`, `ui_title_bar_height`, `ui_close_box_size`, `ui_text_center_x`, `ui_text_center_y`), the System 7.5 palette (`ui_black`, `ui_white`, `ui_gray`, `ui_focus`, `ui_accent`), and client chrome (`ui_frame`, `ui_title_bar`, `ui_close_box`, `ui_separator`, `ui_center_text`). No record/sum/generic/`state`, no new opcode or builtin. |
 | 2026-11-17 | M2.4.1 adds the `stdlib` string editing and selection layer: `str_boundary`, `str_cursor_clamp`/`left`/`right`/`home`/`end`, `str_insert_into`, `str_delete_into`, `str_backspace`, `str_selection_normalize`/`all`/`collapse`/`replace` (13 helpers, 52 total). Positions are byte offsets; insertion and deletion require code-point boundaries, a mutator stages into `bytes[256]`, converts with `core.substr_into` and publishes with one copy, so a failure leaves the destination untouched and the text valid UTF-8. Cursors clamp instead of failing (SE5); backspace at 0 is an `Ok` no-op (SE7); the selection is the scalar pair `start`/`stop` (SE6). The 256-byte working capacity returns `CapacityExceeded` without a partial write. No record/sum/generic/`state`, no new opcode or builtin. Closes the language side of Q44. |
+| 2026-11-17 | M2.4.2 adds the `stdlib` controls layer (32 drawing, hit-test, transition, focus and key-decode helpers, 84 total): button (normal/pressed/focused), checkbox (box, check mark, label, toggle), text field (visible slice, accent selection, caret, reveal), vertical scrollbar (track, thumb, page hit, clamp), list (rows, selection, scroll into view, row hit, move), `ui_rect_hit`, `ui_focus_ring`, `ui_focus_next` and the packed-key decoders. The application owns the event loop and all state; the library has no widget object, callback, event pump or `state`. Drawing uses the M2.4.0 metrics/palette; too-small geometry is `Invalid` and disabled graphics draw nothing while the pure helpers keep working. No new opcode or builtin. The embedded source cap rises to 128 KiB and the compile arena to 4 MiB (the library is 72,426 B and needs 2,428,888 B of scratch). Proof `samples/apps/ui_controls` (injected pointer/key events, `get_pixel` checks) and the `langhost` sequence test. |

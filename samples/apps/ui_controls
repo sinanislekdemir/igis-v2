@@ -1,0 +1,733 @@
+unit ui_controls;
+
+// M2.4.2 proof: the stdlib controls layer in a real window.
+//
+//   run ui_controls
+//
+// The app opens a window, draws a button, a checkbox, a text field, a vertical
+// scrollbar and a list, then drives them with injected pointer and key events:
+//
+//   1. A pointer press on the button paints the pressed (gray) face and a
+//      release inside activates it (`ui_button_pressed`).
+//   2. A pointer click toggles the checkbox (`ui_checkbox_toggle`), and the
+//      check mark and the focused ring are checked with `get_pixel`.
+//   3. Tab moves the focus; typed text, Backspace, Delete and the arrows edit
+//      the text field through the M2.4.1 helpers, driven by the key decode
+//      helpers. The caret, the accent selection band and the visible slice are
+//      checked with `get_pixel`.
+//   4. A click below the scrollbar thumb pages down; the thumb moves and the
+//      focused ring appears.
+//   5. Up/Down moves the list selection and `ui_list_ensure_visible` scrolls
+//      the list; a row click selects through `ui_list_hit`.
+//   6. Tab wraps the focus back to the button.
+//
+// The first failing check is printed with its step number. `langhost` and a
+// kernel without a framebuffer run the pure helpers and the disabled-screen
+// `Invalid` contract and print `ui_controls: host ok`.
+
+uses core, stdlib, syslib;
+
+const
+  ControlCount = 5;
+  ButtonW = 120;
+  ButtonH = 24;
+  FieldW = 320;
+  FieldH = 22;
+  ListW = 320;
+  ListH = 82;
+  ScrollW = 16;
+  ScrollH = 160;
+  Gap = 20;
+
+var
+  failed: bool;
+  fail_step: int;
+  fail_label: string[64];
+  step: int;
+  status: Status;
+  present_status: Status;
+  screen_w: uint;
+  screen_h: uint;
+  id: int;
+  rect: Rect;
+  ev: Event;
+  flushed: uint;
+
+  bx: int;
+  by: int;
+  cx: int;
+  cy: int;
+  tx: int;
+  ty: int;
+  sx: int;
+  sy: int;
+  lx: int;
+  ly: int;
+
+  focus_index: int;
+  button_clicks: int;
+  button_down: bool;
+  checkbox_down: bool;
+  checked: bool;
+
+  field_text: string[256];
+  field_cursor: int;
+  field_scroll: int;
+  sel_start: int;
+  sel_stop: int;
+  one: bytes[1];
+  ch: string[1];
+  digits: string[16];
+  copied: int;
+
+  scroll_position: int;
+  scroll_visible: int;
+  scroll_total: int;
+
+  items: array[string[64], 8];
+  list_count: int;
+  list_selected: int;
+  list_top: int;
+
+  black: uint;
+  white: uint;
+  gray: uint;
+  accent: uint;
+
+  dirty: bool;
+  shot: bool;
+  hit_row: int;
+  command: int;
+  at: int;
+
+procedure say(line: const string[0]);
+begin
+  core.write(line);
+end;
+
+procedure verify(label: const string[0]; passed: bool);
+begin
+  step := step + 1;
+  if not passed and not failed then
+  begin
+    failed := true;
+    fail_step := step;
+    fail_label := label;
+  end;
+end;
+
+// ---- pure helpers and the disabled-screen contract ---------------------
+
+procedure pure_checks();
+begin
+  verify("rect hit origin", stdlib.ui_rect_hit(10, 10, 10, 10, 10, 10));
+  verify("rect hit inside", stdlib.ui_rect_hit(10, 10, 10, 10, 19, 19));
+  verify("rect hit past x", not stdlib.ui_rect_hit(10, 10, 10, 10, 20, 15));
+  verify("rect hit past y", not stdlib.ui_rect_hit(10, 10, 10, 10, 15, 20));
+  verify("rect hit before", not stdlib.ui_rect_hit(10, 10, 10, 10, 9, 9));
+  verify("rect hit empty", not stdlib.ui_rect_hit(0, 0, 0, 10, 0, 0));
+
+  verify("button hit", stdlib.ui_button_hit(0, 0, 20, 20, 10, 10));
+  verify("button hit border", not stdlib.ui_button_hit(0, 0, 20, 20, 20, 10));
+  verify("checkbox hit", stdlib.ui_checkbox_hit(0, 0, 10, 10));
+  verify("checkbox hit label is not a hit", not stdlib.ui_checkbox_hit(0, 0, 20, 5));
+
+  verify("button pressed inside", stdlib.ui_button_pressed(true, true));
+  verify("button released outside", not stdlib.ui_button_pressed(true, false));
+  verify("button release when up", not stdlib.ui_button_pressed(false, true));
+  verify("checkbox toggle on", stdlib.ui_checkbox_toggle(false));
+  verify("checkbox toggle off", not stdlib.ui_checkbox_toggle(true));
+
+  verify("focus next forward", stdlib.ui_focus_next(0, 5, 1) = 1);
+  verify("focus next wrap", stdlib.ui_focus_next(4, 5, 1) = 0);
+  verify("focus next back wrap", stdlib.ui_focus_next(0, 5, -1) = 4);
+  verify("focus next empty", stdlib.ui_focus_next(3, 0, 1) = 0);
+  verify("focus next stale", stdlib.ui_focus_next(7, 5, 1) = 3);
+
+  verify("list rows", stdlib.ui_list_rows(82) = 5 and stdlib.ui_list_rows(1) = 0);
+  verify("list move down", stdlib.ui_list_move(2, 6, 1) = 3);
+  verify("list move clamp top", stdlib.ui_list_move(0, 6, -1) = 0);
+  verify("list move clamp end", stdlib.ui_list_move(5, 6, 1) = 5);
+  verify("list move empty", stdlib.ui_list_move(4, 0, 1) = 0);
+  verify("list ensure below", stdlib.ui_list_ensure_visible(5, 0, 5) = 1);
+  verify("list ensure above", stdlib.ui_list_ensure_visible(1, 3, 5) = 1);
+  verify("list ensure visible", stdlib.ui_list_ensure_visible(2, 0, 5) = 0);
+  verify("list hit row", stdlib.ui_list_hit(0, 0, 100, 82, 10, 21, 6, 0) = 1);
+  verify("list hit border", stdlib.ui_list_hit(0, 0, 100, 82, 10, 0, 6, 0) = -1);
+  verify("list hit past items", stdlib.ui_list_hit(0, 0, 100, 82, 10, 70, 2, 0) = -1);
+  verify("list hit offset", stdlib.ui_list_hit(0, 0, 100, 82, 10, 21, 6, 1) = 2);
+
+  verify("scroll clamp low", stdlib.ui_scrollbar_clamp(-3, 10, 100) = 0);
+  verify("scroll clamp high", stdlib.ui_scrollbar_clamp(200, 10, 100) = 90);
+  verify("scroll clamp empty", stdlib.ui_scrollbar_clamp(5, 10, 5) = 0);
+  verify(
+    "scroll hit thumb",
+    stdlib.ui_scrollbar_hit(0, 0, 16, 160, 8, 5, 0, 10, 100) = 3);
+  verify(
+    "scroll hit below",
+    stdlib.ui_scrollbar_hit(0, 0, 16, 160, 8, 150, 0, 10, 100) = 2);
+  verify(
+    "scroll hit outside",
+    stdlib.ui_scrollbar_hit(0, 0, 16, 160, 30, 5, 0, 10, 100) = 0);
+
+  verify("key text", stdlib.ui_key_text(uint(72 * 65536 + 104)) = byte(104));
+  verify("key modifiers", stdlib.ui_key_modifiers(uint(65 + 1 * 256)) = 1);
+  verify("key code", stdlib.ui_key_code(uint(72 * 65536 + 104)) = 72);
+  verify("key backspace", stdlib.ui_key_is_backspace(uint(0x101 * 65536)));
+  verify("key tab", stdlib.ui_key_is_tab(uint(0x102 * 65536)));
+  verify("key enter", stdlib.ui_key_is_enter(uint(0x103 * 65536)));
+  verify("key left", stdlib.ui_key_is_left(uint(0x110 * 65536)));
+  verify("key right", stdlib.ui_key_is_right(uint(0x111 * 65536)));
+  verify("key up", stdlib.ui_key_is_up(uint(0x112 * 65536)));
+  verify("key down", stdlib.ui_key_is_down(uint(0x113 * 65536)));
+  verify("key home", stdlib.ui_key_is_home(uint(0x114 * 65536)));
+  verify("key end", stdlib.ui_key_is_end(uint(0x115 * 65536)));
+  verify("key delete", stdlib.ui_key_is_delete(uint(0x119 * 65536)));
+  verify("key non-text", not stdlib.ui_key_is_tab(uint(72 * 65536 + 104)));
+
+  field_text := "abcdef";
+  verify(
+    "field reveal keeps visible",
+    stdlib.ui_text_field_reveal(field_text, 2, 0, 24) = 0);
+  verify(
+    "field reveal scrolls right",
+    stdlib.ui_text_field_reveal(field_text, 6, 0, 24) = 3);
+  verify(
+    "field reveal scrolls left",
+    stdlib.ui_text_field_reveal(field_text, 1, 4, 24) = 1);
+  field_text := "";
+end;
+
+procedure host_checks();
+begin
+  verify("button disabled", stdlib.ui_button(0, 0, 100, 20, "ok", false, true) = Invalid);
+  verify("checkbox disabled", stdlib.ui_checkbox(0, 0, "ok", true, true) = Invalid);
+  verify(
+    "text field disabled",
+    stdlib.ui_text_field(0, 0, 100, 20, "x", 1, 0, 0, 0, true) = Invalid);
+  verify(
+    "scrollbar disabled",
+    stdlib.ui_scrollbar(0, 0, 16, 100, 0, 10, 100, true) = Invalid);
+  verify(
+    "list disabled",
+    stdlib.ui_list(0, 0, 100, 82, items, 6, 0, 0, true) = Invalid);
+  verify("focus ring disabled", stdlib.ui_focus_ring(0, 0, 10, 10) = Invalid);
+end;
+
+// ---- drawing -----------------------------------------------------------
+
+procedure draw_panel();
+var
+  st: Status;
+begin
+  st := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, white);
+  st := stdlib.ui_frame(rect.x + 8, rect.y + 8, rect.w - 16, rect.h - 16);
+  st := stdlib.ui_button(
+    bx, by, ButtonW, ButtonH, "Press", button_down, focus_index = 0);
+  st := stdlib.ui_checkbox(cx, cy, "Enable", checked, focus_index = 1);
+  st := stdlib.ui_text_field(
+    tx, ty, FieldW, FieldH, field_text, field_cursor, field_scroll,
+    sel_start, sel_stop, focus_index = 2);
+  st := stdlib.ui_scrollbar(
+    sx, sy, ScrollW, ScrollH, scroll_position, scroll_visible, scroll_total,
+    focus_index = 3);
+  st := stdlib.ui_list(
+    lx, ly, ListW, ListH, items, list_count, list_selected, list_top,
+    focus_index = 4);
+end;
+
+procedure present_panel();
+begin
+  draw_panel();
+  present_status := syslib.window_present(id);
+end;
+
+// ---- event handling ----------------------------------------------------
+
+procedure move_selection_to_cursor();
+begin
+  sel_start := field_cursor;
+  sel_stop := field_cursor;
+end;
+
+procedure edit_text();
+var
+  text_byte: byte;
+  st: Status;
+begin
+  if stdlib.ui_key_is_backspace(ev.code) then
+  begin
+    if sel_start <> sel_stop then
+    begin
+      st := stdlib.str_delete_into(field_text, sel_start, sel_stop - sel_start);
+      field_cursor := sel_start;
+      sel_stop := sel_start;
+    end
+    else
+    begin
+      st := stdlib.str_backspace(field_text, field_cursor);
+      move_selection_to_cursor();
+    end;
+  end
+  else if stdlib.ui_key_is_delete(ev.code) then
+  begin
+    if sel_start <> sel_stop then
+    begin
+      st := stdlib.str_delete_into(field_text, sel_start, sel_stop - sel_start);
+      field_cursor := sel_start;
+      sel_stop := sel_start;
+    end
+    else if field_cursor < int(core.len(field_text)) then
+    begin
+      at := field_cursor;
+      at := stdlib.str_cursor_right(field_text, at);
+      if at > field_cursor then
+        st := stdlib.str_delete_into(field_text, field_cursor, at - field_cursor);
+    end;
+  end
+  else if stdlib.ui_key_is_left(ev.code) then
+  begin
+    move_selection_to_cursor();
+    field_cursor := stdlib.str_cursor_left(field_text, field_cursor);
+    move_selection_to_cursor();
+  end
+  else if stdlib.ui_key_is_right(ev.code) then
+  begin
+    move_selection_to_cursor();
+    field_cursor := stdlib.str_cursor_right(field_text, field_cursor);
+    move_selection_to_cursor();
+  end
+  else if stdlib.ui_key_is_home(ev.code) then
+  begin
+    field_cursor := stdlib.str_cursor_home(field_cursor);
+    move_selection_to_cursor();
+  end
+  else if stdlib.ui_key_is_end(ev.code) then
+  begin
+    field_cursor := stdlib.str_cursor_end(field_text, field_cursor);
+    move_selection_to_cursor();
+  end
+  else
+  begin
+    text_byte := stdlib.ui_key_text(ev.code);
+    if text_byte >= byte(32) and text_byte < byte(127) then
+    begin
+      one[0] := text_byte;
+      copied := core.substr_into(ch, one, 0, 1);
+      if copied = 1 then
+      begin
+        st := stdlib.str_selection_replace(field_text, sel_start, sel_stop, ch);
+        field_cursor := sel_start;
+        sel_stop := sel_start;
+      end;
+    end;
+  end;
+  field_scroll := stdlib.ui_text_field_reveal(
+    field_text, field_cursor, field_scroll, FieldW - 6);
+end;
+
+procedure handle_key();
+begin
+  if stdlib.ui_key_is_tab(ev.code) then
+    focus_index := stdlib.ui_focus_next(focus_index, ControlCount, 1)
+  else if focus_index = 0 then
+  begin
+    if stdlib.ui_key_is_enter(ev.code) then
+      button_clicks := button_clicks + 1;
+  end
+  else if focus_index = 1 then
+  begin
+    if stdlib.ui_key_is_enter(ev.code) then
+      checked := stdlib.ui_checkbox_toggle(checked);
+  end
+  else if focus_index = 2 then
+    edit_text()
+  else if focus_index = 3 then
+  begin
+    if stdlib.ui_key_is_up(ev.code) then
+      scroll_position := stdlib.ui_scrollbar_clamp(
+        scroll_position - scroll_visible, scroll_visible, scroll_total)
+    else if stdlib.ui_key_is_down(ev.code) then
+      scroll_position := stdlib.ui_scrollbar_clamp(
+        scroll_position + scroll_visible, scroll_visible, scroll_total);
+  end
+  else if focus_index = 4 then
+  begin
+    if stdlib.ui_key_is_up(ev.code) then
+    begin
+      list_selected := stdlib.ui_list_move(list_selected, list_count, -1);
+      list_top := stdlib.ui_list_ensure_visible(
+        list_selected, list_top, stdlib.ui_list_rows(ListH));
+    end
+    else if stdlib.ui_key_is_down(ev.code) then
+    begin
+      list_selected := stdlib.ui_list_move(list_selected, list_count, 1);
+      list_top := stdlib.ui_list_ensure_visible(
+        list_selected, list_top, stdlib.ui_list_rows(ListH));
+    end;
+  end;
+end;
+
+procedure handle_pointer();
+begin
+  if ev.kind = PointerDown then
+  begin
+    if stdlib.ui_button_hit(bx, by, ButtonW, ButtonH, ev.x, ev.y) then
+    begin
+      focus_index := 0;
+      button_down := true;
+    end
+    else if stdlib.ui_checkbox_hit(cx, cy, ev.x, ev.y) then
+    begin
+      focus_index := 1;
+      checkbox_down := true;
+    end
+    else if stdlib.ui_rect_hit(tx, ty, FieldW, FieldH, ev.x, ev.y) then
+    begin
+      focus_index := 2;
+      field_cursor := stdlib.str_cursor_end(field_text, field_cursor);
+      move_selection_to_cursor();
+      field_scroll := stdlib.ui_text_field_reveal(
+        field_text, field_cursor, field_scroll, FieldW - 6);
+    end
+    else if stdlib.ui_rect_hit(sx, sy, ScrollW, ScrollH, ev.x, ev.y) then
+    begin
+      focus_index := 3;
+      command := stdlib.ui_scrollbar_hit(
+        sx, sy, ScrollW, ScrollH, ev.x, ev.y,
+        scroll_position, scroll_visible, scroll_total);
+      if command = 1 then
+        scroll_position := stdlib.ui_scrollbar_clamp(
+          scroll_position - scroll_visible, scroll_visible, scroll_total)
+      else if command = 2 then
+        scroll_position := stdlib.ui_scrollbar_clamp(
+          scroll_position + scroll_visible, scroll_visible, scroll_total);
+    end
+    else
+    begin
+      hit_row := stdlib.ui_list_hit(
+        lx, ly, ListW, ListH, ev.x, ev.y, list_count, list_top);
+      if hit_row >= 0 then
+      begin
+        focus_index := 4;
+        list_selected := hit_row;
+        list_top := stdlib.ui_list_ensure_visible(
+          list_selected, list_top, stdlib.ui_list_rows(ListH));
+      end;
+    end;
+  end
+  else if ev.kind = PointerUp then
+  begin
+    if stdlib.ui_button_pressed(
+      button_down, stdlib.ui_button_hit(bx, by, ButtonW, ButtonH, ev.x, ev.y)) then
+      button_clicks := button_clicks + 1;
+    button_down := false;
+    if checkbox_down and stdlib.ui_checkbox_hit(cx, cy, ev.x, ev.y) then
+      checked := stdlib.ui_checkbox_toggle(checked);
+    checkbox_down := false;
+  end;
+end;
+
+// Poll and handle every queued event; one repaint after the batch.
+procedure drain_events();
+var
+  running: bool;
+  count: int;
+begin
+  running := true;
+  count := 0;
+  while running and count < 64 do
+  begin
+    status := syslib.poll_event(ev);
+    if status = Ok then
+    begin
+      count := count + 1;
+      if ev.kind = Expose then
+        dirty := true
+      else if ev.kind = KeyDown then
+      begin
+        handle_key();
+        dirty := true;
+      end
+      else if ev.kind = PointerDown or ev.kind = PointerUp then
+      begin
+        handle_pointer();
+        dirty := true;
+      end;
+    end
+    else
+      running := false;
+  end;
+  if dirty then
+  begin
+    present_panel();
+    dirty := false;
+  end;
+end;
+
+// ---- injection ---------------------------------------------------------
+
+// Clamp the pointer to the origin, discard the queued move and place it on an
+// absolute screen point; the window service sees one move from a known state.
+procedure pointer_to(x: int; y: int);
+begin
+  status := syslib.inject_pointer(-100000, -100000, uint(0));
+  flushed := syslib.event_flush();
+  status := syslib.inject_pointer(x, y, uint(0));
+  drain_events();
+end;
+
+procedure pointer_down();
+begin
+  status := syslib.inject_pointer(0, 0, uint(1));
+  drain_events();
+end;
+
+procedure pointer_up();
+begin
+  status := syslib.inject_pointer(0, 0, uint(0));
+  drain_events();
+end;
+
+procedure inject_key(key_code: int; text_byte: int);
+begin
+  ev.kind := KeyDown;
+  ev.x := 0;
+  ev.y := 0;
+  ev.code := uint(key_code * 65536 + text_byte);
+  ev.window := 0;
+  status := syslib.inject_event(ev);
+  drain_events();
+end;
+
+// ---- kernel proof ------------------------------------------------------
+
+procedure kernel_proof();
+begin
+  // Initial composition and baseline pixels.
+  present_panel();
+  verify("content filled", syslib.get_pixel(rect.x + 2, rect.y + 2) = white);
+  verify("button face", syslib.get_pixel(bx + 2, by + 2) = white);
+  verify("button border", syslib.get_pixel(bx, by) = black);
+  verify("button focus ring", syslib.get_pixel(bx + 3, by + 3) = black);
+  verify("checkbox face", syslib.get_pixel(cx + 5, cy + 2) = white);
+  verify("checkbox border", syslib.get_pixel(cx, cy) = black);
+  verify("field border", syslib.get_pixel(tx, ty) = black);
+  verify("scrollbar thumb", syslib.get_pixel(sx + 3, sy + 3) = gray);
+  verify("list selection", syslib.get_pixel(lx + 2, ly + 4) = accent);
+
+  // 1. Button: press paints gray, release inside activates.
+  pointer_to(bx + ButtonW div 2, by + ButtonH div 2);
+  pointer_down();
+  verify("button down state", button_down);
+  verify("button pressed face", syslib.get_pixel(bx + 2, by + 2) = gray);
+  pointer_up();
+  verify("button click counted", button_clicks = 1);
+  verify("button released face", syslib.get_pixel(bx + 2, by + 2) = white);
+  verify("button focus after click", focus_index = 0 and syslib.get_pixel(bx + 3, by + 3) = black);
+
+  // 2. Checkbox: a click toggles it and draws the check mark.
+  pointer_to(cx + 5, cy + 5);
+  pointer_down();
+  verify("checkbox focus after click", focus_index = 1);
+  pointer_up();
+  verify("checkbox toggled", checked);
+  verify("check mark", syslib.get_pixel(cx + 2, cy + 5) = black);
+  verify("checkbox focus ring", syslib.get_pixel(cx + 14, cy) = black);
+
+  // 3. Text field: Tab focuses it; typed text and editing keys mutate through
+  // the M2.4.1 helpers.
+  inject_key(0x102, 0);
+  verify("tab focuses field", focus_index = 2);
+  inject_key(72, 104); // 'h'
+  inject_key(73, 105); // 'i'
+  verify("typed text", field_text = "hi" and field_cursor = 2);
+  verify("typed glyph", syslib.get_pixel(tx + 3, ty + 7) = black);
+  verify("caret at end", syslib.get_pixel(tx + 19, ty + 7) = black);
+  inject_key(0x101, 0); // Backspace
+  verify("backspace", field_text = "h" and field_cursor = 1);
+  verify("caret after backspace", syslib.get_pixel(tx + 11, ty + 7) = black);
+  inject_key(0x110, 0); // Left
+  verify("left moves caret", field_cursor = 0 and syslib.get_pixel(tx + 11, ty + 7) = white);
+  inject_key(0x111, 0); // Right
+  verify("right moves caret", field_cursor = 1 and syslib.get_pixel(tx + 11, ty + 7) = black);
+  inject_key(0x114, 0); // Home
+  verify("home moves caret", field_cursor = 0);
+  inject_key(0x115, 0); // End
+  verify("end moves caret", field_cursor = 1);
+
+  // Selection band: cell 0 is selected, so its blank corner is the accent.
+  sel_start := 0;
+  sel_stop := 1;
+  field_cursor := 1;
+  present_panel();
+  verify("selection accent", syslib.get_pixel(tx + 7, ty + 7) = accent);
+  verify("selection caret", syslib.get_pixel(tx + 11, ty + 7) = black);
+  move_selection_to_cursor();
+
+  // 4. Scrollbar: a click below the thumb pages down and focuses it.
+  pointer_to(sx + 8, sy + 150);
+  pointer_down();
+  pointer_up();
+  verify("scrollbar focus after click", focus_index = 3);
+  verify("scrollbar page down", scroll_position = 10);
+  verify("scrollbar ring", syslib.get_pixel(sx + 1, sy + 1) = black);
+  verify("scrollbar thumb moved", syslib.get_pixel(sx + 3, sy + 3) = white);
+  verify("scrollbar thumb at page", syslib.get_pixel(sx + 3, sy + 18) = gray);
+
+  // The keyboard pages too while the scrollbar is focused.
+  inject_key(0x113, 0); // Down
+  verify("scrollbar key down", scroll_position = 20);
+
+  // 5. List: Tab focuses it, Down moves the selection and scrolls it into view.
+  inject_key(0x102, 0);
+  verify("tab focuses list", focus_index = 4);
+  verify("list focus ring", syslib.get_pixel(lx + 2, ly + 2) = black);
+  inject_key(0x113, 0);
+  inject_key(0x113, 0);
+  verify("list moved twice", list_selected = 2 and list_top = 0);
+  inject_key(0x113, 0);
+  inject_key(0x113, 0);
+  inject_key(0x113, 0);
+  verify("list scrolled", list_selected = 5 and list_top = 1);
+  verify("list selected row", syslib.get_pixel(lx + 2, ly + 67) = accent);
+
+  // A row click selects through the hit test (row 1 with top 1 is index 2).
+  pointer_to(lx + 10, ly + 21);
+  pointer_down();
+  pointer_up();
+  verify("list click selects", focus_index = 4 and list_selected = 2);
+  verify("list click ring", syslib.get_pixel(lx + 2, ly + 2) = black);
+
+  // 6. Tab wraps back to the button, and Enter activates it.
+  inject_key(0x102, 0);
+  verify("tab wraps", focus_index = 0);
+  inject_key(0x103, 0); // Enter
+  verify("enter activates button", button_clicks = 2);
+
+  status := syslib.window_close(id);
+  verify("window closed", status = Ok);
+end;
+
+procedure report_and_exit();
+begin
+  if failed then
+  begin
+    say("ui_controls: failed check ");
+    at := core.format_int_into(digits, fail_step, uint(10), uint(0));
+    say(digits);
+    say(" (");
+    say(fail_label);
+    say(")\n");
+  end
+  else
+    say("ui_controls: ok\n");
+end;
+
+procedure main(args: const string[1024]);
+begin
+  failed := false;
+  fail_step := 0;
+  step := 0;
+  shot := args = "shot";
+  black := stdlib.ui_black();
+  white := stdlib.ui_white();
+  gray := stdlib.ui_gray();
+  accent := stdlib.ui_accent();
+  focus_index := 0;
+  button_clicks := 0;
+  button_down := false;
+  checkbox_down := false;
+  checked := false;
+  field_text := "";
+  field_cursor := 0;
+  field_scroll := 0;
+  sel_start := 0;
+  sel_stop := 0;
+  scroll_position := 0;
+  scroll_visible := 10;
+  scroll_total := 100;
+  list_count := 6;
+  list_selected := 0;
+  list_top := 0;
+  items[0] := "Alpha";
+  items[1] := "Bravo";
+  items[2] := "Charlie";
+  items[3] := "Delta";
+  items[4] := "Echo";
+  items[5] := "Foxtrot";
+
+  pure_checks();
+
+  screen_w := syslib.screen_width();
+  screen_h := syslib.screen_height();
+  if screen_w = uint(0) then
+  begin
+    host_checks();
+    if failed then
+      report_and_exit()
+    else
+      say("ui_controls: host ok\n");
+  end
+  else if screen_w < uint(80 + 480 + 20) or screen_h < uint(80 + 317 + 20) then
+    say("ui_controls: screen too small\n")
+  else
+  begin
+    status := syslib.window_open(80, 80, 480, 300, "UI Controls", id);
+    if status <> Ok then
+      say("ui_controls: no window\n")
+    else
+    begin
+      status := syslib.window_content_rect(id, rect);
+      if status <> Ok then
+        say("ui_controls: no content rect\n")
+      else
+      begin
+        bx := rect.x + Gap;
+        by := rect.y + Gap;
+        cx := rect.x + Gap;
+        cy := rect.y + Gap + 40;
+        tx := rect.x + Gap;
+        ty := rect.y + Gap + 72;
+        lx := rect.x + Gap;
+        ly := rect.y + Gap + 110;
+        sx := rect.x + Gap + ListW + 40;
+        sy := by;
+        dirty := false;
+
+        // Flush anything the boot windows queued so the injected stream starts
+        // from a known state; our own panel is repainted immediately.
+        flushed := syslib.event_flush();
+        if shot then
+        begin
+          // A representative composed state for the screenshot harness: the
+          // field is focused with a selection and a caret, the checkbox is
+          // checked, the scrollbar is paged and the list has a selection.
+          checked := true;
+          field_text := "Hello, world";
+          field_cursor := 5;
+          field_scroll := 0;
+          sel_start := 0;
+          sel_stop := 5;
+          scroll_position := 10;
+          list_selected := 2;
+          list_top := 0;
+          focus_index := 2;
+          draw_panel();
+          present_panel();
+          say("ui_controls: ready\n");
+          // Hold the frame for the screenshot harness. Spinning for three
+          // seconds keeps the task's CPU budget (10 s) intact.
+          flushed := core.clock();
+          while core.clock() - flushed < uint(3000000000) do
+            at := 0;
+          status := syslib.window_close(id);
+          say("ui_controls: done\n");
+        end
+        else
+          kernel_proof();
+        report_and_exit();
+      end;
+    end;
+  end;
+end;

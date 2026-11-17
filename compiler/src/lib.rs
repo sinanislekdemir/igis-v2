@@ -32,10 +32,15 @@ use abi::Status;
 
 pub use arena::FixedBuf;
 
-/// Maximum accepted source size for one unit. Spec 0008 caps a unit at 64 KiB
+/// Maximum accepted source size for one unit. Spec 0008 caps a unit at 128 KiB
 /// and an application at 256 KiB; the kernel's source buffer holds one unit, so
 /// this is the effective per-unit cap.
-pub const MAX_SOURCE_BYTES: usize = 64 * 1024;
+///
+/// M2.4.2 raised this from 64 KiB: the M2.4.2 controls pushed the embedded
+/// `stdlib` past the old cap (it is 72 KiB of source). The combined application
+/// cap is unchanged at 256 KiB, so an application still has 128 KiB of its own
+/// source available.
+pub const MAX_SOURCE_BYTES: usize = 128 * 1024;
 
 /// Maximum combined source size for an application and the embedded `stdlib`
 /// unit. It matches the 256 KiB per-application cap in spec 0008.
@@ -55,9 +60,10 @@ pub const STDLIB_PATH: &str = "stdlib/stdlib.ig";
 /// and line-table images and the constant pool all live here; a caller with a
 /// larger buffer still only gets this much, so the bound is real.
 ///
-/// M2.4.0 raised this from 1 MiB: the UI layout layer pushed the embedded
-/// `stdlib` unit past the old cap. 2 MiB leaves room for M2.4.1–M2.4.6.
-pub const MAX_ARENA_BYTES: usize = 2 * 1024 * 1024;
+/// M2.4.0 raised this from 1 MiB and M2.4.2 raised it from 2 MiB: the UI
+/// layout and controls layers pushed the embedded `stdlib` unit past the old
+/// caps (M2.4.2 needs 2,428,888 B). 4 MiB leaves room for M2.4.3–M2.4.6.
+pub const MAX_ARENA_BYTES: usize = 4 * 1024 * 1024;
 
 /// Code-blob buffer a caller must provide (provisional tuning value, spec 0008:
 /// 256 KiB per application).

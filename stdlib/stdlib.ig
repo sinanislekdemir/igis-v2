@@ -37,6 +37,8 @@ const
   UiContentInset = 8;
   UiTitleBarHeight = 16;
   UiCloseBoxSize = 11;
+  UiCheckBoxSize = 11;
+  UiFieldCapacity = 64;
   UiBlack = 0x000000;
   UiWhite = 0x00FFFFFF;
   UiGray = 0x00CCCCCC;
@@ -1514,4 +1516,890 @@ begin
   end;
 
   return Ok;
+end;
+
+// ---- UI controls (spec 0003, "UI controls") ----------------------------
+//
+// Drawing, hit-testing and small state-transition helpers for the controls an
+// application composes inside its own window content (M2.4.2). The application
+// owns the event loop and every state scalar; the library has no widget object,
+// callback, internal event pump or `state`. Drawing uses the M2.4.0 metrics and
+// palette (a `stdlib` constant is not exported, so the values are passed to
+// `syslib` through the private constants below).
+//
+// Every drawing helper returns the first `syslib` status it receives: `Ok`, or
+// `Invalid` with nothing drawn when graphics are disabled or the geometry is
+// unusable. Hit tests and state helpers are pure and keep working with a
+// disabled screen. Geometry follows the screen-relative `syslib` rule (drawing
+// is clipped, never faulted); a control whose own extent is too small for its
+// drawing returns `Invalid` rather than painting outside itself.
+//
+// Control conventions:
+//   - The outer `(x, y, w, h)` is the control's full extent. The 1-px border is
+//     inside it, so `ui_rect_hit` is inclusive of `(x, y)` and exclusive of
+//     `(x + w, y + h)`.
+//   - The focused state is a dotted 1-px ring inset inside the control's own
+//     extent (`ui_focus_ring`), distinct from the solid border and never drawn
+//     outside the control (there is no per-task clip in M2).
+//   - `pressed` and `checked` are application state; the helpers draw it and
+//     return a transition, they never store it.
+
+// The shared hit-test rule: `(px, py)` is inside `(x, y, w, h)` when the
+// extent is positive and the point is at or past the origin and strictly
+// before the far edge. Off-screen and clipped controls use the same rule.
+function ui_rect_hit(x: int; y: int; w: int; h: int; px: int; py: int): bool;
+begin
+  if w <= 0 or h <= 0 then
+    return false;
+  if px < x or px >= x + w then
+    return false;
+  if py < y or py >= y + h then
+    return false;
+  return true;
+end;
+
+// A dotted 1-px black ring along the perimeter of `(x, y, w, h)`: one pixel
+// every two positions on each edge. It is the focused-state cue for controls;
+// callers inset it inside the control so it never draws outside the control's
+// extent. `w < 1` or `h < 1` returns `Invalid` and draws nothing.
+function ui_focus_ring(x: int; y: int; w: int; h: int): Status;
+var
+  st: Status;
+  i: int;
+  black: uint;
+begin
+  if w < 1 or h < 1 then
+    return Invalid;
+  black := uint(UiBlack);
+  i := 0;
+  while i < w do
+  begin
+    st := syslib.fill_rect(x + i, y, 1, 1, black);
+    if st <> Ok then
+      return st;
+    st := syslib.fill_rect(x + i, y + h - 1, 1, 1, black);
+    if st <> Ok then
+      return st;
+    i := i + 2;
+  end;
+  i := 0;
+  while i < h do
+  begin
+    st := syslib.fill_rect(x, y + i, 1, 1, black);
+    if st <> Ok then
+      return st;
+    st := syslib.fill_rect(x + w - 1, y + i, 1, 1, black);
+    if st <> Ok then
+      return st;
+    i := i + 2;
+  end;
+  return Ok;
+end;
+
+// The next focus index for `count` controls, wrapping in both directions.
+// `count <= 0` returns 0. A `current` outside `0..count-1` is first wrapped, so
+// a stale index cannot skip the wrap.
+function ui_focus_next(current: int; count: int; delta: int): int;
+var
+  at: int;
+  next: int;
+begin
+  if count <= 0 then
+    return 0;
+  at := current mod count;
+  if at < 0 then
+    at := at + count;
+  next := (at + delta) mod count;
+  if next < 0 then
+    next := next + count;
+  return next;
+end;
+
+// ---- key decoding (spec 0010, "Key events") ----------------------------
+//
+// `Event.code` packs `text | modifiers << 8 | key code << 16`; the language has
+// no bitwise operators, so these helpers use `div`/`mod` over `uint`. They are
+// pure and work with a disabled screen. The application maps keys to controls:
+// Tab/Shift+Tab call `ui_focus_next`, arrows move the selected control's value,
+// Backspace/Delete/Home/End drive a text field, and Enter activates a button.
+
+// bits 0..=7: the text byte (0 for a non-text key or a release).
+function ui_key_text(code: uint): byte;
+begin
+  return byte(code mod uint(256));
+end;
+
+// bits 8..=11: Shift 1, Ctrl 2, Alt 4, Caps 8.
+function ui_key_modifiers(code: uint): int;
+begin
+  return int((code div uint(256)) mod uint(16));
+end;
+
+// bits 16..=31: the stable key code (unshifted ASCII or a 0x100-range code).
+function ui_key_code(code: uint): int;
+begin
+  return int(code div uint(65536));
+end;
+
+function ui_key_is_backspace(code: uint): bool;
+begin
+  return ui_key_code(code) = 0x101;
+end;
+
+function ui_key_is_tab(code: uint): bool;
+begin
+  return ui_key_code(code) = 0x102;
+end;
+
+function ui_key_is_enter(code: uint): bool;
+begin
+  return ui_key_code(code) = 0x103;
+end;
+
+function ui_key_is_left(code: uint): bool;
+begin
+  return ui_key_code(code) = 0x110;
+end;
+
+function ui_key_is_right(code: uint): bool;
+begin
+  return ui_key_code(code) = 0x111;
+end;
+
+function ui_key_is_up(code: uint): bool;
+begin
+  return ui_key_code(code) = 0x112;
+end;
+
+function ui_key_is_down(code: uint): bool;
+begin
+  return ui_key_code(code) = 0x113;
+end;
+
+function ui_key_is_home(code: uint): bool;
+begin
+  return ui_key_code(code) = 0x114;
+end;
+
+function ui_key_is_end(code: uint): bool;
+begin
+  return ui_key_code(code) = 0x115;
+end;
+
+function ui_key_is_delete(code: uint): bool;
+begin
+  return ui_key_code(code) = 0x119;
+end;
+
+// ---- button ------------------------------------------------------------
+
+// A rectangular button inside `(x, y, w, h)`: a white face (gray while pressed,
+// so the press is visible), a 1-px black border, a centred label truncated to
+// the interior width and, while focused, a dotted inset ring. A pressed button
+// insets its label by one pixel when the face is tall enough. Labels are cut at
+// a code-point boundary and at most 64 bytes.
+//
+// `w < 9` or `h < 10` returns `Invalid` and draws nothing: the face would not
+// hold the border, padding and one glyph row.
+function ui_button(x: int; y: int; w: int; h: int; label: const string[0]; pressed: bool; focused: bool): Status;
+var
+  st: Status;
+  face: uint;
+  avail: int;
+  fits: int;
+  at: int;
+  next: int;
+  codepoint: int;
+  length: int;
+  shown_chars: int;
+  shown_bytes: int;
+  staged: string[64];
+  copied: int;
+  label_x: int;
+  label_y: int;
+  shift: int;
+  done: bool;
+begin
+  if w < 9 or h < 10 then
+    return Invalid;
+  if pressed then
+    face := uint(UiGray)
+  else
+    face := uint(UiWhite);
+  st := syslib.fill_rect(x + 1, y + 1, w - 2, h - 2, face);
+  if st <> Ok then
+    return st;
+  st := ui_frame(x, y, w, h);
+  if st <> Ok then
+    return st;
+
+  avail := w - 8;
+  fits := avail div UiGlyphWidth;
+  length := int(core.len(label));
+  at := 0;
+  shown_chars := 0;
+  shown_bytes := 0;
+  done := false;
+  while not done and at < length and shown_chars < fits do
+  begin
+    st := utf8_decode(label, at, codepoint, next);
+    if st <> Ok then
+      done := true
+    else if next > UiTitleCapacity then
+      done := true
+    else
+    begin
+      at := next;
+      shown_chars := shown_chars + 1;
+      shown_bytes := at;
+    end;
+  end;
+  if shown_bytes > 0 then
+  begin
+    copied := core.substr_into(staged, label, 0, shown_bytes);
+    if copied <> shown_bytes then
+      return Invalid;
+    shift := 0;
+    if pressed and w > 12 and h > 12 then
+      shift := 1;
+    label_x := ui_text_center_x(x + 1, w - 2, staged) + shift;
+    label_y := ui_text_center_y(y, h) + shift;
+    st := syslib.draw_text(label_x, label_y, staged, uint(UiBlack));
+    if st <> Ok then
+      return st;
+  end;
+
+  if focused then
+  begin
+    st := ui_focus_ring(x + 3, y + 3, w - 6, h - 6);
+    if st <> Ok then
+      return st;
+  end;
+  return Ok;
+end;
+
+// The button's hit test; the same inclusive/exclusive rule as `ui_rect_hit`.
+function ui_button_hit(x: int; y: int; w: int; h: int; px: int; py: int): bool;
+begin
+  return ui_rect_hit(x, y, w, h, px, py);
+end;
+
+// The press/release transition: true when a pointer release lands inside a
+// button that was held down, i.e. the click activates it. The caller keeps
+// `pressed` (set on a pointer-down inside the button) and clears it after the
+// release. A release outside the button returns false.
+function ui_button_pressed(pressed: bool; inside: bool): bool;
+begin
+  return pressed and inside;
+end;
+
+// ---- checkbox ----------------------------------------------------------
+
+// A checkbox: an 11x11 white box with a black outline, a seven-pixel check
+// mark when `checked`, and the label six pixels to its right, vertically
+// centred on the box. While focused, a dotted ring surrounds the control's
+// full extent (`11 + 6 + label width` wide), drawn before the box so the box
+// border stays solid.
+function ui_checkbox(x: int; y: int; label: const string[0]; checked: bool; focused: bool): Status;
+var
+  st: Status;
+  white: uint;
+  black: uint;
+  label_x: int;
+  label_y: int;
+  width: int;
+begin
+  if focused then
+  begin
+    width := UiCheckBoxSize + 6 + ui_text_width(label);
+    st := ui_focus_ring(x, y, width, UiCheckBoxSize);
+    if st <> Ok then
+      return st;
+  end;
+  white := uint(UiWhite);
+  black := uint(UiBlack);
+  st := syslib.fill_rect(x, y, UiCheckBoxSize, UiCheckBoxSize, white);
+  if st <> Ok then
+    return st;
+  st := syslib.draw_rect(x, y, UiCheckBoxSize, UiCheckBoxSize, black);
+  if st <> Ok then
+    return st;
+  if checked then
+  begin
+    // A check mark from (x+2, y+5) down to (x+4, y+7) and up to (x+8, y+3).
+    st := syslib.fill_rect(x + 2, y + 5, 1, 1, black);
+    if st <> Ok then
+      return st;
+    st := syslib.fill_rect(x + 3, y + 6, 1, 1, black);
+    if st <> Ok then
+      return st;
+    st := syslib.fill_rect(x + 4, y + 7, 1, 1, black);
+    if st <> Ok then
+      return st;
+    st := syslib.fill_rect(x + 5, y + 6, 1, 1, black);
+    if st <> Ok then
+      return st;
+    st := syslib.fill_rect(x + 6, y + 5, 1, 1, black);
+    if st <> Ok then
+      return st;
+    st := syslib.fill_rect(x + 7, y + 4, 1, 1, black);
+    if st <> Ok then
+      return st;
+    st := syslib.fill_rect(x + 8, y + 3, 1, 1, black);
+    if st <> Ok then
+      return st;
+  end;
+  label_x := x + UiCheckBoxSize + 6;
+  label_y := ui_text_center_y(y, UiCheckBoxSize);
+  st := syslib.draw_text(label_x, label_y, label, black);
+  if st <> Ok then
+    return st;
+  return Ok;
+end;
+
+// The checkbox's hit test: the 11x11 box only. The label is not clickable
+// because the signature carries no width for it.
+function ui_checkbox_hit(x: int; y: int; px: int; py: int): bool;
+begin
+  return ui_rect_hit(x, y, UiCheckBoxSize, UiCheckBoxSize, px, py);
+end;
+
+// The toggle transition: the new `checked` value after a click.
+function ui_checkbox_toggle(checked: bool): bool;
+begin
+  return not checked;
+end;
+
+// ---- text field --------------------------------------------------------
+
+// Returns the scroll offset that keeps the clamped `cursor` visible in a field
+// whose text area is `width_px` pixels wide (one 8-pixel cell per code point).
+// It is the horizontal analogue of `ui_list_ensure_visible`: a caret left of
+// `scroll` scrolls back to the caret; a caret past the right edge scrolls
+// forward so it sits at the right edge. A width below one glyph is treated as
+// one glyph. Pure, so a caller can run it with a disabled screen.
+function ui_text_field_reveal(text: const string[0]; cursor: int; scroll: int; width_px: int): int;
+var
+  base: int;
+  caret: int;
+  at: int;
+  cells: int;
+  limit: int;
+  i: int;
+begin
+  base := str_cursor_clamp(text, scroll);
+  caret := str_cursor_clamp(text, cursor);
+  if width_px < UiGlyphWidth then
+    width_px := UiGlyphWidth;
+  limit := width_px div UiGlyphWidth;
+  if caret <= base then
+    return caret;
+  at := base;
+  cells := 0;
+  while at < caret and cells < limit do
+  begin
+    at := str_cursor_right(text, at);
+    cells := cells + 1;
+  end;
+  if at >= caret then
+    return base;
+  at := caret;
+  i := 0;
+  while i < limit do
+  begin
+    at := str_cursor_left(text, at);
+    i := i + 1;
+  end;
+  return at;
+end;
+
+// A text field inside `(x, y, w, h)`: a white interior, a 1-px black border,
+// the visible slice of `text` from the `scroll` byte offset, an accent band
+// with white text for the `sel_start..sel_stop` selection, a one-pixel caret
+// when focused and the cursor is visible, and a dotted inset focus ring.
+//
+// `scroll`, `cursor` and both selection ends are clamped to code-point
+// boundaries; the helper never mutates the text (a `string` is read-only by
+// index anyway). At most 64 bytes and `(w - 6) / 8` code points are shown.
+// `w < 9` or `h < 10` returns `Invalid` and draws nothing.
+function ui_text_field(x: int; y: int; w: int; h: int; text: const string[0]; cursor: int; scroll: int; sel_start: int; sel_stop: int; focused: bool): Status;
+var
+  st: Status;
+  inner_x: int;
+  avail: int;
+  fits: int;
+  length: int;
+  scroll_at: int;
+  shown_end: int;
+  at: int;
+  next: int;
+  codepoint: int;
+  shown_chars: int;
+  shown_bytes: int;
+  staged: string[64];
+  selected: string[64];
+  copied: int;
+  ty: int;
+  first: int;
+  last: int;
+  sel_from: int;
+  sel_to: int;
+  sel_x: int;
+  sel_end: int;
+  cells: int;
+  caret: int;
+  caret_x: int;
+  done: bool;
+begin
+  if w < 9 or h < 10 then
+    return Invalid;
+  inner_x := x + 3;
+  avail := w - 6;
+  fits := avail div UiGlyphWidth;
+  ty := ui_text_center_y(y + 1, h - 2);
+
+  st := syslib.fill_rect(x + 1, y + 1, w - 2, h - 2, uint(UiWhite));
+  if st <> Ok then
+    return st;
+  st := ui_frame(x, y, w, h);
+  if st <> Ok then
+    return st;
+
+  length := int(core.len(text));
+  scroll_at := str_cursor_clamp(text, scroll);
+  at := scroll_at;
+  shown_chars := 0;
+  shown_bytes := 0;
+  done := false;
+  while not done and at < length and shown_chars < fits do
+  begin
+    st := utf8_decode(text, at, codepoint, next);
+    if st <> Ok then
+      done := true
+    else if next - scroll_at > UiFieldCapacity then
+      done := true
+    else
+    begin
+      at := next;
+      shown_chars := shown_chars + 1;
+      shown_bytes := at - scroll_at;
+    end;
+  end;
+  shown_end := scroll_at + shown_bytes;
+
+  if shown_bytes > 0 then
+  begin
+    copied := core.substr_into(staged, text, scroll_at, shown_bytes);
+    if copied <> shown_bytes then
+      return Invalid;
+    st := syslib.draw_text(inner_x, ty, staged, uint(UiBlack));
+    if st <> Ok then
+      return st;
+  end;
+
+  // Selection: normalize the pair, intersect with the visible slice, convert
+  // the byte offsets to cell offsets, then paint the accent band and redraw
+  // the selected text white on top.
+  first := sel_start;
+  last := sel_stop;
+  copied := str_selection_normalize(text, first, last);
+  sel_from := first;
+  if sel_from < scroll_at then
+    sel_from := scroll_at;
+  sel_to := last;
+  if sel_to > shown_end then
+    sel_to := shown_end;
+  if sel_from < sel_to then
+  begin
+    at := scroll_at;
+    cells := 0;
+    while at < sel_from do
+    begin
+      at := str_cursor_right(text, at);
+      cells := cells + 1;
+    end;
+    sel_x := inner_x + cells * UiGlyphWidth;
+    at := scroll_at;
+    cells := 0;
+    while at < sel_to do
+    begin
+      at := str_cursor_right(text, at);
+      cells := cells + 1;
+    end;
+    sel_end := inner_x + cells * UiGlyphWidth;
+    st := syslib.fill_rect(sel_x, ty, sel_end - sel_x, UiGlyphHeight, uint(UiAccent));
+    if st <> Ok then
+      return st;
+    copied := core.substr_into(selected, text, sel_from, sel_to - sel_from);
+    if copied <> sel_to - sel_from then
+      return Invalid;
+    st := syslib.draw_text(sel_x, ty, selected, uint(UiWhite));
+    if st <> Ok then
+      return st;
+  end;
+
+  if focused then
+  begin
+    caret := str_cursor_clamp(text, cursor);
+    if caret >= scroll_at and caret <= shown_end then
+    begin
+      at := scroll_at;
+      cells := 0;
+      while at < caret do
+      begin
+        at := str_cursor_right(text, at);
+        cells := cells + 1;
+      end;
+      caret_x := inner_x + cells * UiGlyphWidth;
+      st := syslib.fill_rect(caret_x, ty, 1, UiGlyphHeight, uint(UiBlack));
+      if st <> Ok then
+        return st;
+    end;
+    st := ui_focus_ring(x + 2, y + 2, w - 4, h - 4);
+    if st <> Ok then
+      return st;
+  end;
+  return Ok;
+end;
+
+// ---- scrollbar ---------------------------------------------------------
+
+// Clamps `position` into `0..max`, where `max = total - visible` (at least 0).
+// Negative `total` or `visible` are treated as 0. Pure.
+function ui_scrollbar_clamp(position: int; visible: int; total: int): int;
+var
+  max: int;
+begin
+  if total < 0 then
+    total := 0;
+  if visible < 0 then
+    visible := 0;
+  max := total - visible;
+  if max < 0 then
+    max := 0;
+  if position < 0 then
+    return 0;
+  if position > max then
+    return max;
+  return position;
+end;
+
+// A vertical scrollbar inside `(x, y, w, h)`: a white track with a black
+// border and a gray thumb with a black outline. `visible` is the number of
+// items on screen and `total` the whole count, so `position` runs `0..max`.
+// The thumb is at least 8 pixels tall (clamped to the track) and moves over the
+// travel `track - thumb`. Focused adds a dotted inset ring.
+//
+// `w < 5` or `h < 5` returns `Invalid` and draws nothing.
+function ui_scrollbar(x: int; y: int; w: int; h: int; position: int; visible: int; total: int; focused: bool): Status;
+var
+  st: Status;
+  track_y: int;
+  track_h: int;
+  max: int;
+  pos: int;
+  thumb_h: int;
+  thumb_y: int;
+  travel: int;
+begin
+  if w < 5 or h < 5 then
+    return Invalid;
+  st := syslib.fill_rect(x + 1, y + 1, w - 2, h - 2, uint(UiWhite));
+  if st <> Ok then
+    return st;
+  st := ui_frame(x, y, w, h);
+  if st <> Ok then
+    return st;
+
+  track_y := y + 2;
+  track_h := h - 4;
+  pos := ui_scrollbar_clamp(position, visible, total);
+  if total <= 0 then
+    thumb_h := track_h
+  else
+  begin
+    if visible <= 0 then
+      thumb_h := 8
+    else
+      thumb_h := (track_h * visible) div total;
+    if thumb_h < 8 then
+      thumb_h := 8;
+    if thumb_h > track_h then
+      thumb_h := track_h;
+  end;
+  max := total - visible;
+  if max < 0 then
+    max := 0;
+  thumb_y := track_y;
+  travel := track_h - thumb_h;
+  if max > 0 and travel > 0 then
+    thumb_y := track_y + (travel * pos) div max;
+  st := syslib.fill_rect(x + 2, thumb_y, w - 4, thumb_h, uint(UiGray));
+  if st <> Ok then
+    return st;
+  st := syslib.draw_rect(x + 2, thumb_y, w - 4, thumb_h, uint(UiBlack));
+  if st <> Ok then
+    return st;
+
+  if focused then
+  begin
+    st := ui_focus_ring(x + 1, y + 1, w - 2, h - 2);
+    if st <> Ok then
+      return st;
+  end;
+  return Ok;
+end;
+
+// The scrollbar hit test. Returns `0` outside, `1` above the thumb (page up),
+// `2` below it (page down) or `3` on the thumb. Uses the same clamped geometry
+// as `ui_scrollbar`. The caller applies the command, e.g.
+// `position := ui_scrollbar_clamp(position - visible, visible, total)` for a
+// page up; thumb dragging belongs to the M2.4 pointer-drag slice.
+function ui_scrollbar_hit(x: int; y: int; w: int; h: int; px: int; py: int; position: int; visible: int; total: int): int;
+var
+  track_y: int;
+  track_h: int;
+  max: int;
+  pos: int;
+  thumb_h: int;
+  thumb_y: int;
+  travel: int;
+begin
+  if w < 5 or h < 5 then
+    return 0;
+  if not ui_rect_hit(x, y, w, h, px, py) then
+    return 0;
+  track_y := y + 2;
+  track_h := h - 4;
+  pos := ui_scrollbar_clamp(position, visible, total);
+  if total <= 0 then
+    thumb_h := track_h
+  else
+  begin
+    if visible <= 0 then
+      thumb_h := 8
+    else
+      thumb_h := (track_h * visible) div total;
+    if thumb_h < 8 then
+      thumb_h := 8;
+    if thumb_h > track_h then
+      thumb_h := track_h;
+  end;
+  max := total - visible;
+  if max < 0 then
+    max := 0;
+  thumb_y := track_y;
+  travel := track_h - thumb_h;
+  if max > 0 and travel > 0 then
+    thumb_y := track_y + (travel * pos) div max;
+  if py >= thumb_y and py < thumb_y + thumb_h then
+    return 3;
+  if py < thumb_y then
+    return 1;
+  return 2;
+end;
+
+// ---- list --------------------------------------------------------------
+
+// The number of whole item rows inside a list of height `h`: the interior
+// `h - 2` divided by the 16-pixel line height, or 0 when there is no room.
+// Pure, so an application can use it for `ui_list_ensure_visible`.
+function ui_list_rows(h: int): int;
+begin
+  if h < 2 then
+    return 0;
+  return (h - 2) div UiLineHeight;
+end;
+
+// A list inside `(x, y, w, h)` over `items[0..count)`: a white interior, a
+// 1-px black border, one 16-pixel row per item from `top`, the selected row
+// filled with the accent (white text) and an unfocused black-on-white row
+// otherwise. `count` is clamped to `0..8` and `top` to
+// `0..max(0, count - rows)`. Labels are truncated to the interior width and
+// 64 bytes. Focused adds a dotted inset ring. `w < 4` or `h < 4` returns
+// `Invalid`; a list with no whole row still draws its frame.
+function ui_list(x: int; y: int; w: int; h: int; items: const array[string[64], 8]; count: int; selected: int; top: int; focused: bool): Status;
+var
+  st: Status;
+  rows: int;
+  total: int;
+  first: int;
+  max_top: int;
+  row: int;
+  index: int;
+  item_y: int;
+  text_y: int;
+  avail: int;
+  fits: int;
+  at: int;
+  next: int;
+  codepoint: int;
+  shown_chars: int;
+  shown_bytes: int;
+  staged: string[64];
+  copied: int;
+  done: bool;
+begin
+  if w < 4 or h < 4 then
+    return Invalid;
+  st := syslib.fill_rect(x + 1, y + 1, w - 2, h - 2, uint(UiWhite));
+  if st <> Ok then
+    return st;
+  st := ui_frame(x, y, w, h);
+  if st <> Ok then
+    return st;
+
+  total := count;
+  if total < 0 then
+    total := 0;
+  if total > 8 then
+    total := 8;
+  rows := ui_list_rows(h);
+  first := top;
+  if first < 0 then
+    first := 0;
+  max_top := total - rows;
+  if max_top < 0 then
+    max_top := 0;
+  if first > max_top then
+    first := max_top;
+  avail := w - 8;
+  if avail < 0 then
+    avail := 0;
+  fits := avail div UiGlyphWidth;
+
+  row := 0;
+  while row < rows and first + row < total do
+  begin
+    index := first + row;
+    item_y := y + 1 + row * UiLineHeight;
+    text_y := ui_text_center_y(item_y, UiLineHeight);
+    if index = selected then
+    begin
+      st := syslib.fill_rect(x + 1, item_y, w - 2, UiLineHeight, uint(UiAccent));
+      if st <> Ok then
+        return st;
+    end;
+
+    at := 0;
+    shown_chars := 0;
+    shown_bytes := 0;
+    done := false;
+    while not done and at < int(core.len(items[index])) and shown_chars < fits do
+    begin
+      st := utf8_decode(items[index], at, codepoint, next);
+      if st <> Ok then
+        done := true
+      else if next > UiTitleCapacity then
+        done := true
+      else
+      begin
+        at := next;
+        shown_chars := shown_chars + 1;
+        shown_bytes := at;
+      end;
+    end;
+    if shown_bytes > 0 then
+    begin
+      copied := core.substr_into(staged, items[index], 0, shown_bytes);
+      if copied <> shown_bytes then
+        return Invalid;
+      if index = selected then
+        st := syslib.draw_text(x + 4, text_y, staged, uint(UiWhite))
+      else
+        st := syslib.draw_text(x + 4, text_y, staged, uint(UiBlack));
+      if st <> Ok then
+        return st;
+    end;
+    row := row + 1;
+  end;
+
+  if focused then
+  begin
+    st := ui_focus_ring(x + 2, y + 2, w - 4, h - 4);
+    if st <> Ok then
+      return st;
+  end;
+  return Ok;
+end;
+
+// The list row under `(px, py)`, or `-1` outside the list, in the border or
+// past the last item. `top` is clamped exactly as `ui_list` clamps it.
+function ui_list_hit(x: int; y: int; w: int; h: int; px: int; py: int; count: int; top: int): int;
+var
+  rows: int;
+  total: int;
+  first: int;
+  max_top: int;
+  row: int;
+  index: int;
+begin
+  if w <= 0 or h <= 0 then
+    return -1;
+  if not ui_rect_hit(x, y, w, h, px, py) then
+    return -1;
+  if py < y + 1 then
+    return -1;
+  total := count;
+  if total < 0 then
+    total := 0;
+  if total > 8 then
+    total := 8;
+  rows := ui_list_rows(h);
+  row := (py - (y + 1)) div UiLineHeight;
+  if row < 0 or row >= rows then
+    return -1;
+  first := top;
+  if first < 0 then
+    first := 0;
+  max_top := total - rows;
+  if max_top < 0 then
+    max_top := 0;
+  if first > max_top then
+    first := max_top;
+  index := first + row;
+  if index < 0 or index >= total then
+    return -1;
+  return index;
+end;
+
+// The `top` that keeps row `selected` inside the `rows` visible rows: scrolls
+// up to the selection when it is above, down so it becomes the last row when
+// below, otherwise leaves `top` unchanged. `rows <= 0` or an empty selection
+// returns a non-negative `top`; the list draw clamps it against `count`.
+function ui_list_ensure_visible(selected: int; top: int; rows: int): int;
+begin
+  if top < 0 then
+    top := 0;
+  if rows <= 0 then
+    return top;
+  if selected < 0 then
+    return top;
+  if selected < top then
+    return selected;
+  if selected >= top + rows then
+    return selected - rows + 1;
+  return top;
+end;
+
+// The row selected by a move of `delta` rows (usually -1 or +1), clamped to
+// `0..count-1` without wrapping. `count <= 0` returns 0. A `selected` outside
+// the range is clamped first.
+function ui_list_move(selected: int; count: int; delta: int): int;
+var
+  at: int;
+begin
+  if count <= 0 then
+    return 0;
+  at := selected;
+  if at < 0 then
+    at := 0;
+  if at > count - 1 then
+    at := count - 1;
+  at := at + delta;
+  if at < 0 then
+    at := 0;
+  if at > count - 1 then
+    at := count - 1;
+  return at;
 end;

@@ -285,8 +285,8 @@ fn a_tiny_manifest_buffer_is_a_capacity_error() {
 
 #[test]
 fn compile_into_reports_its_caps() {
-    assert_eq!(compiler::MAX_SOURCE_BYTES, 64 * 1024);
-    assert_eq!(compiler::MAX_ARENA_BYTES, 2 * 1024 * 1024);
+    assert_eq!(compiler::MAX_SOURCE_BYTES, 128 * 1024);
+    assert_eq!(compiler::MAX_ARENA_BYTES, 4 * 1024 * 1024);
     assert_eq!(compiler::MAX_CODE_BYTES, 256 * 1024);
     assert_eq!(compiler::MAX_MANIFEST_BYTES, 4 * 1024);
 }
@@ -2935,7 +2935,7 @@ fn the_embedded_stdlib_compiles_on_its_own() {
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(manifest_unit(&package), "stdlib");
     assert_eq!(
-        header.function_count, 52,
+        header.function_count, 84,
         "trim_into, split_once, parse_int_into, parse_f64_into, starts_with, contains_byte, \
          split_all, drain_into, map_get_or, utf8_decode_into, utf8_len, utf8_decode, \
          utf8_valid, recv_exact, send_frame, recv_frame_into, send_line, recv_line_into, \
@@ -2943,11 +2943,19 @@ fn the_embedded_stdlib_compiles_on_its_own() {
          ui_text_height, ui_line_height, ui_content_inset, ui_title_bar_height, \
          ui_close_box_size, ui_black, ui_white, ui_gray, ui_focus, ui_accent, \
          ui_text_center_x, ui_text_center_y, ui_frame, ui_title_bar, ui_close_box, \
-         ui_separator, ui_center_text, and the M2.4.1 editing layer: str_boundary, \
+         ui_separator, ui_center_text, the M2.4.1 editing layer: str_boundary, \
          str_cursor_clamp, str_cursor_left, str_cursor_right, str_cursor_home, \
          str_cursor_end, str_insert_into, str_delete_into, str_backspace, \
          str_selection_normalize, str_selection_all, str_selection_collapse, \
-         str_selection_replace"
+         str_selection_replace, and the M2.4.2 controls layer: ui_rect_hit, \
+         ui_focus_ring, ui_focus_next, ui_key_text, ui_key_modifiers, ui_key_code, \
+         ui_key_is_backspace, ui_key_is_tab, ui_key_is_enter, ui_key_is_left, \
+         ui_key_is_right, ui_key_is_up, ui_key_is_down, ui_key_is_home, ui_key_is_end, \
+         ui_key_is_delete, ui_button, \
+         ui_button_hit, ui_button_pressed, ui_checkbox, ui_checkbox_hit, \
+         ui_checkbox_toggle, ui_text_field, ui_text_field_reveal, ui_scrollbar_clamp, \
+         ui_scrollbar, ui_scrollbar_hit, ui_list_rows, ui_list, ui_list_hit, \
+         ui_list_ensure_visible, ui_list_move"
     );
     assert_eq!(header.entry, 0);
     assert_eq!(header.state_size, 0, "the stdlib declares no state");
@@ -3074,10 +3082,10 @@ end;
     let package = compile(source, "ui.ig").expect("the UI helpers compile");
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(
-        header.entry, 52,
-        "the entry follows the 52 library functions"
+        header.entry, 84,
+        "the entry follows the 84 library functions"
     );
-    assert!(header_function_count(&package) > 52);
+    assert!(header_function_count(&package) > 84);
 }
 
 #[test]
@@ -3116,10 +3124,10 @@ end;
     let package = compile(source, "edit.ig").expect("the editing helpers compile");
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(
-        header.entry, 52,
-        "the entry follows the 52 library functions"
+        header.entry, 84,
+        "the entry follows the 84 library functions"
     );
-    assert!(header_function_count(&package) > 52);
+    assert!(header_function_count(&package) > 84);
 }
 
 #[test]
@@ -3162,6 +3170,51 @@ procedure main(args: const string[1024]);
 begin
   st := stdlib.ui_frame(0, 0, 10, 10);
   st := stdlib.ui_center_text(0, 0, 10, 10, v, stdlib.ui_black());
+end;
+"#;
+    let error = compile(sum, "t.ig").expect_err("a sum is not a string");
+    assert!(error.message.contains("not a buffer"), "{}", error.message);
+}
+
+#[test]
+fn ui_controls_reject_a_record_or_sum_argument() {
+    // The M2.4.2 controls follow the same rule: a record or sum has no identity
+    // across the unit boundary, so it is a scalar/buffer mismatch.
+    let record = br#"
+unit t;
+uses core, stdlib;
+
+type P = record x: int; end;
+
+var
+  p: P;
+  st: Status;
+
+procedure main(args: const string[1024]);
+begin
+  st := stdlib.ui_rect_hit(p, 0, 10, 10, 1, 1);
+end;
+"#;
+    let error = compile(record, "t.ig").expect_err("a record is not an int");
+    assert!(
+        error.message.contains("cannot be used as a scalar"),
+        "{}",
+        error.message
+    );
+
+    let sum = br#"
+unit t;
+uses core, stdlib;
+
+type V = A | B;
+
+var
+  v: V;
+  st: Status;
+
+procedure main(args: const string[1024]);
+begin
+  st := stdlib.ui_button(0, 0, 100, 20, v, false, true);
 end;
 "#;
     let error = compile(sum, "t.ig").expect_err("a sum is not a string");
