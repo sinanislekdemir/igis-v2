@@ -116,9 +116,9 @@ kernel is not written in the new language. Self-hosting the kernel is out of sco
 - **R14 (MUST):** There is no capability or permission model. Any application may use any
   `syslib` primitive. Isolation is limited to interpreter-enforced memory ownership.
 - **R15 (SHOULD):** The system should remain usable interactively: the shell is an
-  ordinary application started by the REPL service, which tries `shell` then `entrypoint`
-  in the image root, and a running application can be inspected and terminated without
-  rebooting.
+  ordinary application started by the REPL service, which tries `entrypoint` (the
+  desktop from M2.5.6) then `shell` in the image root, and a running application can be
+  inspected and terminated without rebooting.
 - **R16 (MUST):** A task may request the realtime class once. Realtime tasks are not
   preempted by the quantum, are exempt from the total CPU budget, and must call
   `core.heartbeat()` at least once per second of non-blocked time; a missed heartbeat is
@@ -269,7 +269,7 @@ specified independently in `0005-host-interface.md`.
 | 19 | Streams: copy through the kernel, or true shared ring buffers? Message- or byte-oriented? | **Resolved** — byte FIFO, copied through the kernel, typed views above it (`0006-streams.md`). |
 | 20 | Can a task's time budget be configured, and by whom? | **Resolved** — a single kernel constant in the first milestone; applications cannot negotiate. |
 | 21 | What happens to a task's streams when the peer dies mid-frame? | **Resolved** — sends are atomic, so there is no mid-frame; queued data is discarded immediately and the peer observes `Closed` (`0006-streams.md`). |
-| 22 | How does the shell run, and how do applications start other applications? | **Resolved** — the REPL is a kernel service; boot tries `shell` then `entrypoint`; the shell is an application; `run`/`spawn` enqueue requests with a fixed `string[1024]` argument (ADR 0017 and addendum). |
+| 22 | How does the shell run, and how do applications start other applications? | **Resolved** — the REPL is a kernel service; boot tries `entrypoint` (the desktop from M2.5.6) then `shell`; the shell is an application; `run`/`spawn` enqueue requests with a fixed `string[1024]` argument (ADR 0017 and addendum; spec 0012 D19). |
 
 ## Changelog
 

@@ -24,7 +24,10 @@ stream and `core.read_line` still blocks on the staged line discipline. It does
 not replace the line discipline with application-side key editing (M2.5.3/M2.6),
 add a second terminal, a writable console or a stream-based terminal protocol.
 
-The desktop boot entry stays `shell`; M2.5.6 switches the entry to the desktop.
+The desktop boot entry is `entrypoint` from M2.5.6 (the `desktop_shell` source staged
+under that file name); it launches this shell from its `Terminal` menu item. The
+one-terminal rule is unchanged: the first shell to attach owns the terminal, and a
+second shell gets `Full`.
 
 ## Requirements
 
@@ -112,10 +115,13 @@ The desktop boot entry stays `shell`; M2.5.6 switches the entry to the desktop.
   holds the terminal), and prints `terminal: ok`.
 - **T14 (MUST):** `desktop_shell` and the terminal coexist: running
   `desktop_shell` from the attached shell draws the menu bar and the desktop
-  window beside the terminal, and the System Log keeps kernel output. The
-  desktop shell is not given a shell launcher in M2.5.5 because the boot entry is
-  still `shell` and a second live shell would hold no terminal; M2.5.6 adds the
-  launcher when the desktop becomes the entry.
+  window beside the terminal, and the System Log keeps kernel output. From
+  M2.5.6 the boot desktop's `Terminal` item spawns the shell (non-blocking) and
+  later clicks raise the live `Terminal` window, so the one-machine-wide terminal
+  is owned by the one shell. The desktop never attaches the terminal itself. If
+  the shell's attach fails (another live task already holds it), it keeps the
+  serial path and reports the fallback line; it does not create a second
+  terminal.
 
 ## Design
 
@@ -185,3 +191,4 @@ opportunity.
 | Date | Change |
 |------|--------|
 | 2026-11-17 | Initial accepted version: `core.terminal_attach` (builtin 44), the one-terminal rule, owner/Expose routing, stale detach/fallback, geometry following, the lock order, the shell window and the `terminal` proof. `samples/apps/windows_proof` moves its "B old area restored to the terminal" probe from `(400, 500)` to `(400, 435)`: the boot Terminal is now the shell's window at `(24, 64)` (content to `y = 440`), so the old point is desktop dither rather than a terminal cell. |
+| 2026-11-17 | M2.5.6: the boot entry is the desktop (`entrypoint`), which launches the shell from its `Terminal` item; later clicks raise the live terminal, and the desktop never attaches it. The one-terminal rule and the shell/terminal transcript are unchanged; the event-injecting regression suite runs on the no-`entrypoint` shell image. |

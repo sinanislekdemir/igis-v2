@@ -17,8 +17,8 @@ regression that the IRQ path is one-for-one, and the serial transcript's
 `mouse: aux IRQ12 delivered ...` line proves the interrupt (not polling) drained it.
 
 Usage:
-    python3 scripts/mouse_burst_qmp.py build/igis.iso
-    python3 scripts/mouse_burst_qmp.py build/igis.iso --cores 1
+    python3 scripts/mouse_burst_qmp.py build/igis-shell.iso
+    python3 scripts/mouse_burst_qmp.py build/igis-shell.iso --cores 1
 
 Exit status is 0 when the guest moved exactly the requested distance.
 """
@@ -72,7 +72,7 @@ def wait_settled(serial, settle=0.4, timeout=8.0):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("iso", help="path to build/igis.iso")
+    parser.add_argument("iso", help="path to build/igis-shell.iso")
     parser.add_argument("--cores", default="4")
     parser.add_argument("--events", type=int, default=300)
     parser.add_argument("--delta", type=int, default=2)

@@ -48,8 +48,9 @@ const
   ContentW = 680;
   ContentH = 480;
 
-  // Root listing capacity. The image has 55 entries at this point; 64 leaves
-  // room without a growth path (there is no allocation).
+  // Root listing capacity. The image has 56 entries (57 with the boot
+  // `entrypoint` alias); 64 leaves room without a growth path (there is no
+  // allocation).
   EntryCapacity = 64;
 
   // Preview cap and per-character layout of the M2.5.1 chunked read.

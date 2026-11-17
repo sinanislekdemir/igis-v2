@@ -385,10 +385,13 @@ task (ADR 0017).
   task, or when the runnable set is empty. It processes at most one request per
   opportunity; a single compile is not interrupted and may hold the core for a long time,
   which is accepted (ADR 0019). Compilation cost is not a design constraint.
-- At boot it tries `shell` in the ext2 root; if absent, it tries `entrypoint`. If neither
-  exists, or the chosen one fails to compile, it writes `no entry` to the console and
-  halts the system. `entrypoint` is for images that boot straight into an application
-  instead of a shell. Once started, the chosen task is ordinary and migratable.
+- At boot it tries `entrypoint` in the ext2 root first; if absent, it tries `shell`. If
+  neither exists, or the chosen one fails to compile, it writes `no entry` to the
+  console and halts the system. From M2.5.6 the image stages the desktop application
+  (`desktop_shell`) under the file name `entrypoint`, so boot lands on the desktop and
+  the text `shell` is launched from its `Terminal` menu item. An image without
+  `entrypoint` boots straight to `shell`, as before (spec 0012 D9/D11/D19). Once
+  started, the chosen task is ordinary and migratable.
 - Applications enqueue compile-and-run requests through `core.run` (blocking) or
   `core.spawn` (returns a `TaskId`); `core.wait` waits and returns the exit reason,
   `core.kill` requests termination by id. The queue holds 1024 pending requests by
@@ -562,7 +565,7 @@ task; after that, shutdown.
 | Multiboot2 framebuffer tag absent | Graphics disabled; the console is serial-only; the kernel continues (spec 0009, G15) |
 | Framebuffer is not 32 bpp RGB, has bad geometry, or the shadow cannot be allocated | Graphics disabled; the boot line names the mode or size; the console is serial-only |
 | Request path malformed or not a regular file | `Status.Invalid`; no task created |
-| `shell` missing or fails to compile | Try `entrypoint`; if that also fails, write `no entry` and halt |
+| `entrypoint` missing or fails to compile | Try `shell`; if that also fails, write `no entry` and halt |
 | Spawn path not found | `Status.NotFound`; no task created |
 | Spawn compile error | `Status.Invalid`; `diag` filled; no task created |
 | Request queue full | `Status.Full`; `run` blocks only on the child, never on the queue |
@@ -597,8 +600,7 @@ task; after that, shutdown.
 | 2026-11-12 | Replaced pinned tasks with work-stealing interpreter loops (ADR 0011); split the runtime into `core`/`stdlib`/`syslib`; byte-FIFO streams; read-only ext2 delivery; framebuffer console; GRUB/multiboot2 boot with own long-mode transition; unconditional budget kill; no capability model. |
 | 2026-11-12 | Added the realtime class: no quantum preemption, admission by core count, one-second heartbeat and `WatchdogTimeout` (ADR 0016). |
 | 2026-11-12 | Added the REPL service: kernel-side compile-and-run, `run`/`spawn`/`wait`/`kill`, task ids and the boot shell (ADR 0017). |
-| 2026-11-12 | REPL service details: `shell` then `entrypoint` boot fallback, `no entry` halt, fixed `string[1024]` arguments, queue capacity 1024, independent children (ADR 0017 addendum). |
-| 2026-11-13 | Floating point is part of the first milestone: `f64` with a kernel-owned per-task `fpu` region, saved on release and restored on claim (ADR 0018). |
+| 2026-11-12 | REPL service details: `shell` then `entrypoint` boot fallback, `no entry` halt, fixed `string[1024]` arguments, queue capacity 1024, independent children (ADR 0017 addendum). || 2026-11-13 | Floating point is part of the first milestone: `f64` with a kernel-owned per-task `fpu` region, saved on release and restored on claim (ADR 0018). |
 | 2026-11-13 | Loader and boot fixed: read-only ext2 subset (1/4 KiB blocks, double indirect, regular root files, validated metadata); request paths validated as relative with no `..`; the multiboot2 framebuffer tag is mandatory; APs come up through a sub-1 MiB trampoline. |
 | 2026-11-13 | The interpreter layer is split into a `compiler` and an `interpreter` crate over a shared `abi` (spec 0008). |
 | 2026-11-13 | Delivery fixed as source-only: the image never contains bytecode, and the manifest is a runtime value (ADR 0019). |
@@ -608,3 +610,4 @@ task; after that, shutdown.
 | 2026-11-16 | Graphics moved to a kernel-owned shadow screen (spec 0009, ADR 0020): the multiboot2 mode lives in `kernel/src/gfx.rs`, the shadow is `pitch * height` contiguous frames allocated after the frame allocator, `present` blits clipped rows with the pitch, the console draws through the shadow, and a rectangular clip is the window-service seam. The framebuffer tag is now optional: a missing or unsupported mode disables graphics and leaves the console on serial instead of halting. |
 | 2026-11-16 | Input added as a kernel device (spec 0010, ADR 0021): the i8042 auxiliary device is initialised at boot and polled in the service opportunity next to the keyboard, one machine-wide pointer state is owned by `kernel/src/gfx.rs`, the software cursor is composited at present time (never in the shadow), and applications reach input only through `syslib.pointer_x`/`pointer_y`/`pointer_buttons` and the debug-only `inject_pointer`. |
 | 2026-11-16 | The absolute USB tablet added as the primary pointer (spec 0010, ADR 0022): `kernel/src/pci.rs` scans bus 0 for the PIIX3 UHCI controller, `kernel/src/usb.rs` enumerates a HID tablet over control transfers and polls one interrupt-IN endpoint, static DMA structures in `.bss` are addressed physically, and `syslib.pointer_source()` reports none/PS/2/tablet. The PS/2 device remains the fallback; both modules are x86/machine-specific until the `arch`/`platform` split. |
+| 2026-11-17 | Boot order changed by M2.5.6 (spec 0012 D19): the REPL tries `entrypoint` first and `shell` second. The image stages the desktop application (`desktop_shell`) under `entrypoint`, so boot lands on the desktop; the text shell is launched from its `Terminal` item. An image without `entrypoint` still boots `shell`. |

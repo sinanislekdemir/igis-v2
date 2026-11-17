@@ -7,8 +7,8 @@ axis values through `input-send-event`, and compares the guest's reported
 screen pixels with the driver's rounding rule.
 
 Usage:
-    python3 scripts/tablet_qmp.py build/igis.iso
-    python3 scripts/tablet_qmp.py build/igis.iso --no-tablet
+    python3 scripts/tablet_qmp.py build/igis-shell.iso
+    python3 scripts/tablet_qmp.py build/igis-shell.iso --no-tablet
 
 The exit status is 0 when every injected position matches within one pixel.
 The full serial transcript is printed so a boot-line check can paste it.
@@ -142,7 +142,7 @@ class Qmp:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("iso", help="path to build/igis.iso")
+    parser.add_argument("iso", help="path to build/igis-shell.iso")
     parser.add_argument("--cores", default="4")
     parser.add_argument("--no-tablet", action="store_true")
     parser.add_argument("--timeout", type=float, default=90.0)

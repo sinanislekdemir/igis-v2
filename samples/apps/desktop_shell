@@ -6,12 +6,19 @@ unit desktop_shell;
 //   run desktop_shell          // normal: draw, print `ready`, pump events
 //   run desktop_shell check    // deterministic self-check, print `ok`
 //
+// M2.5.6 makes this the boot entry: the image stages this source under the
+// file name `entrypoint` (the unit stays `desktop_shell` for diagnostics), so
+// booting the ISO lands on this menu bar. With no graphics the app spawns the
+// text `shell` instead, keeping a serial REPL on a machine that cannot draw.
+//
 // The menu bar has direct items and no dropdowns (M2.4.3 owns those):
 //
-//   File     enumerate the live windows into the terminal window
-//   Apps     launch `clock` with core.spawn (non-blocking)
-//   Windows  raise the terminal window (the existing "bring forward" item)
-//   Apple    raise the shell's own window
+//   File      enumerate the live windows into the terminal window
+//   Apps      launch `clock` with core.spawn (non-blocking)
+//   Windows   raise the terminal window (the existing "bring forward" item)
+//   Terminal  launch `shell` non-blocking; a later click raises the existing
+//             Terminal window instead of spawning a second shell
+//   Apple     raise the shell's own window
 //
 // The shell draws its own window content and presents it with
 // `syslib.window_present`; an `Expose` for its id repaints that content. Window
@@ -22,11 +29,13 @@ unit desktop_shell;
 // The window list uses `syslib.window_info` (builtin 40), which returns the
 // topmost window first. `check` mode injects one pointer-down per item and
 // pumps the event, so the whole surface is deterministic without a pointer
-// device.
+// device. `check` assumes the caller already holds the one terminal (it runs
+// from a shell), so its Terminal item raises that window rather than spawning.
 //
 // The desktop shell does not touch the kernel's terminal or system-log pixels:
 // no `syslib.clear`, and every text line goes to the terminal window through
-// `core.write`.
+// `core.write`. It never attaches the terminal itself: the launched `shell`
+// does (spec 0014, the one-terminal rule).
 
 uses core, syslib;
 
@@ -61,11 +70,17 @@ var
   last_task: int;
   launches: int;
 
+  // The desktop-launched shell (M2.5.6). `shell_launched` is set on the first
+  // successful spawn; later Terminal clicks raise the live window instead.
+  shell_launched: bool;
+  shell_task: int;
+
   // Menu bookkeeping.
   handled: bool;
   file_runs: int;
   app_runs: int;
   window_runs: int;
+  terminal_runs: int;
 
   // Check-mode bookkeeping.
   failed: bool;
@@ -136,6 +151,7 @@ begin
   status := syslib.draw_text(24, 7, "File", black);
   status := syslib.draw_text(72, 7, "Apps", black);
   status := syslib.draw_text(112, 7, "Windows", black);
+  status := syslib.draw_text(184, 7, "Terminal", black);
   status := syslib.fill_rect(0, MenuHeight - 1, screen_w, 1, black);
   draw_clock(screen_w - 8);
   // The bar is application-drawn into the shadow; present its rows so the
@@ -165,10 +181,11 @@ begin
         status := syslib.draw_text(rect.x + 12, rect.y + 52, "File: list windows", black);
         status := syslib.draw_text(rect.x + 12, rect.y + 68, "Apps: launch clock", black);
         status := syslib.draw_text(rect.x + 12, rect.y + 84, "Windows: raise terminal", black);
-        status := syslib.draw_text(rect.x + 12, rect.y + 108, "focus:", black);
+        status := syslib.draw_text(rect.x + 12, rect.y + 100, "Terminal: launch shell", black);
+        status := syslib.draw_text(rect.x + 12, rect.y + 116, "focus:", black);
         focus := syslib.window_focus();
         used := core.format_int_into(digits, focus, uint(10), uint(0));
-        status := syslib.draw_text(rect.x + 68, rect.y + 108, digits, black);
+        status := syslib.draw_text(rect.x + 68, rect.y + 116, digits, black);
         // A small black mark in the content, used by the check-mode pixel test
         // and visible as the shell's own content marker.
         status := syslib.fill_rect(
@@ -256,6 +273,60 @@ begin
   end;
 end;
 
+// Non-blocking shell launch (M2.5.6). The desktop is the boot entry, so the
+// first Terminal click spawns `shell` with `core.spawn` and keeps pumping; the
+// shell opens its own terminal window and attaches it (spec 0014). A later
+// click raises the existing Terminal window instead of starting a second shell
+// that could not hold the one terminal. If the window is gone (the shell
+// exited), the click spawns a fresh one.
+procedure launch_shell();
+begin
+  raised_id := 0;
+  if shell_launched then
+    raise_terminal();
+  if raised_id > 0 then
+  begin
+    say("desktop_shell: terminal raised\n");
+  end
+  else
+  begin
+    launch_status := core.spawn("shell", "", diag, shell_task);
+    if launch_status = Ok then
+    begin
+      shell_launched := true;
+      say("desktop_shell: launched shell task ");
+      say_int(shell_task);
+      say("\n");
+    end
+    else
+    begin
+      say("desktop_shell: shell launch failed: ");
+      say(diag.message);
+      say("\n");
+    end;
+  end;
+end;
+
+// With no graphics the desktop cannot be the interactive surface. Spawn the
+// text shell (the pre-M2.5.6 boot entry) so the machine keeps a serial REPL;
+// the desktop then exits and the shell becomes the only task.
+procedure serial_shell();
+begin
+  launch_status := core.spawn("shell", "", diag, shell_task);
+  if launch_status = Ok then
+  begin
+    say("desktop_shell: serial shell task ");
+    say_int(shell_task);
+    say("\n");
+  end
+  else
+  begin
+    say("desktop_shell: shell launch failed: ");
+    say(diag.message);
+    say("\n");
+  end;
+end;
+
 // A direct menu item: the row is the menu bar, the x ranges are the item pads.
 procedure handle_menu(x: int; y: int);
 begin
@@ -284,6 +355,12 @@ begin
     begin
       raise_terminal();
       window_runs := window_runs + 1;
+      handled := true;
+    end
+    else if x >= 180 and x < 256 then
+    begin
+      launch_shell();
+      terminal_runs := terminal_runs + 1;
       handled := true;
     end;
   end;
@@ -343,8 +420,12 @@ begin
   file_runs := 0;
   app_runs := 0;
   window_runs := 0;
+  terminal_runs := 0;
   launches := 0;
   raised_id := 0;
+  // `check` is run from a shell that already holds the one terminal, so the
+  // Terminal item must raise that window, not spawn a second shell.
+  shell_launched := true;
 
   draw_menu_bar();
   status := syslib.window_open(600, 72, 360, 164, "Desktop", own);
@@ -395,6 +476,19 @@ begin
     status := syslib.window_info(uint(0), win_id, win_rect, win_title);
     verify(
       "raised window is the terminal",
+      status = Ok and win_id = raised_id and win_title = "Terminal");
+
+    // Terminal: the live boot shell already holds the terminal, so this item
+    // reuses and raises it rather than spawning a second shell (M2.5.6).
+    inject_click(210, 10);
+    pump_click();
+    verify("terminal item handled", handled and terminal_runs = 1);
+    verify(
+      "terminal item reuses the terminal",
+      raised_id > 0 and raised_id <> own and syslib.window_focus() = raised_id);
+    status := syslib.window_info(uint(0), win_id, win_rect, win_title);
+    verify(
+      "terminal item raised the terminal",
       status = Ok and win_id = raised_id and win_title = "Terminal");
 
     // Enumeration boundary and the sanctioned presentation path.
@@ -462,12 +556,27 @@ begin
   black := uint(0x000000);
   screen_w := int(syslib.screen_width());
   screen_h := int(syslib.screen_height());
-  if screen_w = 0 or screen_h = 0 then
-    say("desktop_shell: no graphics\n")
+  shell_launched := false;
+  terminal_runs := 0;
+  if args = "check" then
+  begin
+    if screen_w = 0 or screen_h = 0 then
+      say("desktop_shell: no graphics\n")
+    else if screen_w < 400 or screen_h < 300 then
+      say("desktop_shell: screen too small\n")
+    else
+      check_mode();
+  end
+  else if screen_w = 0 or screen_h = 0 then
+  begin
+    say("desktop_shell: no graphics\n");
+    serial_shell();
+  end
   else if screen_w < 400 or screen_h < 300 then
-    say("desktop_shell: screen too small\n")
-  else if args = "check" then
-    check_mode()
+  begin
+    say("desktop_shell: screen too small\n");
+    serial_shell();
+  end
   else
     normal_mode();
 end;

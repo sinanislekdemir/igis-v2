@@ -8,9 +8,9 @@ through QMP `screendump`. If the QEMU build rejects the PNG format, it dumps a
 PPM and converts it with PIL.
 
 Usage:
-    python3 scripts/desktop_screenshot_qmp.py build/igis.iso
-    python3 scripts/desktop_screenshot_qmp.py build/igis.iso \
-        --output /tmp/igis-desktop.png
+    python3 scripts/terminal_screenshot_qmp.py build/igis-shell.iso
+    python3 scripts/terminal_screenshot_qmp.py build/igis-shell.iso \
+        --output /tmp/igis-terminal.png
 
 The script never opens the image for viewing: it only reads its size and
 dimensions so the path can be reported. The shell holds the frame open in
@@ -160,7 +160,7 @@ def capture(qmp, output):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("iso", help="path to build/igis.iso")
+    parser.add_argument("iso", help="path to build/igis-shell.iso")
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
     parser.add_argument("--cores", default="4")
     parser.add_argument("--timeout", type=float, default=90.0)

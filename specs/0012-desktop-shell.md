@@ -23,7 +23,9 @@ Two things are needed:
    share one cursor, and neither may scroll the desktop.
 2. A **desktop shell** application must draw the System 7.5-style menu bar, launch
    applications without blocking itself, and list/raise existing windows. It is an
-   ordinary application, not boot code: the boot entry stays `shell` until M2.5.6.
+   ordinary application, not boot code. M2.3.4 ran it manually (`run desktop_shell`);
+   M2.5.6 makes it the boot entry and gives it the `Terminal` item that starts the text
+   shell, so booting the image lands on the desktop.
 
 M2.3.4 does not add a text widget, a control toolkit, dropdown menus, icons, drag or
 resize. Those are M2.4/M2.5.
@@ -83,14 +85,19 @@ resize. Those are M2.4/M2.5.
 
 ### Desktop shell
 
-- **D9 (MUST):** `samples/apps/desktop_shell` is an ordinary application, run manually
-  as `run desktop_shell [check]`. The boot entry is unchanged (`shell`, then
-  `entrypoint`); M2.5.6 switches it.
+- **D9 (MUST):** `samples/apps/desktop_shell` is an ordinary application. It is also the
+  boot entry from M2.5.6: the image stages the same source under the file name
+  `entrypoint`, and the REPL tries `entrypoint` first and `shell` second. The file name
+  is the load path; the source keeps `unit desktop_shell;`, which is only diagnostic
+  identity. An image without `entrypoint` therefore boots the text `shell` exactly as
+  before M2.5.6. The desktop never attaches the console terminal; the `shell` it
+  launches does (spec 0014, the one-terminal rule).
 - **D10 (MUST):** The shell draws a System 7.5-style menu bar at the top of the screen:
-  a white bar 22 pixels high, a black 8×8 Apple square, the labels `File`, `Apps` and
-  `Windows`, a black baseline on row 21, and the `core.clock()` `HH:MM` right-aligned.
-  The bar is application-drawn and is presented after it is drawn and redrawn after
-  every event. There are no dropdown menus in M2.3.4: each label is a direct item.
+  a white bar 22 pixels high, a black 8×8 Apple square, the labels `File`, `Apps`,
+  `Windows` and `Terminal`, a black baseline on row 21, and the `core.clock()` `HH:MM`
+  right-aligned. The bar is application-drawn and is presented after it is drawn and
+  redrawn after every event. There are no dropdown menus in M2.3.4: each label is a
+  direct item; `Terminal` is the M2.5.6 addition.
 - **D11 (MUST):** A pointer-down with `window = 0` at a menu item runs it:
   - `File` enumerates the live windows and writes their id, title and frame into the
     terminal window;
@@ -99,7 +106,13 @@ resize. Those are M2.4/M2.5.
   - `Windows` raises the existing window titled `Terminal` (the "bring the terminal
     forward" affordance without a dropdown; it sits left of the shell's window, so the
     raise cannot uncover the shell);
+  - `Terminal` launches `shell` with `core.spawn` when no shell has been launched yet,
+    and records the task id. The desktop keeps pumping and never waits for it. After the
+    first launch, a Terminal click raises the live window titled `Terminal` instead of
+    spawning a second shell (which the one-terminal rule would refuse with `Full`); if
+    that window is gone because the shell exited, the click spawns a fresh shell.
   - the Apple square raises the shell's own window.
+
   A launched application is never waited for: the shell uses `core.spawn`, not
   `core.run`.
 - **D12 (MUST):** The shell may own one window of its own ("Desktop"). It draws the
@@ -111,11 +124,13 @@ resize. Those are M2.4/M2.5.
 - **D13 (MUST):** `check` mode is deterministic and headless: draw the bar and window,
   check menu-bar/chrome/content pixels with `get_pixel`, inject a `PointerDown` at each
   item with `syslib.inject_event` and pump it, verify the listing (Terminal and System
-  Log titles present), the spawn result and the focus change, verify enumeration ends
-  in `NotFound` and `window_present` succeeds, and print `desktop_shell: ok`. Normal
-  mode draws the same image, prints `desktop_shell: ready`, promotes itself to the
-  realtime class with heartbeats (falling back to a normal loop when admission is full),
-  and pumps `next_event` until it is killed.
+  Log titles present), the spawn result and the focus change, verify that the `Terminal`
+  item raises the already-live terminal (check mode runs from a shell that holds it, so
+  it never spawns a second shell), verify enumeration ends in `NotFound` and
+  `window_present` succeeds, and print `desktop_shell: ok`. Normal mode draws the same
+  image, prints `desktop_shell: ready`, promotes itself to the realtime class with
+  heartbeats (falling back to a normal loop when admission is full), and pumps
+  `next_event` until it is killed.
 - **D14 (MUST):** There is no global work-area rule in M2.3.4. The shell places its own
   window below the bar, and kernel windows start at `y = 26`. An application that opens
   a window at `y = 0` covers the menu bar; the shell repaints the bar on its next event
@@ -132,9 +147,11 @@ resize. Those are M2.4/M2.5.
   graphics, is `NotFound` and writes nothing. The compiler requires a `var string`
   destination of at least capacity 64; the interpreter bounds-checks the destination
   before calling the host. It is builtin **40** and the ABI opcode table is unchanged.
-- **D16 (MUST):** With graphics disabled (`screen_width() == 0`), `desktop_shell`
-  prints `desktop_shell: no graphics` and exits; the kernel windows do not exist and
-  the console is serial-only. `window_info` is `NotFound` for every index.
+- **D16 (MUST):** With graphics disabled (`screen_width() == 0`), the desktop prints
+  `desktop_shell: no graphics`. In normal (boot) mode it then spawns the text `shell`
+  with `core.spawn` and exits, so the machine keeps a serial REPL; in `check` mode it
+  exits without spawning. The kernel windows do not exist and the console is
+  serial-only. `window_info` is `NotFound` for every index.
 - **D17 (MUST):** Lock order stays acyclic: console drawing and `console::pump` take
   `CONSOLE`, then `WINDOW` (to read visible parts), then `SCREEN` (to paint); the window
   service's repair takes `WINDOW`, then `SCREEN`; no path takes `WINDOW` and then
@@ -147,6 +164,19 @@ resize. Those are M2.4/M2.5.
   detaches to serial-only when the terminal's window disappears. A terminal repaint
   asserts the attached task's output, including children it spawns, as D5 already
   requires; it does not add a second terminal or per-task routing.
+- **D19 (MUST):** Boot lands on the desktop. The REPL tries `entrypoint` first and
+  `shell` second (spec 0002, spec 0005); the image stages `desktop_shell` under both
+  names (`entrypoint` is an alias, not a second source). The boot desktop draws the bar
+  and its `Desktop` window, prints `desktop_shell: ready`, promotes to realtime with
+  heartbeats, and pumps events; it never exits and never waits on a child. The text
+  shell is started by the `Terminal` item (D11), and the desktop never attaches the
+  terminal itself. If `entrypoint` is absent or fails to load, `shell` boots unchanged;
+  if graphics are disabled, D16's serial-shell spawn runs. The desktop is a permanent
+  consumer of the one machine-wide event queue (spec 0010 I31), so an application that
+  also calls `next_event` competes with it; the event-injecting regression suite runs on
+  the shell-entry image (`cargo xtask image --shell`), which has no `entrypoint` and is
+  exactly the pre-M2.5.6 boot. The shell's byte-stream terminal (`core.write` /
+  `core.read_line`) is unaffected by the queue.
 
 ## Design
 
@@ -205,7 +235,22 @@ serial, keyboard, frame, gfx::init, clip self-check
 console::init       // desktop fill, two owner-0 windows, grids
 console::route_self_check
 keyboard decoder self-check and the ordinary boot log (system log window)
+repl::boot          // `entrypoint` (the desktop), else `shell`, else `no entry`
 ```
+
+`entrypoint` is an image alias of `samples/apps/desktop_shell` (the unit keeps its name);
+`--shell` omits it and exercises the fallback. The desktop's normal loop is:
+
+```text
+draw menu bar + Desktop window
+promote to realtime
+print `desktop_shell: ready`
+loop: heartbeat -> next_event -> Expose repaint / menu action -> redraw bar
+```
+
+`Terminal` calls `core.spawn("shell", "", diag, id)` and does not wait. The shell opens
+its 560×360 window, attaches the console terminal and runs its command loop. A second
+Terminal click raises the live window instead of spawning a second shell.
 
 `gfx` keeps only the generic primitives; the whole-screen console helpers
 (`console_clear`, `console_glyph`, `console_scroll`) and the shadow scroll are removed.
@@ -238,11 +283,20 @@ while that id is its own; otherwise it presents what the service last left.
 - Kernel: `console: route ok` on `-smp 4` and `-smp 1`; the serial transcript still
   carries the whole boot log and the sample output; `desktop_shell: ok` in check mode
   and `desktop_shell: ready` in normal mode.
-- Screenshot: `scripts/desktop_screenshot_qmp.py` boots headless without a tablet, runs
+- Boot-to-desktop: `scripts/boot_desktop_qmp.py` boots `build/igis.iso` with no manual
+  `run`, waits for `desktop_shell: ready`, clicks the `Terminal` menu item through QMP
+  absolute pointer events, waits for `shell> `, types `terminal`, waits for
+  `terminal: ok`, and captures `/home/sinan/Desktop/igis-boot-desktop.png` (PNG, PPM
+  fallback). The image is reported by path, dimensions and byte size; it is never
+  opened for viewing. The same harness runs on `-smp 4` and `-smp 1`.
+- Shell fallback: `cargo xtask image --shell` stages the same sources without the
+  `entrypoint` alias; the transcript shows `repl: entrypoint: not found`,
+  `repl: trying `shell`` and a working shell. The event-injecting regression suite runs
+  on that image because the boot desktop is a permanent consumer of the machine-wide
+  queue (D19).
+- Screenshot: `scripts/desktop_screenshot_qmp.py` on the shell-entry image runs
   `desktop_shell`, waits for `desktop_shell: ready`, and captures
   `/home/sinan/Desktop/igis-desktop.png` through QMP `screendump` (PNG, PPM fallback).
-  The image is reported by path, dimensions and byte size; it is never opened for
-  viewing by the harness.
 - Regressions: `events`, `mouse`, `desktop`, `text 42 hi`, `frames`, `streams`, `deep`,
   `utf8`, `realtime`, `cores`, `windows`, `windows_demo`, `windows_events`, both QMP
   pointer harnesses. The three samples that assumed a window-free baseline (`events`,
@@ -253,8 +307,13 @@ while that id is its own; otherwise it presents what the service last left.
 
 | Situation | Behaviour |
 |-----------|-----------|
-| Graphics disabled | No kernel windows, no desktop shell window; console serial only; `desktop_shell: no graphics` |
-| Screen too small for two 8×8 windows | No kernel windows opened; serial only, graphics primitives still work |
+| Graphics disabled | No kernel windows, no desktop shell window; console serial only; the desktop prints `desktop_shell: no graphics` and, in boot mode, spawns the text `shell` so the serial REPL survives |
+| Screen too small for two 8×8 windows | No kernel windows opened; serial only, graphics primitives still work; the desktop spawns the text `shell` in boot mode |
+| `entrypoint` absent from the image | The REPL tries `shell` next; the pre-M2.5.6 boot is unchanged |
+| `entrypoint` fails to read or compile | The diagnostic is logged, the reserved id is burned, and the REPL tries `shell` |
+| A second Terminal click while the shell lives | The desktop raises the existing `Terminal` window; no second shell is spawned |
+| A Terminal click after the shell exited | Its window is gone, so the desktop spawns a fresh shell |
+| A manually launched second `desktop_shell` | It draws a second bar and has its own `shell_launched` flag; single-instance rules remain an M2 limitation |
 | Opening a kernel window fails (`Full`) | That terminal is unattached; its bytes still reach serial; the other may exist |
 | An application calls `syslib.clear` | Console pixels are erased; grids survive; the next expose/output repaints |
 | A window covers a kernel window | The kernel grid keeps the hidden cells; the covering pixels are never overwritten; uncover marks `Expose` and the pump repaints |
@@ -285,7 +344,7 @@ while that id is its own; otherwise it presents what the service last left.
 |---|----------|-----------------|
 | 1 | Work area: should the window service clamp every open below the menu bar? | When a second shell/app cannot avoid the bar (M2.3.5/M2.4) |
 | 2 | Kernel windows as a general logging target (level, ring, scrollback) | When the log window needs history beyond the visible grid |
-| 3 | Menu-bar ownership: the shell app draws it; a second shell instance would draw a second bar | M2.5.6 (boot-to-desktop) and single-instance rules |
+| 3 | Menu-bar ownership: the shell app draws it; a second shell instance would draw a second bar | **Resolved for the boot path (M2.5.6):** the desktop's `Terminal` item raises the live shell instead of spawning a second one. A manually launched second `run desktop_shell` still draws a second bar; that remains a documented M2 limitation. |
 | 4 | Per-window clip/ownership for kernel drawing (today the console passes an explicit clip per cell and does not mutate the global one) | If a kernel producer other than the console draws into a window |
 
 ## Changelog
@@ -296,3 +355,4 @@ while that id is its own; otherwise it presents what the service last left.
 | 2026-11-16 | M2.3.4 implemented: `console::init` opens `Terminal` and `System Log` (owner `0`) after the desktop fill; grids and per-window scroll; `console::route_self_check` (`console: terminal ok`, `console: log ok`, `console: route ok`); `console::pump` pulls owner-0 exposes in `poll_input`; explicit-clip `gfx::draw_cell`/`present_within` (the console never narrows the global clip); `window::open` admits owner `0`, `window::info`/`visible_content_parts`; builtin 40 with compiler capacity and interpreter destination checks; `samples/apps/desktop_shell` check/normal modes; the bar is presented after it is drawn; `events`/`windows`/`windows_events` record the boot focus baseline; `scripts/desktop_screenshot_qmp.py` captures `/home/sinan/Desktop/igis-desktop.png` (1024×768). M2.3.5 remains the two-app/focus/drag/expose proof. |
 | 2026-11-17 | D3 made race-free: `window::generation()` (kernel-internal) is bumped by every visible mutation and read by `paint_cell`/`repaint` before computing visible parts and after painting; a changed generation retries the cell/part with fresh parts (bounded `PAINT_RETRIES`). M2.3.5's two-application proof deterministically reproduced the old stale-parts overwrite (a log-grid repaint computed before a window moved above it painted that window's area afterwards); the retry keeps the covered window's pixels. `samples/apps/windows_proof` and `scripts/windows_proof_screenshot_qmp.py` added. |
 | 2026-11-17 | D18 added by M2.5.5 (spec 0014, ADR 0028): the terminal half of the console can be attached to a task-owned window; the first attach releases the owner-0 boot Terminal, exposes are pulled by id (terminal) and owner 0 (log), and a vanished window detaches to serial-only. The System Log, D3's explicit clip/generation retry and D17's lock order are unchanged. |
+| 2026-11-17 | M2.5.6 boot to the desktop: `entrypoint` (the `desktop_shell` source staged under that file name) is the boot entry, `shell` the fallback; the `Terminal` menu item spawns `shell` with `core.spawn` and later clicks raise the live window; the desktop never attaches the terminal; graphics-disabled boot spawns the text shell. D19 records the permanent-queue-consumer limitation and the `--shell` image used for the event-injecting regression suite. `scripts/boot_desktop_qmp.py` proves the boot menu click and captures `igis-boot-desktop.png`. |

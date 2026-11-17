@@ -327,13 +327,18 @@ impl ExitRing {
 
 static EXITS: SpinLock<ExitRing> = SpinLock::new(ExitRing::new());
 
-/// Boots the first application: `shell`, else `entrypoint`, else `no entry`.
+/// Boots the first application: the desktop `entrypoint`, else `shell`, else
+/// `no entry`.
+///
+/// The image stages the desktop source under `entrypoint` (spec 0012, M2.5.6);
+/// an image without it falls back to the text shell, so a machine with no
+/// entry point and every pre-M2.5.6 image keep working.
 ///
 /// Returns the id of the task left in the runnable set. A failed attempt
 /// burns its reserved id (ids are never reused) and falls through to the next
 /// name, as before.
 pub fn boot(image: &Ext2<'_>) -> u64 {
-    for name in ["shell", "entrypoint"] {
+    for name in ["entrypoint", "shell"] {
         let id = task::reserve_id();
         let mut diag = [0u8; DIAG_BYTES];
         if load(image, name, id, &[], &mut diag).is_ok() {

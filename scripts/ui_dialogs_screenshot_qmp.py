@@ -9,8 +9,8 @@ writes the guest framebuffer to a PNG through QMP `screendump`. If the QEMU
 build rejects the PNG format, it dumps a PPM and converts it with PIL.
 
 Usage:
-    python3 scripts/ui_dialogs_screenshot_qmp.py build/igis.iso
-    python3 scripts/ui_dialogs_screenshot_qmp.py build/igis.iso \
+    python3 scripts/ui_dialogs_screenshot_qmp.py build/igis-shell.iso
+    python3 scripts/ui_dialogs_screenshot_qmp.py build/igis-shell.iso \
         --output /tmp/igis-dialogs.png
 
 The script never opens the image for viewing: it only reads its size and
@@ -161,7 +161,7 @@ def capture(qmp, output):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("iso", help="path to build/igis.iso")
+    parser.add_argument("iso", help="path to build/igis-shell.iso")
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
     parser.add_argument("--cores", default="4")
     parser.add_argument("--timeout", type=float, default=90.0)

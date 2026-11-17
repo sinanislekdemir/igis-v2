@@ -25,12 +25,14 @@ fn main() -> ExitCode {
 
     match command {
         "build" => build(),
-        "image" => image(),
+        "image" => image(args.iter().any(|arg| arg == "--shell")),
         "run" => run(&args[1..]),
         "clean" => clean(),
         other => {
             eprintln!("unknown command: {other}");
-            eprintln!("usage: cargo xtask <build|image|run [--headless] [--no-tablet] [--cores N]|clean>");
+            eprintln!(
+                "usage: cargo xtask <build|image [--shell]|run [--headless] [--no-tablet] [--shell] [--cores N]|clean>"
+            );
             ExitCode::FAILURE
         }
     }
@@ -65,7 +67,7 @@ fn kernel_elf() -> PathBuf {
         .join(KERNEL_ELF)
 }
 
-fn image() -> ExitCode {
+fn image(shell: bool) -> ExitCode {
     if build() == ExitCode::FAILURE {
         return ExitCode::FAILURE;
     }
@@ -76,14 +78,16 @@ fn image() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let iso_root = root().join("build").join("iso");
+    let iso_root = root()
+        .join("build")
+        .join(if shell { "iso-shell" } else { "iso" });
     let boot = iso_root.join("boot");
     let grub = boot.join("grub");
 
     fs::create_dir_all(&grub).expect("create ISO tree");
     fs::copy(&elf, boot.join("kernel.elf")).expect("copy kernel ELF");
 
-    let apps = match apps_image() {
+    let apps = match apps_image(shell) {
         Ok(image) => image,
         Err(message) => {
             eprintln!("apps image: {message}");
@@ -104,7 +108,8 @@ fn image() -> ExitCode {
     );
     fs::write(grub.join("grub.cfg"), config).expect("write grub.cfg");
 
-    let iso = root().join("build").join("igis.iso");
+    let iso_name = if shell { "igis-shell.iso" } else { "igis.iso" };
+    let iso = root().join("build").join(iso_name);
     let status = Command::new("grub2-mkrescue")
         .arg("-o")
         .arg(&iso)
@@ -125,20 +130,41 @@ fn image() -> ExitCode {
 /// The staging directory and the image live under `build/`; `mke2fs -d` copies
 /// the staged tree into a fresh 4 MiB ext2 filesystem with 1 KiB blocks. The
 /// image carries source files only (ADR 0019).
-fn apps_image() -> Result<PathBuf, String> {
+///
+/// The boot entry is `entrypoint` (spec 0012, M2.5.6): the desktop source is
+/// staged a second time under that name so the boot unit can be the desktop
+/// without duplicating it in `samples/apps`. The file name is the load path; the
+/// `unit desktop_shell;` name is only diagnostic identity. `--shell` omits the
+/// alias so the REPL falls back to `shell`, exactly as an older image would.
+fn apps_image(shell: bool) -> Result<PathBuf, String> {
     let source = root().join("samples").join("apps");
     if !source.is_dir() {
         return Err(format!("{} is not a directory", source.display()));
     }
 
-    let staging = root().join("build").join("apps-root");
+    let staging = root().join("build").join(if shell {
+        "apps-shell-root"
+    } else {
+        "apps-root"
+    });
     if staging.exists() {
         fs::remove_dir_all(&staging).map_err(|error| format!("{}: {error}", staging.display()))?;
     }
     fs::create_dir_all(&staging).map_err(|error| format!("{}: {error}", staging.display()))?;
     stage_files(&source, &staging)?;
 
-    let image = root().join("build").join("apps.img");
+    if !shell {
+        let desktop = staging.join("desktop_shell");
+        if !desktop.is_file() {
+            return Err(format!("{}: missing desktop source", desktop.display()));
+        }
+        fs::copy(&desktop, staging.join("entrypoint"))
+            .map_err(|error| format!("{}: {error}", desktop.display()))?;
+    }
+
+    let image = root()
+        .join("build")
+        .join(if shell { "apps-shell.img" } else { "apps.img" });
     if image.exists() {
         fs::remove_file(&image).map_err(|error| format!("{}: {error}", image.display()))?;
     }
@@ -192,7 +218,8 @@ fn stage_files(source: &Path, destination: &Path) -> Result<(), String> {
 }
 
 fn run(args: &[String]) -> ExitCode {
-    if image() == ExitCode::FAILURE {
+    let shell = args.iter().any(|arg| arg == "--shell");
+    if image(shell) == ExitCode::FAILURE {
         return ExitCode::FAILURE;
     }
 
@@ -214,7 +241,9 @@ fn run(args: &[String]) -> ExitCode {
         }
     }
 
-    let iso = root().join("build").join("igis.iso");
+    let iso = root()
+        .join("build")
+        .join(if shell { "igis-shell.iso" } else { "igis.iso" });
     let mut qemu = Command::new("qemu-system-x86_64");
 
     qemu.current_dir(root())

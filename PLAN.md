@@ -14,9 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `648e1de` (the M2.5.3 text editor, its `langhost` test, the QMP
-  screenshot harness and the spec 0003 note) plus the M2.5.4 browser commit and this
-  docs/resume commit on top.
+- **Last commit:** `ee34a8b` (M2.5.5 terminal window) plus the M2.5.6 boot-to-desktop
+  commit and the docs/resume commit on top.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -37,63 +36,53 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   and screenshot harness (`65f4875`), M2.5.3 the text editor plus its
   check/shot modes and screenshot harness (`648e1de`), and M2.5.4 the file browser
   plus its check/shot modes, `langhost` test and screenshot harness.
-- **Verified at that point:** **365 host tests** (abi 18, compiler 152, interpreter 127,
-  langhost 68, including doctests); `cargo xtask build`/`image` clean; the boot prints
-  `console: terminal ok`, `console: log ok`, `console: route ok`, `graphics: clip ok`,
-  `window: rules ok`, `window: paint ok` and `window: route ok` on `-smp 4` and
-  `-smp 1`; `run browser check` → `browser: ok` on `-smp 4` and `-smp 1` (it lists the
-  root, previews `child` and `text`, exercises the error classes, scrolling, a real
-  double-click and an Enter, checks pixels, then launches `editor check` and sees it
-  exit `Ok`); `run browser` without arguments is the interactive browser and
-  `run browser shot` → `browser: ready` then `browser: done` after the five-second
-  hold; `run files` → `files: root listing ok`, `files: root dot ok`,
-  `files: size agrees ok`, `files: chunked read ok`, `files: read 559/559`,
-  `files: offset rules ok`, `files: error paths ok`, `files: ok` on both; `run text_edit`
-  → `text_edit: ok` on both; `run ui_layout` → `ui_layout: ok`
-  on both; `run ui_controls` → `ui_controls: ok` on both; `run ui_menus` →
-  `ui_menus: ok` on both; `run ui_dialogs` → `ui_dialogs: ok` on both; `run ui_icons` →
-  `ui_icons: open Document` then `ui_icons: ok` on both; `run widgets` (or
-  `run widgets check`) → `widgets: ok` on both, and `widgets: host ok` on `langhost`;
-  `run clock_window check` → `clock_window: ok` on both, and
-  `clock_window: host ok` on `langhost`; `run clock_window shot` →
-  `clock_window: ready`, then `clock_window: done` after the five-second live hold;
-  `run editor check` → `editor: ok` on `-smp 4` and `-smp 1`, and `editor: host ok`
-  on `langhost`; `run editor shot` → `editor: ready`, then `editor: done` after the
-  five-second hold; `run windows_proof` → `windows_proof: ok` in its own boot;
-  `run desktop_shell check` →
-  `desktop_shell: ok`; `run windows` → `windows: ok`; `run windows_events` →
-  `windows_events: ok`; `run windows_demo` → `windows_demo: checks ok`,
-  `windows_demo: ready`, `windows_demo: ok`; `run mouse` → `mouse: ok` in its own boot
-  (and through both QMP harnesses); regressions `editor check`, `clock_window check`,
-  `files`, `widgets check`, `ui_icons`, `ui_dialogs`, `ui_menus`, `ui_controls`,
-  `text_edit`, `ui_layout`, `desktop_shell check`, `windows`, `windows_events`,
+- **Verified at that point (M2.5.6):** **368 host tests** (abi 18, compiler 153,
+  interpreter 129, langhost 68, including doctests); `cargo xtask build`/`image` and
+  `cargo xtask image --shell` clean; boot self-checks unchanged
+  (`console: terminal ok`, `console: log ok`, `console: route ok`, `graphics: clip ok`,
+  `window: rules ok`, `window: paint ok`, `window: route ok`); the desktop boot image
+  needs no manual `run` (`repl: trying entrypoint` → `entrypoint: spawned as task 1` →
+  `desktop_shell: ready`), the `Terminal` menu click spawns the shell
+  (`desktop_shell: launched shell task 2`, `shell> `) and `terminal` prints
+  `terminal: ok`; the shell image shows `entrypoint: not found` → `shell: spawned as
+  task 2` and boots the pre-M2.5.6 shell. The event-injecting suite runs on
+  `build/igis-shell.iso`: `terminal`, `files`, `text_edit`, `ui_layout`, `ui_controls`,
+  `ui_menus`, `ui_dialogs`, `ui_icons`, `widgets check`, `clock_window check`,
+  `editor check`, `browser check`, `desktop_shell check`, `windows`, `windows_events`,
   `windows_demo`, `events`, `text 42 hi`, `frames`, `streams`, `deep`, `utf8`,
-  `realtime` and `cores` pass on `-smp 4` and `-smp 1`;
+  `realtime`, `cores` and `windows_proof` all pass on `-smp 4` and `-smp 1`.
   `scripts/tablet_qmp.py` 7/7, `--no-tablet` → `mouse: ok`,
-  `scripts/mouse_burst_qmp.py --cores 1` → 600/600; the embedded `stdlib` is 114,823 B
-  of source, 84,920 B of code and 4,134,600 B of compile scratch with a minimal
-  application (the `ui_icons` pair needs 5,386,584 B, the `widgets` pair 6,546,928 B
-  with a 57,388 B application; the source cap is 128 KiB and the arena cap 8 MiB). The
-  `widgets` task package is 165,424 B of code (41 frames), 9,608 B of state and a
-  25,360 B stack; the `files` package is 6,936 B of code (2 frames), 520 B of state and
-  664 B of stack, the `clock_window` source is 17,744 B and its task package is
-  103,696 B of code (26 frames), 1,304 B of state and a 20,896 B stack, the `editor`
-  source is 43,834 B and its package is 134,176 B of code (33 frames), 19,856 B of state
-  and a 33,416 B stack, the `browser` source is 33,970 B and its package is 121,688 B
-  of code (30 frames), 10,832 B of state and a 22,608 B stack, and the image root lists
-  55 entries (54 staged source files plus the `mke2fs` `lost+found` directory).
-  Screenshots
-  `/home/sinan/Desktop/igis-desktop.png`
-  (1024×768, 31555 bytes), `igis-windows.png` (1024×768, 28169 bytes),
-  `igis-m23-proof.png` (1024×768, 30901 bytes), `igis-controls.png` (1024×768, 32967
-  bytes), `igis-menus.png` (1024×768, 27590 bytes), `igis-dialogs.png`
-  (1024×768, 29544 bytes), `igis-icons.png` (1024×768, 33991 bytes),
-  `igis-widgets.png` (1024×768, 25894 bytes), `igis-clock.png` (1024×768,
-  31443 bytes), `igis-editor.png` (1024×768, 30492 bytes),
-  `igis-browser.png` (1024×768, 32847 bytes) and `igis-terminal.png`
-  (1024×768, 32228 bytes).
-- **Next slice (not started):** **M2.5.6** — boot to the desktop: `entrypoint`
-  becomes the desktop and the shell is launched from a menu item.
+  `scripts/mouse_burst_qmp.py --cores 1 --batch 300` 600/600.
+  Screenshots: `igis-boot-desktop.png` (1024×768, about 31.9 KiB on `-smp 4`, 31.6 KiB on
+  `-smp 1`), plus the M2.5 screenshots `igis-terminal.png` (32228), `igis-browser.png`
+  (32847), `igis-editor.png` (30492), `igis-clock.png` (31443), `igis-widgets.png`
+  (25894), `igis-icons.png` (33991), `igis-dialogs.png` (29544), `igis-menus.png`
+  (27590), `igis-controls.png` (32967), `igis-m23-proof.png` (30901),
+  `igis-windows.png` (28169) and `igis-desktop.png` (31555 bytes). Desktop source
+  18,102 B / package 16,000 B code (4 frames), 752 B state, 1,264 B stack; the desktop
+  image root lists 57 entries, the shell image 56; `stdlib` 125 functions and no cap
+  change.
+- **Next slice (not started):** **M2.6.1** — the proportional (Chicago-like) font with a
+  glyph cache and text metrics, keeping 8×8 as the fallback.
+- **M2.5.6 complete:** `repl::boot` tries `entrypoint` first and `shell` second. `xtask
+  image` stages `samples/apps/desktop_shell` under the second file name `entrypoint` (the
+  unit stays `desktop_shell`), so boot lands on the desktop without duplicating source;
+  `xtask image --shell` omits the alias and writes `build/igis-shell.iso`, the pre-M2.5.6
+  boot used to prove the fallback and to run the event-injecting regression suite.
+  `desktop_shell`'s fourth direct menu item `Terminal` `core.spawn`s `shell` non-blocking
+  and records the id; later clicks raise the live `Terminal` window (or spawn again after
+  the shell exits), so the one-terminal rule is never violated and the desktop stays
+  interactive. The desktop never attaches the terminal; the shell does. With graphics
+  disabled the desktop prints `desktop_shell: no graphics` and spawns the text shell, so
+  a serial REPL survives. `scripts/boot_desktop_qmp.py` boots the ISO with no manual
+  `run`, waits for `desktop_shell: ready`, clicks `Terminal` via QMP absolute pointer
+  events, types `terminal`, checks `terminal: ok`, and writes
+  `/home/sinan/Desktop/igis-boot-desktop.png`; it passes on `-smp 4` and `-smp 1`. The
+  desktop is a permanent consumer of the one machine-wide event queue (spec 0010 I31),
+  so event-reading apps compete with it and the regression suite runs on the shell image;
+  the shell's byte-stream terminal is unaffected. Desktop source 18,102 B, package
+  16,000 B code / 752 B state / 1,264 B stack; desktop image root 57 entries, shell image
+  56; `stdlib` 125 functions, 368 host tests, no cap change. **M2.5 is complete.**
 - **M2.5.5 complete:** `core.terminal_attach(window_id) -> Status` (host builtin 44,
   spec 0014, ADR 0028) binds the one machine-wide console terminal grid to a window
   owned by the calling task; the kernel host passes the task id and checks ownership,
@@ -195,7 +184,7 @@ Trust the repository, not a summary. On a fresh start:
        printf 'run events\n'; sleep 8; printf 'run windows\n'; sleep 6; \
        printf 'run windows_events\n'; sleep 6; printf 'run windows_demo\n'; sleep 22; \
        printf 'exit\n' ) | timeout 360s \
-       qemu-system-x86_64 -cdrom build/igis.iso -m 256M -serial stdio -monitor none \
+       qemu-system-x86_64 -cdrom build/igis-shell.iso -m 256M -serial stdio -monitor none \
        -no-reboot -no-shutdown -accel tcg -vga std -display none -smp 4 -usb \
        -device usb-tablet`
      → `console: terminal ok`, `console: log ok`, `console: route ok`,
@@ -207,6 +196,15 @@ Trust the repository, not a summary. On a fresh start:
      `windows: ok`, `windows_events: ok`, `windows_demo: checks ok`,
      `windows_demo: ready`, `windows_demo: ok`, `ioapic: version ...`,
      `mouse: aux IRQ12 enabled ...`, `usb: tablet ...` when the device is present.
+     From M2.5.6 these shell-driven recipes use the shell-entry image
+     (`cargo xtask image --shell` → `build/igis-shell.iso`): the boot desktop is a
+     permanent consumer of the one event queue, so event-injecting apps run in the
+     pre-M2.5.6 boot. The `boot_desktop` harness below uses `build/igis.iso`.
+   - Boot to the desktop: `cargo xtask image` then
+     `python3 scripts/boot_desktop_qmp.py build/igis.iso` (and `--cores 1`) →
+     `desktop_shell: ready`, `desktop_shell: launched shell task N`, `shell> `,
+     `terminal: ok`, and a 1024×768 PNG at
+     `/home/sinan/Desktop/igis-boot-desktop.png`.
    - `windows_proof` in its own boot: `( sleep 6; printf 'run windows_proof\n'; sleep 30; \
      printf 'exit\n' ) | timeout 60s qemu-system-x86_64 ...` → `windows_proof: ok`.
      Its step 23 samples `(100, 350)`, which can be scrolled terminal text after several
@@ -218,48 +216,49 @@ Trust the repository, not a summary. On a fresh start:
      `ui_controls: ok`, `ui_menus: ok`, `ui_dialogs: ok`, `ui_icons: ok`,
      `widgets: ok`, `clock_window: ok`, `editor: ok` and `windows_proof: ok` must hold
      there too.
-   - `python3 scripts/desktop_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
+   - `python3 scripts/desktop_screenshot_qmp.py build/igis-shell.iso` → a 1024×768 PNG at
      `/home/sinan/Desktop/igis-desktop.png`.
-   - `python3 scripts/windows_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
+   - `python3 scripts/windows_screenshot_qmp.py build/igis-shell.iso` → a 1024×768 PNG at
      `/home/sinan/Desktop/igis-windows.png`.
-   - `python3 scripts/windows_proof_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG
+   - `python3 scripts/windows_proof_screenshot_qmp.py build/igis-shell.iso` → a 1024×768 PNG
      at `/home/sinan/Desktop/igis-m23-proof.png`.
-   - `python3 scripts/ui_controls_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG
+   - `python3 scripts/ui_controls_screenshot_qmp.py build/igis-shell.iso` → a 1024×768 PNG
      at `/home/sinan/Desktop/igis-controls.png`.
-   - `python3 scripts/ui_menus_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
+   - `python3 scripts/ui_menus_screenshot_qmp.py build/igis-shell.iso` → a 1024×768 PNG at
      `/home/sinan/Desktop/igis-menus.png`.
-   - `python3 scripts/ui_dialogs_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
+   - `python3 scripts/ui_dialogs_screenshot_qmp.py build/igis-shell.iso` → a 1024×768 PNG at
      `/home/sinan/Desktop/igis-dialogs.png`.
-   - `python3 scripts/ui_icons_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
+   - `python3 scripts/ui_icons_screenshot_qmp.py build/igis-shell.iso` → a 1024×768 PNG at
      `/home/sinan/Desktop/igis-icons.png`.
-   - `python3 scripts/widgets_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
+   - `python3 scripts/widgets_screenshot_qmp.py build/igis-shell.iso` → a 1024×768 PNG at
      `/home/sinan/Desktop/igis-widgets.png`.
-   - `python3 scripts/clock_window_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG
+   - `python3 scripts/clock_window_screenshot_qmp.py build/igis-shell.iso` → a 1024×768 PNG
      at `/home/sinan/Desktop/igis-clock.png`.
-   - `python3 scripts/editor_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
+   - `python3 scripts/editor_screenshot_qmp.py build/igis-shell.iso` → a 1024×768 PNG at
      `/home/sinan/Desktop/igis-editor.png`.
-   - `python3 scripts/browser_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
+   - `python3 scripts/browser_screenshot_qmp.py build/igis-shell.iso` → a 1024×768 PNG at
      `/home/sinan/Desktop/igis-browser.png`.
-   - `python3 scripts/terminal_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
+   - `python3 scripts/terminal_screenshot_qmp.py build/igis-shell.iso` → a 1024×768 PNG at
      `/home/sinan/Desktop/igis-terminal.png` (the attached shell terminal and the
      desktop shell together).
-   - `python3 scripts/tablet_qmp.py build/igis.iso` → `7/7 absolute cases passed`.
-   - `python3 scripts/tablet_qmp.py build/igis.iso --no-tablet` → `mouse: ok` fallback.
-   - `python3 scripts/mouse_burst_qmp.py build/igis.iso` → `600/600` px with a
+   - `python3 scripts/tablet_qmp.py build/igis-shell.iso` → `7/7 absolute cases passed`.
+   - `python3 scripts/tablet_qmp.py build/igis-shell.iso --no-tablet` → `mouse: ok` fallback.
+   - `python3 scripts/mouse_burst_qmp.py build/igis-shell.iso` → `600/600` px with a
      `mouse: aux IRQ12 delivered ...` line; `--cores 1` is the single-core variant.
-6. The next slice is **M2.5.6** (boot to the desktop: `entrypoint` becomes the desktop
-   and the shell is launched from a menu item). M2.5.5 landed the terminal window:
-   `core.terminal_attach` (builtin 44) binds the one console terminal to the shell's
-   own window, the first attach releases the kernel boot Terminal, a second live task is
-   `Full`, a disappeared owner detaches to serial-only, exposes are pulled by id and a
-   moved window is followed by generation. M2.5.4 landed the file browser with its
-   check/shot modes and screenshot harness; M2.5.3 landed the text editor; M2.5.2 the
-   clock window; M2.5.1 `core.fs_list`, `core.fs_read` and `core.fs_size` over the image
-   root, no handle or writable path.
+6. The next slice is **M2.6.1** (the proportional Chicago-like font with a glyph cache and
+   text metrics, keeping 8×8 as the fallback). **M2.5 is complete** with M2.5.6: boot
+   lands on the desktop (`entrypoint`, staged from `desktop_shell`), the `Terminal` menu
+   item spawns the shell non-blocking and later clicks raise it, and
+   `scripts/boot_desktop_qmp.py` proves the boot-to-terminal path with a QMP menu click.
+   M2.5.5's terminal attaches the one console grid to the shell's window; M2.5.4 is the
+   file browser; M2.5.3 the text editor; M2.5.2 the clock window; M2.5.1 `core.fs_list`,
+   `core.fs_read` and `core.fs_size` over the image root.
    The M2 limitations still in force: an app that ignores an `Expose` keeps stale
    content, a full-screen `syslib.clear` erases the kernel windows' pixels, there is no
-   per-task clip (a covered client must repaint only its visible part), and there is no
-   global work area (an app at `y = 0` covers the menu bar until the shell's next event).
+   per-task clip (a covered client must repaint only its visible part), there is no
+   global work area (an app at `y = 0` covers the menu bar until the shell's next event),
+   and the boot desktop is a permanent consumer of the one event queue, so event-reading
+   apps run in the shell-entry image until per-task event delivery lands.
 
 If anything in this file disagrees with the code or the specs, the code and specs win and
 this file must be corrected in the same commit.
@@ -471,8 +470,17 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
   or builtin (125 `stdlib` functions).
 - [x] **M2.5.5** Terminal window: the existing shell running in a window (`core.write` /
   `core.read_line` routed), so the REPL and the desktop coexist.
-- [ ] **M2.5.6** Boot to desktop: `entrypoint` becomes the desktop; the shell is launched
-  from a menu item.
+- [x] **M2.5.6** Boot to desktop: `entrypoint` becomes the desktop; the shell is launched
+  from a menu item. `xtask image` stages `samples/apps/desktop_shell` under the
+  `entrypoint` file name (the unit stays `desktop_shell`); `repl::boot` tries
+  `entrypoint` then `shell`; `xtask image --shell` / `xtask run --shell` omit the alias
+  (`build/igis-shell.iso`) to prove the fallback and to run the event-injecting suite.
+  The desktop's direct `Terminal` item `core.spawn`s `shell` once (non-blocking) and
+  later clicks raise the live window; the desktop never attaches the terminal, and a
+  graphics-disabled boot spawns the text shell for a serial REPL.
+  `scripts/boot_desktop_qmp.py` clicks `Terminal`, types `terminal`, checks
+  `terminal: ok` and writes `igis-boot-desktop.png` on `-smp 4` and `-smp 1`.
+  **M2.5 is complete.**
 
 ### M2.6 — polish and measurement
 
