@@ -631,6 +631,22 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
   iteration against the pre-fix kernel. Spec 0007 Sch17, ADR 0034, OPEN-QUESTIONS Q50
   resolved.
 
+### Post-M2 deferred items closed
+
+- [x] **Q39 console/stream/input multiplexing.** `core.poll_any` (non-blocking) and
+  `core.next_any` (blocking) are host builtins 51/52 (no opcode) over a
+  `const array[uint, 8]`: source `0` is one completed console line, `1` one input event
+  (including a pending `Expose`), and any other value a stream handle whose data or close
+  is ready (a read select). `core.stream_source` is compiler-lowered. One
+  `abi::wait::WaitSet` (`Copy + Eq`, eight sources) is both `WaitKind::Any` and
+  `WaitFor::Any`; `wake_console`/`wake_input`/`wake_stream` wake a matching set, and the
+  scheduler's post-block `task::wait_any_ready` recheck closes the lost-wake window.
+  Readiness is a snapshot: the following `read_line`/`next_event`/`recv` is authoritative.
+  Proof `samples/apps/multiplex` (+ `multiplex_sender`) waits on all three, self-injects
+  the input event and takes the console line typed by
+  `scripts/multiplex_qmp.py`; `multiplex check` is deterministic. Specs 0003/0005/0006/
+  0007, ADR 0036.
+
 ### Post-M2 hardening
 
 - [x] **Q41 correctly rounded decimal → binary64 parsing.** `core.parse_f64_into(src,
@@ -678,7 +694,6 @@ system menu/About are application-drawn with direct Restart/Halt (ADRs 0032, 003
 | Recovery from a hardware guard hit (Q47) | OPEN-QUESTIONS Q47 | when a task must survive a kernel-bug guard hit |
 | MMIO/DMA/block handles (Q45/Q9) | OPEN-QUESTIONS | first real block device or MMIO peripheral |
 | Writable filesystem / persistence | none yet | when the editor must save |
-| Console/stream multiplexing, `poll` (Q39) | OPEN-QUESTIONS Q39 | when a task serves two sources |
 | Debug/introspection primitive (Q8) | OPEN-QUESTIONS Q8 | when the desktop needs task/system info |
 | Nominal `TaskId` (Q43) | OPEN-QUESTIONS Q43 | before `stdlib` exposes task primitives |
 | Runtime-capacity buffer parameters (Q46) | OPEN-QUESTIONS Q46 | when slicing/wider stream reads need it |
