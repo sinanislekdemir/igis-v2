@@ -2090,6 +2090,19 @@ fn widgets_compiles_and_reports_the_host_path() {
 }
 
 #[test]
+fn clock_window_compiles_and_reports_the_host_path() {
+    let path = format!(
+        "{}/../samples/apps/clock_window",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "clock_window").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"clock_window: host ok\n".to_vec());
+}
+
+#[test]
 fn widgets_draw_the_documented_sequence() {
     // A composed panel: menu bar and one pull-down, every control, one icon
     // row, an alert and an input dialog, plus the pure control/key results the
