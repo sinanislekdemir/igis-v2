@@ -55,13 +55,13 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `realtime`, `cores` and `windows_proof` all pass on `-smp 4` and `-smp 1`.
   `scripts/tablet_qmp.py` 7/7, `--no-tablet` → `mouse: ok`,
   `scripts/mouse_burst_qmp.py --cores 1 --batch 300` 600/600.
-  Screenshots: `igis-boot-desktop.png` (1024×768, about 31.9 KiB on `-smp 4`, 31.6 KiB on
+  Screenshots: `igis-boot-desktop.png` (1024×768, about 31 KiB on `-smp 4` and
   `-smp 1`), plus the M2.5 screenshots `igis-terminal.png` (32228), `igis-browser.png`
   (32847), `igis-editor.png` (30492), `igis-clock.png` (31443), `igis-widgets.png`
   (25894), `igis-icons.png` (33991), `igis-dialogs.png` (29544), `igis-menus.png`
   (27590), `igis-controls.png` (32967), `igis-m23-proof.png` (30901),
   `igis-windows.png` (28169) and `igis-desktop.png` (31555 bytes). Desktop source
-  18,102 B / package 16,000 B code (4 frames), 752 B state, 1,264 B stack; the desktop
+  17,289 B / package 14,952 B code (4 frames), 752 B state, 1,136 B stack; the desktop
   image root lists 57 entries, the shell image 56; `stdlib` 125 functions and no cap
   change.
 - **Next slice (not started):** **M2.6.1** — the proportional (Chicago-like) font with a
@@ -82,8 +82,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `/home/sinan/Desktop/igis-boot-desktop.png`; it passes on `-smp 4` and `-smp 1`. The
   desktop is a permanent consumer of the one machine-wide event queue (spec 0010 I31),
   so event-reading apps compete with it and the regression suite runs on the shell image;
-  the shell's byte-stream terminal is unaffected. Desktop source 18,102 B, package
-  16,000 B code / 752 B state / 1,264 B stack; desktop image root 57 entries, shell image
+  the shell's byte-stream terminal is unaffected. Desktop source 17,289 B, package
+  14,952 B code / 752 B state / 1,136 B stack; desktop image root 57 entries, shell image
   56; `stdlib` 125 functions, 368 host tests, no cap change. **M2.5 is complete.**
 - **M2.5.5 complete:** `core.terminal_attach(window_id) -> Status` (host builtin 44,
   spec 0014, ADR 0028) binds the one machine-wide console terminal grid to a window

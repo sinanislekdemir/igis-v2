@@ -366,51 +366,11 @@ begin
   end;
 end;
 
-// Injects one pointer-down at a menu-bar position (deterministic input for
-// check mode). `inject_event` does not move the pointer; only the event matters.
-procedure inject_click(x: int; y: int);
-begin
-  ev.kind := PointerDown;
-  ev.x := x;
-  ev.y := y;
-  ev.code := uint(1);
-  ev.window := 0;
-  status := syslib.inject_event(ev);
-end;
-
-// Polls until the injected click has been handled (or 32 pollable events pass).
-// Repaints this shell's window on its own exposes and handles only desktop
-// clicks; pointer/key events addressed to a window are ignored.
-procedure pump_click();
-var
-  done: bool;
-  polls: int;
-begin
-  done := false;
-  polls := 0;
-  while not done and polls < 32 do
-  begin
-    status := syslib.poll_event(ev);
-    if status = Ok then
-    begin
-      if ev.kind = Expose then
-      begin
-        if ev.window = own then draw_shell_window();
-      end
-      else if ev.kind = PointerDown then
-      begin
-        if ev.window = 0 then
-        begin
-          handle_menu(ev.x, ev.y);
-          done := true;
-        end;
-      end;
-      polls := polls + 1;
-    end
-    else
-      done := true;
-  end;
-end;
+// Check mode calls the menu handlers directly. From M2.5.6 the boot desktop is
+// itself a consumer of the one machine-wide event queue, so an injected click
+// in a second instance could be taken by the boot desktop instead; the direct
+// call keeps the check deterministic wherever it runs. The real pointer path
+// (hit-test -> raise/focus -> menu) is proved by the boot harness instead.
 
 procedure check_mode();
 begin
@@ -452,8 +412,7 @@ begin
 
     // File: enumerate. The kernel terminal and system log must be present,
     // together with this shell's window.
-    inject_click(40, 10);
-    pump_click();
+    handle_menu(40, 10);
     verify("file item handled", handled and file_runs = 1);
     verify("terminal listed", saw_terminal);
     verify("system log listed", saw_log);
@@ -461,14 +420,12 @@ begin
     verify("at least three windows", count >= 3);
 
     // Apps: a non-blocking spawn of `clock`.
-    inject_click(84, 10);
-    pump_click();
+    handle_menu(84, 10);
     verify("apps item handled", handled and app_runs = 1);
     verify("clock spawned", launch_status = Ok and last_task > 0 and launches = 1);
 
     // Windows: raise the terminal; focus and the top of the z-order follow.
-    inject_click(132, 10);
-    pump_click();
+    handle_menu(132, 10);
     verify("windows item handled", handled and window_runs = 1);
     verify(
       "terminal raised",
@@ -480,8 +437,7 @@ begin
 
     // Terminal: the live boot shell already holds the terminal, so this item
     // reuses and raises it rather than spawning a second shell (M2.5.6).
-    inject_click(210, 10);
-    pump_click();
+    handle_menu(210, 10);
     verify("terminal item handled", handled and terminal_runs = 1);
     verify(
       "terminal item reuses the terminal",

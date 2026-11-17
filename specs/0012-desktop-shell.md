@@ -122,9 +122,11 @@ resize. Those are M2.4/M2.5.
   a client with no per-task clip (M2) cannot overwrite the window above. It never draws in
   another window's content rectangle.
 - **D13 (MUST):** `check` mode is deterministic and headless: draw the bar and window,
-  check menu-bar/chrome/content pixels with `get_pixel`, inject a `PointerDown` at each
-  item with `syslib.inject_event` and pump it, verify the listing (Terminal and System
-  Log titles present), the spawn result and the focus change, verify that the `Terminal`
+  check menu-bar/chrome/content pixels with `get_pixel`, call each menu item's handler
+  directly (the boot desktop is itself an event consumer from M2.5.6, so an injected
+  click from a second instance could be taken by it; the real pointer path is proved by
+  the boot harness and the routing proofs), verify the listing (Terminal and System Log
+  titles present), the spawn result and the focus change, verify that the `Terminal`
   item raises the already-live terminal (check mode runs from a shell that holds it, so
   it never spawns a second shell), verify enumeration ends in `NotFound` and
   `window_present` succeeds, and print `desktop_shell: ok`. Normal mode draws the same
