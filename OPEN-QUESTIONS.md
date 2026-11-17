@@ -52,7 +52,31 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 
 | # | Question | Options / recommendation | Trigger |
 |---|----------|--------------------------|---------|
-| Q47 | Recovering a task from a hardware guard hit | not in M1: a `#PF` inside a known guard names the stack and halts. The legal overflow is the interpreter's `Faulted(StackOverflow)`, which the guard never sees. Recovering one task from the fault path needs the task id in the handler, a safe abandon of the faulted kernel frame, and a reason the interpreter cannot already produce — and it would weaken the `fault`/`exit` budget rule (ADR 0010) | if a kernel-side stack bug must not take the machine down, or when per-task stack isolation replaces shared address-space assumptions |
+| Q47 | Recovering a task from a hardware guard hit | **Blocked (2026-11-17 feasibility study).** A `#PF` inside a known guard is still a named halt (`stack guard: task N` / `ap core N` / `boot core`), not a recovered task. Safe recovery needs lock-ownership tracking first: see "Q47 blocker" below. The legal overflow remains the interpreter's `Faulted(StackOverflow)`, which the guard never sees. The C6 placement invariant (`Region::layout_ok`, boot `stack: layout ok`) is the cheap mitigation, not a resolution | when a kernel-side stack bug must not take the machine down; prerequisite work first |
+
+**Q47 blocker (2026-11-17 feasibility study).** The per-core `CURRENT` task plus a
+recovery trampoline is not sufficient. A guard hit happens in a *native kernel frame*, and
+the fault may have interrupted a kernel path that holds a `SpinLock` while copying into or
+out of task memory: `console::read_line` (console lock), `stream_recv` (stream record
+lock), and the `window_info` copy (window table lock) are concrete examples, and any
+future host primitive has the same shape. The kernel has no lock-ownership tracking, so
+abandoning that frame would either leave the lock held (a machine-wide hang the next time
+any core takes it) or require guessing which lock was interrupted. Queued bytes and
+half-written task buffers make the abandoned operation non-atomic as well. A safe design
+therefore needs one of:
+
+1. lock-ownership tracking (a per-core record of every held lock, released or handed off
+   on abandon) so the recovery path can prove no lock is held; or
+2. an audited "no task-memory access under a lock" rule for every host primitive, which is
+   a much larger constraint than the current code follows.
+
+Only then do the handler-side pieces (task id in `#PF`, a validated per-core `CURRENT`, a
+recovery trampoline that returns to the scheduler) become safe. Until that exists the
+behaviour stays a named halt, which is loud rather than corrupting. The realistic route to
+a guard hit is limited on purpose: the interpreter is `#![forbid(unsafe_code)]` and
+bounds-checks every slice, so a mis-based or oversized `Region` is the actual risk; the
+constructor now rejects that geometry at placement (`Status.Invalid`) and the boot
+self-check proves the rule (`stack: layout ok`). Spec 0004 C6, spec 0002 H2.
 
 ## F. Scheduler liveness
 

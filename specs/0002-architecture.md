@@ -296,7 +296,9 @@ measures are adopted provisionally — accepted only for as long as they stay ch
 - **H1 (MUST):** Kernel text and read-only data are mapped read-only, with `CR0.WP = 1`.
 - **H2 (MUST):** Every task stack has a not-present guard page at its growing end. The
   guard is one extra frame below the declared region, so the interpreter's frame-extent
-  check is the first line of defence; a fault inside a known guard range names the guard
+  check is the first line of defence; placement validates the guard/region geometry
+  (`Region::layout_ok`) and reports `Status.Invalid` instead of installing a task on a
+  mis-based region; a fault inside a known guard range names the guard
   and halts as a kernel-bug backstop, and per-task recovery from the hardware fault is
   deferred (OPEN-QUESTIONS Q47). Any other fault is a kernel panic.
 - **H3 (MUST):** NX is enabled (`EFER.NXE`); kernel data, task stacks and application

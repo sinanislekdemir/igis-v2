@@ -629,6 +629,23 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
   iteration against the pre-fix kernel. Spec 0007 Sch17, ADR 0034, OPEN-QUESTIONS Q50
   resolved.
 
+### Post-M2 hardening
+
+- [x] **C6 guarded-stack placement invariant.** `Region::allocate_guarded` now validates
+  its constructed fields with the pure `Region::layout_ok` rule before returning: `frames
+  >= 1`, `len >= 1`, `span == frames + 1`, `start == base + FRAME_SIZE`,
+  `len <= frames * FRAME_SIZE`, the half-open `[start, start + len)` inside the frames
+  above the guard and disjoint from `[base, base + FRAME_SIZE)`, overflow-safe at both
+  ends, and a frame-aligned base. A mismatch restores the guard, frees the frames and
+  returns `Status::Invalid` (the REPL reports it as a placement failure); only a failure
+  to *restore* the guard still halts, as before. The boot self-check runs the same rule
+  over valid/invalid scratch tuples (pure arithmetic, no allocation) and prints
+  `stack: layout ok` beside the existing `guards:` line. This is the cheap mitigation
+  for Q47: the interpreter is `#![forbid(unsafe_code)]` and bounds-checks its slices, so
+  a mis-based/oversized region was the realistic route to a task-guard fault. Q47 itself
+  stays **blocked** on lock-ownership tracking (OPEN-QUESTIONS Q47); no recovery code was
+  shipped. Spec 0004 C6, spec 0002 H2.
+
 ### M2 completion
 
 All M2.1–M2.6 tickets are done. The accepted M2 limitations remain documented and are

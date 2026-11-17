@@ -6,7 +6,7 @@
 - **Superseded by:** none
 - **ADRs:** 0004 (static application memory), 0006 (MMU hardening), 0007 (fully static
   placement), 0011 (work stealing), 0015 (delivery), 0018 (floating point)
-- **Updated:** 2026-11-13
+- **Updated:** 2026-11-17
 
 ## Context
 
@@ -264,6 +264,22 @@ for v1.
 Because any core may run the task, the stack is not core-local: it is part of the task's
 regions, and a core switches to it when it claims the task (ADR 0011).
 
+**C6 is enforced at placement.** `Region::allocate_guarded` validates the constructed
+layout with the pure `Region::layout_ok` rule: at least one usable frame and one byte,
+`span == frames + 1` (guard plus region), `start == base + FRAME_SIZE`, and
+`len <= frames * FRAME_SIZE`; the half-open `[start, start + len)` therefore lies inside
+the frames above the guard and is disjoint from `[base, base + FRAME_SIZE)`. Both
+`base + span * FRAME_SIZE` and `start + len` are checked for overflow, and the base must be
+frame-aligned. A mismatch is a recoverable placement failure: the guard is restored, the
+frames are freed, and the constructor returns `Status.Invalid` (the REPL reports it as
+`cannot place regions` and records `Faulted(IoError)` like any other placement failure); a
+failure to *restore* the guard remains the existing kernel-bug halt. A boot self-check runs
+the same rule over valid and invalid scratch tuples and prints `stack: layout ok`, so a
+geometry bug cannot reach a task guard. This is the cheap mitigation for Q47: the
+interpreter is `#![forbid(unsafe_code)]` and bounds-checks its slices, so a mis-based or
+oversized `Region` is the realistic route to a hardware guard hit; recovery from the fault
+path itself remains blocked on lock-ownership tracking (OPEN-QUESTIONS Q47).
+
 ## Streams
 
 Stream buffers are kernel-owned and never mapped into the application's addressable
@@ -346,3 +362,4 @@ milestone. Raw physical addresses never reach application-visible values.
 | 2026-11-12 | Resolved D2-D14: no first-class slices, one `state` region, per-instance code, frames for large locals, compiler-computed alignment, `syslib`-owned MMIO/DMA, build-parameter capacities, `bytes`/`string` split, at-least-N parameters. Added task-level ownership for work stealing (ADR 0011) and ext2 delivery (ADR 0015). |
 | 2026-11-13 | Added the `fpu` region: a kernel-owned 512-byte FXSAVE image per task, outside the application's nameable regions; C9 now includes SSE state (ADR 0018, D17). |
 | 2026-11-16 | C6 implemented: the guard is one extra frame below the declared stack, excluded from `stack.start`/`stack.len`, allocated as `stack_len + 4096` and restored on every free path (D18). |
+| 2026-11-17 | C6 enforced at placement: `Region::layout_ok` checks the guard/region geometry with overflow-safe arithmetic and `Region::allocate_guarded` rejects a mismatch as `Status::Invalid` (unguard and free first); boot self-check `stack: layout ok`. The Q47 hardware-guard recovery remains blocked on lock-ownership tracking, so this is its cheap mitigation. |
