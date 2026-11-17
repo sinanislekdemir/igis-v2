@@ -309,7 +309,7 @@ service compiles from.
 
 | Primitive | Implemented signature | Result |
 |-----------|-----------------------|--------|
-| `core.halt` | `() -> Status` | stops every other online core on the wake vector, prints `system: N of M APs stopped`, and halts the caller; never returns on a live kernel |
+| `core.halt` | `() -> Status` | stops every other online core on the wake vector, writes `system: N of M APs stopped` to serial, and halts the caller; never returns on a live kernel |
 | `core.reboot` | `() -> Status` | stops the other cores, drives `0xCF9` (`0x02`/`0x06`) and the 8042 pulse reset (`0x64 <- 0xFE`), and halts the caller if the firmware ignores them |
 
 - `Host::halt`/`Host::reboot` take no operands and return `Status`; both default to

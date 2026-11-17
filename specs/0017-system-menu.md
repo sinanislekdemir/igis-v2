@@ -94,8 +94,9 @@ Non-goals:
   shutdown flag and wakes every other online core on the existing `0x40` vector. The
   wake handler acknowledges (`smp::note_stopped`) and halts **without returning to the
   task**, so a busy core stops too. The caller counts itself as stopped, waits bounded
-  by the clock and a spin ceiling (the boot core's timer may stop first), prints
-  `system: N of M APs stopped`, and halts. It never returns to the application.
+  by the clock and a spin ceiling (the boot core's timer may stop first), writes
+  `system: N of M APs stopped` to serial (another core may have halted holding the
+  console lock), and halts. It never returns to the application.
 - **S10 (MUST):** `core.reboot` performs the same stop and then drives the platform
   reset channels: `0xCF9 <- 0x02`, `0xCF9 <- 0x06`, then a bounded wait for the 8042
   input buffer and `0x64 <- 0xFE`. QEMU resets and reboots. If the firmware ignores both

@@ -1055,8 +1055,8 @@ application may stop or reset the machine (vision R14, "no capability model").
 
 - `core.halt` requests a machine-wide halt. The kernel sets the shutdown flag, wakes
   every other online core on the existing IPI vector (the handler acknowledges and
-  halts), waits bounded for the acknowledgements, prints `system: N of M APs stopped`
-  and halts the calling core. It never returns on a live kernel; the `Status` result is
+  halts), waits bounded for the acknowledgements, writes `system: N of M APs stopped`
+  to serial and halts the calling core. It never returns on a live kernel; the `Status` result is
   unobservable there.
 - `core.reboot` requests the same stop, then drives the platform reset channels
   (`0xCF9` write `0x02`/`0x06`, then the 8042 pulse reset `0x64 <- 0xFE`). QEMU
