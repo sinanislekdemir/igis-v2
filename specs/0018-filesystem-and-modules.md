@@ -135,7 +135,7 @@ mount table. `stdlib` stays embedded and is not moved into the image.
   (`base/desktop_shell`) and is staged once more as `system/entrypoint` for the
   boot path; its unit name stays `desktop_shell`.
 - **X5 (MUST):** `langhost` resolves `lib.*` through the same reader interface over
-  the `samples/apps` tree, and its tests use an in-memory reader.
+  the `samples/apps` tree, and its tests use an in-memory reader or a fixture tree.
 
 ## Design
 
@@ -211,8 +211,9 @@ time only).
 | Scratch arena | 8 MiB | 16 MiB |
 | Units per package (ids) | 2 (`0..=1`) | 17 (`0..=16`) |
 
-The kernel holds one combined source buffer (384 KiB) and one arena (16 MiB) in
-`.bss`; both are static and preallocated (ADR 0007).
+The kernel keeps its 128 KiB application-source buffer and adds the 16 MiB arena in
+`.bss`; module sources are copied into the arena, so both buffers are static and
+preallocated (ADR 0007).
 
 ## Interfaces
 

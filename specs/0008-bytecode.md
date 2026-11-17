@@ -92,10 +92,14 @@ that is the only way a package ever comes into existence. It has the lifetime of
 no part of it is written back, cached for a later start, or stored in the image (ADR 0019).
 A second start of the same application compiles its source again.
 
-### Multi-unit compilation (`stdlib`)
+### Multi-unit compilation (`stdlib` and `/lib` modules)
 
 An application that says `uses stdlib;` is compiled together with the embedded library unit
-(`stdlib/stdlib.ig`, included with `include_str!`) into **one package**:
+(`stdlib/stdlib.ig`, included with `include_str!`) into **one package**. An application or
+module that says `uses lib.math;` (spec 0018) compiles the source at the image path
+`lib/math.ig` into the same package as one more unit; the rules below apply to it
+unchanged — its names are reachable as `math.<name>`, it may import `core`, `syslib`,
+`stdlib` and other modules, and it may not declare state, a stream endpoint or `main`:
 
 - **Name resolution.** The application's top-level names stay unqualified; the library's
   are reachable only as `stdlib.<name>`. Inside the library its own names are unqualified,
@@ -104,21 +108,23 @@ An application that says `uses stdlib;` is compiled together with the embedded l
   0003, H4); it lets the UI layout layer draw with the primitives in spec 0009. A
   `stdlib.*` reference without the import, or an unknown `stdlib.*` name, is a compile
   error.
-- **Function table.** Library procedures occupy the first indices (`0..L`), application
-  procedures follow (`L..L+A`); cross-unit calls resolve to those indices. The entry is the
-  application's `main`.
-- **One instruction section, one constant blob.** Both units share the constant pool in
+- **Function table.** The embedded library's procedures occupy the first indices, then
+  each `/lib` module in discovery order, then the application's; cross-unit calls resolve
+  to those indices. The entry is the application's `main`.
+- **One instruction section, one constant blob.** Every unit shares the constant pool in
   first-use order, so deterministic output and one artifact hold.
-- **Line table.** Each entry carries a unit id: `0` application, `1` embedded `stdlib`.
-  The verifier accepts unit ids `0..=1`. Compile diagnostics name the failing unit and path
-  (`stdlib/stdlib.ig:line:col: ...`), so a broken library is an ordinary `Diagnostic`.
+- **Line table.** Each entry carries a unit id: `0` application, `1` embedded `stdlib`
+  (reserved even in a package that only imports modules), and `2..=16` for `/lib` modules
+  in depth-first `uses` order (`abi::MAX_UNIT_ID`). The verifier accepts unit ids
+  `0..=16`. Compile diagnostics name the failing unit and path
+  (`lib/math.ig:line:col: ...`), so a broken module is an ordinary `Diagnostic`.
 - **Manifest.** It keeps the application's unit name and entry point, plus the stream
   endpoint descriptors in declaration order (name, direction, capacity). Handle `i` is
   written at `state[i * 8]`; no offset is stored in the descriptor.
-- **Types.** Type ids are compiler-local per unit. A library signature may use scalars,
-  buffers, `Status` and `FaultCode`; a record, sum or user enum crossing the unit boundary
-  is a compile error until a shared type table exists.
-- **Cost.** The library is recompiled from source for every application instance that
+- **Types.** Type ids are compiler-local per unit. A library or module signature may use
+  scalars, buffers, `Status` and `FaultCode`; a record, sum or user enum crossing the unit
+  boundary is a compile error until a shared type table exists.
+- **Cost.** Every unit is recompiled from source for each application instance that
   imports it (ADR 0019); nothing precompiled is ever shipped.
 
 ### Target profile
@@ -432,21 +438,24 @@ so a bug in one cannot silently become a feature of the other.
 Compile memory is caller-provided: source buffer, token/parse arenas, code buffer and
 constant buffer, each with a compile-time cap. One package is compiled at a time because
 the service holds the compiler lock (spec 0007), so one set of buffers is enough. The
-first-milestone caps (provisional, tuning): 128 KiB of source per unit, 256 KiB per
-application, 8 MiB of scratch. They bound memory because memory is statically placed; they
+first-milestone caps (provisional, tuning): 128 KiB of source per unit, 384 KiB per
+application (application + `stdlib` + every `/lib` module), 16 MiB of scratch. They bound
+memory because memory is statically placed; they
 are not a time budget, and compile time is not a design constraint (ADR 0019). The scratch
-cap was 1 MiB until M2.4.0, 2 MiB until M2.4.2 and 4 MiB until M2.4.5: the UI layout,
-controls, menus and dialogs layers pushed the embedded library over the earlier caps, and
-M2.4.5's icons layer plus its bitmap-bearing sample needed 5,386,584 B for the pair (the
-library alone is 114,823 B of source and the pair with a minimal application needs
-4,134,600 B), so the cap is now 8 MiB. The source cap rose from 64 KiB to 128 KiB in
-M2.4.2 for the same reason; the combined application cap stays 256 KiB, so an application
-still has 128 KiB of its own source. The kernel's static buffers grow with both (spec 0007).
+cap was 1 MiB until M2.4.0, 2 MiB until M2.4.2, 4 MiB until M2.4.5 and 8 MiB until M3.2:
+the UI layout, controls, menus and dialogs layers pushed the embedded library over the
+earlier caps, and M2.4.5's icons layer plus its bitmap-bearing sample needed 5,386,584 B
+for the pair (the library alone is 114,823 B of source and the pair with a minimal
+application needs 4,134,600 B). M3.2 added `/lib` modules, raised the arena to 16 MiB and
+the combined application source cap to 384 KiB. The per-unit source cap rose from 64 KiB
+to 128 KiB in M2.4.2 for the same reason. The kernel's static buffers grow with the arena
+(spec 0007); the application-source buffer stays 128 KiB because module sources are copied
+into the arena.
 
 The `compiler` crate is `no_std` and allocation-free: it borrows the source, stores tokens,
 AST nodes and name tables in the caller's scratch arena, and writes the package into the
 caller's code and manifest buffers. It exports the caps as `MAX_SOURCE_BYTES` (128 KiB),
-`MAX_ARENA_BYTES` (8 MiB), `MAX_CODE_BYTES` (256 KiB) and `MAX_MANIFEST_BYTES` (4 KiB), and
+`MAX_ARENA_BYTES` (16 MiB), `MAX_CODE_BYTES` (256 KiB) and `MAX_MANIFEST_BYTES` (4 KiB), and
 `compile_into` reports exhaustion of any of them as `Status.CapacityExceeded` with a
 `Diagnostic`. The only `unsafe` in the crate is the alignment/initialisation arithmetic of
 the bump arena, isolated in `compiler/src/arena.rs`.
@@ -457,7 +466,8 @@ the bump arena, isolated in `compiler/src/arena.rs`.
   compiler is trusted, the verifier protects the kernel from a corrupt image. A structural
   error refuses the package with `Status.Invalid` and a `Diagnostic`.
 - The line table is sorted by code offset and names a unit id (0 application, 1 embedded
-  `stdlib`); a fault binary-searches it for `line` and `column`, and the unit id names the
+  `stdlib`, `2..=16` `/lib` modules); a fault binary-searches it for `line` and `column`,
+  and the unit id names the
   source unit. The compiler reserves one hidden
   `Diagnostic` slot in `state` for the interpreter to fill before invoking `fault`/`exit`.
 - Field validation is per opcode: a reserved field must be zero unless the opcode defines

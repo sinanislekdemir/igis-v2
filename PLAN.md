@@ -14,9 +14,9 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `0f08c54` (M3.1: the image is a real directory tree, ext2 walks
-  paths, the file API and `spawn` take hierarchical paths, boot is
-  `system/entrypoint` → `base/shell`) plus this docs commit. The tree is clean.
+- **Last commit:** `9d0b666` (M3.2: `uses lib.*` compiles `/lib` modules into the
+  package; `SourceReader`, unit ids 0/1/2.., caps 384 KiB / 16 MiB,
+  `samples/apps/lib/math.ig`) plus this docs commit. The tree is clean.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -42,32 +42,22 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   the `perf` measurement (`2c0df71`), M2.6.3 the deterministic specimen plus the
   headless golden-frame harness (`tests/golden/visual.png`), and M2.6.4 the System
   menu, About panel, `core.halt`/`core.reboot` and the halt/reboot probes.
-- **Verified at that point (M3.1, independently by the parent):** **408 host tests**
-  (abi 23, compiler 158, interpreter 149 + 1 doctest, langhost 77); `cargo xtask
-  build`/`image`/`image --shell` clean. Boot prints `ext2: mounted`, a five-entry root
-  (`lost+found base home lib system`), `ext2: base/shell is 10144 bytes`,
-  `ext2: tree ok`, then `repl: trying \`system/entrypoint\`` → `not found` →
-  `repl: trying \`base/shell\`` on the shell image. A typed serial transcript on
-  `-smp 4` and `-smp 1` accepts `help`, `run files` (`files: ok`), `run child world`
-  and `run base/child world` (`child: args world`), `run system/system_probe`
-  (usage line), `exit`. A 26-command regression batch passes on both core counts
-  (`files`, `browser check`, `editor check`, the shell's `terminal`, `desktop_shell
-  check`, `widgets check`, `windows`, `windows_events`, `kill_stress`, `realtime`,
-  `multiplex check`, `streams`, `frames`, `deep`, `utf8`, `text 42 hi`,
-  `clock_window check`, `f64parse`, the five `ui_*` apps, `text_edit`, `font`,
-  `perf`); `windows_proof` passes in its own boot on both, and its timeout inside a
-  long shared boot is the pre-existing sample sensitivity, not this slice.
-  `run system/system_probe halt` prints `system: 3 of 3 APs stopped` on `-smp 4` and
-  `0 of 0` on `-smp 1`. `boot_desktop_qmp.py` reaches `desktop_shell: ready` →
-  Terminal click → `terminal: ok` on both, and the visual golden still matches on
-  both (`37802052…e9e81c9f`).
-- **Next slice:** **M3.2 — compiler multi-unit modules (`uses lib.*`)** (spec 0018
-  M1–M13). A fresh subagent implements `compiler::SourceReader` +
-  `compile_with_imports`, dotted resolution to `lib/*.ig`, unit name checks, cycle
-  detection, module restrictions, unit ids and the new caps, adds
-  `samples/apps/lib/math.ig`, and proves it on the host. The kernel wiring and the
-  in-kernel proof are M3.3. M3.2 must also update the ext2 boot self-check, whose
-  step 6 currently assumes `lib` is empty.
+- **Verified at that point (M3.2, independently by the parent):** **438 host tests**
+  (abi 23, compiler 184, interpreter 150, langhost 80, 1 doctest); `cargo xtask
+  build`/`image`/`image --shell` clean; boot still prints `ext2: tree ok` (step 6
+  now requires `lib/math.ig`) and the arena change shows as `frames: 57903 free`
+  (`.bss` +8 MiB). A hand-written source with `uses lib.math;` calling
+  `math.clamp`/`abs_int`/`max_int`/`min_int`/`sign` runs on `langhost` and prints
+  `mod_demo: ok`, proving dotted resolution, the unit-name qualifier and the host
+  reader end to end. The typed shell transcript and the 26-command regression
+  batch pass on `-smp 4` and `-smp 1`; `boot_desktop_qmp.py` reaches `terminal: ok`
+  on both; the visual golden still matches on both
+  (`37802052…e9e81c9f`). The in-kernel module path is deliberately not wired yet.
+- **Next slice:** **M3.3 — kernel-side modules and the `/lib` proof** (spec 0018).
+  A fresh subagent implements `compiler::SourceReader` over the mounted `Ext2`,
+  switches `repl::compile` to `compile_with_imports`, adds
+  `samples/apps/base/module_demo` importing `lib.math`, and proves `run
+  module_demo` on `-smp 4` and `-smp 1` plus `langhost`.
 
 - **M2.6.3 complete:** the headless visual-regression harness (spec 0009 "Visual proof",
   G21; ADR 0032) and the resolution of M2.1.2. `samples/apps/visual` opens a window whose
@@ -739,7 +729,7 @@ application's package. One ticket per session; the parent verifies each.
   boot; `boot_desktop_qmp.py` and the visual golden pass on both; `system_probe halt`
   resolves through `system/`.
 
-- [ ] **M3.2 Compiler multi-unit modules (`uses lib.*`).**
+- [x] **M3.2 Compiler multi-unit modules (`uses lib.*`).**
   Update the ext2 boot self-check first: its step 6 asserts `lib` is empty, which
   stops being true once `lib/math.ig` is staged (assert the file is listed instead).
   `compiler::SourceReader` + `compile_with_imports` (arena-copied unit sources);
@@ -751,10 +741,16 @@ application's package. One ticket per session; the parent verifies each.
   `sign`) and a compiler/langhost test that imports it. `compile_into` keeps its
   signature and rejects `lib.*`. Verification: host tests only (compiler
   fixtures, in-memory reader, `langhost` runs a sample importing `lib.math`).
+  **Done (`9d0b666`):** 438 host tests; `SourceReader`/`compile_with_imports`,
+  `abi::MAX_UNIT_ID` 16, `MAX_MODULE_UNITS` 15, caps 384 KiB / 16 MiB, ext2 step 6
+  updated, `lib/math.ig` staged; an inline `uses lib.math;` program runs on
+  `langhost` (`mod_demo: ok`); boot `ext2: tree ok`, the 26-command batch on both
+  core counts, `boot_desktop_qmp.py` and the visual golden still pass.
 
 - [ ] **M3.3 Kernel-side modules and the `/lib` proof.**
-  `repl::compile` uses `compile_with_imports` over the mounted `Ext2`; the static
-  source buffer becomes 384 KiB and the arena 16 MiB; add
+  `repl::compile` uses `compile_with_imports` over the mounted `Ext2` (a reader
+  that copies each module source into the compiler's arena, so the kernel
+  application-source buffer stays 128 KiB); the arena is the M3.2 16 MiB; add
   `samples/apps/base/module_demo` (imports `lib.math`, prints
   `module_demo: ok`); `run module_demo` proves the whole path on `-smp 4` and
   `-smp 1`; `langhost` prints the host path. Update image entry counts and the
