@@ -1,2 +1,5 @@
 /target
 /build
+
+# Python bytecode caches from the screenshot harnesses
+__pycache__/
