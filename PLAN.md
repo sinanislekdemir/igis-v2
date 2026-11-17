@@ -14,7 +14,7 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `320d086` (the M2.4.2 `stdlib` controls layer, proof and tests) plus
+- **Last commit:** `9fa9fd0` (the M2.4.3 `stdlib` menus layer, proof and tests) plus
   this docs/resume commit on top.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
@@ -26,29 +26,38 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `Expose` and `window_present` (`dc14442`), M2.3.4 the desktop shell, kernel text
   windows and `window_info` (`4f9a45e`), M2.3.5 the two-application proof
   (`8688f88`), M2.4.0 the `stdlib` UI layout layer (`655faf1`, `d8f6609`), M2.4.1 the
-  `stdlib` string editing and selection layer (`b7b813c`), and M2.4.2 the `stdlib` controls
-  layer plus the `ui_controls` proof (`320d086`).
-- **Verified at that point:** **333 host tests** (abi 15, compiler 145, interpreter 117,
-  langhost 56, including doctests); `cargo xtask build`/`image` clean; the boot prints
+  `stdlib` string editing and selection layer (`b7b813c`), M2.4.2 the `stdlib` controls
+  layer plus the `ui_controls` proof (`320d086`), and M2.4.3 the `stdlib` menus layer
+  plus the `ui_menus` proof (`9fa9fd0`).
+- **Verified at that point:** **337 host tests** (abi 15, compiler 147, interpreter 117,
+  langhost 58, including doctests); `cargo xtask build`/`image` clean; the boot prints
   `console: terminal ok`, `console: log ok`, `console: route ok`, `graphics: clip ok`,
   `window: rules ok`, `window: paint ok` and `window: route ok` on `-smp 4` and
   `-smp 1`; `run text_edit` → `text_edit: ok` on both; `run ui_layout` → `ui_layout: ok`
-  on both; `run ui_controls` → `ui_controls: ok` on both; `run windows_proof` →
-  `windows_proof: ok`; `run desktop_shell check` →
+  on both; `run ui_controls` → `ui_controls: ok` on both; `run ui_menus` →
+  `ui_menus: ok` on both; `run windows_proof` → `windows_proof: ok` in its own boot;
+  `run desktop_shell check` →
   `desktop_shell: ok`; `run windows` → `windows: ok`; `run windows_events` →
   `windows_events: ok`; `run windows_demo` → `windows_demo: checks ok`,
   `windows_demo: ready`, `windows_demo: ok`; `run mouse` → `mouse: ok` in its own boot
   (and through both QMP harnesses); regressions `events`, `desktop`, `text 42 hi`,
   `frames`, `streams`, `deep`, `utf8`, `realtime`, `cores` pass on both core counts;
   `scripts/tablet_qmp.py` 7/7, `--no-tablet` → `mouse: ok`,
-  `scripts/mouse_burst_qmp.py` → 600/600; the embedded `stdlib` is 72,426 B of source,
-  54,704 B of code and 2,428,888 B of compile scratch (the source cap is 128 KiB and the
+  `scripts/mouse_burst_qmp.py` → 600/600; the embedded `stdlib` is 90,615 B of source,
+  69,280 B of code and 2,720,800 B of compile scratch (the source cap is 128 KiB and the
   arena cap 4 MiB);
   screenshots `/home/sinan/Desktop/igis-desktop.png` (1024×768, 31555
   bytes), `igis-windows.png` (1024×768, 28169 bytes), `igis-m23-proof.png`
-  (1024×768, 30901 bytes) and `igis-controls.png` (1024×768, 32967 bytes).
-- **Next slice (not started):** **M2.4.3** — menus (menu-bar model, pull-down tracking,
-  keyboard equivalents, checkmarks and disabled items).
+  (1024×768, 30901 bytes), `igis-controls.png` (1024×768, 32967 bytes) and
+  `igis-menus.png` (1024×768, 27590 bytes).
+- **Next slice (not started):** **M2.4.4** — dialogs and alerts (modal loop,
+  default/cancel buttons, text input dialogs).
+- **Known sample sensitivity:** `windows_proof` must run in its own boot in this
+  environment. Its step 23 (`A old area restored to the terminal`) samples `(100, 350)`,
+  which can land on scrolled terminal text after several text apps; the same failure
+  reproduces on the M2.4.2 top commit `92b140c`, so it is a pre-existing sample-harness
+  sensitivity, not an M2.4.3 regression. `mouse` likewise runs in its own boot (a
+  full-screen `syslib.clear` races a console repaint).
 
 ### Resuming from a fresh session (no chat history)
 
@@ -56,33 +65,41 @@ Trust the repository, not a summary. On a fresh start:
 
 1. `git status --short` and `git log --oneline -8` — the tree should be clean and the top
    commit should match the "Last commit" line above; if not, stop and reconcile first.
-2. `cargo test -q -p abi -p compiler -p interpreter -p langhost` — expect **330** tests
-   plus the doctest, all green.
+2. `cargo test -q -p abi -p compiler -p interpreter -p langhost` — expect **337** tests
+   plus the doctests, all green.
 3. `cargo xtask build` — expect a clean kernel build.
 4. Read, in this order: this file, `AGENTS.md` (status paragraph + decisions table),
    `specs/0009-graphics-and-windows.md`, `specs/0010-input-and-events.md`,
    `specs/0011-windows.md`, `specs/0012-desktop-shell.md`, `adr/0020`, `adr/0021`,
    `adr/0022`, `adr/0023`, `adr/0024`, `adr/0025`, `adr/0026` (the `stdlib` UI layer).
 5. Baseline kernel checks (headless, no chat needed):
-   - `( sleep 6; printf 'run text_edit\n'; sleep 10; printf 'run ui_layout\n'; sleep 6; \
-     printf 'run windows_proof\n'; sleep 12; printf 'run desktop_shell check\n'; sleep 20; \
-     printf 'run desktop\n'; sleep 4; printf 'run events\n'; sleep 8; \
-     printf 'run windows_events\n'; sleep 6; printf 'run windows_demo\n'; sleep 22; \
-     printf 'exit\n' ) | timeout 220s \
-     qemu-system-x86_64 -cdrom build/igis.iso -m 256M -serial stdio -monitor none \
-     -no-reboot -no-shutdown -accel tcg -vga std -display none -smp 4 -usb \
-     -device usb-tablet`
+   - Combined boot (no window-injecting proof app, so the shared event queue stays
+     quiet between samples):
+     `( sleep 6; printf 'run text_edit\n'; sleep 10; printf 'run ui_layout\n'; sleep 6; \
+       printf 'run ui_controls\n'; sleep 10; printf 'run ui_menus\n'; sleep 10; \
+       printf 'run desktop_shell check\n'; sleep 20; printf 'run desktop\n'; sleep 4; \
+       printf 'run events\n'; sleep 8; printf 'run windows\n'; sleep 6; \
+       printf 'run windows_events\n'; sleep 6; printf 'run windows_demo\n'; sleep 22; \
+       printf 'exit\n' ) | timeout 240s \
+       qemu-system-x86_64 -cdrom build/igis.iso -m 256M -serial stdio -monitor none \
+       -no-reboot -no-shutdown -accel tcg -vga std -display none -smp 4 -usb \
+       -device usb-tablet`
      → `console: terminal ok`, `console: log ok`, `console: route ok`,
      `graphics: clip ok`, `window: rules ok`, `window: paint ok`, `window: route ok`,
-     `text_edit: ok`, `ui_layout: ok`, `windows_proof: ok`, `desktop_shell: ok`,
-     `desktop: ok`, `keyboard: decoder ok`, `events: ok`, `windows_events: ok`,
-     `windows_demo: checks ok`, `windows_demo: ready`, `windows_demo: ok`,
-     `ioapic: version ...`, `mouse: aux IRQ12 enabled ...`, `usb: tablet ...` when the
-     device is present. Repeat with `-smp 1` (no `--cores` needed): `text_edit: ok`,
-     `ui_layout: ok` and `windows_proof: ok` must hold there too. Run `mouse` in its own
-     boot (the QMP harness does): a full-screen `syslib.clear` erases the kernel windows'
-     pixels and a concurrent console repaint can overwrite the background pixels the
-     sample checks.
+     `text_edit: ok`, `ui_layout: ok`, `ui_controls: ok`, `ui_menus: ok`,
+     `desktop_shell: ok`, `desktop: ok`, `keyboard: decoder ok`, `events: ok`,
+     `windows: ok`, `windows_events: ok`, `windows_demo: checks ok`,
+     `windows_demo: ready`, `windows_demo: ok`, `ioapic: version ...`,
+     `mouse: aux IRQ12 enabled ...`, `usb: tablet ...` when the device is present.
+   - `windows_proof` in its own boot: `( sleep 6; printf 'run windows_proof\n'; sleep 30; \
+     printf 'exit\n' ) | timeout 60s qemu-system-x86_64 ...` → `windows_proof: ok`.
+     Its step 23 samples `(100, 350)`, which can be scrolled terminal text after several
+     text apps; the same failure reproduces on `92b140c`, so this is a sample-harness
+     sensitivity, not a product regression. Run `mouse` in its own boot too (the QMP
+     harness does): a full-screen `syslib.clear` erases the kernel windows' pixels and a
+     concurrent console repaint can overwrite the background pixels the sample checks.
+   - Repeat the UI samples with `-smp 1`: `text_edit: ok`, `ui_layout: ok`,
+     `ui_controls: ok`, `ui_menus: ok` and `windows_proof: ok` must hold there too.
    - `python3 scripts/desktop_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
      `/home/sinan/Desktop/igis-desktop.png`.
    - `python3 scripts/windows_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
@@ -91,19 +108,23 @@ Trust the repository, not a summary. On a fresh start:
      at `/home/sinan/Desktop/igis-m23-proof.png`.
    - `python3 scripts/ui_controls_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG
      at `/home/sinan/Desktop/igis-controls.png`.
+   - `python3 scripts/ui_menus_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
+     `/home/sinan/Desktop/igis-menus.png`.
    - `python3 scripts/tablet_qmp.py build/igis.iso` → `7/7 absolute cases passed`.
    - `python3 scripts/tablet_qmp.py build/igis.iso --no-tablet` → `mouse: ok` fallback.
    - `python3 scripts/mouse_burst_qmp.py build/igis.iso` → `600/600` px with a
      `mouse: aux IRQ12 delivered ...` line; `--cores 1` is the single-core variant.
-6. The next slice is **M2.4.3** (menus). The window service is complete for M2: the
-   M2.3.5 proof covers two tasks, focus/raise by click, a scripted `window_move` drag and
-   `Expose` repaint. M2.4.0 added the `stdlib` metrics, palette and client chrome; M2.4.1
-   added the atomic, code-point-safe string editing and selection helpers a text field
-   needs. Pointer-driven continuous drag, controls, menus, dialogs and icons are still
-   ahead. The M2 limitations still in force: an app that ignores an `Expose` keeps stale
-   content, a full-screen `syslib.clear` erases the kernel windows' pixels, there is no
-   per-task clip (a covered client must repaint only its visible part), and there is no
-   global work area (an app at `y = 0` covers the menu bar until the shell's next event).
+6. The next slice is **M2.4.4** (dialogs and alerts). The window service is complete for
+   M2: the M2.3.5 proof covers two tasks, focus/raise by click, a scripted `window_move`
+   drag and `Expose` repaint. M2.4.0 added the `stdlib` metrics, palette and client
+   chrome; M2.4.1 added the atomic, code-point-safe string editing and selection helpers
+   a text field needs; M2.4.2 added the controls; M2.4.3 added the menu bar, pull-downs,
+   `uint` masks and the keyboard mapping. Pointer-driven continuous drag, dialogs, icons
+   and the widgets demo are still ahead. The M2 limitations still in force: an app that
+   ignores an `Expose` keeps stale content, a full-screen `syslib.clear` erases the
+   kernel windows' pixels, there is no per-task clip (a covered client must repaint only
+   its visible part), and there is no global work area (an app at `y = 0` covers the menu
+   bar until the shell's next event).
 
 If anything in this file disagrees with the code or the specs, the code and specs win and
 this file must be corrected in the same commit.
@@ -217,8 +238,16 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
   event loop. Proof `samples/apps/ui_controls` (injected pointer/key events, `get_pixel`)
   and the `langhost` sequence test; the source cap rose to 128 KiB and the arena to 4 MiB
   (spec 0008). Specs 0003/0008.
-- [ ] **M2.4.3** Menus: menu-bar model, pull-down tracking, keyboard equivalents,
-  checkmarks and disabled items.
+- [x] **M2.4.3** Menus: menu-bar model, pull-down tracking, keyboard equivalents,
+  checkmarks and disabled items. 15 ordinary-language helpers in `stdlib` (99 total) with
+  no new opcode, builtin or `state`: `ui_menu_bar`/`ui_menu_bar_hit`,
+  `ui_menu_dropdown`/`ui_menu_hit`, the `uint` masks (`ui_menu_bit`/`has`/`set`), the
+  selectability/state helpers (`ui_menu_selectable`, `ui_menu_first`, `ui_menu_open`,
+  `ui_menu_close`, `ui_menu_move`) and `ui_menu_key`. Checked and disabled are independent
+  of the highlight; separators are `-` and are never selectable; disabled rows are gray
+  and skipped. Proof `samples/apps/ui_menus` (injected pointer/key events, `get_pixel`)
+  and the `langhost` sequence test; screenshot `igis-menus.png` (`9fa9fd0`).
+  Specs 0003/0008.
 - [ ] **M2.4.4** Dialogs and alerts: modal loop, default/cancel buttons, text input dialogs.
 - [ ] **M2.4.5** Icons and desktop: 32×32 icon assets, icon grid, double-click, drag,
   selection rectangle, trash.
@@ -262,7 +291,7 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
 | Nominal `TaskId` (Q43) | OPEN-QUESTIONS Q43 | before `stdlib` exposes task primitives |
 | Runtime-capacity buffer parameters (Q46) | OPEN-QUESTIONS Q46 | when slicing/wider stream reads need it |
 | Explicit stream close (Q10) | spec 0006 | streams v2 |
-| Compile arena: ~2.43 MiB of 4 MiB used by `stdlib` (72 KiB source) | spec 0008 | watch as M2.4.3–M2.4.6 grow the library |
+| Compile arena: ~2.72 MiB of 4 MiB used by `stdlib` (90 KiB source) | spec 0008 | watch as M2.4.4–M2.4.6 grow the library |
 | Guard table cache exhaustion (32 tables) | spec 0002/spec 0009 | long-lived workloads with many stacks |
 | `cargo fmt` drift in three pre-existing files + CI fmt/clippy | repo | housekeeping |
 
