@@ -8,12 +8,12 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{Read, Seek, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
 use abi::{ExitReason, FaultCode, Status};
-use interpreter::{Host, Machine, Outcome, Program, StreamError, WaitOutcome};
+use interpreter::{FsEntry, Host, Machine, Outcome, Program, StreamError, WaitOutcome};
 
 /// Default instruction budget for one `langhost` run. This is a host-side
 /// watchdog, not a scheduler quantum: the machine is resumed between slices
@@ -270,14 +270,116 @@ impl Host for ConsoleHost {
         // Children run to completion inside `spawn`, so nothing is ever live.
         Status::NotFound
     }
+
+    // Application files (spec 0013). `langhost` has a real filesystem, so it
+    // implements the same root-only view over the sample source directory the
+    // image is built from: listing is sorted by name (the ext2 order is not
+    // sorted, so no program may depend on it), reads are chunked at the same
+    // 256 bytes, and subdirectories/symlinks are refused exactly as the kernel
+    // subset does.
+    fn fs_list(&mut self, path: &[u8], index: u64, name: &mut [u8]) -> Result<FsEntry, Status> {
+        let path = std::str::from_utf8(path).map_err(|_| Status::Invalid)?;
+        let status = abi::fs::validate_root(path);
+        if status != Status::Ok {
+            return Err(status);
+        }
+        let index = usize::try_from(index).map_err(|_| Status::NotFound)?;
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(&self.source_dir).map_err(|_| Status::IoError)? {
+            let entry = entry.map_err(|_| Status::IoError)?;
+            let entry_name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| Status::Invalid)?;
+            let file_type = entry.file_type().map_err(|_| Status::IoError)?;
+            let kind = if file_type.is_file() {
+                abi::fs::KIND_FILE
+            } else if file_type.is_dir() {
+                abi::fs::KIND_DIR
+            } else {
+                abi::fs::KIND_OTHER
+            };
+            let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+            entries.push((entry_name, kind, size));
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let Some((entry_name, kind, size)) = entries.get(index) else {
+            return Err(Status::NotFound);
+        };
+        let bytes = entry_name.as_bytes();
+        if bytes.len() > name.len() {
+            return Err(Status::CapacityExceeded);
+        }
+        name[..bytes.len()].copy_from_slice(bytes);
+        Ok(FsEntry {
+            name_len: bytes.len(),
+            kind: *kind,
+            size: *size,
+        })
+    }
+
+    fn fs_read(&mut self, path: &[u8], offset: u64, dst: &mut [u8]) -> Result<usize, Status> {
+        let path = std::str::from_utf8(path).map_err(|_| Status::Invalid)?;
+        let status = abi::fs::validate_root_name(path);
+        if status != Status::Ok {
+            return Err(status);
+        }
+        let target = self.source_dir.join(path);
+        let metadata = match std::fs::symlink_metadata(&target) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(Status::NotFound)
+            }
+            Err(_) => return Err(Status::IoError),
+        };
+        if !metadata.is_file() {
+            return Err(Status::Invalid);
+        }
+        let mut file = std::fs::File::open(&target).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Status::NotFound
+            } else {
+                Status::IoError
+            }
+        })?;
+        file.seek(std::io::SeekFrom::Start(offset))
+            .map_err(|_| Status::IoError)?;
+        let mut written = 0usize;
+        while written < dst.len() {
+            match file.read(&mut dst[written..]) {
+                Ok(0) => break,
+                Ok(count) => written += count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err(Status::IoError),
+            }
+        }
+        Ok(written)
+    }
+
+    fn fs_size(&mut self, path: &[u8]) -> Result<u64, Status> {
+        let path = std::str::from_utf8(path).map_err(|_| Status::Invalid)?;
+        let status = abi::fs::validate_root_name(path);
+        if status != Status::Ok {
+            return Err(status);
+        }
+        let target = self.source_dir.join(path);
+        let metadata = match std::fs::symlink_metadata(&target) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(Status::NotFound)
+            }
+            Err(_) => return Err(Status::IoError),
+        };
+        if !metadata.is_file() {
+            return Err(Status::Invalid);
+        }
+        Ok(metadata.len())
+    }
 }
 
 /// Host-side path validation, matching the kernel's relative-path rule.
 fn valid_path(path: &str) -> bool {
-    !path.is_empty()
-        && !path.starts_with('/')
-        && !path.ends_with('/')
-        && !path.split('/').any(|part| part.is_empty() || part == "..")
+    abi::fs::validate_path(path) == Status::Ok
 }
 
 /// Verifies and runs a compiled package.

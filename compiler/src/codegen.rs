@@ -6488,6 +6488,148 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::enumeration(STATUS_ENUM)))
             }
+            // Application files (spec 0013). The M2.5.1 view is the read-only
+            // image root; the compiler checks the staged signatures and the
+            // fixed destination capacities, the machine validates the path
+            // syntax, and the kernel host resolves the entry. No new opcode.
+            "core.fs_list" => {
+                if args.len() != 5 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.fs_list` expects 5 arguments, got {}", args.len()),
+                    ));
+                }
+                let path = self.emit_ref(args[0], None)?;
+                if path.kind != Kind::String {
+                    let found = self.type_name(path);
+                    return Err(self.err_at(
+                        args[0],
+                        format_args!("`core.fs_list` expects a `string` path, found `{found}`"),
+                    ));
+                }
+                let index = self.expr_scalar(args[1])?;
+                if index.kind != Kind::Uint {
+                    return Err(self.err_at(
+                        args[1],
+                        format_args!("`core.fs_list` expects a `uint` index, found `{index}`"),
+                    ));
+                }
+                let name = self.emit_var_buffer_ref(args[2])?;
+                if name.kind != Kind::String {
+                    let found = self.type_name(name);
+                    return Err(self.err_at(
+                        args[2],
+                        format_args!("`core.fs_list` expects a `var string` name, found `{found}`"),
+                    ));
+                }
+                if name.cap < abi::fs::NAME_CAP as u32 {
+                    return Err(self.err_at(
+                        args[2],
+                        format_args!(
+                            "`core.fs_list` needs a name buffer of at least {} bytes, found {}",
+                            abi::fs::NAME_CAP,
+                            name.cap
+                        ),
+                    ));
+                }
+                let kind = self.emit_scalar_ref(args[3])?;
+                if kind.kind != Kind::Uint {
+                    let found = self.type_name(kind);
+                    return Err(self.err_at(
+                        args[3],
+                        format_args!("`core.fs_list` expects `var kind: uint`, found `{found}`"),
+                    ));
+                }
+                let size = self.emit_scalar_ref(args[4])?;
+                if size.kind != Kind::Uint {
+                    let found = self.type_name(size);
+                    return Err(self.err_at(
+                        args[4],
+                        format_args!("`core.fs_list` expects `var size: uint`, found `{found}`"),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::FS_LIST)?;
+                self.pop(5)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "core.fs_read" => {
+                if args.len() != 4 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.fs_read` expects 4 arguments, got {}", args.len()),
+                    ));
+                }
+                let path = self.emit_ref(args[0], None)?;
+                if path.kind != Kind::String {
+                    let found = self.type_name(path);
+                    return Err(self.err_at(
+                        args[0],
+                        format_args!("`core.fs_read` expects a `string` path, found `{found}`"),
+                    ));
+                }
+                let offset = self.expr_scalar(args[1])?;
+                if offset.kind != Kind::Uint {
+                    return Err(self.err_at(
+                        args[1],
+                        format_args!("`core.fs_read` expects a `uint` offset, found `{offset}`"),
+                    ));
+                }
+                let destination = self.emit_var_buffer_ref(args[2])?;
+                if destination.kind != Kind::Bytes || destination.cap < abi::fs::READ_CHUNK as u32 {
+                    let found = self.type_name(destination);
+                    return Err(self.err_at(
+                        args[2],
+                        format_args!(
+                            "`core.fs_read` needs a writable `var bytes` destination of at least {} bytes, found `{found}`",
+                            abi::fs::READ_CHUNK
+                        ),
+                    ));
+                }
+                let read = self.emit_scalar_ref(args[3])?;
+                if read.kind != Kind::Int {
+                    let found = self.type_name(read);
+                    return Err(self.err_at(
+                        args[3],
+                        format_args!("`core.fs_read` expects `var read: int`, found `{found}`"),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::FS_READ)?;
+                self.pop(4)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "core.fs_size" => {
+                if args.len() != 2 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`core.fs_size` expects 2 arguments, got {}", args.len()),
+                    ));
+                }
+                let path = self.emit_ref(args[0], None)?;
+                if path.kind != Kind::String {
+                    let found = self.type_name(path);
+                    return Err(self.err_at(
+                        args[0],
+                        format_args!("`core.fs_size` expects a `string` path, found `{found}`"),
+                    ));
+                }
+                let size = self.emit_scalar_ref(args[1])?;
+                if size.kind != Kind::Uint {
+                    let found = self.type_name(size);
+                    return Err(self.err_at(
+                        args[1],
+                        format_args!("`core.fs_size` expects `var size: uint`, found `{found}`"),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::FS_SIZE)?;
+                self.pop(2)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
             "core.wait" => {
                 if args.len() != 2 {
                     return Err(self.err(

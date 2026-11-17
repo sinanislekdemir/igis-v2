@@ -5,7 +5,7 @@ Parked decisions for igis-v2. This is the working register; each spec's own
 resolved, record the answer in the relevant spec or in a new ADR, then remove it here.
 
 **Status:** implementation phase. Last updated: 2026-11-17.
-**Snapshot:** specs 0001–0012, ADRs 0001–0025.
+**Snapshot:** specs 0001–0013, ADRs 0001–0027.
 
 ## How to use
 
@@ -59,6 +59,7 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | # | Question | Options / recommendation | Trigger |
 |---|----------|--------------------------|---------|
 | Q50 | `core.kill` of a task another core has already claimed | `request_kill` publishes `KILL_FLAGS` before taking the slot lock; a claimed task's owner reads the flag after its quantum. If the owner reads it just before the publication and then blocks the task, the request can be left with no runnable owner and `wait` can hang. M2.3.5's proof hit this once on `-smp 4` and avoids the path with a stage-4 close/exit acknowledged by `core.wait`; the two fixes are to re-check `KILL_FLAGS` in the block path under the slot lock, or to publish the flag while holding the slot lock and wake a blocked task after it. The hang is observed but the exact interleaving is unproven | when an application must kill an arbitrary running task (M2.4 window/task controls) |
+| Q51 | Application file API: subdirectories, writable save, and a handle model | M2.5.1 implements the read-only root-only view (`core.fs_list`/`fs_read`/`fs_size`, spec 0013, ADR 0027): no handle, no writable path, a path with `/` is `Invalid`. `lost+found` is listed as a directory and refused by reads. The editor can save only when a writable filesystem exists; the browser may need subdirectory listing if the image ever grows one. A per-open handle model is rejected for M2 but can be revisited if per-read root lookup measures badly | M2.5.4 (browser) for subdirectories; when a writable filesystem exists for save |
 
 ## Decided in the 2026-11-16 guards session
 

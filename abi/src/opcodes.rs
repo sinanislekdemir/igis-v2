@@ -605,6 +605,43 @@ pub mod builtin {
     /// compile-checked capacity is at least the title cap.
     pub const WINDOW_INFO: u32 = 40;
 
+    // ---- application files (spec 0013) ---------------------------------
+    //
+    // The read-only ext2 image is reachable through three `core` builtins.
+    // M2.5.1 is root-only: `fs_list` accepts `""`/`"."`, and `fs_read`/
+    // `fs_size` accept one root component with no `/`. No opcode is added:
+    // the machine validates the path syntax and the destinations, the host
+    // resolves the entry and copies the bytes.
+
+    /// `core.fs_list(path, index, var name, var kind, var size) -> Status`: the
+    /// `index`-th named entry of the image root (`0`-based, directory order,
+    /// `.` and `..` excluded). `Ok` writes the name (at most [`crate::fs::NAME_CAP`]
+    /// bytes), the kind (`0` regular file, `1` directory, `2` other) and the
+    /// inode size, and pushes `Ok`; an index past the end is `NotFound`; a path
+    /// other than `""`/`"."` is `Invalid`; a name longer than the destination
+    /// is `CapacityExceeded`. Every destination is untouched on failure.
+    /// Operands: `[path reference][index][name reference][kind reference][size
+    /// reference]`.
+    pub const FS_LIST: u32 = 41;
+
+    /// `core.fs_read(path, offset, var dst, var read) -> Status`: copy up to
+    /// [`crate::fs::READ_CHUNK`] bytes of the regular root file at byte
+    /// `offset` into a `var bytes[N]` destination (`N >= READ_CHUNK`).
+    /// `Ok` sets the destination's runtime length and `read` to the copied
+    /// count; at or past the file's end it writes `0` bytes and pushes `Ok`.
+    /// A failure leaves `dst` and `read` untouched: `NotFound` for a missing
+    /// name, `Invalid` for a directory/other entry or a path with a separator,
+    /// `CapacityExceeded` for a path longer than 256 bytes, `IoError` for a
+    /// corrupt image. Operands: `[path reference][offset][dst reference][read
+    /// reference]`.
+    pub const FS_READ: u32 = 42;
+
+    /// `core.fs_size(path, var size) -> Status`: the byte size of a regular
+    /// root file. `Ok` writes `size`; the errors are `FS_READ`'s (a missing
+    /// name is `NotFound`, a directory or bad path `Invalid`). Operands:
+    /// `[path reference][size reference]`.
+    pub const FS_SIZE: u32 = 43;
+
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
         match id {
@@ -648,6 +685,9 @@ pub mod builtin {
             WINDOW_FOCUS => Some((0, 1)),
             WINDOW_PRESENT => Some((1, 1)),
             WINDOW_INFO => Some((4, 1)),
+            FS_LIST => Some((5, 1)),
+            FS_READ => Some((4, 1)),
+            FS_SIZE => Some((2, 1)),
             _ => None,
         }
     }

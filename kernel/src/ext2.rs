@@ -77,6 +77,26 @@ struct Inode {
     blocks: [u32; INODE_WORDS],
 }
 
+/// One root-directory entry as the application file API reports it (spec
+/// 0013). `kind` is an `abi::fs::KIND_*` value; `size` is the inode byte size.
+#[derive(Clone, Copy)]
+pub struct RootEntry {
+    /// Used bytes of the name the caller asked for.
+    pub name_len: usize,
+    /// `abi::fs::KIND_FILE`, `KIND_DIR` or `KIND_OTHER`.
+    pub kind: u64,
+    /// The entry's inode size in bytes.
+    pub size: u64,
+}
+
+fn entry_kind(mode: u16) -> u64 {
+    match mode & S_IFMT {
+        S_IFREG => abi::fs::KIND_FILE,
+        S_IFDIR => abi::fs::KIND_DIR,
+        _ => abi::fs::KIND_OTHER,
+    }
+}
+
 /// A mounted read-only ext2 filesystem.
 pub struct Ext2<'a> {
     device: BlockDevice<'a>,
@@ -250,6 +270,102 @@ impl<'a> Ext2<'a> {
             return Err(Status::Invalid);
         }
         Ok(written)
+    }
+
+    /// Reads up to `out.len()` bytes of a regular file at byte `offset`
+    /// (spec 0013, `core.fs_read`).
+    ///
+    /// The data blocks are streamed in order; nothing is buffered or
+    /// allocated. An offset at or past the file's end returns `Ok(0)`, so
+    /// end-of-file is not an error. A missing name is [`Status::NotFound`] and
+    /// a non-regular entry is [`Status::Invalid`], exactly as in
+    /// [`Ext2::read_file`].
+    pub fn read_at(&self, name: &str, offset: u64, out: &mut [u8]) -> Result<usize, Status> {
+        let inode = self.regular_inode(name)?;
+        if offset >= inode.size || out.is_empty() {
+            return Ok(0);
+        }
+
+        let block_size = self.block_size as u64;
+        let mut block_start = 0u64;
+        let mut written = 0usize;
+        self.each_data_block(&inode, &mut |data| {
+            let start = block_start;
+            block_start += block_size;
+            if written == out.len() {
+                return Ok(());
+            }
+            // Blocks are contiguous in the subset, so the block that holds
+            // `offset` is the first one whose end is past it.
+            let end = (start + block_size).min(inode.size);
+            if end <= offset {
+                return Ok(());
+            }
+            let from = offset.saturating_sub(start) as usize;
+            let to = (end - start) as usize;
+            if from >= to {
+                return Ok(());
+            }
+            let count = (to - from).min(out.len() - written);
+            out[written..written + count].copy_from_slice(&data[from..from + count]);
+            written += count;
+            Ok(())
+        })?;
+        Ok(written)
+    }
+
+    /// Reads one named root-directory entry by 0-based index (spec 0013,
+    /// `core.fs_list`).
+    ///
+    /// `.` and `..` are excluded and entries are visited in directory order
+    /// (which is not sorted). The name is copied into `name`; a name longer
+    /// than the destination is [`Status::CapacityExceeded`]. An index at or
+    /// past the last entry is [`Status::NotFound`].
+    pub fn list_entry(&self, index: u32, name: &mut [u8]) -> Result<RootEntry, Status> {
+        let root = self.inode(ROOT_INODE)?;
+        if root.mode & S_IFMT != S_IFDIR {
+            return Err(Status::Invalid);
+        }
+
+        let mut seen = 0u32;
+        let mut found = None;
+        let mut error = None;
+        self.each_dir_entry(&root, &mut |number, _, entry| {
+            // `each_dir_entry` cannot stop the block walk, so a `done` check
+            // keeps a later directory block from overwriting the result.
+            if found.is_some() || error.is_some() {
+                return Ok(false);
+            }
+            if entry == b"." || entry == b".." {
+                return Ok(true);
+            }
+            if seen != index {
+                seen += 1;
+                return Ok(true);
+            }
+            match self.inode(number) {
+                Ok(inode) => {
+                    if entry.len() > name.len() {
+                        error = Some(Status::CapacityExceeded);
+                    } else {
+                        name[..entry.len()].copy_from_slice(entry);
+                        found = Some(RootEntry {
+                            name_len: entry.len(),
+                            kind: entry_kind(inode.mode),
+                            size: inode.size,
+                        });
+                    }
+                }
+                Err(status) => error = Some(status),
+            }
+            Ok(false)
+        })?;
+
+        match (found, error) {
+            (_, Some(status)) => Err(status),
+            (Some(entry), None) => Ok(entry),
+            (None, None) => Err(Status::NotFound),
+        }
     }
 
     /// Size in bytes of a regular file.

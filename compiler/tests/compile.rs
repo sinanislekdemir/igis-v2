@@ -6367,3 +6367,205 @@ end;
         );
     }
 }
+
+#[test]
+fn fs_primitives_are_builtin_ids_41_to_43_and_check_their_signatures() {
+    use abi::opcodes::{self, builtin};
+
+    let source = r#"
+unit t;
+uses core;
+var
+  status: Status;
+  name: string[64];
+  kind: uint;
+  size: uint;
+  read: int;
+  chunk: bytes[256];
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_list("", uint(0), name, kind, size);
+  status := core.fs_list(".", uint(1), name, kind, size);
+  status := core.fs_read("child", uint(0), chunk, read);
+  status := core.fs_size("child", size);
+end;
+"#;
+    let package = compile(source.as_bytes(), "t.ig").expect("the file primitives compile");
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+    let mut seen = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        if op == opcodes::BUILTIN {
+            seen.push(u32::from_le_bytes(
+                instructions[pc + 4..pc + 8].try_into().unwrap(),
+            ));
+        }
+        pc += words * 4;
+    }
+    for id in [builtin::FS_LIST, builtin::FS_READ, builtin::FS_SIZE] {
+        assert!(seen.contains(&id), "builtin {id} is emitted");
+    }
+    assert_eq!(
+        (builtin::FS_LIST, builtin::FS_READ, builtin::FS_SIZE),
+        (41, 42, 43)
+    );
+
+    let cases = [
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; name: string[64]; kind: uint; size: uint;
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_list("", uint(0), name, kind);
+end;
+"#,
+            "`core.fs_list` expects 5 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; raw: bytes[16]; name: string[64]; kind: uint; size: uint;
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_list(raw, uint(0), name, kind, size);
+end;
+"#,
+            "`core.fs_list` expects a `string` path",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; name: string[64]; kind: uint; size: uint;
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_list("", 0, name, kind, size);
+end;
+"#,
+            "`core.fs_list` expects a `uint` index",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; raw: bytes[64]; kind: uint; size: uint;
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_list("", uint(0), raw, kind, size);
+end;
+"#,
+            "`core.fs_list` expects a `var string` name",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; name: string[32]; kind: uint; size: uint;
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_list("", uint(0), name, kind, size);
+end;
+"#,
+            "needs a name buffer of at least 64 bytes",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; name: string[64]; total: int; size: uint;
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_list("", uint(0), name, total, size);
+end;
+"#,
+            "`core.fs_list` expects `var kind: uint`",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; name: string[64]; kind: uint; read: int;
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_list("", uint(0), name, kind, read);
+end;
+"#,
+            "`core.fs_list` expects `var size: uint`",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; read: int; chunk: bytes[256];
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_read("child", 0, chunk, read);
+end;
+"#,
+            "`core.fs_read` expects a `uint` offset",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; read: int; text: string[256];
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_read("child", uint(0), text, read);
+end;
+"#,
+            "needs a writable `var bytes` destination of at least 256 bytes",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; read: int; chunk: bytes[128];
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_read("child", uint(0), chunk, read);
+end;
+"#,
+            "needs a writable `var bytes` destination of at least 256 bytes",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; count: uint; chunk: bytes[256];
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_read("child", uint(0), chunk, count);
+end;
+"#,
+            "`core.fs_read` expects `var read: int`",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; count: int;
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_size("child", count);
+end;
+"#,
+            "`core.fs_size` expects `var size: uint`",
+        ),
+    ];
+    for (source, expected) in cases {
+        let error = compile(source.as_bytes(), "t.ig").expect_err("must be a compile error");
+        assert!(
+            error.message.contains(expected),
+            "expected `{expected}`, got `{}`",
+            error.message
+        );
+    }
+}

@@ -2276,3 +2276,20 @@ end;
     assert!(host.texts.contains(&(604, 376, b"OK".to_vec(), BLACK)));
     assert!(host.texts.contains(&(672, 376, b"Cancel".to_vec(), BLACK)));
 }
+
+/// The M2.5.1 proof sample against `langhost`'s root-only file host (spec
+/// 0013): listing, `fs_size`, chunked reads, offsets and error paths all run
+/// on the host with the same 256-byte chunk the kernel uses.
+#[test]
+fn the_files_sample_lists_and_reads_the_application_directory() {
+    let path = format!("{}/../samples/apps/files", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "files").expect("the files sample compiles");
+    let result =
+        langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies and runs");
+    let output = String::from_utf8(result.output).expect("UTF-8 output");
+    assert!(output.contains("files: root entries="), "{output}");
+    assert!(output.contains("files: chunked read ok"), "{output}");
+    assert!(output.ends_with("files: ok\n"), "{output}");
+    assert_eq!(result.reason, ExitReason::Ok);
+}

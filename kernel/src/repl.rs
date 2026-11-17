@@ -39,7 +39,7 @@ use crate::sync::SpinLock;
 use crate::task::{self, Task, ARGS_BYTES};
 
 /// Maximum path length accepted by `core.spawn` (spec 0005).
-pub const PATH_BYTES: usize = 256;
+pub const PATH_BYTES: usize = abi::fs::PATH_MAX;
 
 /// Pending `spawn` requests (spec 0005/0007: 1024 by default).
 pub const QUEUE_CAPACITY: usize = 1024;
@@ -348,16 +348,7 @@ pub fn boot(image: &Ext2<'_>) -> u64 {
 /// Validates a `core.spawn` path (spec 0005): relative, at most
 /// [`PATH_BYTES`], no leading/trailing `/`, no empty or `..` component.
 pub fn validate_path(path: &str) -> Status {
-    if path.len() > PATH_BYTES {
-        return Status::CapacityExceeded;
-    }
-    if path.is_empty() || path.starts_with('/') || path.ends_with('/') {
-        return Status::Invalid;
-    }
-    if path.split('/').any(|part| part.is_empty() || part == "..") {
-        return Status::Invalid;
-    }
-    Status::Ok
+    abi::fs::validate_path(path)
 }
 
 /// The kernel side of `core.spawn`: validate, fill the diagnostic, reserve an

@@ -69,6 +69,9 @@ The interface is split into two namespaces:
 | `spawn` | `fn spawn(path: &str, args: &str, diag: &mut Diagnostic, id: &mut TaskId) -> Status` | no; reserves an id and returns |
 | `wait` | `fn wait(id: TaskId, reason: &mut ExitReason) -> Status` | yes if the task is live |
 | `kill` | `fn kill(id: TaskId) -> Status` | no; requests termination |
+| `fs_list` | `fn fs_list(path: &[u8], index: u64, name: &mut [u8]) -> Result<FsEntry, Status>` | no; root-only, directory order |
+| `fs_read` | `fn fs_read(path: &[u8], offset: u64, dst: &mut [u8]) -> Result<usize, Status>` | no; at most 256 bytes, 0 at EOF |
+| `fs_size` | `fn fs_size(path: &[u8]) -> Result<u64, Status>` | no; regular root files |
 
 - `realtime_on` promotes the calling task, one way, to the realtime class: it is claimed
   before normal tasks and is not released at quantum expiry. It returns `Status.Full` when
@@ -257,6 +260,30 @@ layer:
 - This is temporary. Replace it with application-side editing when the terminal window
   lands (Q44; M2.5.5); the `stdlib` editing primitives it needs are already in place.
 
+#### Implemented ABI: application files (M2.5.1)
+
+The read-only image is reachable through three host builtins (41–43; spec 0013, ADR
+0027). There is no handle, no per-task file state and no writable operation: every call
+names a path, and the kernel host resolves it against the same ext2 mount the REPL
+service compiles from.
+
+| Primitive | Implemented signature | Result |
+|-----------|-----------------------|--------|
+| `core.fs_list` | `(path: const string[0], index: uint, var name: string[64], var kind: uint, var size: uint) -> Status` | `Ok` with the `index`-th root entry (name, kind, inode size); `NotFound` past the end; `Invalid` for any path other than `""`/`"."`; `CapacityExceeded` for a name over 64 bytes |
+| `core.fs_read` | `(path: const string[0], offset: uint, var dst: bytes[256], var read: int) -> Status` | `Ok` with up to 256 bytes at `offset`, setting the destination length and `read` (`Ok`/0 at or past EOF); `NotFound` for a missing name; `Invalid` for a directory, another non-regular kind or a path with `/`; `CapacityExceeded` for a path over 256 bytes; `IoError` for a corrupt image |
+| `core.fs_size` | `(path: const string[0], var size: uint) -> Status` | `Ok` with a regular root file's byte size; the same errors as `fs_read` |
+
+- The machine validates the path through `abi::fs` (the same function `core.spawn` uses)
+  and the destination regions before calling the host, then publishes the name/chunk
+  with one copy only on `Ok`. A failure leaves every out-parameter untouched.
+- `Host::fs_list` is `(path: &[u8], index: u64, name: &mut [u8]) -> Result<FsEntry,
+  Status>`, `Host::fs_read` is `(path: &[u8], offset: u64, dst: &mut [u8]) ->
+  Result<usize, Status>` and `Host::fs_size` is `(path: &[u8]) -> Result<u64, Status>`.
+  All three default to `NotFound`, so a mock with no filesystem needs no override.
+- The kernel host uses `Ext2::list_entry`/`read_at`/`file_size`. `langhost` implements the
+  same root-only view over `samples/apps` (sorted names, the same 256-byte chunk).
+  M2.5.1 is root-only by design: a separator is `Invalid`, not a traversal.
+
 ### `syslib` primitives
 
 | Primitive | Signature (illustrative) | Notes |
@@ -406,6 +433,12 @@ signal for origin and cost (`0003-language.md`).
 | Argument longer than 1024 bytes | `Status.CapacityExceeded`; `diag` filled; no request enqueued |
 | Path longer than 256 bytes | `Status.CapacityExceeded`; `diag` filled; no request enqueued |
 | Request path malformed or not a regular file | `Status.Invalid`; `diag` filled; no task created |
+| File path malformed or a subdirectory path | `Status.Invalid`; no out-parameter written |
+| File name not found | `Status.NotFound`; no out-parameter written |
+| File entry is a directory or another non-regular kind | `Status.Invalid`; nothing read |
+| Listing index past the last entry | `Status.NotFound`; nothing written |
+| File name longer than the 64-byte listing destination | `Status.CapacityExceeded`; nothing written |
+| File read destination below 256 bytes | Compile error (typed code) or `OutOfBounds` fault (hand-made bytecode); the host is not called |
 | `run`/`spawn` compile error | `Status.Invalid`; `diag` filled; no task created |
 | `run` load error after `spawn` returned | The service records `Faulted(IoError)`; `run` returns `Ok` with that reason and fills `diag` from the exit record; `wait` sees `Faulted(IoError)` without a diagnostic |
 | Request queue full | `Status.Full`; `diag` filled; `run` blocks only on the child |
@@ -463,3 +496,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-16 | Window host methods (spec 0011, M2.3.1): `window_open(x, y, w, h, title) -> Result<u64, Status>`, `window_close`/`window_raise`/`window_move` (`Status`), `window_frame_rect`/`window_content_rect` (`Result<Rect, Status>`) and `window_focus() -> u64`. The defaults are a disabled service (`Invalid` at `open` and on the rect reads, `NotFound` at `close`/`raise`/`move`, focus 0), matching the kernel's empty table. The interpreter decodes the operands and writes a 32-byte `abi::layout::rect` image only on `Ok`; builtins 32–38, no new opcode. |
 | 2026-11-16 | M2.3.4 (spec 0012): console output routing is unchanged at this interface (`console_write` bytes, `read_line` lines), but the kernel now paints the terminal into a kernel-owned window and kernel diagnostics into a system-log window; the serial mirror continues for both. A new read-only `window_info` host method is the disabled-service `None` default. |
 | 2026-11-17 | Q44 narrows (M2.4.1): the language now has code-point-safe insert/delete/backspace/cursor/selection helpers (`stdlib.str_*`, spec 0003), so the reason the kernel kept a staged line discipline no longer holds at the language level. The staged `core.read_line` and its four-line ring stay for the shell until the terminal window can run the shell in a window with application-side editing (M2.5.5); the host interface itself is unchanged. |
+| 2026-11-17 | Application files (spec 0013, M2.5.1): `Host::fs_list` (`Result<FsEntry, Status>`), `Host::fs_read` (`Result<usize, Status>`) and `Host::fs_size` (`Result<u64, Status>`), all defaulting to `NotFound`, and builtins 41–43. The interpreter validates the shared `core.spawn` path syntax and the root-only M2.5.1 subset, stages a 64-byte name and a 256-byte chunk and publishes only on `Ok`; the kernel host uses the existing ext2 mount, `langhost` the sample directory. No opcode, no handle, no writable path. |

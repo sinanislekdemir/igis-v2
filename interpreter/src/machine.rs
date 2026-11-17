@@ -74,6 +74,29 @@ pub struct WindowInfo {
 /// The fixed title capacity of `window_info` (spec 0011, W9; spec 0012, D15).
 pub const WINDOW_TITLE_CAP: usize = layout::window::TITLE_CAP as usize;
 
+/// One root-directory entry returned by [`Host::fs_list`] (spec 0013).
+///
+/// The name is staged in the caller's buffer because the interpreter cannot
+/// return a borrowed slice from a host call: the machine passes a local
+/// [`FS_NAME_CAP`]-byte array, the host copies the name and reports
+/// `name_len`, and the machine publishes it into the caller's `var string`
+/// only on `Ok`. `kind` is one of `abi::fs::KIND_*`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FsEntry {
+    /// The used bytes of the name buffer, at most [`FS_NAME_CAP`].
+    pub name_len: usize,
+    /// `abi::fs::KIND_FILE`, `KIND_DIR` or `KIND_OTHER`.
+    pub kind: u64,
+    /// The entry's inode size in bytes.
+    pub size: u64,
+}
+
+/// The fixed name capacity of `core.fs_list` (spec 0013).
+pub const FS_NAME_CAP: usize = abi::fs::NAME_CAP;
+
+/// The fixed read chunk of `core.fs_read` (spec 0013).
+pub const FS_READ_CHUNK: usize = abi::fs::READ_CHUNK;
+
 /// The host interface as far as this slice needs it (spec 0005).
 ///
 /// The kernel implements this over its own console, clock and REPL service;
@@ -341,6 +364,39 @@ pub trait Host {
     /// The default is a disabled service (`None`, reported as `NotFound`).
     fn window_info(&mut self, _index: u64) -> Option<WindowInfo> {
         None
+    }
+
+    // ---- application files (spec 0013) ----------------------------------
+    //
+    // The M2.5.1 view is the read-only image root. The machine validates the
+    // path syntax and the destination buffers, so every host agrees that a
+    // malformed path is `Invalid`; the host resolves the entry and copies the
+    // bytes. The defaults model a machine with no filesystem: every call is
+    // `NotFound`, which is what `langhost`'s bare mock reports and what the
+    // interpreter's own tests inherit.
+
+    /// One root-directory entry (`core.fs_list`): `index` is 0-based in
+    /// directory order, `.` and `..` excluded. `name` is a local buffer of at
+    /// least [`FS_NAME_CAP`] bytes; the host copies the name and returns its
+    /// length. A missing index is `NotFound`, a name that does not fit is
+    /// `CapacityExceeded`, an unsupported path is `Invalid`. The default is
+    /// `NotFound`.
+    fn fs_list(&mut self, _path: &[u8], _index: u64, _name: &mut [u8]) -> Result<FsEntry, Status> {
+        Err(Status::NotFound)
+    }
+
+    /// Up to [`FS_READ_CHUNK`] bytes of a regular root file at `offset`
+    /// (`core.fs_read`). The machine passes a local chunk buffer; the host
+    /// must not write past it and must return `0` at or past the end. The
+    /// default is `NotFound`.
+    fn fs_read(&mut self, _path: &[u8], _offset: u64, _dst: &mut [u8]) -> Result<usize, Status> {
+        Err(Status::NotFound)
+    }
+
+    /// The byte size of a regular root file (`core.fs_size`). The default is
+    /// `NotFound`.
+    fn fs_size(&mut self, _path: &[u8]) -> Result<u64, Status> {
+        Err(Status::NotFound)
     }
 
     /// Requests a new application instance (`core.spawn`).
@@ -1801,6 +1857,221 @@ impl Machine {
                             }
                         }
                     }
+                    // Application files (spec 0013). The M2.5.1 view is the
+                    // read-only image root. The machine validates the path
+                    // syntax and the destination regions before the host call,
+                    // so every host agrees on a malformed path; a failure
+                    // leaves every out-parameter untouched.
+                    builtin::FS_LIST => {
+                        let size_bits = self.pop(stack)?;
+                        let kind_bits = self.pop(stack)?;
+                        let name_bits = self.pop(stack)?;
+                        let index = self.pop(stack)?;
+                        let path_bits = self.pop(stack)?;
+
+                        // The name destination is a `var string[>= NAME_CAP]`
+                        // data reference: check its length word and the full
+                        // capacity before asking the host.
+                        let (name_region, name_offset) =
+                            self.resolve(name_bits, state, stack, constants, args)?;
+                        if name_region != refs::REGION_STATE && name_region != refs::REGION_STACK {
+                            return Err(FaultCode::IllegalOperation);
+                        }
+                        if name_offset < 8 {
+                            return Err(FaultCode::OutOfBounds);
+                        }
+                        let name_end = name_offset
+                            .checked_add(FS_NAME_CAP)
+                            .ok_or(FaultCode::OutOfBounds)?;
+                        if name_end
+                            > region_len(name_region, state, stack, constants, args)
+                                .ok_or(FaultCode::OutOfBounds)?
+                        {
+                            return Err(FaultCode::OutOfBounds);
+                        }
+
+                        let result = {
+                            let (path_region, path_offset) =
+                                self.resolve(path_bits, state, stack, constants, args)?;
+                            let path_len = self.buffer_len(
+                                path_region,
+                                path_offset,
+                                state,
+                                stack,
+                                constants,
+                                args,
+                            )?;
+                            let path = buffer_slice(
+                                path_region,
+                                path_offset,
+                                path_len,
+                                state,
+                                stack,
+                                constants,
+                                args,
+                            )?;
+                            match core::str::from_utf8(path) {
+                                Err(_) => Err(Status::Invalid),
+                                Ok(text) => match abi::fs::validate_root(text) {
+                                    Status::Ok => {
+                                        let mut name = [0u8; FS_NAME_CAP];
+                                        match host.fs_list(text.as_bytes(), index, &mut name) {
+                                            Ok(entry) => Ok((entry, name)),
+                                            Err(status) => Err(status),
+                                        }
+                                    }
+                                    status => Err(status),
+                                },
+                            }
+                        };
+                        match result {
+                            Ok((entry, name)) => {
+                                if entry.name_len > FS_NAME_CAP {
+                                    return Err(FaultCode::IllegalOperation);
+                                }
+                                self.write_buffer_ref(
+                                    name_bits,
+                                    &name[..entry.name_len],
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.write_ref(
+                                    kind_bits, entry.kind, state, stack, constants, args,
+                                )?;
+                                self.write_ref(
+                                    size_bits, entry.size, state, stack, constants, args,
+                                )?;
+                                self.push(stack, Status::Ok as u64)?;
+                            }
+                            Err(status) => self.push(stack, status as u64)?,
+                        }
+                    }
+                    builtin::FS_READ => {
+                        let read_bits = self.pop(stack)?;
+                        let dst_bits = self.pop(stack)?;
+                        let offset = self.pop(stack)?;
+                        let path_bits = self.pop(stack)?;
+
+                        // The destination is a `var bytes[>= READ_CHUNK]` data
+                        // reference: validate the writable region and the whole
+                        // chunk before any byte is produced.
+                        let (dst_region, dst_offset) =
+                            self.resolve(dst_bits, state, stack, constants, args)?;
+                        if dst_region != refs::REGION_STATE && dst_region != refs::REGION_STACK {
+                            return Err(FaultCode::IllegalOperation);
+                        }
+                        if dst_offset < 8 {
+                            return Err(FaultCode::OutOfBounds);
+                        }
+                        let dst_end = dst_offset
+                            .checked_add(FS_READ_CHUNK)
+                            .ok_or(FaultCode::OutOfBounds)?;
+                        if dst_end
+                            > region_len(dst_region, state, stack, constants, args)
+                                .ok_or(FaultCode::OutOfBounds)?
+                        {
+                            return Err(FaultCode::OutOfBounds);
+                        }
+
+                        // The host fills a local chunk; the caller's buffer is
+                        // published with one copy only on `Ok`, so a failure
+                        // leaves `dst` and `read` untouched.
+                        let mut chunk = [0u8; FS_READ_CHUNK];
+                        let result = {
+                            let (path_region, path_offset) =
+                                self.resolve(path_bits, state, stack, constants, args)?;
+                            let path_len = self.buffer_len(
+                                path_region,
+                                path_offset,
+                                state,
+                                stack,
+                                constants,
+                                args,
+                            )?;
+                            let path = buffer_slice(
+                                path_region,
+                                path_offset,
+                                path_len,
+                                state,
+                                stack,
+                                constants,
+                                args,
+                            )?;
+                            match core::str::from_utf8(path) {
+                                Err(_) => Err(Status::Invalid),
+                                Ok(text) => match abi::fs::validate_root_name(text) {
+                                    Status::Ok => host.fs_read(text.as_bytes(), offset, &mut chunk),
+                                    status => Err(status),
+                                },
+                            }
+                        };
+                        match result {
+                            Ok(count) => {
+                                if count > FS_READ_CHUNK {
+                                    return Err(FaultCode::IllegalOperation);
+                                }
+                                self.write_buffer_ref(
+                                    dst_bits,
+                                    &chunk[..count],
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.write_ref(
+                                    read_bits,
+                                    count as u64,
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.push(stack, Status::Ok as u64)?;
+                            }
+                            Err(status) => self.push(stack, status as u64)?,
+                        }
+                    }
+                    builtin::FS_SIZE => {
+                        let size_bits = self.pop(stack)?;
+                        let path_bits = self.pop(stack)?;
+                        let result = {
+                            let (path_region, path_offset) =
+                                self.resolve(path_bits, state, stack, constants, args)?;
+                            let path_len = self.buffer_len(
+                                path_region,
+                                path_offset,
+                                state,
+                                stack,
+                                constants,
+                                args,
+                            )?;
+                            let path = buffer_slice(
+                                path_region,
+                                path_offset,
+                                path_len,
+                                state,
+                                stack,
+                                constants,
+                                args,
+                            )?;
+                            match core::str::from_utf8(path) {
+                                Err(_) => Err(Status::Invalid),
+                                Ok(text) => match abi::fs::validate_root_name(text) {
+                                    Status::Ok => host.fs_size(text.as_bytes()),
+                                    status => Err(status),
+                                },
+                            }
+                        };
+                        match result {
+                            Ok(size) => {
+                                self.write_ref(size_bits, size, state, stack, constants, args)?;
+                                self.push(stack, Status::Ok as u64)?;
+                            }
+                            Err(status) => self.push(stack, status as u64)?,
+                        }
+                    }
                     _ => return Err(FaultCode::IllegalOperation),
                 }
             }
@@ -2160,6 +2431,49 @@ impl Machine {
         match region {
             refs::REGION_STATE => state[offset..end].copy_from_slice(bytes),
             refs::REGION_STACK => stack[offset..end].copy_from_slice(bytes),
+            _ => return Err(FaultCode::IllegalOperation),
+        }
+        Ok(())
+    }
+
+    /// Publishes a whole buffer through a `var` data reference (the
+    /// `core.fs_list` name and the `core.fs_read` destination, spec 0013).
+    ///
+    /// The reference names the buffer's data, so the length word sits eight
+    /// bytes before it. The destination must be a writable region wide enough
+    /// for the bytes; the length and the data are both written, which is the
+    /// "one copy publishes a whole value" rule the stream helpers also use.
+    fn write_buffer_ref(
+        &self,
+        bits: u64,
+        bytes: &[u8],
+        state: &mut [u8],
+        stack: &mut [u8],
+        code: &[u8],
+        args: &[u8],
+    ) -> Result<(), FaultCode> {
+        let (region, offset) = self.resolve(bits, state, stack, code, args)?;
+        if region != refs::REGION_STATE && region != refs::REGION_STACK {
+            return Err(FaultCode::IllegalOperation);
+        }
+        if offset < 8 {
+            return Err(FaultCode::OutOfBounds);
+        }
+        let end = offset
+            .checked_add(bytes.len())
+            .ok_or(FaultCode::OutOfBounds)?;
+        if end > region_len(region, state, stack, code, args).ok_or(FaultCode::OutOfBounds)? {
+            return Err(FaultCode::OutOfBounds);
+        }
+        match region {
+            refs::REGION_STATE => {
+                write_u64(state, offset - 8, bytes.len() as u64)?;
+                state[offset..end].copy_from_slice(bytes);
+            }
+            refs::REGION_STACK => {
+                write_u64(stack, offset - 8, bytes.len() as u64)?;
+                stack[offset..end].copy_from_slice(bytes);
+            }
             _ => return Err(FaultCode::IllegalOperation),
         }
         Ok(())

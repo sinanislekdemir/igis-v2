@@ -994,6 +994,37 @@ realtime task. `heartbeat` has no result and is a no-op on a normal task; a real
 must call it at least once per second of non-blocked time or the kernel terminates it with
 `FaultCode.WatchdogTimeout`.
 
+### Application files (M2.5.1)
+
+Applications read the read-only application image through three `core` builtins (spec
+0013, ADR 0027):
+
+```text
+core.fs_list(path: const string[0]; index: uint;
+             var name: string[64]; var kind: uint; var size: uint) -> Status
+core.fs_read(path: const string[0]; offset: uint;
+             var dst: bytes[256]; var read: int) -> Status
+core.fs_size(path: const string[0]; var size: uint) -> Status
+```
+
+They are host builtins (41–43), not opcodes. The M2.5.1 view is the **root directory
+only**: `fs_list` accepts `""` or `"."`, and `fs_read`/`fs_size` accept one root
+component with no `/`. Paths use the same syntax as `core.spawn` (relative, at most 256
+bytes, no leading/trailing `/`, no empty or `..` component); a malformed path is
+`Invalid` and an over-long one is `CapacityExceeded`. A path with a separator addresses
+a subdirectory, which is unsupported and also `Invalid` — not a silent `NotFound`.
+
+`fs_list` returns entry `index` in directory order (not sorted), excluding `.` and `..`;
+`NotFound` past the end. `kind` is `0` regular file, `1` directory and `2` other; an
+entry name longer than 64 bytes is `CapacityExceeded`. `fs_read` copies up to 256 bytes
+and is an `Ok` with zero bytes at or past the end of the file: it sets both the
+destination's runtime length and `read` to the copied count, so the caller loops on
+`read = 0`. The destination must be a `var bytes[N]` with `N >= 256` (a compile check),
+and a missing name is `NotFound`, a directory `Invalid`. `fs_size` returns the same
+inode byte size the kernel's loader uses. Every failure leaves all out-parameters
+untouched; there is no allocation and no handle. The exact error table is spec 0013,
+F14.
+
 ## Modules
 
 - **M1 (MUST):** One source file is one `unit`.
@@ -1293,9 +1324,9 @@ its task was created.
 
 `core` (native, Rust) provides the primitives that must be fast or that touch the host
 interface: console read/write, `yield`, stream send/receive/try, monotonic clock,
-`sleep_until`, realtime promotion and `heartbeat`, `run`/`spawn`/`wait`/`kill`, byte and
-string copy/compare/find, integer and `f64` math, formatting primitives (integer and
-fixed-point float), and the checked conversions. `stdlib` (written in the language)
+`sleep_until`, realtime promotion and `heartbeat`, `run`/`spawn`/`wait`/`kill`, read-only
+file access, byte and string copy/compare/find, integer and `f64` math, formatting
+primitives (integer and fixed-point float), and the checked conversions. `stdlib` (written in the language)
 provides arrays, rings, maps, UTF-8 helpers, parsing (including decimal `f64`), formatting,
 typed stream views, and the UI layout/chrome and controls layers. `syslib` (native, Rust) provides
 ports, MMIO handles, the drawing primitives and future block/DMA access.
@@ -1932,3 +1963,4 @@ controls and input dialog for the QMP screenshot harness.
 | 2026-11-17 | M2.4.3 adds the `stdlib` menus layer (15 helpers, 99 total): a menu-bar model and drawing (`ui_menu_bar`, `ui_menu_bar_hit`, `ui_menu_bar_height`), pull-downs (`ui_menu_dropdown`, `ui_menu_hit`) with a check column, right-aligned shortcut text, accent selection, gray disabled rows and `-` separators, `uint` mask helpers (`ui_menu_bit`/`has`/`set`), the selectability and state transitions (`ui_menu_selectable`, `ui_menu_first`, `ui_menu_open`, `ui_menu_close`, `ui_menu_move`), and a pure key mapping (`ui_menu_key`: Escape closes, Enter activates, arrows move/switch menus). The app owns the open menu, the highlight and the masks; checked and disabled are independent and the highlight never changes them. No record/sum/generic/`state`, no new opcode or builtin. Too-small geometry is `Invalid`, disabled graphics draw nothing while the pure helpers work, and clipping is `syslib`'s. Proof `samples/apps/ui_menus` (injected pointer/key events, `get_pixel`), the `langhost` sequence test and `/home/sinan/Desktop/igis-menus.png`. |
 | 2026-11-17 | M2.4.4 adds the `stdlib` dialogs layer (10 helpers, 109 total): `ui_message` (word-wrapped text in a fixed box), the dialog button geometry (`ui_dialog_button_width`, `ui_dialog_button_left`, `ui_dialog_button_top`), `ui_dialog_button` (a button with the default action's double border), `ui_alert`/`ui_alert_hit` (frame, focused title bar, wrapped message, default/cancel pair; alert slots 0 default, 1 cancel, the close box cancels), `ui_input_dialog`/`ui_input_dialog_hit` (prompt, `ui_text_field`, OK/Cancel; slots 0 field, 1 default, 2 cancel, the close box cancels) and `ui_dialog_key` (Enter = result 1 default, Escape = result 2 cancel when `has_cancel`, Tab/Shift+Tab = actions 3/4 focus next/previous, everything else 0). The app owns the modal loop, the focus slot, the result and the text buffer; the input dialog only draws and never mutates the buffer, and editing stays exclusively the M2.4.1 helpers. No record/sum/generic/`state`, no new opcode or builtin. Too-small geometry is `Invalid` (80 px alert, 106 px input dialog, buttons fitting the width); disabled graphics draw nothing while the pure helpers work. Proof `samples/apps/ui_dialogs` (injected key/pointer events, `get_pixel`), the `langhost` sequence test and `/home/sinan/Desktop/igis-dialogs.png`. |
 | 2026-11-17 | M2.4.5 adds the `stdlib` icons and desktop interaction layer (16 helpers, 125 total): `ui_icon` draws a 32×32 monochrome bitmap supplied as `array[uint, 32]` row masks (row 0 the top, bit 0 the left pixel) with one `fill_rect` per maximal set-bit run, and `ui_icon_size`/`ui_icon_row_bit`/`ui_icon_label` complete the asset surface; `ui_icon_cell_x`/`_y`, `ui_icon_label_y` and `ui_icon_grid_hit` are the grid geometry (row-major, `count` valid cells, -1 outside or for non-positive geometry); `ui_double_click` is a pure 400 ms inclusive same-target test with no state; `ui_icon_grab`/`ui_icon_follow` carry the drag offset (inside the bitmap only) and position; `ui_selection_normalize` returns an inclusive band, `ui_selection_rect` the dotted outline and `ui_rect_intersects` the cell overlap (touching edges excluded); `ui_icon_drop` returns -2 inside the trash, else the cell or -1, and `ui_trash_hit` names the rectangle rule. The four bitmaps live in the sample and the app owns the cells, live/selected flags, click time/target and drag clamp; a drag cancels the pending double-click. No record/sum/generic/`state`, no new opcode or builtin. Proof `samples/apps/ui_icons` (injected pointer events, double-click marker, drag to a cell and to the trash, rubber-band selection, `get_pixel`), the `langhost` sequence/pure test and `/home/sinan/Desktop/igis-icons.png`. The compile arena cap rises to 8 MiB (spec 0008). |
+| 2026-11-17 | M2.5.1 adds the application file surface (spec 0013, ADR 0027): `core.fs_list(path, index, var name, var kind, var size) -> Status`, `core.fs_read(path, offset, var dst: bytes[256], var read) -> Status` and `core.fs_size(path, var size) -> Status` as host builtins 41–43. The view is the image root only; paths use the shared `core.spawn` syntax (relative, no `..`, ≤256 bytes), a separator is `Invalid` (unsupported subdirectory), listing reports kind `0` file / `1` directory / `2` other, reads are 256-byte chunks with `Ok`/0 at EOF, and every failure leaves the out-parameters untouched. No allocation, no handle and no new opcode. |
