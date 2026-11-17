@@ -220,6 +220,7 @@ fn stage_app_samples_compile_with_the_spawn_builtins() {
         "text",
         "desktop",
         "ui_layout",
+        "module_demo",
     ] {
         let path = app_path(name);
         let source = std::fs::read(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
@@ -228,6 +229,22 @@ fn stage_app_samples_compile_with_the_spawn_builtins() {
         });
         assert!(!package.code.is_empty(), "{name} produced no code");
     }
+}
+
+#[test]
+fn module_demo_imports_lib_math_on_the_host() {
+    // spec 0018 M1–M13, M3.3: the staged `/lib` proof reads `lib/math.ig` from
+    // the same tree the kernel's image reader walks, so the host run pins the
+    // module path as well as the five helpers' results.
+    let path = app_path("module_demo");
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
+    let package = langhost::compile(&source, "module_demo").expect("module_demo compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(
+        String::from_utf8(result.output).expect("UTF-8 output"),
+        "module_demo: ok\n"
+    );
 }
 
 #[test]

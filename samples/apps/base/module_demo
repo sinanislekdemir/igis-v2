@@ -1,0 +1,58 @@
+unit module_demo;
+
+// In-kernel proof of the `/lib` module path (spec 0018, M1–M13; M3.3).
+//
+// `lib.math` is `samples/apps/lib/math.ig`, resolved by the kernel's
+// `compiler::SourceReader` over the mounted image at load time. The module's
+// helpers are called as `math.*`; the application itself declares no top-level
+// `var` state, no stream endpoint and no new syntax.
+
+uses core, lib.math;
+
+procedure check(what: const string[0]; passed: bool; ok: var bool);
+begin
+  if not passed then
+  begin
+    core.write("module_demo: FAIL ");
+    core.write(what);
+    core.write("\n");
+    ok := false;
+  end;
+end;
+
+procedure main(args: const string[1024]);
+var
+  ok: bool;
+begin
+  ok := true;
+
+  // clamp: inside the band, below the low bound, above the high bound, and the
+  // low-above-high rule.
+  check("clamp in band", math.clamp(5, 0, 9) = 5, ok);
+  check("clamp low edge", math.clamp(0, 0, 9) = 0, ok);
+  check("clamp high edge", math.clamp(9, 0, 9) = 9, ok);
+  check("clamp below low", math.clamp(0 - 3, 0, 9) = 0, ok);
+  check("clamp above high", math.clamp(42, 0, 9) = 9, ok);
+  check("clamp low above high", math.clamp(3, 9, 2) = 9, ok);
+
+  // min_int / max_int, both argument orders and negatives.
+  check("min_int left", math.min_int(2, 5) = 2, ok);
+  check("min_int right", math.min_int(5, 2) = 2, ok);
+  check("min_int negative", math.min_int(0 - 7, 0 - 2) = 0 - 7, ok);
+  check("max_int left", math.max_int(5, 2) = 5, ok);
+  check("max_int right", math.max_int(2, 5) = 5, ok);
+  check("max_int negative", math.max_int(0 - 7, 0 - 2) = 0 - 2, ok);
+
+  // abs_int: negative, zero and positive.
+  check("abs_int negative", math.abs_int(0 - 7) = 7, ok);
+  check("abs_int zero", math.abs_int(0) = 0, ok);
+  check("abs_int positive", math.abs_int(7) = 7, ok);
+
+  // sign: -1, 0 and 1.
+  check("sign negative", math.sign(0 - 3) = 0 - 1, ok);
+  check("sign zero", math.sign(0) = 0, ok);
+  check("sign positive", math.sign(3) = 1, ok);
+
+  if ok then
+    core.write("module_demo: ok\n");
+end;

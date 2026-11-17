@@ -6,7 +6,9 @@
 //! claim and processes at most one request per opportunity: it reads the source
 //! from ext2, compiles it in the kernel with the same static buffers the boot
 //! path uses, validates the package, places `code`/`state`/`stack` and enqueues
-//! the task under the reserved id.
+//! the task under the reserved id. A `uses lib.*` clause is compiled in the same
+//! pass: [`ImageReader`] supplies the module sources from the same image (spec
+//! 0018, M1–M13).
 //!
 //! A failure is not reported to the caller directly (`core.spawn` returns
 //! `Status.Ok` once the id is reserved; the compile happens later). It is
@@ -62,6 +64,29 @@ static MANIFEST: SpinLock<[u8; compiler::MAX_MANIFEST_BYTES]> =
     SpinLock::new([0; compiler::MAX_MANIFEST_BYTES]);
 /// The compiler is a single resource; one compile at a time.
 static COMPILER_LOCK: SpinLock<()> = SpinLock::new(());
+
+/// [`compiler::SourceReader`] over the mounted image (spec 0018, "Compiler
+/// interface").
+///
+/// `uses lib.a` resolves to `lib/a.ig` and the compiler reads it through this
+/// reader; the bytes are copied into the compiler's own arena, so the kernel
+/// needs no per-module buffer and [`SOURCE`] stays at one unit's cap. A read
+/// failure is reported by the compiler as a `Diagnostic` naming the unit, the
+/// resolved path and the `uses` line.
+struct ImageReader<'image, 'device> {
+    image: &'image Ext2<'device>,
+}
+
+impl compiler::SourceReader for ImageReader<'_, '_> {
+    fn size(&self, path: &str) -> Result<usize, Status> {
+        let size = self.image.file_size(path)?;
+        usize::try_from(size).map_err(|_| Status::CapacityExceeded)
+    }
+
+    fn read(&self, path: &str, out: &mut [u8]) -> Result<usize, Status> {
+        self.image.read_file(path, out)
+    }
+}
 
 /// Largest `state` or `stack` region a manifest may request (matching the
 /// compiler/verifier section cap).
@@ -633,9 +658,10 @@ fn load(image: &Ext2<'_>, name: &str, id: u64, args: &[u8], diag: &mut [u8]) -> 
     let mut code_scratch = CODE_SCRATCH.lock();
     let mut manifest = MANIFEST.lock();
 
-    let package = match compiler::compile_into(
+    let package = match compiler::compile_with_imports(
         &source[..source_len],
         name,
+        &mut ImageReader { image },
         &mut arena[..],
         &mut code_scratch[..],
         &mut manifest[..],
