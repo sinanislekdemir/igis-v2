@@ -14,8 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `fb452bd` (the M2.4.5 `stdlib` icons and desktop layer,
-  `ui_icons` proof, screenshot harness and tests) plus this docs/resume commit on top.
+- **Last commit:** `9d9b0f1` (the M2.4.6 widgets demo, screenshot harness and
+  `langhost` tests) plus this docs/resume commit on top.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -29,35 +29,44 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `stdlib` string editing and selection layer (`b7b813c`), M2.4.2 the `stdlib` controls
   layer plus the `ui_controls` proof (`320d086`), M2.4.3 the `stdlib` menus layer
   plus the `ui_menus` proof (`9fa9fd0`), M2.4.4 the `stdlib` dialogs layer plus the
-  `ui_dialogs` proof (`f03559b`), and M2.4.5 the `stdlib` icons and desktop layer plus
-  the `ui_icons` proof (`fb452bd`).
-- **Verified at that point:** **345 host tests** (abi 15, compiler 151, interpreter 117,
-  langhost 62, including doctests); `cargo xtask build`/`image` clean; the boot prints
+  `ui_dialogs` proof (`f03559b`), M2.4.5 the `stdlib` icons and desktop layer plus
+  the `ui_icons` proof (`fb452bd`), and M2.4.6 the widgets demo window plus the
+  `widgets` proof (`9d9b0f1`).
+- **Verified at that point:** **347 host tests** (abi 15, compiler 151, interpreter 117,
+  langhost 64, including doctests); `cargo xtask build`/`image` clean; the boot prints
   `console: terminal ok`, `console: log ok`, `console: route ok`, `graphics: clip ok`,
   `window: rules ok`, `window: paint ok` and `window: route ok` on `-smp 4` and
   `-smp 1`; `run text_edit` → `text_edit: ok` on both; `run ui_layout` → `ui_layout: ok`
   on both; `run ui_controls` → `ui_controls: ok` on both; `run ui_menus` →
   `ui_menus: ok` on both; `run ui_dialogs` → `ui_dialogs: ok` on both; `run ui_icons` →
-  `ui_icons: open Document` then `ui_icons: ok` on both;
+  `ui_icons: open Document` then `ui_icons: ok` on both; `run widgets` (or
+  `run widgets check`) → `widgets: ok` on both, and `widgets: host ok` on `langhost`;
   `run windows_proof` → `windows_proof: ok` in its own boot;
   `run desktop_shell check` →
   `desktop_shell: ok`; `run windows` → `windows: ok`; `run windows_events` →
   `windows_events: ok`; `run windows_demo` → `windows_demo: checks ok`,
   `windows_demo: ready`, `windows_demo: ok`; `run mouse` → `mouse: ok` in its own boot
   (and through both QMP harnesses); regressions `events`, `desktop`, `text 42 hi`,
-  `frames`, `streams`, `deep`, `utf8`, `realtime`, `cores` pass on both core counts;
+  `frames`, `streams`, `deep`, `utf8`, `realtime`, `cores` pass on `-smp 4` (the UI
+  samples also on `-smp 1`);
   `scripts/tablet_qmp.py` 7/7, `--no-tablet` → `mouse: ok`,
   `scripts/mouse_burst_qmp.py` → 600/600; the embedded `stdlib` is 114,823 B of source,
   84,920 B of code and 4,134,600 B of compile scratch with a minimal application (the
-  `ui_icons` pair needs 5,386,584 B; the source cap is 128 KiB and the arena cap 8 MiB);
-  screenshots `/home/sinan/Desktop/igis-desktop.png` (1024×768, 31555
+  `ui_icons` pair needs 5,386,584 B, the `widgets` pair 6,546,928 B with a 57,388 B
+  application; the source cap is 128 KiB and the arena cap 8 MiB). The `widgets` task
+  package is 165,424 B of code (41 frames), 9,608 B of state and a 25,360 B stack.
+  Screenshots `/home/sinan/Desktop/igis-desktop.png` (1024×768, 31555
   bytes), `igis-windows.png` (1024×768, 28169 bytes), `igis-m23-proof.png`
   (1024×768, 30901 bytes), `igis-controls.png` (1024×768, 32967 bytes),
   `igis-menus.png` (1024×768, 27590 bytes), `igis-dialogs.png`
-  (1024×768, 29544 bytes) and `igis-icons.png` (1024×768, 33991 bytes).
-- **Next slice (not started):** **M2.4.6** — the "widgets" demo window that exercises
-  every control (button, checkbox, text field, scrollbar, list, menus and dialogs in one
-  composed window).
+  (1024×768, 29544 bytes), `igis-icons.png` (1024×768, 33991 bytes) and
+  `igis-widgets.png` (1024×768, 25894 bytes).
+- **Next slice (not started):** **M2.5.1** — the read-only file API for applications
+  (`core.fs_list`/`core.fs_read` with bounded buffers and `Status` errors). The M2.4
+  UI toolkit is complete; the M2.4.6 demo is its integration proof.
+- **M2.4 complete:** the language-level UI toolkit now has the layout/chrome (M2.4.0),
+  string editing (M2.4.1), controls (M2.4.2), menus (M2.4.3), dialogs (M2.4.4), icons
+  (M2.4.5) and the one composed widgets demo (M2.4.6).
 - **Known sample sensitivity:** `windows_proof` must run in its own boot in this
   environment. Its step 23 (`A old area restored to the terminal`) samples `(100, 350)`,
   which can land on scrolled terminal text after several text apps; the same failure
@@ -73,7 +82,7 @@ Trust the repository, not a summary. On a fresh start:
 
 1. `git status --short` and `git log --oneline -8` — the tree should be clean and the top
    commit should match the "Last commit" line above; if not, stop and reconcile first.
-2. `cargo test -q -p abi -p compiler -p interpreter -p langhost` — expect **345** tests
+2. `cargo test -q -p abi -p compiler -p interpreter -p langhost` — expect **347** tests
    plus the doctests, all green.
 3. `cargo xtask build` — expect a clean kernel build.
 4. Read, in this order: this file, `AGENTS.md` (status paragraph + decisions table),
@@ -86,17 +95,18 @@ Trust the repository, not a summary. On a fresh start:
      `( sleep 6; printf 'run text_edit\n'; sleep 10; printf 'run ui_layout\n'; sleep 6; \
        printf 'run ui_controls\n'; sleep 10; printf 'run ui_menus\n'; sleep 10; \
        printf 'run ui_dialogs\n'; sleep 10; printf 'run ui_icons\n'; sleep 12; \
+       printf 'run widgets check\n'; sleep 20; \
        printf 'run desktop_shell check\n'; sleep 20; printf 'run desktop\n'; sleep 4; \
        printf 'run events\n'; sleep 8; printf 'run windows\n'; sleep 6; \
        printf 'run windows_events\n'; sleep 6; printf 'run windows_demo\n'; sleep 22; \
-       printf 'exit\n' ) | timeout 260s \
+       printf 'exit\n' ) | timeout 280s \
        qemu-system-x86_64 -cdrom build/igis.iso -m 256M -serial stdio -monitor none \
        -no-reboot -no-shutdown -accel tcg -vga std -display none -smp 4 -usb \
        -device usb-tablet`
      → `console: terminal ok`, `console: log ok`, `console: route ok`,
      `graphics: clip ok`, `window: rules ok`, `window: paint ok`, `window: route ok`,
      `text_edit: ok`, `ui_layout: ok`, `ui_controls: ok`, `ui_menus: ok`,
-     `ui_dialogs: ok`, `ui_icons: open Document`, `ui_icons: ok`,
+     `ui_dialogs: ok`, `ui_icons: open Document`, `ui_icons: ok`, `widgets: ok`,
      `desktop_shell: ok`, `desktop: ok`, `keyboard: decoder ok`, `events: ok`,
      `windows: ok`, `windows_events: ok`, `windows_demo: checks ok`,
      `windows_demo: ready`, `windows_demo: ok`, `ioapic: version ...`,
@@ -109,8 +119,8 @@ Trust the repository, not a summary. On a fresh start:
      harness does): a full-screen `syslib.clear` erases the kernel windows' pixels and a
      concurrent console repaint can overwrite the background pixels the sample checks.
    - Repeat the UI samples with `-smp 1`: `text_edit: ok`, `ui_layout: ok`,
-     `ui_controls: ok`, `ui_menus: ok`, `ui_dialogs: ok`, `ui_icons: ok` and
-     `windows_proof: ok` must hold there too.
+     `ui_controls: ok`, `ui_menus: ok`, `ui_dialogs: ok`, `ui_icons: ok`,
+     `widgets: ok` and `windows_proof: ok` must hold there too.
    - `python3 scripts/desktop_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
      `/home/sinan/Desktop/igis-desktop.png`.
    - `python3 scripts/windows_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
@@ -125,23 +135,25 @@ Trust the repository, not a summary. On a fresh start:
      `/home/sinan/Desktop/igis-dialogs.png`.
    - `python3 scripts/ui_icons_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
      `/home/sinan/Desktop/igis-icons.png`.
+   - `python3 scripts/widgets_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
+     `/home/sinan/Desktop/igis-widgets.png`.
    - `python3 scripts/tablet_qmp.py build/igis.iso` → `7/7 absolute cases passed`.
    - `python3 scripts/tablet_qmp.py build/igis.iso --no-tablet` → `mouse: ok` fallback.
    - `python3 scripts/mouse_burst_qmp.py build/igis.iso` → `600/600` px with a
      `mouse: aux IRQ12 delivered ...` line; `--cores 1` is the single-core variant.
-6. The next slice is **M2.4.6** (the widgets demo window). The window service is complete
-   for M2: the M2.3.5 proof covers two tasks, focus/raise by click, a scripted
-   `window_move` drag and `Expose` repaint. M2.4.0 added the `stdlib` metrics, palette and
-   client chrome; M2.4.1 the atomic, code-point-safe string editing and selection helpers
-   a text field needs; M2.4.2 the controls; M2.4.3 the menu bar, pull-downs, `uint` masks
-   and the keyboard mapping; M2.4.4 the dialogs and alerts; M2.4.5 the 32×32 icon
-   bitmaps, grid geometry, double-click threshold, drag offsets, rubber-band selection and
-   the trash drop rule (`ui_icons`, with the assets in the sample). The widgets demo is
-   still ahead. The M2 limitations still in force: an app that
-   ignores an `Expose` keeps stale content, a full-screen `syslib.clear` erases the
-   kernel windows' pixels, there is no per-task clip (a covered client must repaint only
-   its visible part), and there is no global work area (an app at `y = 0` covers the menu
-   bar until the shell's next event).
+6. The next slice is **M2.5.1** (the read-only file API for applications:
+   `core.fs_list`/`core.fs_read` with bounded buffers and `Status` errors). The M2.4 UI
+   toolkit is complete: M2.4.0 added the `stdlib` metrics, palette and client chrome;
+   M2.4.1 the atomic, code-point-safe string editing and selection helpers a text field
+   needs; M2.4.2 the controls; M2.4.3 the menu bar, pull-downs, `uint` masks and the
+   keyboard mapping; M2.4.4 the dialogs and alerts; M2.4.5 the 32×32 icon bitmaps, grid
+   geometry, double-click threshold, drag offsets, rubber-band selection and the trash
+   drop rule; and M2.4.6 the composed widgets demo (`samples/apps/widgets`) that proves
+   the whole toolkit in one window and one event loop. The M2 limitations still in force:
+   an app that ignores an `Expose` keeps stale content, a full-screen `syslib.clear`
+   erases the kernel windows' pixels, there is no per-task clip (a covered client must
+   repaint only its visible part), and there is no global work area (an app at `y = 0`
+   covers the menu bar until the shell's next event).
 
 If anything in this file disagrees with the code or the specs, the code and specs win and
 this file must be corrected in the same commit.
@@ -289,7 +301,19 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
   to an empty cell, drag to the trash, rubber-band selection, `get_pixel`) and the
   `langhost` sequence/pure test; `scripts/ui_icons_screenshot_qmp.py` writes
   `igis-icons.png`. The arena cap rose to 8 MiB (the pair needs 5,386,584 B; spec 0008).
-- [ ] **M2.4.6** Proof: a "widgets" demo window that exercises every control.
+- [x] **M2.4.6** Proof: the `widgets` demo window that exercises every control. One 760×560
+  client panel (`samples/apps/widgets`) with an app-drawn File/Edit/View menu bar and clock,
+  a button, a checkbox, a text field (typing, selection, scroll, a 2-byte `é` through the
+  M2.4.1 helpers), a scrollbar over a 16-line document, an 8-row list, a folder/document
+  icon strip with a trash target, an alert and a text-input dialog (one modal state
+  machine: while a dialog is open every key and pointer event goes to it; the field is
+  published only on OK). Check mode drives injected pointer/key events and checks pixels
+  with `get_pixel`; it prints `widgets: ok` on `-smp 4` and `-smp 1` and `widgets: host ok`
+  on `langhost`, and `langhost/tests/e2e.rs` pins the composed drawing sequence and the
+  control/key results. No new helper, opcode or builtin (125 `stdlib` functions); the
+  `widgets` source is 57,388 B and the pair needs 6,546,928 B of scratch.
+  `scripts/widgets_screenshot_qmp.py` writes `igis-widgets.png` (`9d9b0f1`). **M2.4 is
+  complete.**
 
 ### M2.5 — applications
 
@@ -329,7 +353,7 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
 | Nominal `TaskId` (Q43) | OPEN-QUESTIONS Q43 | before `stdlib` exposes task primitives |
 | Runtime-capacity buffer parameters (Q46) | OPEN-QUESTIONS Q46 | when slicing/wider stream reads need it |
 | Explicit stream close (Q10) | spec 0006 | streams v2 |
-| Compile arena: 4.13 MiB of 8 MiB used by `stdlib` with a minimal app (115 KiB source); the `ui_icons` pair needs 5.39 MiB | spec 0008 | watch as M2.4.6 grows the library |
+| Compile arena: 4.13 MiB of 8 MiB used by `stdlib` with a minimal app (115 KiB source); the `ui_icons` pair needs 5.39 MiB and the `widgets` pair 6.55 MiB | spec 0008 | watch as M2.5 grows the library |
 | Guard table cache exhaustion (32 tables) | spec 0002/spec 0009 | long-lived workloads with many stacks |
 | `cargo fmt` drift in three pre-existing files + CI fmt/clippy | repo | housekeeping |
 

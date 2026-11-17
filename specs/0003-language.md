@@ -1767,7 +1767,17 @@ the dialog button geometry, `ui_alert`, `ui_input_dialog`, their hit tests and
 landed as ordinary language code over the drawing primitives (`ui_icon`, the bit and grid
 geometry helpers, `ui_double_click`, the grab/follow pair, the selection
 normalize/outline/intersection helpers and the drop/trash rules), again with no opcode or
-builtin. The widgets demo (M2.4.6) is still ahead.
+builtin. The M2.4.6 widgets demo (`samples/apps/widgets`) is the integration proof:
+one 760×560 client panel composes a client menu bar with File/Edit/View pull-downs,
+a button, a checkbox, a text field, a scrollbar over a 16-line document, an 8-row
+list, a compact folder/document icon strip with a trash target, an alert and a
+text-input dialog. It adds no helper, opcode or builtin; the app owns every state
+scalar and the one event loop, and the dialogs are the same state machine (while a
+dialog is open every key and pointer event goes to it). Check mode drives injected
+pointer and key events and checks representative pixels, including a 2-byte `é`
+edit through the M2.4.1 helpers, and prints `widgets: ok` in the kernel on `-smp 4`
+and `-smp 1` or `widgets: host ok` on `langhost`; `widgets shot` composes the menu,
+controls and input dialog for the QMP screenshot harness.
 
 ## Failure modes
 
