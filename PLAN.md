@@ -14,8 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** the M2.4.2 controls commit (`stdlib`, proof, tests) plus the docs/resume
-  commit on top.
+- **Last commit:** `320d086` (the M2.4.2 `stdlib` controls layer, proof and tests) plus
+  this docs/resume commit on top.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -27,9 +27,9 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   windows and `window_info` (`4f9a45e`), M2.3.5 the two-application proof
   (`8688f88`), M2.4.0 the `stdlib` UI layout layer (`655faf1`, `d8f6609`), M2.4.1 the
   `stdlib` string editing and selection layer (`b7b813c`), and M2.4.2 the `stdlib` controls
-  layer plus the `ui_controls` proof (commit hash in the docs/resume commit on top).
+  layer plus the `ui_controls` proof (`320d086`).
 - **Verified at that point:** **333 host tests** (abi 15, compiler 145, interpreter 117,
-  langhost 55, including doctests); `cargo xtask build`/`image` clean; the boot prints
+  langhost 56, including doctests); `cargo xtask build`/`image` clean; the boot prints
   `console: terminal ok`, `console: log ok`, `console: route ok`, `graphics: clip ok`,
   `window: rules ok`, `window: paint ok` and `window: route ok` on `-smp 4` and
   `-smp 1`; `run text_edit` → `text_edit: ok` on both; `run ui_layout` → `ui_layout: ok`
