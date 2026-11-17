@@ -527,9 +527,11 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
     path. The primitives return `Status` and fill the caller's `Diagnostic` on `spawn`
     and the `ExitReason` sum type on `wait` (Q43 is now `core.run`, `TaskId` and the
     request-completion diagnostic path).
-11. ~~Console input~~ — done: COM1 and the PS/2 keyboard are polled in the service
-    opportunity, a kernel-staged line ring echoes/edits, and `core.read_line` blocks the
-    shell until a line exists (Q44; spec 0005).
+11. ~~Console input~~ — done: COM1 drains into a 512-byte raw byte ring in the service
+    opportunity and `core.read_input` copies what is waiting without blocking; the kernel
+    neither echoes nor assembles lines, the shell echoes and edits its own `string[256]`
+    with the `stdlib.str_*` helpers, and PS/2 presses are events only (Q44 resolved,
+    ADR 0037; spec 0005).
 12. ~~Buffer indexing, comparison and length~~ — done: `buf[i]` reads a raw `byte` checked
     against the runtime length, `bytes[i] := b` writes one byte checked against the capacity
     (extending the length and zero-filling the gap), `string` is read-only by index, `=`/`<>`
@@ -538,10 +540,9 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
 13. ~~String search, slicing and command arguments~~ — done: `core.find` and the staged
     `core.substr_into` (`find`/`substr` opcodes, 57 → 59 in ABI v1) give the shell `cmd`/`rest`
     splitting and `echo <text>`; `run <app> [args]` separates the tail at its first space and
-    `child` prints the received `main(args)`. The host `read_line` stub scripts
-    `help`, `run child world`, `echo hi there`, `exit`. Q44 narrowed in M2.4.1: the
-    `stdlib` editing primitives now exist, and the kernel keeps the staged 4-line ring only
-    until the shell runs in a terminal window (M2.5.5).
+    `child` prints the received `main(args)`. The host console scripts
+    `help`, `run child world`, `echo hi there`, `exit` as a byte queue, so `langhost`
+    exercises the same application-side line editing (Q44 resolved, ADR 0037).
 14. ~~Integer formatting and the first `syslib` ports~~ — done: `core.format_int_into`
     (`format_int`, 59 → 60; decimal/hex, sign, zero-padding, exact fit or `-6`, bad base
     `-4`) and `syslib.port_in8`/`port_out8` (builtin ids 7/8, `Host` defaults, kernel over
