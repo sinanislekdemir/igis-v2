@@ -5,6 +5,7 @@ mod clock;
 mod console;
 mod event;
 mod ext2;
+mod font;
 mod font8x8;
 mod frame;
 mod gfx;
@@ -68,6 +69,18 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
         Ok(()) => println!("keyboard: decoder ok"),
         Err(step) => {
             println!("keyboard: decoder FAIL at step {step}");
+            arch_x86_64::halt();
+        }
+    }
+
+    // The proportional font's source table (spec 0015): every printable glyph
+    // renders to a valid 12-row box, the variable advances hold, and the 8×8
+    // fallback is eight pixels per byte. It also warms the glyph cache before
+    // the first window title is drawn.
+    match font::self_check() {
+        Ok(()) => println!("font: glyphs ok"),
+        Err(step) => {
+            println!("font: glyphs FAIL at step {step}");
             arch_x86_64::halt();
         }
     }

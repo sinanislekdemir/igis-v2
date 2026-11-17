@@ -34,7 +34,7 @@ from tablet_qmp import Qmp, Serial  # noqa: E402
 DEFAULT_OUTPUT = "/home/sinan/Desktop/igis-boot-desktop.png"
 
 # Centre of the desktop's direct `Terminal` item (x range 180..256, y 0..22).
-TERMINAL_ITEM = (210, 10)
+TERMINAL_ITEM = (170, 10)
 
 
 def hid_axis(pixel, extent):

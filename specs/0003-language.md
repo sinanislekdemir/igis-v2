@@ -4,7 +4,7 @@
 - **Scope:** application language, type system, memory model, standard library
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0002, 0004, 0005, 0007, 0010, 0011, 0016, 0018, 0021, 0024
+- **ADRs:** 0002, 0004, 0005, 0007, 0010, 0011, 0016, 0018, 0021, 0024, 0030
 - **Updated:** 2026-11-17
 
 ## Context
@@ -1154,6 +1154,9 @@ syslib.fill_rect(x: int, y: int, w: int, h: int, color: uint) -> Status
 syslib.fill_dither(x: int, y: int, w: int, h: int, color: uint) -> Status
 syslib.draw_rect(x: int, y: int, w: int, h: int, color: uint) -> Status
 syslib.draw_text(x: int, y: int, text: const string[0], color: uint) -> Status
+syslib.text_width_prop(text: const string[0]) -> uint  // 0 when graphics are disabled
+syslib.text_height_prop() -> uint                      // 12, or 0 when disabled
+syslib.draw_text_prop(x: int, y: int, text: const string[0], color: uint) -> Status
 syslib.get_pixel(x: int, y: int) -> uint
 syslib.present(x: int, y: int, w: int, h: int) -> Status
 syslib.clear(color: uint) -> Status
@@ -1170,6 +1173,18 @@ a blank cell for a byte outside `0x00..=0x7F`; `get_pixel` returns `0` outside t
 whole screen and presents it. Drawing primitives other than `clear` do not present. When
 graphics are disabled the size is `0x0`, every primitive is `Invalid` and `get_pixel` is
 `0` (spec 0009, G15).
+
+**Proportional font (spec 0015, M2.6.1).** Three additional primitives expose a
+12-pixel-tall proportional bitmap font for printable ASCII (`0x20..=0x7E`).
+`text_width_prop` is the sum of the glyph advances in pixels; `text_height_prop` is the
+12-pixel line height; `draw_text_prop` draws with `y` at the top of the line box and a
+transparent background. A byte outside printable ASCII contributes an 8-pixel advance
+and keeps an 8×8 console-font cell (blank at or above `0x80`), so mixed text is
+deterministic. The same colour and clipping rules apply. With graphics disabled the two
+metrics are `0` and `draw_text_prop` is `Invalid`. `draw_text` is unchanged and remains
+the 8×8 primitive; the console and the `stdlib.ui_*` helpers stay on 8×8 in this slice.
+The window-service title bar and the desktop shell's menu bar/clock use the proportional
+face. Builtins 45–47; no opcode.
 
 **Staged input surface (spec 0010).** The pointer is a machine-wide value, not a device
 handle. These are the only primitives an application has for it:

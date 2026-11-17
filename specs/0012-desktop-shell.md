@@ -5,7 +5,7 @@
   `interpreter`, `abi`; `samples/apps`; M2.3.4 of the desktop milestone
 - **Supersedes:** the full-screen console of spec 0009 G14 (superseded in part)
 - **Superseded by:** none
-- **ADRs:** 0020, 0024, 0025, 0029
+- **ADRs:** 0020, 0024, 0025, 0029, 0030
 - **Updated:** 2026-11-17
 
 ## Context
@@ -52,11 +52,13 @@ resize. Those are M2.4/M2.5.
   global clip: a whole-grid repaint must not clip an application drawing on another
   core. A cell that is partly or wholly covered leaves the covering window untouched. A
   single cell is presented after it is painted; a whole-window repaint presents each
-  visible part once. Because a window on another core can move above the console
-  between the visible-parts query and the paint, every cell/part paint reads the
-  window service's visible-geometry generation before the query, compares it after the
-  paint, and retries with fresh parts (bounded); a move after the final check is covered
-  by the service's own expose on the next pump.
+  visible part once. Because a window on another core can open, raise or move above the
+  console between the visible-parts query and the paint, the console holds the window
+  table lock across the whole cell/part paint (`window::paint_visible_parts`); this is
+  the same `WINDOW → SCREEN` order as the service's repair, and the paint callback never
+  calls the console. A window opened or moved afterwards runs its own repair, which
+  paints above the console; the console follows a moved window through the
+  visible-geometry generation on the next pump.
 - **D4 (MUST):** On a pending `Expose` for owner `0`, the console repaints that window's
   grid. The repaint is **pulled**, not called from the window service: `console::pump`
   takes exposed owner-0 windows at the service opportunity (and the idle loop, through
@@ -155,9 +157,9 @@ resize. Those are M2.4/M2.5.
   exits without spawning. The kernel windows do not exist and the console is
   serial-only. `window_info` is `NotFound` for every index.
 - **D17 (MUST):** Lock order stays acyclic: console drawing and `console::pump` take
-  `CONSOLE`, then `WINDOW` (to read visible parts), then `SCREEN` (to paint); the window
-  service's repair takes `WINDOW`, then `SCREEN`; no path takes `WINDOW` and then
-  `CONSOLE`. Producers never take the window lock.
+  `CONSOLE`, then `WINDOW` (to read visible parts **and hold through the paint**), then
+  `SCREEN`; the window service's repair takes `WINDOW`, then `SCREEN`; no path takes
+  `WINDOW` and then `CONSOLE`. Producers never take the window lock.
 - **D18 (MUST):** M2.5.5 extends D1/D4: the **terminal** half may be attached to an
   ordinary task-owned window through `core.terminal_attach` (spec 0014, ADR 0028). The
   first successful task attach releases the owner-`0` boot Terminal; the System Log
@@ -361,3 +363,4 @@ while that id is its own; otherwise it presents what the service last left.
 | 2026-11-17 | D3 made race-free: `window::generation()` (kernel-internal) is bumped by every visible mutation and read by `paint_cell`/`repaint` before computing visible parts and after painting; a changed generation retries the cell/part with fresh parts (bounded `PAINT_RETRIES`). M2.3.5's two-application proof deterministically reproduced the old stale-parts overwrite (a log-grid repaint computed before a window moved above it painted that window's area afterwards); the retry keeps the covered window's pixels. `samples/apps/windows_proof` and `scripts/windows_proof_screenshot_qmp.py` added. |
 | 2026-11-17 | D18 added by M2.5.5 (spec 0014, ADR 0028): the terminal half of the console can be attached to a task-owned window; the first attach releases the owner-0 boot Terminal, exposes are pulled by id (terminal) and owner 0 (log), and a vanished window detaches to serial-only. The System Log, D3's explicit clip/generation retry and D17's lock order are unchanged. |
 | 2026-11-17 | M2.5.6 boot to the desktop: `entrypoint` (the `desktop_shell` source staged under that file name) is the boot entry, `shell` the fallback; the `Terminal` menu item spawns `shell` with `core.spawn` and later clicks raise the live window; the desktop never attaches the terminal; graphics-disabled boot spawns the text shell. D19 records the permanent-queue-consumer limitation and the `--shell` image used for the event-injecting regression suite. `scripts/boot_desktop_qmp.py` proves the boot menu click and captures `igis-boot-desktop.png`. |
+| 2026-11-17 | M2.6.1 (spec 0015, ADR 0030): the desktop shell's menu-bar labels and clock use the proportional font, and the service title bar does too; the item hit ranges are derived from the measured label widths. D3 is strengthened: `console::paint_cell`/`repaint` now call `window::paint_visible_parts`, which holds the window table lock across the paint, replacing the bounded generation retry (a cell painted with stale parts could still overwrite a newly opened window's chrome once; `desktop_shell check` reproduced it on `-smp 4`). The generation still follows a moved terminal on the next pump. |

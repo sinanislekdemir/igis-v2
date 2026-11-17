@@ -659,6 +659,33 @@ pub mod builtin {
     /// Operands: `[window id]`.
     pub const TERMINAL_ATTACH: u32 = 44;
 
+    // ---- proportional font (spec 0015) ----------------------------------
+    //
+    // The font lives in the kernel (`kernel/src/font.rs`); these three
+    // builtins expose its metrics and its drawing path. `draw_text` stays the
+    // 8×8 fallback and is unchanged. No opcode is added: the machine resolves
+    // the text reference and the host owns the rasterisation.
+
+    /// `syslib.text_width_prop(text) -> uint`: the measured advance width of
+    /// `text` in the proportional font, in pixels (spec 0015). Printable ASCII
+    /// contributes its variable glyph advance; every other byte contributes
+    /// the 8×8 fallback advance of 8. `0` when graphics are disabled.
+    /// Operands: `[text reference]`.
+    pub const TEXT_WIDTH_PROP: u32 = 45;
+
+    /// `syslib.text_height_prop() -> uint`: the proportional font's line
+    /// height in pixels (12), or `0` when graphics are disabled. No operands.
+    pub const TEXT_HEIGHT_PROP: u32 = 46;
+
+    /// `syslib.draw_text_prop(x, y, text, color) -> Status`: draw proportional
+    /// text with a transparent background (spec 0015). `y` is the top of the
+    /// 12-pixel line box; printable ASCII uses the variable-width glyphs,
+    /// other bytes keep an 8×8 cell with an 8-pixel advance, and bytes at or
+    /// above `0x80` are blank. A colour above `0x00FF_FFFF` is `Invalid`; the
+    /// screen and the clip bound every pixel, so an off-screen origin is not
+    /// an error. Operands: `[x][y][text reference][color]`.
+    pub const DRAW_TEXT_PROP: u32 = 47;
+
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
         match id {
@@ -706,6 +733,9 @@ pub mod builtin {
             FS_READ => Some((4, 1)),
             FS_SIZE => Some((2, 1)),
             TERMINAL_ATTACH => Some((1, 1)),
+            TEXT_WIDTH_PROP => Some((1, 1)),
+            TEXT_HEIGHT_PROP => Some((0, 1)),
+            DRAW_TEXT_PROP => Some((4, 1)),
             _ => None,
         }
     }

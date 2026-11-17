@@ -401,13 +401,17 @@ on the same table; the machine, not the compiler, owns the runtime checks.
 | 42 | `fs_read` | 4 → 1 | path ref, offset, dst ref, read ref; ≤256 bytes, 0 at EOF; writes on `Ok` |
 | 43 | `fs_size` | 2 → 1 | path ref, size ref; writes on `Ok` |
 | 44 | `terminal_attach` | 1 → 1 | window id; binds the one console terminal to the caller's window |
+| 45 | `text_width_prop` | 1 → 1 | text reference; measured proportional advance in pixels, 0 when disabled |
+| 46 | `text_height_prop` | 0 → 1 | the proportional line height (12), 0 when disabled |
+| 47 | `draw_text_prop` | 4 → 1 | x, y, text reference, colour; proportional glyphs with the 8×8 fallback |
 
 Graphics builtins add no opcode, so ABI v1 stays at **75** opcodes (spec 0009). The input
 builtins (spec 0010), the window builtins (spec 0011), the application file builtins
-(spec 0013) and `terminal_attach` (spec 0014) add none either; the interpreter owns the
+(spec 0013), `terminal_attach` (spec 0014) and the proportional-font builtins (spec
+0015) add none either; the interpreter owns the
 button-mask rule, the path validation and the operand decoding, the host owns the pointer
 state, the event queue, the window table, poll-time routing, the per-window exposes, the
-read-only ext2 view and the terminal attachment.
+read-only ext2 view, the terminal attachment and the font's glyph cache.
 
 ### Compiler / runtime split
 
@@ -583,3 +587,4 @@ pub fn run(task: &mut Task);
 | 2026-11-17 | The M2.4.5 icons and desktop layer adds no opcode or builtin (spec 0003, "UI icons and desktop"): all 16 helpers are ordinary language code over `syslib`, and the 32×32 `array[uint, 32]` bitmap is an ordinary array parameter. The library grew to 114,823 B of source and 84,920 B of code, and the pair with a minimal application needs 4,134,600 B of scratch (the `ui_icons` pair needs 5,386,584 B), so `MAX_ARENA_BYTES` rose from 4 to 8 MiB; the source cap stays 128 KiB and the combined application cap 256 KiB. ABI v1 stays at **75** opcodes. |
 | 2026-11-17 | M2.5.1 adds builtins 41–43 (`fs_list` 5 → 1, `fs_read` 4 → 1, `fs_size` 2 → 1) and no opcode; ABI v1 stays at **75**. The machine validates the path through `abi::fs` (the same syntax as `core.spawn`) and the root-only subset, checks the 64-byte name and 256-byte destination regions, stages the host result locally and publishes it with one copy only on `Ok`. `Ext2::list_entry` and `Ext2::read_at` add no allocation and stream the existing data blocks. |
 | 2026-11-17 | M2.5.5 adds builtin 44 `terminal_attach` (1 → 1, spec 0014): the machine pops the window id, calls `Host::terminal_attach` and pushes the `Status`. The kernel host supplies the caller's task id, checks ownership and geometry and binds the one machine-wide console terminal. No opcode; ABI v1 stays at **75**. |
+| 2026-11-17 | M2.6.1 adds builtins 45–47 (spec 0015): `text_width_prop` (1 → 1), `text_height_prop` (0 → 1) and `draw_text_prop` (4 → 1). The machine resolves the text reference with the same bounds checks as `draw_text` and pushes the measured width, the 12-pixel line height or the drawing status; the host defaults are 0/0/`Invalid` for a disabled screen. The proportional font itself is kernel data with a lazy glyph cache, so no opcode is added and ABI v1 stays at **75**. |

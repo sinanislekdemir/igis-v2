@@ -783,18 +783,32 @@ impl Table {
 
         // Title text: truncate to the band right of the close box, then centre
         // it. The band is repainted in the title colour so stripes never cross
-        // a glyph.
+        // a glyph. The service chrome uses the proportional font (spec 0015);
+        // truncation is by measured width, so narrow letters fit more of the
+        // title than the old fixed 8-pixel cells did.
         let available = inner_w - 20;
         let mut chars = 0;
-        if available >= 8 && window.title_len > 0 {
-            let max_chars = (available / 8) as usize;
-            chars = window.title_len.min(max_chars);
+        let mut text_w = 0i64;
+        if available >= 4 && window.title_len > 0 {
+            while chars < window.title_len {
+                let advance = gfx::prop_advance(window.title[chars]);
+                if text_w + advance > available {
+                    break;
+                }
+                text_w += advance;
+                chars += 1;
+            }
         }
         if chars > 0 {
-            let text_w = chars as i64 * 8;
             let band_x = inner_x + 20 + (available - text_w) / 2;
-            let _ = gfx::fill_rect(band_x - 2, frame.y + 3, text_w + 4, 10, title_bg);
-            let _ = gfx::draw_text(band_x, frame.y + 4, &window.title[..chars], CHROME_INK);
+            let _ = gfx::fill_rect(
+                band_x - 2,
+                frame.y + 2,
+                text_w + 4,
+                gfx::PROP_LINE_HEIGHT,
+                title_bg,
+            );
+            let _ = gfx::draw_text_prop(band_x, frame.y + 2, &window.title[..chars], CHROME_INK);
         }
 
         // Separator under the title bar, then the outer border last so no
@@ -1092,24 +1106,24 @@ pub fn generation() -> u64 {
     TABLE.lock().generation
 }
 
-/// The visible parts of a window's content rectangle, topmost-occlusion
-/// subtracted, for **kernel-owned** content rendering (spec 0012 D3).
+/// Runs `paint` with a window's visible content parts while the window table
+/// lock is held (spec 0012 D3).
 ///
-/// This is the console's counterpart to [`present`]: the terminal paints its
-/// grid itself, so it needs the same `content ∩ visible parts` geometry that
-/// `window_present` would use. It is kernel-internal (no `syslib` binding) and
-/// copies at most `out.len()` parts, returning how many were written. An
-/// unknown id or disabled graphics writes none.
-pub fn visible_content_parts(id: u64, out: &mut [Rect]) -> usize {
+/// The console uses this to paint its terminal grid: a window opened, raised
+/// or moved on another core between a separate geometry read and the paint
+/// could otherwise be overwritten by the console's older parts. Holding
+/// `WINDOW` across the paint is the same order as the service's repair
+/// (`WINDOW → SCREEN`), and `paint` must not call the console. Returns
+/// `false` for an unknown id.
+pub fn paint_visible_parts(id: u64, paint: &mut dyn FnMut(&[Rect])) -> bool {
     let table = TABLE.lock();
     let Some(pos) = table.position(id) else {
-        return 0;
+        return false;
     };
     let content = table.windows[table.order[pos]].content();
     let parts = table.visible_parts(content, pos + 1);
-    let count = parts.count.min(out.len());
-    out[..count].copy_from_slice(&parts.rects[..count]);
-    count
+    paint(&parts.rects[..parts.count]);
+    true
 }
 
 /// The focused window id, or 0 (W6).

@@ -5726,6 +5726,91 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::enumeration(STATUS_ENUM)))
             }
+            "syslib.text_width_prop" => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`syslib.text_width_prop` expects 1 argument, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                let text = self.emit_ref(args[0], Some(Kind::String))?;
+                if text.kind != Kind::String {
+                    let found = self.type_name(text);
+                    return Err(self.err_at(
+                        args[0],
+                        format_args!(
+                            "`syslib.text_width_prop` expects a `string`, found `{found}`"
+                        ),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::TEXT_WIDTH_PROP)?;
+                self.pop(1)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Uint)))
+            }
+            "syslib.text_height_prop" => {
+                if !args.is_empty() {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`syslib.text_height_prop` expects 0 arguments, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::TEXT_HEIGHT_PROP)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Uint)))
+            }
+            "syslib.draw_text_prop" => {
+                if args.len() != 4 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`syslib.draw_text_prop` expects 4 arguments, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                for (index, name) in ["x", "y"].iter().enumerate() {
+                    let value = self.expr_scalar(args[index])?;
+                    if value.kind != Kind::Int {
+                        return Err(self.err_at(
+                            args[index],
+                            format_args!(
+                                "`syslib.draw_text_prop` expects an `int` {name}, found `{value}`"
+                            ),
+                        ));
+                    }
+                }
+                let text = self.emit_ref(args[2], Some(Kind::String))?;
+                if text.kind != Kind::String {
+                    let found = self.type_name(text);
+                    return Err(self.err_at(
+                        args[2],
+                        format_args!("`syslib.draw_text_prop` expects a `string`, found `{found}`"),
+                    ));
+                }
+                let color = self.expr_scalar(args[3])?;
+                if color.kind != Kind::Uint {
+                    return Err(self.err_at(
+                        args[3],
+                        format_args!(
+                            "`syslib.draw_text_prop` expects a `uint` color, found `{color}`"
+                        ),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::DRAW_TEXT_PROP)?;
+                self.pop(4)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
             "syslib.get_pixel" => {
                 if args.len() != 2 {
                     return Err(self.err(

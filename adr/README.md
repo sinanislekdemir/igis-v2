@@ -54,3 +54,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0027 | [File access for applications is stateless, root-only host builtins](0027-stateless-root-only-file-api.md) | Accepted | 2026-11-17 |
 | 0028 | [One machine-wide terminal attached to a task-owned window](0028-one-terminal-attached-window.md) | Accepted | 2026-11-17 |
 | 0029 | [Boot into the desktop; launch the shell from its Terminal item](0029-boot-to-desktop.md) | Accepted | 2026-11-17 |
+| 0030 | [A kernel-owned 12-pixel proportional bitmap font with a lazy glyph cache](0030-proportional-font.md) | Accepted | 2026-11-17 |

@@ -1,0 +1,279 @@
+unit font;
+
+// M2.6.1 proof: the proportional (Chicago-like) desktop font (spec 0015).
+//
+//   run font
+//
+// The sample opens one window, draws proportional text in its content, and
+// checks the measured advances, a narrow glyph, a wide glyph, the 8×8 fallback,
+// the non-ASCII fallback advance, clipping and the service chrome's title.
+//
+// The font contract proved here:
+//
+//   - `syslib.text_height_prop()` is 12 (the line box);
+//   - `syslib.text_width_prop` is the sum of the glyph advances, so `ii` is
+//     narrower than `MM` and `Wi`;
+//   - printable ASCII draws a variable-width glyph (the `i` stem at column 1,
+//     the `M` outer stems at columns 0 and 9);
+//   - a byte outside 0x20..=0x7E keeps an 8-pixel cell and draws blank when it
+//     is at or above 0x80, so `"é"` advances 16 and an `"éA"` string puts A at
+//     +16;
+//   - `syslib.draw_text` still draws the 8×8 console font;
+//   - an off-screen origin is clipped (`Ok`, nothing outside) and a partially
+//     visible glyph keeps its on-screen pixels;
+//   - a disabled screen reports 0 metrics and `Invalid` drawing, which is the
+//     `langhost` path (`font: host ok`).
+//
+// Nothing is cleared (`syslib.clear` is not called) and the window is closed
+// at the end, so the sample is safe next to the boot desktop.
+
+uses core, syslib;
+
+const
+  WindowX = 80;
+  WindowY = 100;
+  ContentW = 460;
+  ContentH = 280;
+
+var
+  failed: bool;
+  step: int;
+  fail_label: string[64];
+  fail_step: int;
+  digits: string[16];
+  used: int;
+  screen_w: uint;
+  screen_h: uint;
+  black: uint;
+  white: uint;
+  status: Status;
+  id: int;
+  rect: Rect;
+  cx: int;
+  cy: int;
+  gy: int;
+  fx: int;
+  fy: int;
+  title_w: int;
+  band_x: int;
+
+procedure say(text: const string[0]);
+begin
+  core.write(text);
+end;
+
+procedure say_int(value: int);
+begin
+  used := core.format_int_into(digits, value, uint(10), uint(0));
+  core.write(digits);
+end;
+
+procedure verify(label: const string[0]; passed: bool);
+begin
+  step := step + 1;
+  if not passed and not failed then
+  begin
+    failed := true;
+    fail_step := step;
+    fail_label := label;
+  end;
+end;
+
+// The measured width of one string in the proportional font.
+function tw(text: const string[0]): int;
+begin
+  return int(syslib.text_width_prop(text));
+end;
+
+// Disabled-screen contract: metrics are 0 and drawing is Invalid. This is the
+// `langhost` path and the starting point for a framebuffer-less kernel.
+procedure host_check();
+begin
+  failed := false;
+  verify("empty width is 0", syslib.text_width_prop("") = uint(0));
+  verify("ii width is 0", syslib.text_width_prop("ii") = uint(0));
+  verify("height is 0", syslib.text_height_prop() = uint(0));
+  verify("draw is Invalid", syslib.draw_text_prop(0, 0, "abc", white) = Invalid);
+  if failed then
+    say("font: host FAIL\n")
+  else
+    say("font: host ok\n");
+end;
+
+procedure check_mode();
+begin
+  failed := false;
+  step := 0;
+  fail_step := 0;
+
+  // The metrics are exact and variable.
+  verify("empty width", tw("") = 0);
+  verify("height is 12", syslib.text_height_prop() = uint(12));
+  verify("i is 3", tw("i") = 3);
+  verify("M is 11", tw("M") = 11);
+  verify("ii is 6", tw("ii") = 6);
+  verify("MM is 22", tw("MM") = 22);
+  verify("Wi is 13", tw("Wi") = 13);
+  verify("ii narrower than MM", tw("ii") < tw("MM"));
+  verify("ii narrower than Wi", tw("ii") < tw("Wi"));
+  verify("i narrower than M", tw("i") < tw("M"));
+  verify("File is 18", tw("File") = 18);
+
+  status := syslib.window_open(WindowX, WindowY, ContentW, ContentH, "Font", id);
+  verify("window open", status = Ok and id > 0);
+  if status <> Ok then
+  begin
+    say("font: FAIL at step ");
+    say_int(step);
+    say(": ");
+    say(fail_label);
+    say("\n");
+    return;
+  end;
+
+  status := syslib.window_content_rect(id, rect);
+  verify("content rect", status = Ok and rect.w = ContentW and rect.h = ContentH);
+  cx := rect.x;
+  cy := rect.y;
+
+  // The window content is the drawing surface; the 8×8 body text elsewhere in
+  // the desktop stays 8×8 by design, and the service chrome uses this font.
+  status := syslib.fill_rect(cx, cy, rect.w, rect.h, white);
+  verify("content fill", status = Ok);
+  status := syslib.draw_text_prop(cx + 12, cy + 8, "Chicago 12 px", black);
+  verify("eyebrow drawn", status = Ok);
+  status := syslib.draw_text_prop(cx + 12, cy + 28, "ii MM Wi mw 0123", black);
+  verify("sample line drawn", status = Ok);
+
+  // A narrow glyph and a wide glyph at known line tops. `i` has its dot at row
+  // 3 and its stem at rows 4..9, column 1; `M` has its outer stems at columns 0
+  // and 9 in the cap rows.
+  gy := cy + 60;
+  status := syslib.draw_text_prop(cx + 12, gy, "i", black);
+  verify("narrow drawn", status = Ok);
+  status := syslib.draw_text_prop(cx + 52, gy, "M", black);
+  verify("wide drawn", status = Ok);
+  verify("narrow dot", syslib.get_pixel(cx + 13, gy + 3) = black);
+  verify("narrow stem", syslib.get_pixel(cx + 13, gy + 9) = black);
+  verify("narrow left cell blank", syslib.get_pixel(cx + 12, gy + 9) = white);
+  verify("wide left stem", syslib.get_pixel(cx + 52, gy + 2) = black);
+  verify("wide right stem", syslib.get_pixel(cx + 61, gy + 2) = black);
+  verify("wide counter blank", syslib.get_pixel(cx + 56, gy + 2) = white);
+
+  // The 8×8 path is still the fallback primitive and still draws its own 'A'
+  // (font8x8 row 0 is 0x0C: columns 2 and 3).
+  status := syslib.draw_text(cx + 140, gy, "A", black);
+  verify("8x8 draw ok", status = Ok);
+  verify("8x8 A column 2", syslib.get_pixel(cx + 142, gy) = black);
+  verify("8x8 A column 0 blank", syslib.get_pixel(cx + 140, gy) = white);
+
+  // A non-ASCII byte keeps an 8-pixel blank cell. UTF-8 `é` is two bytes, so
+  // it measures 16, and the A after it starts at +16.
+  verify("utf8 width is 16", tw("é") = 16);
+  verify("A plus utf8", tw("Aé") = tw("A") + 16);
+  fy := cy + 100;
+  status := syslib.draw_text_prop(cx + 12, fy, "é", black);
+  verify("utf8 fallback ok", status = Ok);
+  verify("utf8 cell is blank", syslib.get_pixel(cx + 13, fy + 2) = white);
+  status := syslib.draw_text_prop(cx + 12, fy + 24, "éA", black);
+  verify("utf8 A drawn", status = Ok);
+  verify("utf8 A position", syslib.get_pixel(cx + 30, fy + 26) = black);
+  verify("utf8 A leading cell blank", syslib.get_pixel(cx + 28, fy + 26) = white);
+  verify("utf8 gap blank", syslib.get_pixel(cx + 27, fy + 26) = white);
+
+  // Clipping: negative and past-the-edge origins are `Ok` and draw nothing
+  // outside; a partially visible glyph keeps its visible pixel.
+  status := syslib.draw_text_prop(-100, -100, "WWWW", black);
+  verify("negative origin ok", status = Ok);
+  status := syslib.draw_text_prop(int(screen_w) - 2, int(screen_h) - 12, "WWWW", black);
+  verify("past edge ok", status = Ok);
+  status := syslib.draw_text_prop(cx - 1, cy + 160, "i", black);
+  verify("partial glyph ok", status = Ok);
+  verify("partial glyph stem", syslib.get_pixel(cx, cy + 169) = black);
+
+  // The window service's own title bar uses the proportional font: "Font" is
+  // centred in the band right of the close box, and the F's top bar starts at
+  // the band's left edge on the first cap row (line top + 2).
+  title_w := tw("Font");
+  band_x := cx + 20 + (rect.w - 20 - title_w) div 2;
+  verify("service title uses prop", syslib.get_pixel(band_x, cy - 12) = black);
+
+  status := syslib.draw_text_prop(cx + 12, cy + 210, "The quick brown fox jumps over the lazy dog.", black);
+  verify("final line drawn", status = Ok);
+  status := syslib.window_present(id);
+  verify("window present", status = Ok);
+  status := syslib.window_close(id);
+  verify("window close", status = Ok);
+
+  if failed then
+  begin
+    say("font: FAIL at step ");
+    say_int(fail_step);
+    say(": ");
+    say(fail_label);
+    say("\n");
+  end
+  else
+    say("font: ok\n");
+end;
+
+// `run font shot`: compose one window with the full proportional specimen and
+// hold it for the QMP screenshot harness. It never calls `syslib.clear`.
+procedure shot_mode();
+var
+  start: uint;
+begin
+  status := syslib.window_open(WindowX, WindowY, ContentW, ContentH, "Font", id);
+  verify("shot window open", status = Ok and id > 0);
+  if status <> Ok then
+  begin
+    say("font: no window\n");
+    return;
+  end;
+  status := syslib.window_content_rect(id, rect);
+  cx := rect.x;
+  cy := rect.y;
+  status := syslib.fill_rect(cx, cy, rect.w, rect.h, white);
+  status := syslib.draw_text_prop(cx + 12, cy + 8, "Chicago-like 12 px", black);
+  status := syslib.draw_text_prop(cx + 12, cy + 30, "ii MM Wi mw 0123456789", black);
+  status := syslib.draw_text_prop(cx + 12, cy + 56, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", black);
+  status := syslib.draw_text_prop(cx + 12, cy + 80, "abcdefghijklmnopqrstuvwxyz", black);
+  status := syslib.draw_text_prop(
+    cx + 12, cy + 104, "The quick brown fox jumps over the lazy dog.", black);
+  status := syslib.draw_text_prop(
+    cx + 12, cy + 128, "File  Apps  Windows  Terminal  12:34", black);
+  status := syslib.draw_text_prop(
+    cx + 12, cy + 160, "Variable widths: i=3 M=11 m=7 W=10", black);
+  status := syslib.draw_text_prop(
+    cx + 12, cy + 192, "Service chrome titles and the desktop menu bar use this font.", black);
+  status := syslib.window_present(id);
+  say("font: ready\n");
+  start := core.clock();
+  while core.clock() < start + uint(5000000000) do
+  begin
+    core.heartbeat();
+  end;
+  status := syslib.window_close(id);
+  say("font: done\n");
+end;
+
+procedure main(args: const string[1024]);
+begin
+  black := uint(0x000000);
+  white := uint(0xFFFFFF);
+  screen_w := syslib.screen_width();
+  screen_h := syslib.screen_height();
+  if args = "shot" then
+  begin
+    if screen_w = uint(0) or screen_h = uint(0) then
+      say("font: no graphics\n")
+    else
+      shot_mode();
+  end
+  else if screen_w = uint(0) or screen_h = uint(0) then
+    host_check()
+  else if int(screen_w) < WindowX + ContentW + 8 or int(screen_h) < WindowY + ContentH + 40 then
+    say("font: screen too small\n")
+  else
+    check_mode();
+end;

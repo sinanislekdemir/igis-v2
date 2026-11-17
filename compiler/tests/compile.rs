@@ -5680,6 +5680,149 @@ end;
     }
 }
 
+// ---- syslib proportional font (spec 0015) ---------------------------------
+
+#[test]
+fn syslib_proportional_font_surface_is_accepted_and_emits_its_builtins() {
+    use abi::opcodes::{self, builtin};
+
+    let source = br#"
+unit t;
+
+uses core, syslib;
+
+var
+  status: Status;
+  width: uint;
+  height: uint;
+
+procedure main(args: const string[1024]);
+begin
+  width := syslib.text_width_prop("ii MM");
+  height := syslib.text_height_prop();
+  status := syslib.draw_text_prop(1, 2, "Hi", uint(0x102030));
+end;
+"#;
+    let package = compile(source, "t.ig").expect("the proportional font surface compiles");
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+    let mut seen = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        if op == opcodes::BUILTIN {
+            seen.push(u32::from_le_bytes(
+                instructions[pc + 4..pc + 8].try_into().unwrap(),
+            ));
+        }
+        pc += words * 4;
+    }
+    assert_eq!(
+        seen,
+        vec![
+            builtin::TEXT_WIDTH_PROP,
+            builtin::TEXT_HEIGHT_PROP,
+            builtin::DRAW_TEXT_PROP,
+        ]
+    );
+    // The ids are part of the ABI surface and must not move.
+    assert_eq!(builtin::TEXT_WIDTH_PROP, 45);
+    assert_eq!(builtin::TEXT_HEIGHT_PROP, 46);
+    assert_eq!(builtin::DRAW_TEXT_PROP, 47);
+    assert_eq!(builtin::effect(builtin::TEXT_WIDTH_PROP), Some((1, 1)));
+    assert_eq!(builtin::effect(builtin::TEXT_HEIGHT_PROP), Some((0, 1)));
+    assert_eq!(builtin::effect(builtin::DRAW_TEXT_PROP), Some((4, 1)));
+}
+
+#[test]
+fn syslib_proportional_font_argument_types_and_arity_are_checked() {
+    let cases = [
+        (
+            r#"
+unit t;
+uses core, syslib;
+var width: uint;
+procedure main(args: const string[1024]);
+begin
+  width := syslib.text_width_prop();
+end;
+"#,
+            "`syslib.text_width_prop` expects 1 argument",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var width: uint;
+var raw: bytes[8];
+procedure main(args: const string[1024]);
+begin
+  width := syslib.text_width_prop(raw);
+end;
+"#,
+            "expected `string`",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var height: uint;
+procedure main(args: const string[1024]);
+begin
+  height := syslib.text_height_prop(uint(1));
+end;
+"#,
+            "`syslib.text_height_prop` expects 0 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.draw_text_prop(1, 2, "Hi");
+end;
+"#,
+            "`syslib.draw_text_prop` expects 4 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.draw_text_prop(uint(1), 2, "Hi", uint(0));
+end;
+"#,
+            "`syslib.draw_text_prop` expects an `int` x",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.draw_text_prop(1, 2, "Hi", 0);
+end;
+"#,
+            "`syslib.draw_text_prop` expects a `uint` color",
+        ),
+    ];
+    for (source, expected) in cases {
+        let error = compile(source.as_bytes(), "t.ig").expect_err("must be a compile error");
+        assert!(
+            error.message.contains(expected),
+            "expected `{expected}`, got `{}`",
+            error.message
+        );
+    }
+}
+
 // ---- syslib pointer (spec 0010) -------------------------------------------
 
 #[test]

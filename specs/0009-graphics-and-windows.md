@@ -1,12 +1,12 @@
 # 0009: Graphics, the shadow screen and the window service
 
 - **Status:** Accepted
-- **Scope:** `abi`, `compiler`, `interpreter`, `syslib`, `kernel` (`gfx`, `console`),
+- **Scope:** `abi`, `compiler`, `interpreter`, `syslib`, `kernel` (`font`, `gfx`, `console`),
   `arch/x86_64` framebuffer access; M2 of the desktop milestone
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0020, 0024
-- **Updated:** 2026-11-16
+- **ADRs:** 0020, 0024, 0030
+- **Updated:** 2026-11-17
 
 ## Context
 
@@ -29,8 +29,8 @@ forward reference; it is not implemented here.
 Non-goals for this slice:
 
 - no mouse, keyboard events, windows, focus, z-order, or `expose`;
-- no per-window canvases, no alpha blending, no scaling, no font beyond the existing
-  8×8 console font;
+- no per-window canvases, no alpha blending, no scaling; the 8×8 console font is the
+  default and a separate 12-pixel proportional face is specified by 0015;
 - no new bytecode opcode: the primitives are host builtins behind `BUILTIN`;
 - no compile-time screen size and no fixed `.bss` shadow.
 
@@ -70,7 +70,9 @@ grows down. Colours are `0x00RRGGBB`.
   set. `get_pixel` has no error path and returns `0` outside the screen.
 - **G10 (MUST):** The `syslib` graphics surface is exactly the small orthogonal set in
   "Interfaces": `screen_width`, `screen_height`, `fill_rect`, `fill_dither`,
-  `draw_rect`, `draw_text`, `get_pixel`, `present`, `clear`.
+  `draw_rect`, `draw_text`, `get_pixel`, `present`, `clear`, plus the three
+  proportional-text primitives of G20 (`text_width_prop`, `text_height_prop`,
+  `draw_text_prop`).
 - **G11 (MUST):** `fill_dither` writes `color` to every other pixel of its extent — the
   pixel `(X, Y)` when `(X + Y)` is even — and leaves the other pixels untouched. This
   is the System 7 desktop background when a white `fill_rect` precedes it.
@@ -104,6 +106,14 @@ grows down. Colours are `0x00RRGGBB`.
   content); the window service remains the only producer of real window frames and its
   own title bar, close box and border (spec 0011, ADR 0024). The library may call
   `syslib` for this (ADR 0026) and inherits G9/G15's error and disabled-screen rules.
+- **G20 (MUST):** `text_width_prop`, `text_height_prop` and `draw_text_prop` expose the
+  12-pixel proportional bitmap font of spec 0015. The first two are pure metrics
+  (advances and line height; 0 when graphics are disabled); `draw_text_prop` draws with a
+  transparent background, `y` at the top of the line box, printable ASCII through the
+  variable-width glyphs and every other byte through an 8-pixel 8×8 fallback cell (blank
+  at or above `0x80`). The same clipping, colour and disabled-screen rules as G9/G15
+  apply. `draw_text` (G13) is unchanged and remains the 8×8 primitive; the console and
+  the `stdlib.ui_*` helpers keep using it in M2.6.1. No opcode is added.
 
 ## Design
 
@@ -180,6 +190,9 @@ syslib.fill_rect(x: int, y: int, w: int, h: int, color: uint) -> Status
 syslib.fill_dither(x: int, y: int, w: int, h: int, color: uint) -> Status
 syslib.draw_rect(x: int, y: int, w: int, h: int, color: uint) -> Status
 syslib.draw_text(x: int, y: int, text: const string[0], color: uint) -> Status
+syslib.text_width_prop(text: const string[0]) -> uint  // 0 when disabled
+syslib.text_height_prop() -> uint                      // 12, or 0 when disabled
+syslib.draw_text_prop(x: int, y: int, text: const string[0], color: uint) -> Status
 syslib.get_pixel(x: int, y: int) -> uint // 0x00RRGGBB, or 0 outside
 syslib.present(x: int, y: int, w: int, h: int) -> Status
 syslib.clear(color: uint) -> Status
@@ -202,6 +215,9 @@ fn fill_rect(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) -> Status { 
 fn fill_dither(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) -> Status { Status::Invalid }
 fn draw_rect(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) -> Status { Status::Invalid }
 fn draw_text(&mut self, x: i64, y: i64, text: &[u8], color: u32) -> Status { Status::Invalid }
+fn text_width_prop(&mut self, text: &[u8]) -> u64 { 0 }
+fn text_height_prop(&mut self) -> u64 { 0 }
+fn draw_text_prop(&mut self, x: i64, y: i64, text: &[u8], color: u32) -> Status { Status::Invalid }
 fn get_pixel(&mut self, x: i64, y: i64) -> u32 { 0 }
 fn present(&mut self, x: i64, y: i64, w: i64, h: i64) -> Status { Status::Invalid }
 fn clear(&mut self, color: u32) -> Status { Status::Invalid }
@@ -231,6 +247,9 @@ an `Info` (width, height, pitch, bpp, shadow address/size/frames, free-frame del
 | Partly outside the screen or the clip | Clipped; `Ok` |
 | `get_pixel` outside the screen | `0` |
 | `draw_text` with a non-ASCII byte | Blank 8×8 cell, advance 8; `Ok` |
+| `draw_text_prop` with a printable byte | Proportional glyph, variable advance; `Ok` |
+| `draw_text_prop` with a non-ASCII byte | Blank 8×8 cell, advance 8; `Ok` |
+| `text_width_prop`/`text_height_prop` with graphics disabled | `0` |
 | Graphics disabled and a primitive is called | `Status.Invalid`; the application may ignore it |
 | Two cores draw at once | The graphics lock serialises each primitive; output interleaves at primitive boundaries |
 | Screen mode is larger than 1024×768 | Works: shadow and clip derive from the actual geometry |
@@ -253,7 +272,7 @@ an `Info` (width, height, pitch, bpp, shadow address/size/frames, free-frame del
 | 1 | ~~Clip-region exposure to applications (`set_clip`/`reset_clip`)~~ | Resolved: no application-facing clip. The clip stays service-owned with an internal save/narrow/restore (spec 0011, W10) |
 | 2 | ~~Cursor and pointer rendering: soft cursor in the shadow, or a hardware sprite~~ | Resolved: composited at present time, never in the shadow (spec 0010, ADR 0021) |
 | 3 | Dirty-rectangle accumulation for `present` | M2.3, with `expose` |
-| 4 | A second font or a proportional font | only if the desktop needs one |
+| 4 | ~~A second font or a proportional font~~ | Resolved: spec 0015 and ADR 0030 add the 12-pixel proportional face; `draw_text` stays 8×8 |
 
 ## Changelog
 
@@ -264,3 +283,4 @@ an `Info` (width, height, pitch, bpp, shadow address/size/frames, free-frame del
 | 2026-11-16 | M2.3.0/M2.3.1: spec 0011 and ADR 0024 fix the window model (content-size geometry, one z-order, one focus, ownership, 16/64/8×8 limits). `gfx` gains the kernel-internal `set_clip`/`reset_clip` used by the service, with a boot self-check (`graphics: clip ok`); no application clip primitive is added (open question 1 resolved). The `syslib` drawing surface is unchanged; chrome, damage and `present` of a union are M2.3.2. |
 | 2026-11-16 | M2.3.2: the window service draws chrome and restores the desktop through the same shadow and internal clip (narrowed per visible part), then presents the damage union once; `syslib.present`/`clear` and the nine drawing primitives are unchanged. The service desktop is white with the `(X + Y)` black dither. `window: paint ok` checks the damage arithmetic at boot. |
 | 2026-11-16 | M2.3.4 (spec 0012, ADR 0025): the console paints two kernel-owned text windows (owner `0`, terminal and system log) instead of the whole screen, with per-window grids and scrolling; expose repair is pulled by `console::pump` at the service opportunity. The whole-screen console helpers and the shadow scroll are removed from `gfx`; the nine drawing primitives, `present`, `clear` and the clip are unchanged. A full-screen `clear` erases the console windows' pixels; their grids survive and repaint on the next expose/output. |
+| 2026-11-17 | M2.6.1 (spec 0015, ADR 0030): G20 adds the three proportional-text builtins (`text_width_prop`, `text_height_prop`, `draw_text_prop`, ids 45–47) and the window-service title bar uses the proportional face; `draw_text`, the console and the `stdlib.ui_*` helpers stay 8×8. No opcode; ABI v1 stays at 75. |

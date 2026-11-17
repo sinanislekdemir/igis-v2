@@ -210,6 +210,26 @@ pub trait Host {
         Status::Invalid
     }
 
+    /// Measures proportional text (`syslib.text_width_prop`, spec 0015).
+    /// `text` is the resolved `string` bytes; the default is a machine with no
+    /// screen (0), matching the disabled-graphics rule.
+    fn text_width_prop(&mut self, _text: &[u8]) -> u64 {
+        0
+    }
+
+    /// The proportional font's line height (`syslib.text_height_prop`, spec
+    /// 0015); 0 when graphics are disabled.
+    fn text_height_prop(&mut self) -> u64 {
+        0
+    }
+
+    /// Draws proportional text with a transparent background
+    /// (`syslib.draw_text_prop`, spec 0015). The default refuses like the
+    /// other drawing primitives.
+    fn draw_text_prop(&mut self, _x: i64, _y: i64, _text: &[u8], _color: u32) -> Status {
+        Status::Invalid
+    }
+
     /// Reads one shadow pixel as `0x00RRGGBB`; 0 outside the screen
     /// (`syslib.get_pixel`, G9).
     fn get_pixel(&mut self, _x: i64, _y: i64) -> u32 {
@@ -1611,21 +1631,38 @@ impl Machine {
                         let status = if !valid_color(color) {
                             Status::Invalid
                         } else {
-                            let (region, offset) =
-                                self.resolve(text_bits, state, stack, constants, args)?;
-                            let length =
-                                self.buffer_len(region, offset, state, stack, constants, args)?;
-                            let end = offset.checked_add(length).ok_or(FaultCode::OutOfBounds)?;
-                            if end
-                                > region_len(region, state, stack, constants, args)
-                                    .ok_or(FaultCode::OutOfBounds)?
-                            {
-                                return Err(FaultCode::OutOfBounds);
-                            }
-                            let text = buffer_slice(
-                                region, offset, length, state, stack, constants, args,
-                            )?;
+                            let text =
+                                self.resolve_text(text_bits, state, stack, constants, args)?;
                             host.draw_text(x as i64, y as i64, text, color as u32)
+                        };
+                        self.push(stack, status as u64)?;
+                    }
+                    builtin::TEXT_WIDTH_PROP => {
+                        // `text`: the measured advance in the proportional font
+                        // (spec 0015). Printable ASCII contributes its glyph
+                        // advance; every other byte contributes 8.
+                        let text_bits = self.pop(stack)?;
+                        let text = self.resolve_text(text_bits, state, stack, constants, args)?;
+                        let width = host.text_width_prop(text);
+                        self.push(stack, width)?;
+                    }
+                    builtin::TEXT_HEIGHT_PROP => {
+                        let height = host.text_height_prop();
+                        self.push(stack, height)?;
+                    }
+                    builtin::DRAW_TEXT_PROP => {
+                        // `x, y, text, color`, the same operand order as
+                        // `DRAW_TEXT`; only the host's rasteriser differs.
+                        let color = self.pop(stack)?;
+                        let text_bits = self.pop(stack)?;
+                        let y = self.pop(stack)?;
+                        let x = self.pop(stack)?;
+                        let status = if !valid_color(color) {
+                            Status::Invalid
+                        } else {
+                            let text =
+                                self.resolve_text(text_bits, state, stack, constants, args)?;
+                            host.draw_text_prop(x as i64, y as i64, text, color as u32)
                         };
                         self.push(stack, status as u64)?;
                     }
@@ -3140,6 +3177,26 @@ impl Machine {
             _ => return Err(FaultCode::OutOfBounds),
         };
         usize::try_from(raw).map_err(|_| FaultCode::OutOfBounds)
+    }
+
+    /// Resolves a `string`/`bytes` reference and returns its bytes, with the
+    /// same length, region and bounds checks `core.write` uses. Shared by
+    /// `draw_text`, `text_width_prop` and `draw_text_prop`.
+    fn resolve_text<'a>(
+        &self,
+        bits: u64,
+        state: &'a [u8],
+        stack: &'a [u8],
+        code: &'a [u8],
+        args: &'a [u8],
+    ) -> Result<&'a [u8], FaultCode> {
+        let (region, offset) = self.resolve(bits, state, stack, code, args)?;
+        let length = self.buffer_len(region, offset, state, stack, code, args)?;
+        let end = offset.checked_add(length).ok_or(FaultCode::OutOfBounds)?;
+        if end > region_len(region, state, stack, code, args).ok_or(FaultCode::OutOfBounds)? {
+            return Err(FaultCode::OutOfBounds);
+        }
+        buffer_slice(region, offset, length, state, stack, code, args)
     }
 
     fn append(

@@ -372,6 +372,10 @@ struct MockHost {
     dithers: Vec<(i64, i64, i64, i64, u32)>,
     outlines: Vec<(i64, i64, i64, i64, u32)>,
     texts: Vec<(i64, i64, Vec<u8>, u32)>,
+    prop_widths: Vec<Vec<u8>>,
+    prop_texts: Vec<(i64, i64, Vec<u8>, u32)>,
+    prop_width_value: u64,
+    prop_height_value: u64,
     pixels: Vec<(i64, i64)>,
     pixel_value: u32,
     presents: Vec<(i64, i64, i64, i64)>,
@@ -503,6 +507,24 @@ impl Host for MockHost {
 
     fn draw_text(&mut self, x: i64, y: i64, text: &[u8], color: u32) -> Status {
         self.texts.push((x, y, text.to_vec(), color));
+        if self.gfx_ok {
+            Status::Ok
+        } else {
+            Status::Invalid
+        }
+    }
+
+    fn text_width_prop(&mut self, text: &[u8]) -> u64 {
+        self.prop_widths.push(text.to_vec());
+        self.prop_width_value
+    }
+
+    fn text_height_prop(&mut self) -> u64 {
+        self.prop_height_value
+    }
+
+    fn draw_text_prop(&mut self, x: i64, y: i64, text: &[u8], color: u32) -> Status {
+        self.prop_texts.push((x, y, text.to_vec(), color));
         if self.gfx_ok {
             Status::Ok
         } else {
@@ -3691,6 +3713,111 @@ fn graphics_defaults_describe_a_disabled_screen() {
     assert_eq!(word(8), 0);
     assert_eq!(word(16), Status::Invalid as u64);
     assert_eq!(word(24), 0);
+}
+
+#[test]
+fn proportional_font_builtins_route_through_the_host_in_declaration_order() {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_CONST, 8);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::TEXT_WIDTH_PROP,
+    );
+    store_at(&mut instructions, 0);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::TEXT_HEIGHT_PROP,
+    );
+    store_at(&mut instructions, 8);
+    op_const(&mut instructions, 3);
+    op_const(&mut instructions, 4);
+    op_imm(&mut instructions, opcodes::REF_CONST, 8);
+    op_const(&mut instructions, 0x10_2030);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::DRAW_TEXT_PROP,
+    );
+    store_at(&mut instructions, 16);
+    op(&mut instructions, opcodes::RET);
+
+    let constants = constant(b"ii");
+    let spec = FnSpec {
+        frame_size: 96,
+        operand_off: 56,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &constants, 24, 96, 0);
+    let mut host = MockHost {
+        gfx_ok: true,
+        prop_width_value: 6,
+        prop_height_value: 12,
+        ..Default::default()
+    };
+    let mut state = vec![0u8; 24];
+    let mut stack = vec![0u8; 96];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 500);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+
+    let word = |offset: usize| u64::from_le_bytes(state[offset..offset + 8].try_into().unwrap());
+    assert_eq!(word(0), 6);
+    assert_eq!(word(8), 12);
+    assert_eq!(word(16), Status::Ok as u64);
+    assert_eq!(host.prop_widths, vec![b"ii".to_vec()]);
+    assert_eq!(host.prop_texts, vec![(3, 4, b"ii".to_vec(), 0x10_2030)]);
+}
+
+#[test]
+fn proportional_font_defaults_and_over_wide_colours_do_not_reach_the_host() {
+    // The trait defaults are a disabled screen: 0 metrics and `Invalid` drawing
+    // (spec 0015). An over-wide colour is rejected before the host is called.
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_CONST, 8);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::TEXT_WIDTH_PROP,
+    );
+    store_at(&mut instructions, 0);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::TEXT_HEIGHT_PROP,
+    );
+    store_at(&mut instructions, 8);
+    op_const(&mut instructions, 0);
+    op_const(&mut instructions, 0);
+    op_imm(&mut instructions, opcodes::REF_CONST, 8);
+    op_const(&mut instructions, 0x0100_0000);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::DRAW_TEXT_PROP,
+    );
+    store_at(&mut instructions, 16);
+    op(&mut instructions, opcodes::RET);
+
+    let constants = constant(b"x");
+    let spec = FnSpec {
+        frame_size: 96,
+        operand_off: 56,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &constants, 24, 96, 0);
+    let mut host = MockHost::default();
+    let mut state = vec![0u8; 24];
+    let mut stack = vec![0u8; 96];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 500);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+
+    let word = |offset: usize| u64::from_le_bytes(state[offset..offset + 8].try_into().unwrap());
+    assert_eq!(word(0), 0);
+    assert_eq!(word(8), 0);
+    assert_eq!(word(16), Status::Invalid as u64);
+    assert_eq!(host.prop_widths, vec![b"x".to_vec()]);
+    assert!(host.prop_texts.is_empty());
 }
 
 #[test]

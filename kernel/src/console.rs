@@ -39,7 +39,7 @@
 
 use core::fmt::{self, Write};
 
-use abi::{Rect, Status};
+use abi::Status;
 use arch_x86_64::{keyboard, serial};
 
 use crate::font8x8::FONT8X8_BASIC;
@@ -55,16 +55,6 @@ pub const LINE_RING: usize = 4;
 
 /// Cell size in pixels: 8×8 glyphs at scale 1 (spec 0012 D2).
 const CELL: i64 = 8;
-
-/// Bounded stale-geometry retries for a console paint (spec 0012 D3).
-///
-/// A cell/part paint computes the window's visible parts, then draws and
-/// presents. A window can move above the console between the two steps on
-/// another core; painting the old parts would then overwrite the higher
-/// window. Each paint therefore compares `window::generation()` before and
-/// after and retries with fresh parts. A move after the final check is covered
-/// by the service's own expose for the next pump.
-const PAINT_RETRIES: usize = 4;
 
 /// Largest grid a terminal can hold. A 1024×768 screen needs 62×89 cells; the
 /// bound leaves room for a much larger mode without a per-screen allocation.
@@ -228,6 +218,10 @@ impl Terminal {
 
     /// Draws the cell background and glyph inside every visible part that the
     /// cell intersects, and presents that intersection (spec 0012 D3).
+    ///
+    /// The window table lock is held for the whole paint, so a window opened,
+    /// raised or moved on another core cannot change the visible parts between
+    /// the geometry read and the pixels.
     fn paint_cell(&mut self, col: usize, row: usize) {
         if !self.attached || col >= self.cols || row >= self.rows {
             return;
@@ -237,17 +231,11 @@ impl Terminal {
         let x1 = x0 + CELL;
         let y1 = y0 + CELL;
         let code = self.grid[row][col];
-        let mut parts = [Rect {
-            x: 0,
-            y: 0,
-            w: 0,
-            h: 0,
-        }; window::MAX_DAMAGE];
-        let mut attempts = 0;
-        loop {
-            let generation = window::generation();
-            let count = window::visible_content_parts(self.id, &mut parts);
-            for part in parts[..count].iter() {
+        let id = self.id;
+        let fg = self.fg;
+        let bg = self.bg;
+        let _ = window::paint_visible_parts(id, &mut |parts| {
+            for part in parts {
                 if part.x >= x1
                     || part.y >= y1
                     || part.x.saturating_add(part.w) <= x0
@@ -261,60 +249,52 @@ impl Terminal {
                     w: part.w,
                     h: part.h,
                 };
-                let _ = gfx::draw_cell(x0, y0, code, self.fg, self.bg, clip);
+                let _ = gfx::draw_cell(x0, y0, code, fg, bg, clip);
                 let _ = gfx::present_within(x0, y0, CELL, CELL, clip);
             }
-            attempts += 1;
-            if window::generation() == generation || attempts >= PAINT_RETRIES {
-                break;
-            }
-        }
+        });
     }
 
     /// Repaints the whole grid into every visible part of the content
-    /// rectangle, presenting each part once (spec 0012 D3).
+    /// rectangle, presenting each part once (spec 0012 D3). As in
+    /// [`Terminal::paint_cell`], the window lock is held across the paint.
     fn repaint(&mut self) {
         if !self.attached {
             return;
         }
-        let mut parts = [Rect {
-            x: 0,
-            y: 0,
-            w: 0,
-            h: 0,
-        }; window::MAX_DAMAGE];
-        let mut attempts = 0;
-        loop {
-            let generation = window::generation();
-            let count = window::visible_content_parts(self.id, &mut parts);
-            for part in parts[..count].iter() {
+        let id = self.id;
+        let x0 = self.x;
+        let y0 = self.y;
+        let cols = self.cols;
+        let rows = self.rows;
+        let fg = self.fg;
+        let bg = self.bg;
+        let grid = &self.grid;
+        let _ = window::paint_visible_parts(id, &mut |parts| {
+            for part in parts {
                 let clip = gfx::Clip {
                     x: part.x,
                     y: part.y,
                     w: part.w,
                     h: part.h,
                 };
-                for row in 0..self.rows {
-                    let y = self.y + row as i64 * CELL;
+                for row in 0..rows {
+                    let y = y0 + row as i64 * CELL;
                     if y >= part.y.saturating_add(part.h) || y + CELL <= part.y {
                         continue;
                     }
-                    for col in 0..self.cols {
-                        let x = self.x + col as i64 * CELL;
+                    for col in 0..cols {
+                        let x = x0 + col as i64 * CELL;
                         if x >= part.x.saturating_add(part.w) || x + CELL <= part.x {
                             continue;
                         }
-                        let code = self.grid[row][col];
-                        let _ = gfx::draw_cell(x, y, code, self.fg, self.bg, clip);
+                        let code = grid[row][col];
+                        let _ = gfx::draw_cell(x, y, code, fg, bg, clip);
                     }
                 }
                 let _ = gfx::present_within(part.x, part.y, part.w, part.h, clip);
             }
-            attempts += 1;
-            if window::generation() == generation || attempts >= PAINT_RETRIES {
-                break;
-            }
-        }
+        });
     }
 
     /// Applies one byte to the terminal state; serial mirroring happens in the

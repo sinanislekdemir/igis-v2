@@ -2334,3 +2334,114 @@ fn the_files_sample_lists_and_reads_the_application_directory() {
     assert!(output.ends_with("files: ok\n"), "{output}");
     assert_eq!(result.reason, ExitReason::Ok);
 }
+
+/// A host with a screen that implements the proportional font's metrics and
+/// records the drawing call (spec 0015). The widths are a small stand-in table:
+/// `i` 3, `M` 11, other printable bytes 6, non-ASCII 8.
+struct PropPainter {
+    widths: Vec<Vec<u8>>,
+    texts: Vec<(i64, i64, Vec<u8>, u32)>,
+    output: Vec<u8>,
+}
+
+impl Host for PropPainter {
+    fn console_write(&mut self, bytes: &[u8]) {
+        self.output.extend_from_slice(bytes);
+    }
+
+    fn clock(&mut self) -> u64 {
+        0
+    }
+
+    fn screen_width(&mut self) -> u64 {
+        1024
+    }
+
+    fn screen_height(&mut self) -> u64 {
+        768
+    }
+
+    fn text_width_prop(&mut self, text: &[u8]) -> u64 {
+        self.widths.push(text.to_vec());
+        text.iter()
+            .map(|byte| match *byte {
+                b'i' => 3,
+                b'M' => 11,
+                0x20..=0x7E => 6,
+                _ => 8,
+            })
+            .sum()
+    }
+
+    fn text_height_prop(&mut self) -> u64 {
+        12
+    }
+
+    fn draw_text_prop(&mut self, x: i64, y: i64, text: &[u8], color: u32) -> Status {
+        self.texts.push((x, y, text.to_vec(), color));
+        Status::Ok
+    }
+}
+
+#[test]
+fn proportional_font_calls_reach_the_host_in_order() {
+    let source = br#"
+unit propseq;
+
+uses core, syslib;
+
+var
+  w: uint;
+  m: uint;
+  h: uint;
+  st: Status;
+
+procedure main(args: const string[1024]);
+begin
+  w := syslib.text_width_prop("ii");
+  m := syslib.text_width_prop("MM");
+  h := syslib.text_height_prop();
+  st := syslib.draw_text_prop(3, 4, "Mi", uint(0x102030));
+  if w = uint(6) and m = uint(22) and h = uint(12) and st = Ok then
+    core.write("prop ok\n");
+end;
+"#;
+    let package = langhost::compile(source, "propseq").expect("compiles");
+    let mut scratch = vec![0u8; package.code.len().div_ceil(32)];
+    let program = interpreter::Program::parse(&package.code, &mut scratch).expect("verifies");
+    let header = *program.header();
+    let mut state = vec![0u8; header.state_size as usize];
+    let mut stack = vec![0u8; header.stack_size as usize];
+    let args = vec![0u8; 8 + 1024];
+    let mut machine = interpreter::Machine::new();
+    let mut host = PropPainter {
+        widths: Vec::new(),
+        texts: Vec::new(),
+        output: Vec::new(),
+    };
+    let outcome = machine.run(
+        &program,
+        &mut host,
+        &mut state,
+        &mut stack,
+        &args,
+        langhost::DEFAULT_BUDGET,
+    );
+    assert_eq!(outcome, interpreter::Outcome::Exited(ExitReason::Ok));
+    assert_eq!(host.output, b"prop ok\n");
+    assert_eq!(host.widths, vec![b"ii".to_vec(), b"MM".to_vec()]);
+    assert_eq!(host.texts, vec![(3, 4, b"Mi".to_vec(), 0x10_2030)]);
+}
+
+/// The M2.6.1 font sample against `langhost`'s disabled screen: it checks the
+/// 0/invalid contract and prints the host transcript.
+#[test]
+fn the_font_sample_reports_the_host_path() {
+    let path = format!("{}/../samples/apps/font", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "font").expect("the font sample compiles");
+    let result =
+        langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies and runs");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"font: host ok\n".to_vec());
+}

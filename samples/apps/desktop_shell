@@ -81,6 +81,13 @@ var
   app_runs: int;
   window_runs: int;
   terminal_runs: int;
+  // Proportional menu-bar layout, derived from the measured label widths
+  // (spec 0015) so the hit ranges and the drawn labels cannot drift.
+  menu_file_x: int;
+  menu_apps_x: int;
+  menu_windows_x: int;
+  menu_terminal_x: int;
+  menu_terminal_end: int;
 
   // Check-mode bookkeeping.
   failed: bool;
@@ -122,10 +129,19 @@ begin
   end;
 end;
 
-// HH:MM from the monotonic clock, right-aligned in the menu bar.
+// The measured width of one label in the proportional font.
+function tw(text: const string[0]): int;
+begin
+  return int(syslib.text_width_prop(text));
+end;
+
+// HH:MM from the monotonic clock, right-aligned in the menu bar. The width is
+// the proportional measurement (spec 0015), so the digits and the colon sit
+// tight to the right edge instead of assuming 8-pixel cells.
 procedure draw_clock(right: int);
 var
   clock_x: int;
+  clock_w: int;
 begin
   now := core.clock();
   minutes := (now div uint(1000000000)) div uint(60);
@@ -133,25 +149,45 @@ begin
   minutes := minutes mod uint(60);
   used := core.format_int_into(clk_h, int(hours), uint(10), uint(2));
   used := core.format_int_into(clk_m, int(minutes), uint(10), uint(2));
-  clock_x := right - 40;
+  clock_w := tw(clk_h) + tw(":") + tw(clk_m);
+  clock_x := right - clock_w;
   if clock_x > 200 then
   begin
-    status := syslib.draw_text(clock_x, 7, clk_h, black);
-    status := syslib.draw_text(clock_x + 16, 7, ":", black);
-    status := syslib.draw_text(clock_x + 24, 7, clk_m, black);
+    status := syslib.draw_text_prop(clock_x, 7, clk_h, black);
+    clock_x := clock_x + tw(clk_h);
+    status := syslib.draw_text_prop(clock_x, 7, ":", black);
+    clock_x := clock_x + tw(":");
+    status := syslib.draw_text_prop(clock_x, 7, clk_m, black);
   end;
 end;
 
+// Left edges of the direct menu items: the Apple square, then File/Apps/
+// Windows/Terminal with a 14-pixel gap. Rebuilt on every bar draw so a font
+// change moves the labels and the hit ranges together.
+procedure layout_menu();
+begin
+  menu_file_x := 24;
+  menu_apps_x := menu_file_x + tw("File") + 14;
+  menu_windows_x := menu_apps_x + tw("Apps") + 14;
+  menu_terminal_x := menu_windows_x + tw("Windows") + 14;
+  menu_terminal_end := menu_terminal_x + tw("Terminal");
+end;
+
 // The menu bar is application-drawn (no global work area in M2.3.4). It stays
-// in the top 22 rows; app windows are expected to open below it.
+// in the top 22 rows; app windows are expected to open below it. The labels and
+// the clock use the proportional font (spec 0015): positions come from the
+// measured widths, not from 8-pixel cells.
 procedure draw_menu_bar();
 begin
   status := syslib.fill_rect(0, 0, screen_w, MenuHeight, white);
-  status := syslib.fill_rect(8, 7, 8, 8, black);
-  status := syslib.draw_text(24, 7, "File", black);
-  status := syslib.draw_text(72, 7, "Apps", black);
-  status := syslib.draw_text(112, 7, "Windows", black);
-  status := syslib.draw_text(184, 7, "Terminal", black);
+  // The Apple square is aligned with the proportional cap rows (line top 7 +
+  // the glyph box's two-row top bearing), not with the old 8×8 cell.
+  status := syslib.fill_rect(8, 9, 8, 8, black);
+  layout_menu();
+  status := syslib.draw_text_prop(menu_file_x, 7, "File", black);
+  status := syslib.draw_text_prop(menu_apps_x, 7, "Apps", black);
+  status := syslib.draw_text_prop(menu_windows_x, 7, "Windows", black);
+  status := syslib.draw_text_prop(menu_terminal_x, 7, "Terminal", black);
   status := syslib.fill_rect(0, MenuHeight - 1, screen_w, 1, black);
   draw_clock(screen_w - 8);
   // The bar is application-drawn into the shadow; present its rows so the
@@ -330,6 +366,7 @@ end;
 // A direct menu item: the row is the menu bar, the x ranges are the item pads.
 procedure handle_menu(x: int; y: int);
 begin
+  layout_menu();
   handled := false;
   if y >= 0 and y < MenuHeight then
   begin
@@ -339,25 +376,25 @@ begin
       draw_shell_window();
       handled := true;
     end
-    else if x >= 20 and x < 66 then
+    else if x >= 20 and x < menu_apps_x - 4 then
     begin
       list_windows();
       file_runs := file_runs + 1;
       handled := true;
     end
-    else if x >= 66 and x < 112 then
+    else if x >= menu_apps_x - 4 and x < menu_windows_x - 4 then
     begin
       launch_clock();
       app_runs := app_runs + 1;
       handled := true;
     end
-    else if x >= 112 and x < 180 then
+    else if x >= menu_windows_x - 4 and x < menu_terminal_x - 4 then
     begin
       raise_terminal();
       window_runs := window_runs + 1;
       handled := true;
     end
-    else if x >= 180 and x < 256 then
+    else if x >= menu_terminal_x - 4 and x < menu_terminal_end + 4 then
     begin
       launch_shell();
       terminal_runs := terminal_runs + 1;
@@ -412,7 +449,7 @@ begin
 
     // File: enumerate. The kernel terminal and system log must be present,
     // together with this shell's window.
-    handle_menu(40, 10);
+    handle_menu(menu_file_x + 4, 10);
     verify("file item handled", handled and file_runs = 1);
     verify("terminal listed", saw_terminal);
     verify("system log listed", saw_log);
@@ -420,12 +457,12 @@ begin
     verify("at least three windows", count >= 3);
 
     // Apps: a non-blocking spawn of `clock`.
-    handle_menu(84, 10);
+    handle_menu(menu_apps_x + 4, 10);
     verify("apps item handled", handled and app_runs = 1);
     verify("clock spawned", launch_status = Ok and last_task > 0 and launches = 1);
 
     // Windows: raise the terminal; focus and the top of the z-order follow.
-    handle_menu(132, 10);
+    handle_menu(menu_windows_x + 4, 10);
     verify("windows item handled", handled and window_runs = 1);
     verify(
       "terminal raised",
@@ -437,7 +474,7 @@ begin
 
     // Terminal: the live boot shell already holds the terminal, so this item
     // reuses and raises it rather than spawning a second shell (M2.5.6).
-    handle_menu(210, 10);
+    handle_menu(menu_terminal_x + 4, 10);
     verify("terminal item handled", handled and terminal_runs = 1);
     verify(
       "terminal item reuses the terminal",

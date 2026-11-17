@@ -29,6 +29,7 @@
 
 use abi::Status;
 
+use crate::font;
 use crate::font8x8::FONT8X8_BASIC;
 use crate::frame;
 use crate::mb2::Framebuffer;
@@ -420,6 +421,47 @@ impl Screen {
                     if bits & (1 << col) != 0 {
                         self.put(cell_x + col as i64, y + row as i64, color);
                     }
+                }
+            }
+        }
+    }
+
+    /// Draws proportional text with a transparent background (spec 0015).
+    ///
+    /// Printable ASCII uses the variable-width font; every other byte keeps an
+    /// 8×8 cell with an eight-pixel advance, drawn two rows down so its ink
+    /// sits on the proportional baseline. Bytes at or above `0x80` have no 8×8
+    /// glyph and draw nothing. `y` is the top of the 12-pixel line box.
+    ///
+    /// The font cache is taken under `SCREEN` on a miss; the documented order
+    /// is `SCREEN → FONT` (nothing takes the font lock and then the screen).
+    fn text_prop(&mut self, x: i64, y: i64, text: &[u8], color: u32) {
+        let mut pen = x;
+        for byte in text {
+            match font::glyph(*byte) {
+                Some(glyph) => {
+                    for (row, bits) in glyph.rows.iter().enumerate() {
+                        for col in 0..glyph.width {
+                            let bit = glyph.left + col;
+                            if bits & (1u16 << bit) != 0 {
+                                self.put(pen + i64::from(bit), y + row as i64, color);
+                            }
+                        }
+                    }
+                    pen += i64::from(glyph.advance);
+                }
+                None => {
+                    if *byte < 0x80 {
+                        let glyph = &FONT8X8_BASIC[*byte as usize];
+                        for (row, bits) in glyph.iter().enumerate() {
+                            for col in 0..8 {
+                                if bits & (1 << col) != 0 {
+                                    self.put(pen + col as i64, y + 2 + row as i64, color);
+                                }
+                            }
+                        }
+                    }
+                    pen += i64::from(font::FALLBACK_ADVANCE);
                 }
             }
         }
@@ -858,6 +900,53 @@ pub fn draw_text(x: i64, y: i64, text: &[u8], color: u32) -> Status {
     match SCREEN.lock().as_mut() {
         Some(screen) => {
             screen.text(x, y, text, color);
+            Status::Ok
+        }
+        None => Status::Invalid,
+    }
+}
+
+// ---- proportional text (spec 0015) ---------------------------------------
+
+/// The proportional font's line height in pixels (12). Kernel callers that
+/// already know graphics are enabled, such as the window chrome, use this
+/// constant directly.
+pub const PROP_LINE_HEIGHT: i64 = font::LINE_HEIGHT as i64;
+
+/// The advance of one byte in the proportional font (8 for a fallback byte).
+pub fn prop_advance(byte: u8) -> i64 {
+    i64::from(font::advance(byte))
+}
+
+/// `syslib.text_width_prop`: the measured advance of `text`, or 0 when graphics
+/// are disabled (the same rule as `screen_width`).
+pub fn text_width_prop(text: &[u8]) -> u64 {
+    if SCREEN.lock().is_none() {
+        return 0;
+    }
+    font::text_width(text)
+}
+
+/// `syslib.text_height_prop`: the 12-pixel line height, or 0 when graphics are
+/// disabled.
+pub fn text_height_prop() -> u64 {
+    if SCREEN.lock().is_none() {
+        return 0;
+    }
+    u64::from(font::LINE_HEIGHT)
+}
+
+/// `syslib.draw_text_prop`: draws proportional text into the shadow with a
+/// transparent background. The interpreter rejects an over-wide colour; the
+/// screen and the clip still bound the pixels, so an off-screen origin or a
+/// partially visible string is clipped and never faults.
+pub fn draw_text_prop(x: i64, y: i64, text: &[u8], color: u32) -> Status {
+    if color > MAX_COLOR {
+        return Status::Invalid;
+    }
+    match SCREEN.lock().as_mut() {
+        Some(screen) => {
+            screen.text_prop(x, y, text, color);
             Status::Ok
         }
         None => Status::Invalid,

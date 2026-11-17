@@ -248,6 +248,22 @@ impl Host for KernelHost<'_> {
         crate::gfx::draw_text(x, y, text, color)
     }
 
+    // The proportional font (spec 0015). The metrics are 0 and the drawing
+    // primitives `Invalid` when graphics are disabled, matching the other
+    // screen calls; the window chrome uses the font module directly because
+    // it only runs while the window service is live.
+    fn text_width_prop(&mut self, text: &[u8]) -> u64 {
+        crate::gfx::text_width_prop(text)
+    }
+
+    fn text_height_prop(&mut self) -> u64 {
+        crate::gfx::text_height_prop()
+    }
+
+    fn draw_text_prop(&mut self, x: i64, y: i64, text: &[u8], color: u32) -> Status {
+        crate::gfx::draw_text_prop(x, y, text, color)
+    }
+
     fn get_pixel(&mut self, x: i64, y: i64) -> u32 {
         crate::gfx::get_pixel(x, y)
     }
