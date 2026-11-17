@@ -1,0 +1,1248 @@
+unit browser;
+
+// M2.5.4: a windowed file browser over the read-only application file API.
+//
+//   run browser         // interactive: list the image root, open and launch
+//   run browser check   // deterministic checks, prints `browser: ok`
+//   run browser shot    // lists and previews, prints `browser: ready` and
+//                       // holds ~5 s for the QMP screenshot harness
+//
+// The listing is the M2.5.1 root view (`core.fs_list`), read from index 0
+// until `NotFound` into fixed arrays (64 names, kinds and sizes). `.` and `..`
+// are already excluded. The ext2 image root also carries `mke2fs`'s
+// `lost+found`: it is shown as a folder (kind 1) and opening or launching it is
+// refused with a clear status, because M2.5.1 has no subdirectory traversal.
+// A kind-2 entry (device, socket, symlink) is shown but cannot be opened.
+//
+// Preview: a regular file at most 2048 bytes is read with `core.fs_size` plus
+// 256-byte `core.fs_read` chunks into a staged `bytes[2048]` and published with
+// one strict-UTF-8 `core.substr_into` (a `bytes` source is the checked
+// conversion). A missing name, a directory, an unsupported path, a file over
+// the preview cap and invalid UTF-8 all set the status line and leave the old
+// preview byte-identical. This is a preview, not a second editor: there is no
+// cursor and no write path.
+//
+// Launch is a blocking launcher: Ctrl+L spawns the selected regular source app
+// with `core.spawn` and then blocks in `core.wait` until it exits. A directory
+// or a kind-2 entry is refused. The `check` proof launches `editor` with the
+// argument `check`, which terminates on its own, so no child is left running.
+//
+// The application owns the selected index, the first visible row, the status
+// line and the preview state. Rows are drawn by the app (a marker, the name and
+// the size) because `ui_list` models eight items while the root has more than
+// fifty; the scrollbar is `ui_scrollbar`/`ui_scrollbar_hit`. Keys are
+// Up/Down/PageUp/PageDown/Home/End, Enter (preview), Ctrl+L (launch) and Ctrl+Q
+// (quit); a double-click previews. Drawing is client content only: no
+// `syslib.clear` and no assumption of a blank screen. Every frame is complete
+// before one `window_present`, and an owner `Expose` repaints the whole content.
+//
+// `langhost` and a kernel without a framebuffer model a disabled screen, so the
+// sample runs the same listing, preview and selection logic there and prints
+// `browser: host ok`. The host path never launches a child.
+
+uses core, stdlib, syslib;
+
+const
+  WindowX = 160;
+  WindowY = 90;
+  ContentW = 680;
+  ContentH = 480;
+
+  // Root listing capacity. The image has 55 entries at this point; 64 leaves
+  // room without a growth path (there is no allocation).
+  EntryCapacity = 64;
+
+  // Preview cap and per-character layout of the M2.5.1 chunked read.
+  PreviewCapacity = 2048;
+  ReadChunk = 256;
+
+  LineH = 16;
+  PathH = 22;
+
+  ListLeft = 8;
+  ListW = 342;
+  ListTop = 30;
+  BodyH = 420;
+  ScrollLeft = 352;
+  ScrollW = 16;
+  PreviewLeft = 378;
+  PreviewW = 294;
+  StatusTop = 460;
+
+  ListRows = 26;
+  PreviewLines = 24;
+  MaxNameBytes = 30;
+  MaxTitleBytes = 20;
+  MaxPreviewCols = 34;
+
+  HoldSeconds = 5;
+  NanosPerSecond = 1000000000;
+
+var
+  // Listing.
+  names: array[string[64], EntryCapacity];
+  kinds: array[uint, EntryCapacity];
+  sizes: array[uint, EntryCapacity];
+  entry_count: int;
+  index: uint;
+  name: string[64];
+  kind: uint;
+  size: uint;
+  truncated: bool;
+
+  // Selection and view.
+  selected: int;
+  top: int;
+
+  // Preview.
+  preview: string[PreviewCapacity];
+  preview_stage: bytes[PreviewCapacity];
+  preview_title: string[64];
+  preview_size: uint;
+  status_line: string[64];
+
+  // Window and absolute layout.
+  id: int;
+  rect: Rect;
+  list_x: int;
+  list_y: int;
+  scroll_x: int;
+  scroll_y: int;
+  preview_x: int;
+  preview_y: int;
+  status_y: int;
+
+  // Palette.
+  black: uint;
+  white: uint;
+  gray: uint;
+  accent: uint;
+
+  // Input and launch.
+  ev: Event;
+  last_click_ns: uint;
+  last_click_item: int;
+  opens: int;
+  last_task: int;
+  launch_status: Status;
+  diag: Diagnostic;
+  reason: ExitReason;
+
+  // Mode and scratch.
+  mode: int;
+  running: bool;
+  auto_draw: bool;
+  dirty: bool;
+  failed: bool;
+  step: int;
+  step_text: string[16];
+  st: Status;
+  used: int;
+  copied: int;
+  value: Status;
+  digits: string[24];
+  name_buf: string[64];
+  title_buf: string[64];
+  line_buf: string[64];
+  size_buf: string[32];
+
+procedure say(line: const string[0]);
+begin
+  core.write(line);
+end;
+
+// Silent check: the first failure is printed with its step number and label.
+procedure verify(label: const string[0]; passed: bool);
+begin
+  step := step + 1;
+  if not passed then
+  begin
+    failed := true;
+    say("browser: failed check ");
+    used := core.format_int_into(step_text, step, uint(10), uint(0));
+    say(step_text);
+    say(" (");
+    say(label);
+    say(")\n");
+  end;
+end;
+
+// ---- listing --------------------------------------------------------------
+
+// Reads the root in directory order until `NotFound`. The path is always the
+// image root; a name or a subdirectory path is `Invalid` (spec 0013, F3).
+procedure load_root();
+var
+  i: int;
+begin
+  entry_count := 0;
+  truncated := false;
+  index := uint(0);
+  st := core.fs_list("", index, name, kind, size);
+  while st = Ok and entry_count < EntryCapacity do
+  begin
+    names[entry_count] := name;
+    kinds[entry_count] := kind;
+    sizes[entry_count] := size;
+    entry_count := entry_count + 1;
+    index := index + uint(1);
+    st := core.fs_list("", index, name, kind, size);
+  end;
+  if entry_count >= EntryCapacity and st = Ok then
+  begin
+    truncated := true;
+    status_line := "listing truncated (64)"
+  end
+  else if st <> NotFound then
+    status_line := "listing failed"
+  else
+    status_line := "";
+
+  selected := 0;
+  top := 0;
+  i := 0;
+  preview := "";
+  preview_title := "";
+  preview_size := uint(0);
+end;
+
+function find_name(target: const string[0]): int;
+var
+  i: int;
+begin
+  i := 0;
+  while i < entry_count do
+  begin
+    if names[i] = target then
+      return i;
+    i := i + 1;
+  end;
+  return -1;
+end;
+
+// ---- preview --------------------------------------------------------------
+
+// The checked bytes -> string publish. Staged bytes are converted with one
+// whole-buffer copy, so a rejected value leaves the old preview untouched.
+function publish_preview(count: int): Status;
+var
+  got: int;
+begin
+  got := core.substr_into(preview, preview_stage, 0, count);
+  if got = count then
+    return Ok;
+  if got = -6 then
+    return CapacityExceeded;
+  return Invalid;
+end;
+
+procedure set_error(err: Status);
+begin
+  if err = NotFound then
+    status_line := "no such file"
+  else if err = Invalid then
+    status_line := "unsupported path"
+  else if err = CapacityExceeded then
+    status_line := "preview too large (2048 max)"
+  else if err = IoError then
+    status_line := "read error"
+  else
+    status_line := "file error";
+end;
+
+// Opens one root entry. A folder is refused before any read (M2.5.1 has no
+// traversal), a kind-2 entry is not openable, a regular file is size-checked,
+// read in 256-byte chunks and published through the strict-UTF-8 conversion.
+// Every failure sets the status line and leaves preview/title/size unchanged.
+function open_entry(entry_name: const string[0]; entry_kind: uint): Status;
+var
+  total: uint;
+  offset: uint;
+  got: int;
+  err: Status;
+  i: int;
+  chunk: bytes[256];
+begin
+  if entry_kind = uint(1) then
+  begin
+    status_line := "folder (subdirectories unsupported)";
+    return Invalid;
+  end;
+  if entry_kind <> uint(0) then
+  begin
+    status_line := "not a regular file";
+    return Invalid;
+  end;
+
+  err := core.fs_size(entry_name, size);
+  if err <> Ok then
+  begin
+    set_error(err);
+    return err;
+  end;
+  if size > uint(PreviewCapacity) then
+  begin
+    status_line := "preview too large (2048 max)";
+    return CapacityExceeded;
+  end;
+
+  total := size;
+  offset := uint(0);
+  err := Ok;
+  while offset < total and err = Ok do
+  begin
+    err := core.fs_read(entry_name, offset, chunk, got);
+    if err = Ok then
+    begin
+      if got <= 0 then
+        err := IoError
+      else
+      begin
+        i := 0;
+        while i < got do
+        begin
+          preview_stage[int(offset) + i] := chunk[i];
+          i := i + 1;
+        end;
+        offset := offset + uint(got);
+      end;
+    end;
+  end;
+  if err <> Ok then
+  begin
+    set_error(err);
+    return err;
+  end;
+  if offset <> total then
+  begin
+    status_line := "read error";
+    return IoError;
+  end;
+
+  err := publish_preview(int(total));
+  if err <> Ok then
+  begin
+    status_line := "invalid UTF-8";
+    return err;
+  end;
+  preview_size := total;
+  preview_title := entry_name;
+  status_line := "opened";
+  return Ok;
+end;
+
+// A direct name open for the error checks: the kind comes from the listing in
+// normal use, but a missing name still reports its own status.
+function open_name(entry_name: const string[0]): Status;
+begin
+  return open_entry(entry_name, uint(0));
+end;
+
+// ---- launch ---------------------------------------------------------------
+
+// Blocking launcher: spawn the selected regular source app, then wait for it
+// to exit. `Ok` means `ExitReason.Ok`; a killed or faulted child is `IoError`.
+// A directory or a kind-2 entry is refused before the spawn.
+function launch_name(entry_name: const string[0]; args: const string[0];
+                     entry_kind: uint): Status;
+var
+  err: Status;
+  child: int;
+  why: ExitReason;
+begin
+  if entry_kind = uint(1) then
+  begin
+    status_line := "cannot launch a folder";
+    return Invalid;
+  end;
+  if entry_kind <> uint(0) then
+  begin
+    status_line := "cannot launch this entry";
+    return Invalid;
+  end;
+
+  child := 0;
+  err := core.spawn(entry_name, args, diag, child);
+  if err <> Ok then
+  begin
+    status_line := "launch failed";
+    return err;
+  end;
+  last_task := child;
+  err := core.wait(child, why);
+  if err <> Ok then
+  begin
+    status_line := "launch wait failed";
+    return err;
+  end;
+
+  err := Ok;
+  case why of
+    Ok: status_line := "launched: ok"
+    Killed:
+    begin
+      status_line := "launch killed";
+      err := IoError;
+    end;
+    Faulted(code):
+    begin
+      status_line := "launch faulted";
+      err := IoError;
+    end;
+  end;
+  return err;
+end;
+
+procedure launch_selected();
+begin
+  if selected >= 0 and selected < entry_count then
+    launch_status := launch_name(names[selected], "", kinds[selected]);
+end;
+
+// ---- selection and view ---------------------------------------------------
+
+procedure ensure_visible();
+begin
+  top := stdlib.ui_list_ensure_visible(selected, top, ListRows);
+  top := stdlib.ui_scrollbar_clamp(top, ListRows, entry_count);
+end;
+
+procedure move_selection(delta: int);
+begin
+  selected := stdlib.ui_list_move(selected, entry_count, delta);
+  ensure_visible();
+end;
+
+procedure activate_selected();
+begin
+  if selected >= 0 and selected < entry_count then
+  begin
+    value := open_entry(names[selected], kinds[selected]);
+    if value = Ok then
+      opens := opens + 1;
+  end;
+end;
+
+// The row under a content point, or -1 outside the list interior. The list is
+// drawn from `top`, one 16-pixel row per entry.
+function index_at(px: int; py: int): int;
+var
+  row: int;
+  at: int;
+begin
+  if not stdlib.ui_rect_hit(list_x, list_y, ListW, BodyH, px, py) then
+    return -1;
+  if py < list_y + 1 or py >= list_y + 1 + ListRows * LineH then
+    return -1;
+  row := (py - list_y - 1) div LineH;
+  at := top + row;
+  if at < 0 or at >= entry_count then
+    return -1;
+  return at;
+end;
+
+// ---- key and pointer handling ---------------------------------------------
+
+procedure handle_key();
+var
+  key: int;
+  mods: int;
+  ctrl: bool;
+begin
+  key := stdlib.ui_key_code(ev.code);
+  mods := stdlib.ui_key_modifiers(ev.code);
+  ctrl := (mods div 2) mod 2 = 1;
+
+  if ctrl then
+  begin
+    if key = 0x6C then
+    begin
+      launch_selected();
+      return;
+    end;
+    if key = 0x71 then
+    begin
+      running := false;
+      return;
+    end;
+  end;
+
+  if stdlib.ui_key_is_up(ev.code) then
+    move_selection(-1)
+  else if stdlib.ui_key_is_down(ev.code) then
+    move_selection(1)
+  else if key = 0x116 then
+    move_selection(0 - ListRows)
+  else if key = 0x117 then
+    move_selection(ListRows)
+  else if stdlib.ui_key_is_home(ev.code) then
+  begin
+    selected := 0;
+    top := 0;
+  end
+  else if stdlib.ui_key_is_end(ev.code) then
+  begin
+    selected := entry_count - 1;
+    ensure_visible();
+  end
+  else if stdlib.ui_key_is_enter(ev.code) then
+    activate_selected();
+end;
+
+procedure handle_pointer();
+var
+  hit: int;
+  action: int;
+  now: uint;
+begin
+  if ev.kind <> PointerDown then
+    return;
+
+  if stdlib.ui_rect_hit(scroll_x, scroll_y, ScrollW, BodyH, ev.x, ev.y) then
+  begin
+    action := stdlib.ui_scrollbar_hit(
+      scroll_x, scroll_y, ScrollW, BodyH, ev.x, ev.y,
+      top, ListRows, entry_count);
+    if action = 1 then
+      top := stdlib.ui_scrollbar_clamp(top - ListRows, ListRows, entry_count)
+    else if action = 2 then
+      top := stdlib.ui_scrollbar_clamp(top + ListRows, ListRows, entry_count);
+    if selected < top then
+      selected := top;
+    if selected >= top + ListRows then
+      selected := top + ListRows - 1;
+    return;
+  end;
+
+  hit := index_at(ev.x, ev.y);
+  if hit < 0 then
+    return;
+  selected := hit;
+  ensure_visible();
+  now := core.clock();
+  if stdlib.ui_double_click(last_click_ns, now, last_click_item = hit)
+     and kinds[hit] = uint(0) then
+  begin
+    last_click_ns := uint(0);
+    last_click_item := -1;
+    value := open_entry(names[hit], kinds[hit]);
+    if value = Ok then
+      opens := opens + 1;
+  end
+  else
+  begin
+    last_click_ns := now;
+    last_click_item := hit;
+    // A single click on a non-openable entry still explains why.
+    if kinds[hit] <> uint(0) then
+      value := open_entry(names[hit], kinds[hit]);
+  end;
+end;
+
+// ---- drawing --------------------------------------------------------------
+
+procedure compute_layout();
+begin
+  list_x := rect.x + ListLeft;
+  list_y := rect.y + ListTop;
+  scroll_x := rect.x + ScrollLeft;
+  scroll_y := rect.y + ListTop;
+  preview_x := rect.x + PreviewLeft;
+  preview_y := rect.y + ListTop;
+  status_y := rect.y + StatusTop;
+end;
+
+procedure draw_marker(x: int; y: int; entry_kind: uint; color: uint);
+begin
+  if entry_kind = uint(1) then
+  begin
+    st := syslib.fill_rect(x, y + 1, 9, 6, color);
+    st := syslib.fill_rect(x, y, 6, 2, color);
+  end
+  else
+  begin
+    st := syslib.draw_rect(x + 1, y, 7, 8, color);
+    if entry_kind = uint(0) then
+    begin
+      st := syslib.fill_rect(x + 3, y + 2, 3, 1, color);
+      st := syslib.fill_rect(x + 3, y + 4, 3, 1, color);
+    end;
+  end;
+end;
+
+procedure draw_path();
+var
+  width: int;
+begin
+  st := syslib.draw_text(rect.x + 8, rect.y + 4, "igis:/", black);
+  used := core.format_int_into(digits, entry_count, uint(10), uint(0));
+  st := syslib.draw_text(rect.x + 80, rect.y + 4, digits, black);
+  st := syslib.draw_text(
+    rect.x + 80 + used * 8, rect.y + 4, " entries", gray);
+  width := stdlib.ui_text_width("read-only");
+  st := syslib.draw_text(
+    rect.x + ContentW - 8 - width, rect.y + 4, "read-only", gray);
+  st := stdlib.ui_separator(rect.x, rect.y + PathH - 1, ContentW);
+end;
+
+procedure draw_list();
+var
+  row: int;
+  at: int;
+  y: int;
+  to: int;
+  size_len: int;
+  label_x: int;
+  color: uint;
+begin
+  st := syslib.fill_rect(list_x, list_y, ListW, BodyH, white);
+  st := syslib.draw_rect(list_x, list_y, ListW, BodyH, black);
+
+  row := 0;
+  while row < ListRows and top + row < entry_count do
+  begin
+    at := top + row;
+    y := list_y + 1 + row * LineH;
+    if at = selected then
+    begin
+      st := syslib.fill_rect(list_x + 1, y, ListW - 2, LineH, accent);
+      color := white;
+    end
+    else
+      color := black;
+
+    draw_marker(list_x + 8, y + 4, kinds[at], color);
+
+    to := int(core.len(names[at]));
+    if to > MaxNameBytes then
+      to := MaxNameBytes;
+    while to > 0 and not stdlib.str_boundary(names[at], to) do
+      to := to - 1;
+    copied := core.substr_into(name_buf, names[at], 0, to);
+    if copied > 0 then
+      st := syslib.draw_text(list_x + 24, y + 4, name_buf, color);
+
+    if kinds[at] = uint(1) then
+    begin
+      label_x := list_x + ListW - 8 - 3 * 8;
+      st := syslib.draw_text(label_x, y + 4, "dir", color);
+    end
+    else if kinds[at] = uint(2) then
+    begin
+      label_x := list_x + ListW - 8 - 5 * 8;
+      st := syslib.draw_text(label_x, y + 4, "other", color);
+    end
+    else
+    begin
+      copied := core.format_int_into(
+        size_buf, int(sizes[at]), uint(10), uint(0));
+      label_x := list_x + ListW - 8 - copied * 8;
+      st := syslib.draw_text(label_x, y + 4, size_buf, color);
+    end;
+
+    row := row + 1;
+  end;
+end;
+
+function preview_line_end(start: int): int;
+var
+  i: int;
+  length: int;
+begin
+  length := int(core.len(preview));
+  i := start;
+  while i < length do
+  begin
+    if preview[i] = byte(10) then
+      return i;
+    i := i + 1;
+  end;
+  return length;
+end;
+
+procedure draw_preview();
+var
+  start: int;
+  stop: int;
+  to: int;
+  row: int;
+  y: int;
+begin
+  st := syslib.fill_rect(preview_x, preview_y, PreviewW, BodyH, white);
+  st := syslib.draw_rect(preview_x, preview_y, PreviewW, BodyH, black);
+  st := syslib.draw_text(preview_x + 8, preview_y + 6, "Preview", gray);
+
+  if int(core.len(preview_title)) > 0 then
+  begin
+    to := int(core.len(preview_title));
+    if to > MaxTitleBytes then
+      to := MaxTitleBytes;
+    while to > 0 and not stdlib.str_boundary(preview_title, to) do
+      to := to - 1;
+    copied := core.substr_into(title_buf, preview_title, 0, to);
+    if copied > 0 then
+      st := syslib.draw_text(preview_x + 64, preview_y + 6, title_buf, black);
+  end;
+
+  st := stdlib.ui_separator(preview_x + 1, preview_y + 20, PreviewW - 2);
+
+  if int(core.len(preview)) = 0 then
+  begin
+    if int(core.len(preview_title)) > 0 then
+      st := syslib.draw_text(preview_x + 8, preview_y + 26, "(empty)", gray)
+    else
+      st := syslib.draw_text(preview_x + 8, preview_y + 26, "(no preview)", gray);
+  end
+  else
+  begin
+    start := 0;
+    row := 0;
+    while row < PreviewLines and start < int(core.len(preview)) do
+    begin
+      stop := preview_line_end(start);
+      to := start + MaxPreviewCols;
+      if to > stop then
+        to := stop;
+      while to > start and not stdlib.str_boundary(preview, to) do
+        to := to - 1;
+      copied := core.substr_into(line_buf, preview, start, to - start);
+      y := preview_y + 26 + row * LineH;
+      if copied > 0 then
+        st := syslib.draw_text(preview_x + 8, y, line_buf, black);
+      if stop < int(core.len(preview)) then
+        start := stop + 1
+      else
+        start := int(core.len(preview));
+      row := row + 1;
+    end;
+  end;
+end;
+
+procedure draw_status();
+var
+  width: int;
+begin
+  st := stdlib.ui_separator(rect.x, status_y - 6, ContentW);
+  st := syslib.draw_text(rect.x + 8, status_y, status_line, black);
+  width := stdlib.ui_text_width("Enter open  Ctrl+L launch");
+  st := syslib.draw_text(
+    rect.x + ContentW - 8 - width, status_y,
+    "Enter open  Ctrl+L launch", gray);
+end;
+
+// One complete frame; the caller presents once afterwards.
+procedure draw_all();
+begin
+  st := syslib.fill_rect(rect.x, rect.y, ContentW, ContentH, white);
+  draw_path();
+  draw_list();
+  st := stdlib.ui_scrollbar(
+    scroll_x, scroll_y, ScrollW, BodyH, top, ListRows, entry_count, false);
+  draw_preview();
+  draw_status();
+end;
+
+procedure present_frame();
+begin
+  st := syslib.window_present(id);
+end;
+
+// ---- event pump -----------------------------------------------------------
+
+// Drains every queued event; drawing is deferred to one frame at the end. In
+// check mode `auto_draw` is off during injected sequences so the double-click
+// deadline never includes a full repaint.
+procedure drain_events();
+var
+  active: bool;
+  count: int;
+begin
+  active := true;
+  count := 0;
+  while active and count < 64 do
+  begin
+    st := syslib.poll_event(ev);
+    if st = Ok then
+    begin
+      count := count + 1;
+      if ev.kind = Expose then
+        dirty := true
+      else if ev.window = id then
+      begin
+        if ev.kind = KeyDown then
+        begin
+          handle_key();
+          dirty := true;
+        end
+        else if ev.kind = PointerDown or ev.kind = PointerUp
+                or ev.kind = PointerMove then
+        begin
+          handle_pointer();
+          dirty := true;
+        end;
+      end;
+    end
+    else
+      active := false;
+  end;
+  if dirty and auto_draw then
+  begin
+    draw_all();
+    present_frame();
+  end;
+  dirty := false;
+end;
+
+// ---- injection (the deterministic test hook) ------------------------------
+
+procedure pointer_to(px: int; py: int);
+begin
+  st := syslib.inject_pointer(-100000, -100000, uint(0));
+  used := int(syslib.event_flush());
+  st := syslib.inject_pointer(px, py, uint(0));
+  drain_events();
+end;
+
+procedure pointer_down();
+begin
+  st := syslib.inject_pointer(0, 0, uint(1));
+  drain_events();
+end;
+
+procedure pointer_up();
+begin
+  st := syslib.inject_pointer(0, 0, uint(0));
+  drain_events();
+end;
+
+procedure inject_key(key_code: int; text_byte: int);
+begin
+  ev.kind := KeyDown;
+  ev.x := 0;
+  ev.y := 0;
+  ev.code := uint(key_code * 65536 + text_byte);
+  ev.window := 0;
+  st := syslib.inject_event(ev);
+  drain_events();
+end;
+
+// ---- shared checks --------------------------------------------------------
+
+function has_kind(target: const string[0]; want: uint): bool;
+var
+  at: int;
+begin
+  at := find_name(target);
+  if at < 0 then
+    return false;
+  return kinds[at] = want;
+end;
+
+// The listing, the preview and every documented error class. Used by both the
+// host path and the kernel proof.
+procedure data_checks();
+var
+  child_at: int;
+  text_at: int;
+  keep_length: int;
+begin
+  load_root();
+  verify("listing non-empty", entry_count > 0);
+  verify("listing complete", not truncated);
+  verify("listing capacity", entry_count <= EntryCapacity);
+  verify("listing size", entry_count >= 50);
+  verify("editor listed", has_kind("editor", uint(0)));
+  verify("widgets listed", has_kind("widgets", uint(0)));
+  verify("child listed", has_kind("child", uint(0)));
+  // The kernel image has `mke2fs`'s lost+found; the host directory does not.
+  verify("folder kind",
+    has_kind("lost+found", uint(1))
+      or (syslib.screen_width() = uint(0) and find_name("lost+found") < 0));
+
+  child_at := find_name("child");
+  verify("child found", child_at >= 0);
+  if child_at >= 0 then
+  begin
+    selected := child_at;
+    ensure_visible();
+    activate_selected();
+    verify("preview child", preview_title = "child");
+    verify("preview prefix", stdlib.starts_with(preview, "unit child;"));
+    verify("preview size", int(core.len(preview)) = int(preview_size));
+    verify("preview lines", preview_line_end(0) > 0);
+  end;
+
+  keep_length := int(core.len(preview));
+
+  // A listed folder is refused before any read; the status explains why.
+  value := open_entry("lost+found", uint(1));
+  verify("folder refused",
+    value = Invalid and stdlib.starts_with(status_line, "folder"));
+  verify("folder keeps preview", int(core.len(preview)) = keep_length);
+
+  // A kind-2 entry is shown but not openable.
+  value := open_entry("child", uint(2));
+  verify("kind two refused",
+    value = Invalid and status_line = "not a regular file");
+  verify("kind two keeps preview", int(core.len(preview)) = keep_length);
+
+  // `widgets` is 57,388 bytes: over the preview cap, refused without a read.
+  value := open_name("widgets");
+  verify("preview too large", value = CapacityExceeded);
+  verify("too large keeps preview", int(core.len(preview)) = keep_length);
+
+  // Missing, root and subdirectory paths are the M2.5.1 error classes.
+  value := open_name("no_such_file");
+  verify("missing file", value = NotFound and status_line = "no such file");
+  value := open_name(".");
+  verify("directory path", value = Invalid);
+  value := open_name("child/x");
+  verify("subdirectory path", value = Invalid);
+  verify("errors keep preview", int(core.len(preview)) = keep_length);
+
+  // The checked bytes -> string publish rejects invalid UTF-8 atomically.
+  preview_stage[0] := byte(0xC3);
+  preview_stage[1] := byte(0x28);
+  value := publish_preview(2);
+  verify("invalid utf8", value = Invalid);
+  verify("invalid keeps preview",
+    int(core.len(preview)) = keep_length
+      and stdlib.starts_with(preview, "unit child;"));
+
+  // The text file is the second deterministic preview used by the key checks.
+  text_at := find_name("text");
+  verify("text found", text_at >= 0);
+  if text_at >= 0 then
+  begin
+    selected := text_at;
+    ensure_visible();
+    activate_selected();
+    verify("preview text", preview_title = "text");
+    verify("preview text prefix", stdlib.starts_with(preview, "unit text;"));
+  end;
+end;
+
+// Movement, clamping, paging and the scrollbar share one model.
+procedure selection_checks();
+var
+  keep_count: int;
+begin
+  keep_count := entry_count;
+  selected := 0;
+  top := 0;
+  move_selection(1);
+  verify("down one", selected = 1 and top = 0);
+  move_selection(-1);
+  verify("up clamps", selected = 0 and top = 0);
+  move_selection(1);
+  verify("down again", selected = 1);
+
+  selected := 0;
+  top := 0;
+  move_selection(0 - ListRows);
+  verify("page up clamps", selected = 0 and top = 0);
+  move_selection(ListRows);
+  verify("page down", selected = ListRows and top = 1);
+
+  selected := keep_count - 1;
+  ensure_visible();
+  verify("end reaches last",
+    selected = keep_count - 1 and top = keep_count - ListRows);
+  verify("scrollbar clamp",
+    stdlib.ui_scrollbar_clamp(keep_count, ListRows, keep_count)
+      = keep_count - ListRows);
+  selected := 0;
+  top := 0;
+  verify("scrollbar model",
+    stdlib.ui_list_ensure_visible(ListRows + 3, 0, ListRows) = 4);
+  verify("move clamps",
+    stdlib.ui_list_move(keep_count - 1, keep_count, 1) = keep_count - 1);
+end;
+
+// ---- modes ---------------------------------------------------------------
+
+procedure host_path();
+begin
+  failed := false;
+  step := 0;
+  data_checks();
+  selection_checks();
+  verify("host no window", syslib.screen_width() = uint(0));
+  if failed then
+    say("browser: host failed\n")
+  else
+    say("browser: host ok\n");
+end;
+
+// The kernel proof. Data and selection checks first, then one composed frame
+// with pixel probes, then a real terminating launch.
+procedure check_mode();
+var
+  child_at: int;
+  text_at: int;
+  before_opens: int;
+  row: int;
+  other_row: int;
+  probe_row: int;
+  probe_at: int;
+  scan: int;
+  row_y: int;
+  preview_text_y: int;
+  hint_x: int;
+  track_h: int;
+  thumb_h: int;
+  travel: int;
+  thumb_y: int;
+  max_top: int;
+begin
+  data_checks();
+  selection_checks();
+
+  // Double-click: first show `text`, then open `child` with two real clicks on
+  // its visible row. Injected events take the normal routing path.
+  child_at := find_name("child");
+  text_at := find_name("text");
+  before_opens := opens;
+  selected := child_at;
+  ensure_visible();
+  preview_title := "text";
+  preview := "unit text;";
+  auto_draw := false;
+  last_click_ns := uint(0);
+  last_click_item := -1;
+  row := child_at - top;
+  row_y := list_y + 1 + row * LineH + LineH div 2;
+  pointer_to(list_x + 100, row_y);
+  pointer_down();
+  pointer_up();
+  pointer_down();
+  pointer_up();
+  auto_draw := true;
+  verify("double click opens",
+    preview_title = "child" and opens = before_opens + 1);
+
+  // Enter on the (already selected) text row previews it.
+  selected := text_at;
+  ensure_visible();
+  inject_key(0x103, 0);
+  verify("enter opens", preview_title = "text" and opens = before_opens + 2);
+
+  // Selection and view are back on a file whose first line draws a known
+  // glyph; build the frame the pixel probes describe.
+  selected := text_at;
+  ensure_visible();
+  value := open_entry(names[text_at], kinds[text_at]);
+  verify("text reopened", value = Ok and preview_title = "text");
+  draw_all();
+  present_frame();
+
+  row := text_at - top;
+  row_y := list_y + 1 + row * LineH;
+  other_row := 0;
+  if row = 0 then
+    other_row := 1;
+  preview_text_y := preview_y + 26;
+  hint_x := rect.x + ContentW - 8 - stdlib.ui_text_width("Enter open  Ctrl+L launch");
+  verify("path rule", syslib.get_pixel(rect.x + 300, rect.y + PathH - 1) = black);
+  verify("list border", syslib.get_pixel(list_x, list_y) = black);
+  verify("selected row", syslib.get_pixel(list_x + 2, row_y + 3) = accent);
+  verify("other row", syslib.get_pixel(
+    list_x + 2, list_y + 1 + other_row * LineH + 3) = white);
+  // The selected row's marker is drawn white on the accent band; a different
+  // visible regular file keeps the black marker.
+  verify("selected marker", syslib.get_pixel(list_x + 9, row_y + 4) = white);
+  probe_row := -1;
+  scan := 0;
+  while scan < ListRows and probe_row < 0 do
+  begin
+    probe_at := top + scan;
+    if probe_at >= 0 and probe_at < entry_count
+       and probe_at <> text_at and kinds[probe_at] = uint(0) then
+      probe_row := scan;
+    scan := scan + 1;
+  end;
+  verify("other file present", probe_row >= 0);
+  verify("file marker", syslib.get_pixel(
+    list_x + 9, list_y + 1 + probe_row * LineH + 4) = black);
+  verify("preview border", syslib.get_pixel(preview_x, preview_y) = black);
+  verify("preview text ink",
+    syslib.get_pixel(preview_x + 9, preview_text_y + 2) = black);
+  verify("preview text hole",
+    syslib.get_pixel(preview_x + 8, preview_text_y) = white);
+  verify("preview divider",
+    syslib.get_pixel(preview_x + 100, preview_y + 20) = black);
+  verify("status rule",
+    syslib.get_pixel(rect.x + 300, status_y - 6) = black);
+  verify("scrollbar border", syslib.get_pixel(scroll_x, scroll_y) = black);
+  // The thumb sits at `top`, so probe the computed thumb rather than the track.
+  track_h := BodyH - 4;
+  thumb_h := (track_h * ListRows) div entry_count;
+  if thumb_h < 8 then
+    thumb_h := 8;
+  travel := track_h - thumb_h;
+  max_top := entry_count - ListRows;
+  thumb_y := scroll_y + 2;
+  if max_top > 0 and travel > 0 then
+    thumb_y := scroll_y + 2 + (travel * top) div max_top;
+  verify("scrollbar thumb",
+    syslib.get_pixel(scroll_x + 4, thumb_y + 2) = gray);
+  verify("hint ink",
+    syslib.get_pixel(hint_x + 1, status_y + 1) = gray);
+
+  // A folder and a kind-2 entry cannot launch; `editor check` is a real
+  // terminating source app, so the blocking launcher leaves no child behind.
+  value := launch_name("lost+found", "", uint(1));
+  verify("launch folder refused",
+    value = Invalid and status_line = "cannot launch a folder");
+  value := launch_name("child", "", uint(2));
+  verify("launch kind two refused",
+    value = Invalid and status_line = "cannot launch this entry");
+  value := launch_name("editor", "check", uint(0));
+  verify("launch completed",
+    value = Ok and last_task > 0 and int(core.len(diag.message)) = 0);
+  verify("launch status", status_line = "launched: ok");
+
+  st := syslib.window_close(id);
+  if failed then
+    say("browser: failed\n")
+  else
+    say("browser: ok\n");
+end;
+
+procedure interactive_mode();
+var
+  ready: bool;
+begin
+  load_root();
+  if entry_count > 0 then
+  begin
+    selected := 0;
+    top := 0;
+    value := open_entry(names[0], kinds[0]);
+  end;
+  draw_all();
+  present_frame();
+  running := true;
+  auto_draw := true;
+  while running do
+  begin
+    st := syslib.next_event(ev);
+    if st <> Ok then
+      running := false
+    else if ev.kind = Expose then
+    begin
+      if ev.window = id then
+      begin
+        draw_all();
+        present_frame();
+      end;
+    end
+    else if ev.window = id then
+    begin
+      ready := false;
+      if ev.kind = KeyDown then
+      begin
+        handle_key();
+        ready := true;
+      end
+      else if ev.kind = PointerDown or ev.kind = PointerUp
+              or ev.kind = PointerMove then
+      begin
+        handle_pointer();
+        ready := true;
+      end;
+      if ready and running then
+      begin
+        draw_all();
+        present_frame();
+      end;
+    end;
+  end;
+  st := syslib.window_close(id);
+end;
+
+procedure shot_mode();
+var
+  deadline: uint;
+  child_at: int;
+begin
+  load_root();
+  child_at := find_name("child");
+  if child_at >= 0 then
+  begin
+    selected := child_at;
+    ensure_visible();
+    value := open_entry(names[child_at], kinds[child_at]);
+  end;
+  draw_all();
+  present_frame();
+  say("browser: ready\n");
+  deadline := core.clock() + uint(HoldSeconds) * uint(NanosPerSecond);
+  auto_draw := true;
+  while core.clock() < deadline and running do
+  begin
+    drain_events();
+  end;
+  st := syslib.window_close(id);
+  say("browser: done\n");
+end;
+
+procedure main(args: const string[1024]);
+var
+  screen_w: uint;
+  screen_h: uint;
+begin
+  failed := false;
+  step := 0;
+  running := true;
+  auto_draw := true;
+  dirty := false;
+  opens := 0;
+  last_click_ns := uint(0);
+  last_click_item := -1;
+  last_task := 0;
+  status_line := "";
+  preview := "";
+  preview_title := "";
+  preview_size := uint(0);
+  black := stdlib.ui_black();
+  white := stdlib.ui_white();
+  gray := stdlib.ui_gray();
+  accent := stdlib.ui_accent();
+
+  mode := 0;
+  if stdlib.starts_with(args, "check") then
+    mode := 1
+  else if stdlib.starts_with(args, "shot") then
+    mode := 2;
+
+  screen_w := syslib.screen_width();
+  screen_h := syslib.screen_height();
+  if screen_w = uint(0) then
+    host_path()
+  else if screen_w < uint(WindowX + ContentW + 40) or
+          screen_h < uint(WindowY + ContentH + 60) then
+    say("browser: screen too small\n")
+  else
+  begin
+    st := syslib.window_open(WindowX, WindowY, ContentW, ContentH, "Browser", id);
+    if st <> Ok then
+      say("browser: no window\n")
+    else
+    begin
+      st := syslib.window_content_rect(id, rect);
+      if st <> Ok then
+        say("browser: no content rect\n")
+      else
+      begin
+        compute_layout();
+        if mode = 1 then
+          check_mode()
+        else if mode = 2 then
+          shot_mode()
+        else
+          interactive_mode();
+      end;
+    end;
+  end;
+end;

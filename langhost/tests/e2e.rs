@@ -2304,6 +2304,20 @@ fn the_editor_sample_checks_its_logic_on_the_host() {
     assert_eq!(result.output, b"editor: host ok\n".to_vec());
 }
 
+/// The M2.5.4 browser sample against `langhost`'s disabled screen: it runs the
+/// same root listing, sorted host order, preview and selection logic as the
+/// kernel check, without a window or a child launch.
+#[test]
+fn the_browser_sample_lists_and_previews_on_the_host() {
+    let path = format!("{}/../samples/apps/browser", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "browser").expect("the browser sample compiles");
+    let result =
+        langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies and runs");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"browser: host ok\n".to_vec());
+}
+
 /// The M2.5.1 proof sample against `langhost`'s root-only file host (spec
 /// 0013): listing, `fs_size`, chunked reads, offsets and error paths all run
 /// on the host with the same 256-byte chunk the kernel uses.
