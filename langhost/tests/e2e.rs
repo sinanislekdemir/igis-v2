@@ -1946,3 +1946,135 @@ end;
         ]
     );
 }
+
+#[test]
+fn ui_icons_compiles_and_reports_the_host_path() {
+    let path = format!("{}/../samples/apps/ui_icons", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "ui_icons").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"ui_icons: host ok\n".to_vec());
+}
+
+#[test]
+fn ui_icons_draw_the_documented_sequence() {
+    let source = br#"
+unit iconseq;
+
+uses core, stdlib, syslib;
+
+var
+  rows: array[uint, 32];
+  x: int;
+  y: int;
+  w: int;
+  h: int;
+  dx: int;
+  dy: int;
+  st: Status;
+
+procedure main(args: const string[1024]);
+begin
+  rows[2] := uint(7);
+  rows[3] := uint(5);
+  st := stdlib.ui_icon(10, 20, rows, stdlib.ui_black());
+  st := stdlib.ui_icon_label(10, 54, "Doc");
+  st := stdlib.ui_selection_rect(40, 20, 20, 10);
+  if st = Ok
+    and stdlib.ui_icon_size() = 32
+    and stdlib.ui_icon_row_bit(rows[2], 2)
+    and not stdlib.ui_icon_row_bit(rows[2], 3)
+    and stdlib.ui_icon_cell_x(1, 10, 100) = 110
+    and stdlib.ui_icon_cell_y(1, 10, 80) = 90
+    and stdlib.ui_icon_label_y(20) = 54
+    and stdlib.ui_icon_grid_hit(0, 0, 2, 4, 100, 80, 110, 10) = 1
+    and stdlib.ui_icon_grid_hit(0, 0, 2, 4, 100, 80, 110, 90) = 3
+    and stdlib.ui_icon_grid_hit(0, 0, 2, 3, 100, 80, 110, 90) = -1
+    and stdlib.ui_double_click(uint(1000), uint(400001000), true)
+    and not stdlib.ui_double_click(uint(1000), uint(400001001), true)
+    and not stdlib.ui_double_click(uint(1000), uint(2000), false)
+    and stdlib.ui_icon_grab(10, 20, 15, 25, dx, dy)
+    and dx = 5 and dy = 5
+    and stdlib.ui_icon_follow(100, 200, 5, 7, x, y) = Ok
+    and x = 95 and y = 193
+    and stdlib.ui_selection_normalize(100, 50, 20, 80, x, y, w, h) = Ok
+    and x = 20 and y = 50 and w = 81 and h = 31
+    and stdlib.ui_rect_intersects(0, 0, 10, 10, 5, 5, 10, 10)
+    and not stdlib.ui_rect_intersects(0, 0, 10, 10, 10, 0, 10, 10)
+    and stdlib.ui_icon_drop(0, 0, 2, 4, 100, 80, 300, 300, 50, 50, 320, 320) = -2
+    and stdlib.ui_icon_drop(0, 0, 2, 4, 100, 80, 300, 300, 50, 50, 110, 10) = 1
+    and stdlib.ui_icon_drop(0, 0, 2, 4, 100, 80, 300, 300, 50, 50, 250, 10) = -1
+    and stdlib.ui_trash_hit(300, 300, 50, 50, 320, 320)
+    and not stdlib.ui_trash_hit(300, 300, 50, 50, 299, 320) then
+    core.write("ui icons sequence ok\n");
+end;
+"#;
+    let package = langhost::compile(source, "iconseq").expect("compiles");
+    let mut scratch = vec![0u8; package.code.len().div_ceil(32)];
+    let program = interpreter::Program::parse(&package.code, &mut scratch).expect("verifies");
+    let header = *program.header();
+    let mut state = vec![0u8; header.state_size as usize];
+    let mut stack = vec![0u8; header.stack_size as usize];
+    let args = vec![0u8; 8 + 1024];
+    let mut machine = interpreter::Machine::new();
+    let mut host = Painter {
+        fills: Vec::new(),
+        outlines: Vec::new(),
+        texts: Vec::new(),
+        output: Vec::new(),
+    };
+    let outcome = machine.run(
+        &program,
+        &mut host,
+        &mut state,
+        &mut stack,
+        &args,
+        langhost::DEFAULT_BUDGET,
+    );
+    assert_eq!(outcome, interpreter::Outcome::Exited(ExitReason::Ok));
+    assert_eq!(host.output, b"ui icons sequence ok\n");
+
+    const BLACK: u32 = 0x000000;
+
+    // `ui_icon` draws one run per maximal set-bit run: row 2 is 0b111 and row
+    // 3 is 0b101, so three fills, and the all-zero rows draw nothing.
+    assert_eq!(
+        host.fills
+            .iter()
+            .filter(|fill| *fill == &(10, 22, 3, 1, BLACK))
+            .count(),
+        1,
+        "row 2 run: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(10, 23, 1, 1, BLACK)),
+        "row 3 first bit: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(12, 23, 1, 1, BLACK)),
+        "row 3 third bit: {:?}",
+        host.fills
+    );
+    assert_eq!(
+        host.fills
+            .iter()
+            .filter(|fill| (fill.1 == 22 || fill.1 == 23) && fill.0 < 40)
+            .count(),
+        3,
+        "no other icon rows: {:?}",
+        host.fills
+    );
+    assert!(host.texts.contains(&(10, 54, b"Doc".to_vec(), BLACK)));
+
+    // The rubber band is the dotted 1-px ring, one pixel every two positions.
+    for at in [(40, 20), (42, 20), (40, 29), (59, 20), (40, 22), (59, 28)] {
+        assert!(
+            host.fills.contains(&(at.0, at.1, 1, 1, BLACK)),
+            "selection dot at {at:?}: {:?}",
+            host.fills
+        );
+    }
+}

@@ -70,6 +70,9 @@ const
   UiAlertMinHeight = 80;
   UiInputMinHeight = 106;
   UiMessageCapacity = 256;
+  UiIconSize = 32;
+  UiIconLabelGap = 2;
+  UiDoubleClickNs = 400000000;
   UiBlack = 0x000000;
   UiWhite = 0x00FFFFFF;
   UiGray = 0x00CCCCCC;
@@ -3425,4 +3428,263 @@ begin
     return UiDialogFocusNext;
   end;
   return UiDialogResultNone;
+end;
+
+// ---- icons and the desktop interaction layer (spec 0003, "UI icons") ----
+//
+// A 32x32 monochrome icon is 32 row masks, bit 0 the left pixel. Drawing,
+// grid geometry, double-click timing, drag offsets, selection rectangles and
+// the trash drop rule are ordinary language code over the nine `syslib`
+// drawing primitives: no new opcode, builtin, record, sum, user enum, generic
+// or `state`. The asset rows live in the application, so the library stays
+// generic and the source cap is not spent on bitmaps.
+//
+// The application owns every piece of state: which cell holds which icon, the
+// drag offset and position, the last click's time and target, the rubber-band
+// origin, the selected set and whether an icon is still alive. The helpers
+// draw and compute, they never store or pump events.
+
+// Side of a `ui_icon` bitmap and of one grid cell's icon.
+function ui_icon_size(): int;
+begin
+  return UiIconSize;
+end;
+
+// `row` bit `col` (0 = the left pixel, 31 = the right pixel). A `col` outside
+// `0..31` is false. The language has no bitwise operators, so the bit is
+// selected with `div`/`mod` over a doubling mask.
+function ui_icon_row_bit(row: uint; col: int): bool;
+var
+  i: int;
+  mask: uint;
+begin
+  if col < 0 or col >= UiIconSize then
+    return false;
+  i := 0;
+  mask := uint(1);
+  while i < col do
+  begin
+    mask := mask * uint(2);
+    i := i + 1;
+  end;
+  return (row div mask) mod uint(2) = uint(1);
+end;
+
+// Draws the 32x32 icon `rows` at `(x, y)`: one 1-pixel-high run per maximal
+// set-bit run in each row, so the interpreter sees at most 64 `fill_rect`
+// calls. Bit 0 is the left pixel and row 0 the top row. The caller paints any
+// background plate it wants; this helper only draws set bits. Drawing is
+// clipped by `syslib`, never faulted. A colour above `0x00FFFFFF` returns
+// `Invalid` before anything is drawn; disabled graphics propagate `Invalid`.
+function ui_icon(x: int; y: int; rows: const array[uint, 32]; color: uint): Status;
+var
+  st: Status;
+  r: int;
+  col: int;
+  run: int;
+  mask: uint;
+begin
+  if color > uint(0x00FFFFFF) then
+    return Invalid;
+  r := 0;
+  while r < UiIconSize do
+  begin
+    mask := uint(1);
+    col := 0;
+    run := -1;
+    while col < UiIconSize do
+    begin
+      if (rows[r] div mask) mod uint(2) = uint(1) then
+      begin
+        if run < 0 then
+          run := col;
+      end
+      else if run >= 0 then
+      begin
+        st := syslib.fill_rect(x + run, y + r, col - run, 1, color);
+        if st <> Ok then
+          return st;
+        run := -1;
+      end;
+      mask := mask * uint(2);
+      col := col + 1;
+    end;
+    if run >= 0 then
+    begin
+      st := syslib.fill_rect(x + run, y + r, UiIconSize - run, 1, color);
+      if st <> Ok then
+        return st;
+    end;
+    r := r + 1;
+  end;
+  return Ok;
+end;
+
+// A black 8x8 label at `(x, y)`, one cell per byte. Transparent background, so
+// the desktop dither shows through; the application centres it with
+// `ui_text_center_x` when it wants a cell-centred caption. Disabled graphics
+// return `Invalid`; the text is clipped by `syslib`.
+function ui_icon_label(x: int; y: int; label: const string[0]): Status;
+begin
+  return syslib.draw_text(x, y, label, uint(UiBlack));
+end;
+
+// The left edge of grid cell column `col`: `origin_x + col * cell_w`. Pure, so
+// a drawing helper and a hit test agree by construction. A non-positive
+// `cell_w` is the caller's choice; the hit test rejects it.
+function ui_icon_cell_x(col: int; origin_x: int; cell_w: int): int;
+begin
+  return origin_x + col * cell_w;
+end;
+
+// The top edge of grid cell row `row`: `origin_y + row * cell_h`.
+function ui_icon_cell_y(row: int; origin_y: int; cell_h: int): int;
+begin
+  return origin_y + row * cell_h;
+end;
+
+// The top of the label under an icon whose top is `icon_y`: the icon side plus
+// a 2-pixel gap (`icon_y + 34`). One 8x8 line follows.
+function ui_icon_label_y(icon_y: int): int;
+begin
+  return icon_y + UiIconSize + UiIconLabelGap;
+end;
+
+// The cell index under `(px, py)` in a grid at `(x, y)` with `cols` columns,
+// `count` valid cells, and cells `cell_w` by `cell_h`: row-major
+// `row * cols + col`, or -1 outside the grid or past `count`. Points on a cell
+// edge belong to the cell to the right/below (the `ui_rect_hit` rule). A
+// non-positive `cols`, `count`, `cell_w` or `cell_h` returns -1.
+function ui_icon_grid_hit(x: int; y: int; cols: int; count: int; cell_w: int; cell_h: int; px: int; py: int): int;
+var
+  col: int;
+  row: int;
+  index: int;
+begin
+  if cols <= 0 or count <= 0 or cell_w <= 0 or cell_h <= 0 then
+    return -1;
+  if px < x or py < y then
+    return -1;
+  col := (px - x) div cell_w;
+  row := (py - y) div cell_h;
+  if col < 0 or col >= cols then
+    return -1;
+  index := row * cols + col;
+  if index < 0 or index >= count then
+    return -1;
+  return index;
+end;
+
+// Whether a press at `now_ns` is the second click of a double-click, given the
+// previous press's `last_ns` and whether it hit the same target. The threshold
+// is 400 ms (`UiDoubleClickNs`), inclusive; a same-nanosecond repeat counts.
+// The application stores the last time and target itself; this helper has no
+// state. A clock that went backwards or a different target is false.
+function ui_double_click(last_ns: uint; now_ns: uint; same_target: bool): bool;
+begin
+  if not same_target then
+    return false;
+  if now_ns < last_ns then
+    return false;
+  if now_ns - last_ns > uint(UiDoubleClickNs) then
+    return false;
+  return true;
+end;
+
+// The grab offset of a press inside an icon whose top-left is `(icon_x,
+// icon_y)`: `dx`/`dy` become `px - icon_x` and `py - icon_y` and the result is
+// true only when the point is inside the 32x32 bitmap. Outside, both offsets
+// are 0 and the result is false, so a press on the label selects but does not
+// drag. The application keeps `dx`/`dy` for the drag.
+function ui_icon_grab(icon_x: int; icon_y: int; px: int; py: int; dx: var int; dy: var int): bool;
+begin
+  dx := 0;
+  dy := 0;
+  if not ui_rect_hit(icon_x, icon_y, UiIconSize, UiIconSize, px, py) then
+    return false;
+  dx := px - icon_x;
+  dy := py - icon_y;
+  return true;
+end;
+
+// The icon top-left for a drag: `x = px - dx`, `y = py - dy`, where `dx`/`dy`
+// came from `ui_icon_grab`. The caller clamps the result to its own desktop
+// rectangle (drawing is clipped by `syslib`, but a dragged icon should stay
+// inside the app's content).
+function ui_icon_follow(px: int; py: int; dx: int; dy: int; x: var int; y: var int): Status;
+begin
+  x := px - dx;
+  y := py - dy;
+  return Ok;
+end;
+
+// Normalizes a rubber-band drag from `(x1, y1)` to `(x2, y2)` into `(x, y, w,
+// h)`. The result is always positive: `x`/`y` are the smaller ordinates and
+// `w`/`h` are the absolute differences plus one, so both pressed and current
+// pixels are inside the band. Pure, so the app can hit-test with it before the
+// first move.
+function ui_selection_normalize(x1: int; y1: int; x2: int; y2: int; x: var int; y: var int; w: var int; h: var int): Status;
+begin
+  if x1 <= x2 then
+  begin
+    x := x1;
+    w := x2 - x1 + 1;
+  end
+  else
+  begin
+    x := x2;
+    w := x1 - x2 + 1;
+  end;
+  if y1 <= y2 then
+  begin
+    y := y1;
+    h := y2 - y1 + 1;
+  end
+  else
+  begin
+    y := y2;
+    h := y1 - y2 + 1;
+  end;
+  return Ok;
+end;
+
+// The rubber-band outline: the same dotted 1-pixel black ring as
+// `ui_focus_ring`, used while the pointer selects desktop icons. It is
+// transparent (nothing is filled) and a band smaller than 1x1 is `Invalid`.
+function ui_selection_rect(x: int; y: int; w: int; h: int): Status;
+begin
+  return ui_focus_ring(x, y, w, h);
+end;
+
+// Whether two axis-aligned rectangles with positive extents overlap. Edges
+// that only touch do not count, so a band exactly on a cell's edge does not
+// select it. A non-positive extent is false.
+function ui_rect_intersects(ax: int; ay: int; aw: int; ah: int; bx: int; by: int; bw: int; bh: int): bool;
+begin
+  if aw <= 0 or ah <= 0 or bw <= 0 or bh <= 0 then
+    return false;
+  if ax + aw <= bx or bx + bw <= ax then
+    return false;
+  if ay + ah <= by or by + bh <= ay then
+    return false;
+  return true;
+end;
+
+// The drop target under a released drag: -2 when `(px, py)` is inside the
+// trash rectangle, otherwise the grid cell index or -1. The application
+// removes a dragged icon on -2, moves it on a cell index, and leaves it where
+// it was on -1. Pure, so a drop preview and the release agree.
+function ui_icon_drop(x: int; y: int; cols: int; count: int; cell_w: int; cell_h: int; tx: int; ty: int; tw: int; th: int; px: int; py: int): int;
+begin
+  if ui_rect_hit(tx, ty, tw, th, px, py) then
+    return -2;
+  return ui_icon_grid_hit(x, y, cols, count, cell_w, cell_h, px, py);
+end;
+
+// Whether `(px, py)` is inside the trash rectangle `(x, y, w, h)`. The same
+// rule as `ui_rect_hit`, named for the desktop's drop target so the application
+// reads as the spec: a press or release over the trash is not an icon action.
+function ui_trash_hit(x: int; y: int; w: int; h: int; px: int; py: int): bool;
+begin
+  return ui_rect_hit(x, y, w, h, px, py);
 end;

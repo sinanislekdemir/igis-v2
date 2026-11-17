@@ -63,7 +63,7 @@ pub const STDLIB_PATH: &str = "stdlib/stdlib.ig";
 /// M2.4.0 raised this from 1 MiB and M2.4.2 raised it from 2 MiB: the UI
 /// layout and controls layers pushed the embedded `stdlib` unit past the old
 /// caps (M2.4.2 needs 2,428,888 B). 4 MiB leaves room for M2.4.3–M2.4.6.
-pub const MAX_ARENA_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_ARENA_BYTES: usize = 8 * 1024 * 1024;
 
 /// Code-blob buffer a caller must provide (provisional tuning value, spec 0008:
 /// 256 KiB per application).

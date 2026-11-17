@@ -419,18 +419,20 @@ Compile memory is caller-provided: source buffer, token/parse arenas, code buffe
 constant buffer, each with a compile-time cap. One package is compiled at a time because
 the service holds the compiler lock (spec 0007), so one set of buffers is enough. The
 first-milestone caps (provisional, tuning): 128 KiB of source per unit, 256 KiB per
-application, 4 MiB of scratch. They bound memory because memory is statically placed; they
+application, 8 MiB of scratch. They bound memory because memory is statically placed; they
 are not a time budget, and compile time is not a design constraint (ADR 0019). The scratch
-cap was 1 MiB until M2.4.0 and 2 MiB until M2.4.2: the UI layout and controls layers pushed
-the embedded library over them (the library is 72,426 B of source and needs 2,428,888 B of
-scratch at M2.4.2), so the cap is now 4 MiB. The source cap rose from 64 KiB to 128 KiB in
+cap was 1 MiB until M2.4.0, 2 MiB until M2.4.2 and 4 MiB until M2.4.5: the UI layout,
+controls, menus and dialogs layers pushed the embedded library over the earlier caps, and
+M2.4.5's icons layer plus its bitmap-bearing sample needed 5,386,584 B for the pair (the
+library alone is 114,823 B of source and the pair with a minimal application needs
+4,134,600 B), so the cap is now 8 MiB. The source cap rose from 64 KiB to 128 KiB in
 M2.4.2 for the same reason; the combined application cap stays 256 KiB, so an application
 still has 128 KiB of its own source. The kernel's static buffers grow with both (spec 0007).
 
 The `compiler` crate is `no_std` and allocation-free: it borrows the source, stores tokens,
 AST nodes and name tables in the caller's scratch arena, and writes the package into the
 caller's code and manifest buffers. It exports the caps as `MAX_SOURCE_BYTES` (128 KiB),
-`MAX_ARENA_BYTES` (4 MiB), `MAX_CODE_BYTES` (256 KiB) and `MAX_MANIFEST_BYTES` (4 KiB), and
+`MAX_ARENA_BYTES` (8 MiB), `MAX_CODE_BYTES` (256 KiB) and `MAX_MANIFEST_BYTES` (4 KiB), and
 `compile_into` reports exhaustion of any of them as `Status.CapacityExceeded` with a
 `Diagnostic`. The only `unsafe` in the crate is the alignment/initialisation arithmetic of
 the bump arena, isolated in `compiler/src/arena.rs`.
@@ -572,3 +574,4 @@ pub fn run(task: &mut Task);
 | 2026-11-17 | The embedded `stdlib` may import `syslib` (ADR 0026): its first-slice "only `core`" rule was a scope statement, not a security boundary. The library is trusted embedded source compiled into the application's package and `syslib` grants the caller no authority it did not already have (spec 0003, H4). The M2.4.0 UI layout layer uses this for the nine graphics primitives; the type-id rule is unchanged, so records, sums and user enums still may not cross the unit boundary. No opcode or builtin is added; ABI v1 stays at **75**. |
 | 2026-11-16 | `window_present` is builtin 39 (1 → 1): pop a window id, present the window's content clipped to its visible parts, push the `Status`. Owner-only and disabled-graphics `Invalid`; no opcode, ABI v1 stays at **75**. `EventKind.Expose` is ordinal 5; routing (`Event.window`) happens in the host at poll time and adds no bytecode. |
 | 2026-11-16 | `window_info` is builtin 40 (4 → 1, spec 0012 D15): index, id reference, `Rect` reference and a `var string` title reference. Index `0` is the topmost live window; `NotFound` past the end or with disabled graphics leaves every destination untouched; `Ok` writes the id, the frame image and the title (at most 64 bytes) and pushes `Status::Ok`. The compiler requires the title destination to have capacity 64 and the interpreter bounds-checks the region before the host call. No new opcode; ABI v1 stays at **75**. |
+| 2026-11-17 | The M2.4.5 icons and desktop layer adds no opcode or builtin (spec 0003, "UI icons and desktop"): all 16 helpers are ordinary language code over `syslib`, and the 32×32 `array[uint, 32]` bitmap is an ordinary array parameter. The library grew to 114,823 B of source and 84,920 B of code, and the pair with a minimal application needs 4,134,600 B of scratch (the `ui_icons` pair needs 5,386,584 B), so `MAX_ARENA_BYTES` rose from 4 to 8 MiB; the source cap stays 128 KiB and the combined application cap 256 KiB. ABI v1 stays at **75** opcodes. |

@@ -1,0 +1,980 @@
+unit ui_icons;
+
+// M2.4.5 proof: the stdlib icons and desktop interaction layer.
+//
+//   run ui_icons          // deterministic self-check, prints `ui_icons: ok`
+//   run ui_icons shot     // composed frame for the screenshot harness
+//
+// The app opens a "Desktop Icons" window whose content is a dithered desktop
+// with a 2x2 icon grid (folder, document, terminal) and a trash target. It
+// owns every piece of state; the library only draws and computes:
+//
+//   1. The dither, three 32x32 icon bitmaps, their labels, the trash plate and
+//      a pixel-level baseline are checked with `syslib.get_pixel`.
+//   2. A double-click on the document icon (two press/release pairs inside the
+//      400 ms `ui_double_click` window) prints the deterministic marker
+//      `ui_icons: open Document` and counts the open.
+//   3. The folder is dragged from cell 0 to the empty cell 3: while the button
+//      is held the icon follows the pointer, the source cell shows the dither,
+//      and the release records the new cell.
+//   4. The folder is dragged into the trash: `ui_icon_drop` returns -2 and the
+//      release removes it (the app owns the live flag).
+//   5. A rubber band from empty desktop selects every live icon whose cell it
+//      intersects: the remaining document and terminal, never the removed
+//      folder. The dotted outline and the accent label bands are checked, and
+//      the band disappears on release.
+//   6. The window is presented with `window_present` and closed.
+//
+// `langhost` and a kernel without a framebuffer run the pure helpers and the
+// disabled-screen `Invalid` contract and print `ui_icons: host ok`.
+
+uses core, stdlib, syslib;
+
+const
+  GridCols = 2;
+  GridCount = 4;
+  ItemCount = 3;
+  CellW = 112;
+  CellH = 88;
+  IconSize = 32;
+  GridX = 24;
+  GridY = 24;
+  TrashSize = 64;
+  TrashMargin = 24;
+  ContentW = 520;
+  ContentH = 320;
+
+var
+  failed: bool;
+  shot: bool;
+  dirty: bool;
+  step: int;
+  fail_step: int;
+  fail_label: string[64];
+
+  status: Status;
+  screen_w: uint;
+  screen_h: uint;
+  id: int;
+  rect: Rect;
+  ev: Event;
+  flushed: uint;
+  now: uint;
+
+  black: uint;
+  white: uint;
+  accent: uint;
+
+  // The icon assets live in the application, not the library (spec 0003,
+  // "UI icons and desktop"): 32 row masks each, bit 0 the left pixel.
+  folder_rows: array[uint, 32];
+  doc_rows: array[uint, 32];
+  term_rows: array[uint, 32];
+  trash_rows: array[uint, 32];
+  labels: array[string[32], 3];
+
+  // The application-owned desktop: which cell holds which icon, whether it is
+  // still alive, and whether it is selected.
+  item_cell: array[int, 3];
+  item_alive: array[bool, 3];
+  selected: array[bool, 3];
+
+  grid_x: int;
+  grid_y: int;
+  trash_x: int;
+  trash_y: int;
+
+  // Drag state.
+  dragging: bool;
+  drag_item: int;
+  drag_moved: bool;
+  drag_dx: int;
+  drag_dy: int;
+  drag_x: int;
+  drag_y: int;
+
+  // Rubber-band state.
+  selecting: bool;
+  sel_x1: int;
+  sel_y1: int;
+  sel_x2: int;
+  sel_y2: int;
+  sel_x: int;
+  sel_y: int;
+  sel_w: int;
+  sel_h: int;
+
+  // Double-click state (the app remembers, the helper does not).
+  last_click_ns: uint;
+  last_click_item: int;
+
+  opens: int;
+  moves: int;
+  trashed: int;
+
+  // Scratch.
+  at: int;
+  used: int;
+  cell_index: int;
+  item_index: int;
+  other_item: int;
+  drop_target: int;
+  probe_x: int;
+  probe_y: int;
+  digits: string[16];
+
+procedure say(line: const string[0]);
+begin
+  core.write(line);
+end;
+
+procedure verify(label: const string[0]; passed: bool);
+begin
+  step := step + 1;
+  if not passed and not failed then
+  begin
+    failed := true;
+    fail_step := step;
+    fail_label := label;
+  end;
+end;
+
+// A point on the same row with an odd `x + y` sum, where the `(X + Y)` dither
+// leaves white. Used for "the icon is gone" checks: the same point is black
+// while a set icon pixel covers it.
+function dither_white_x(x: int; y: int): int;
+begin
+  if (x + y) mod 2 = 0 then
+    return x + 1;
+  return x;
+end;
+
+function cell_col(cell_value: int): int;
+begin
+  return cell_value mod GridCols;
+end;
+
+function cell_row(cell_value: int): int;
+begin
+  return cell_value div GridCols;
+end;
+
+function icon_x_at(cell_value: int): int;
+begin
+  return stdlib.ui_icon_cell_x(cell_col(cell_value), grid_x, CellW);
+end;
+
+function icon_y_at(cell_value: int): int;
+begin
+  return stdlib.ui_icon_cell_y(cell_row(cell_value), grid_y, CellH);
+end;
+
+function item_at_cell(cell_value: int): int;
+var
+  i: int;
+begin
+  i := 0;
+  while i < ItemCount do
+  begin
+    if item_alive[i] and item_cell[i] = cell_value then
+      return i;
+    i := i + 1;
+  end;
+  return -1;
+end;
+
+function selected_count(): int;
+var
+  i: int;
+  total: int;
+begin
+  i := 0;
+  total := 0;
+  while i < ItemCount do
+  begin
+    if item_alive[i] and selected[i] then
+      total := total + 1;
+    i := i + 1;
+  end;
+  return total;
+end;
+
+procedure clear_selected();
+var
+  i: int;
+begin
+  i := 0;
+  while i < ItemCount do
+  begin
+    selected[i] := false;
+    i := i + 1;
+  end;
+end;
+
+procedure select_only(index: int);
+begin
+  clear_selected();
+  selected[index] := true;
+end;
+
+// The band selects every live icon whose cell rectangle it intersects.
+procedure update_selection();
+var
+  i: int;
+begin
+  i := 0;
+  while i < ItemCount do
+  begin
+    if item_alive[i] then
+      selected[i] := stdlib.ui_rect_intersects(
+        sel_x, sel_y, sel_w, sel_h,
+        icon_x_at(item_cell[i]), icon_y_at(item_cell[i]), CellW, CellH)
+    else
+      selected[i] := false;
+    i := i + 1;
+  end;
+end;
+
+// ---- drawing -----------------------------------------------------------
+
+// A white 32x32 plate, the bitmap and the label. A selected label is an accent
+// band with white text (the System 7 inversion); the icon itself is unchanged.
+procedure draw_icon(index: int; ix: int; iy: int);
+var
+  st: Status;
+  label_y: int;
+  label_x: int;
+  text_w: int;
+begin
+  st := syslib.fill_rect(ix, iy, IconSize, IconSize, white);
+  if index = 0 then
+    st := stdlib.ui_icon(ix, iy, folder_rows, black)
+  else if index = 1 then
+    st := stdlib.ui_icon(ix, iy, doc_rows, black)
+  else
+    st := stdlib.ui_icon(ix, iy, term_rows, black);
+  label_y := stdlib.ui_icon_label_y(iy);
+  text_w := stdlib.ui_text_width(labels[index]);
+  label_x := ix + (IconSize - text_w) div 2;
+  if selected[index] then
+  begin
+    st := syslib.fill_rect(label_x - 2, label_y - 2, text_w + 4, 12, accent);
+    st := syslib.draw_text(label_x, label_y, labels[index], white);
+  end
+  else
+    st := stdlib.ui_icon_label(label_x, label_y, labels[index]);
+end;
+
+procedure draw_trash();
+var
+  st: Status;
+  ix: int;
+  iy: int;
+  text_w: int;
+  label_x: int;
+begin
+  st := syslib.fill_rect(trash_x, trash_y, TrashSize, TrashSize, white);
+  st := syslib.draw_rect(trash_x, trash_y, TrashSize, TrashSize, black);
+  ix := trash_x + (TrashSize - IconSize) div 2;
+  iy := trash_y + 8;
+  st := stdlib.ui_icon(ix, iy, trash_rows, black);
+  text_w := stdlib.ui_text_width("Trash");
+  label_x := trash_x + (TrashSize - text_w) div 2;
+  st := stdlib.ui_icon_label(label_x, stdlib.ui_icon_label_y(iy), "Trash");
+end;
+
+procedure draw_desktop();
+var
+  st: Status;
+  i: int;
+  ix: int;
+  iy: int;
+begin
+  st := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, white);
+  st := syslib.fill_dither(rect.x, rect.y, rect.w, rect.h, black);
+  i := 0;
+  while i < ItemCount do
+  begin
+    if item_alive[i] then
+    begin
+      if dragging and drag_item = i then
+        draw_icon(i, drag_x, drag_y)
+      else
+        draw_icon(i, icon_x_at(item_cell[i]), icon_y_at(item_cell[i]));
+    end;
+    i := i + 1;
+  end;
+  draw_trash();
+  i := 0;
+  while i < ItemCount do
+  begin
+    if item_alive[i] and selected[i] and not (dragging and drag_item = i) then
+    begin
+      ix := icon_x_at(item_cell[i]);
+      iy := icon_y_at(item_cell[i]);
+      st := stdlib.ui_selection_rect(ix + 2, iy + 2, IconSize - 4, IconSize - 4);
+    end;
+    i := i + 1;
+  end;
+  if dragging then
+    st := stdlib.ui_selection_rect(
+      drag_x + 2, drag_y + 2, IconSize - 4, IconSize - 4);
+  if selecting then
+    st := stdlib.ui_selection_rect(sel_x, sel_y, sel_w, sel_h);
+  st := syslib.window_present(id);
+end;
+
+// ---- event handling ----------------------------------------------------
+
+procedure handle_down();
+var
+  hit_cell: int;
+  hit_item: int;
+begin
+  now := core.clock();
+  if stdlib.ui_trash_hit(
+    trash_x, trash_y, TrashSize, TrashSize, ev.x, ev.y) then
+    drag_item := -1
+  else
+  begin
+    hit_cell := stdlib.ui_icon_grid_hit(
+      grid_x, grid_y, GridCols, GridCount, CellW, CellH, ev.x, ev.y);
+    hit_item := -1;
+    if hit_cell >= 0 then
+      hit_item := item_at_cell(hit_cell);
+    if hit_item >= 0 then
+    begin
+      select_only(hit_item);
+      if stdlib.ui_icon_grab(
+        icon_x_at(item_cell[hit_item]), icon_y_at(item_cell[hit_item]),
+        ev.x, ev.y, drag_dx, drag_dy) then
+      begin
+        dragging := true;
+        drag_moved := false;
+        drag_item := hit_item;
+        drag_x := icon_x_at(item_cell[hit_item]);
+        drag_y := icon_y_at(item_cell[hit_item]);
+      end;
+      if stdlib.ui_double_click(
+        last_click_ns, now, last_click_item = hit_item) then
+      begin
+        opens := opens + 1;
+        say("ui_icons: open ");
+        say(labels[hit_item]);
+        say("\n");
+        last_click_ns := uint(0);
+        last_click_item := -1;
+      end
+      else
+      begin
+        last_click_ns := now;
+        last_click_item := hit_item;
+      end;
+    end
+    else
+    begin
+      selecting := true;
+      sel_x1 := ev.x;
+      sel_y1 := ev.y;
+      sel_x2 := ev.x;
+      sel_y2 := ev.y;
+      status := stdlib.ui_selection_normalize(
+        sel_x1, sel_y1, sel_x2, sel_y2, sel_x, sel_y, sel_w, sel_h);
+      clear_selected();
+    end;
+  end;
+end;
+
+procedure handle_move();
+begin
+  if dragging then
+  begin
+    drag_moved := true;
+    status := stdlib.ui_icon_follow(
+      ev.x, ev.y, drag_dx, drag_dy, drag_x, drag_y);
+    if drag_x < rect.x then
+      drag_x := rect.x;
+    if drag_x > rect.x + rect.w - IconSize then
+      drag_x := rect.x + rect.w - IconSize;
+    if drag_y < rect.y then
+      drag_y := rect.y;
+    if drag_y > rect.y + rect.h - IconSize then
+      drag_y := rect.y + rect.h - IconSize;
+  end
+  else if selecting then
+  begin
+    sel_x2 := ev.x;
+    sel_y2 := ev.y;
+    status := stdlib.ui_selection_normalize(
+      sel_x1, sel_y1, sel_x2, sel_y2, sel_x, sel_y, sel_w, sel_h);
+    update_selection();
+  end;
+end;
+
+procedure handle_up();
+begin
+  if dragging then
+  begin
+    drop_target := stdlib.ui_icon_drop(
+      grid_x, grid_y, GridCols, GridCount, CellW, CellH,
+      trash_x, trash_y, TrashSize, TrashSize, ev.x, ev.y);
+    if drop_target = -2 then
+    begin
+      item_alive[drag_item] := false;
+      selected[drag_item] := false;
+      trashed := trashed + 1;
+    end
+    else if drop_target >= 0 then
+    begin
+      other_item := item_at_cell(drop_target);
+      if (other_item < 0 or other_item = drag_item) and item_cell[drag_item] <> drop_target then
+      begin
+        item_cell[drag_item] := drop_target;
+        moves := moves + 1;
+      end;
+    end;
+    dragging := false;
+    drag_item := -1;
+    if drag_moved then
+    begin
+      last_click_ns := uint(0);
+      last_click_item := -1;
+    end;
+  end
+  else if selecting then
+    selecting := false;
+end;
+
+procedure handle_pointer();
+begin
+  if ev.kind = PointerDown then
+    handle_down()
+  else if ev.kind = PointerMove then
+    handle_move()
+  else if ev.kind = PointerUp then
+    handle_up();
+end;
+
+// Poll and handle every queued event; one repaint after the batch.
+procedure drain_events();
+var
+  running: bool;
+  count: int;
+begin
+  running := true;
+  count := 0;
+  while running and count < 64 do
+  begin
+    status := syslib.poll_event(ev);
+    if status = Ok then
+    begin
+      count := count + 1;
+      if ev.kind = Expose then
+        dirty := true
+      else if ev.kind = PointerDown or ev.kind = PointerMove or ev.kind = PointerUp then
+      begin
+        handle_pointer();
+        dirty := true;
+      end;
+    end
+    else
+      running := false;
+  end;
+  if dirty then
+  begin
+    draw_desktop();
+    dirty := false;
+  end;
+end;
+
+// ---- injection ---------------------------------------------------------
+
+// Clamp the pointer to the origin, discard the queued move and place it on an
+// absolute screen point; the window service sees one move from a known state.
+procedure pointer_to(x: int; y: int);
+begin
+  status := syslib.inject_pointer(-100000, -100000, uint(0));
+  flushed := syslib.event_flush();
+  status := syslib.inject_pointer(x, y, uint(0));
+  drain_events();
+end;
+
+// The same, with the left button held: a drag, not a move.
+procedure pointer_to_held(x: int; y: int);
+begin
+  status := syslib.inject_pointer(-100000, -100000, uint(1));
+  flushed := syslib.event_flush();
+  status := syslib.inject_pointer(x, y, uint(1));
+  drain_events();
+end;
+
+procedure pointer_down();
+begin
+  status := syslib.inject_pointer(0, 0, uint(1));
+  drain_events();
+end;
+
+procedure pointer_up();
+begin
+  status := syslib.inject_pointer(0, 0, uint(0));
+  drain_events();
+end;
+
+// ---- pure helpers and the disabled-screen contract ---------------------
+
+procedure pure_checks();
+begin
+  verify("icon size", stdlib.ui_icon_size() = 32);
+  verify("row bit 0", stdlib.ui_icon_row_bit(uint(5), 0));
+  verify("row bit 1 off", not stdlib.ui_icon_row_bit(uint(5), 1));
+  verify("row bit 2", stdlib.ui_icon_row_bit(uint(5), 2));
+  verify("row bit out", not stdlib.ui_icon_row_bit(uint(5), 32));
+  verify("cell x", stdlib.ui_icon_cell_x(2, 10, 100) = 210);
+  verify("cell y", stdlib.ui_icon_cell_y(3, 20, 80) = 260);
+  verify("label y", stdlib.ui_icon_label_y(100) = 134);
+
+  verify("grid hit origin", stdlib.ui_icon_grid_hit(0, 0, 2, 3, 100, 80, 0, 0) = 0);
+  verify("grid hit second", stdlib.ui_icon_grid_hit(0, 0, 2, 3, 100, 80, 110, 10) = 1);
+  verify("grid hit lower", stdlib.ui_icon_grid_hit(0, 0, 2, 3, 100, 80, 10, 90) = 2);
+  verify("grid hit past count", stdlib.ui_icon_grid_hit(0, 0, 2, 3, 100, 80, 110, 90) = -1);
+  verify("grid hit outside", stdlib.ui_icon_grid_hit(0, 0, 2, 3, 100, 80, -1, 5) = -1);
+  verify("grid hit empty", stdlib.ui_icon_grid_hit(0, 0, 0, 3, 100, 80, 5, 5) = -1);
+
+  verify(
+    "double click inside",
+    stdlib.ui_double_click(uint(1000), uint(1000 + 400000000), true));
+  verify(
+    "double click too late",
+    not stdlib.ui_double_click(uint(1000), uint(1000 + 400000001), true));
+  verify("double click other", not stdlib.ui_double_click(uint(1000), uint(2000), false));
+  verify("double click backwards", not stdlib.ui_double_click(uint(5000), uint(4000), true));
+
+  verify("grab inside", stdlib.ui_icon_grab(10, 20, 15, 25, at, used));
+  verify("grab offsets", at = 5 and used = 5);
+  verify(
+    "grab outside",
+    not stdlib.ui_icon_grab(10, 20, 9, 25, at, used) and at = 0 and used = 0);
+
+  at := 0;
+  used := 0;
+  status := stdlib.ui_icon_follow(100, 200, 5, 7, at, used);
+  verify("follow", status = Ok and at = 95 and used = 193);
+
+  status := stdlib.ui_selection_normalize(100, 50, 20, 80, at, used, probe_x, probe_y);
+  verify(
+    "normalize",
+    status = Ok and at = 20 and used = 50 and probe_x = 81 and probe_y = 31);
+  status := stdlib.ui_selection_normalize(5, 9, 5, 9, at, used, probe_x, probe_y);
+  verify(
+    "normalize point",
+    status = Ok and at = 5 and used = 9 and probe_x = 1 and probe_y = 1);
+
+  verify("intersects", stdlib.ui_rect_intersects(0, 0, 10, 10, 5, 5, 10, 10));
+  verify("intersects edge", not stdlib.ui_rect_intersects(0, 0, 10, 10, 10, 0, 10, 10));
+  verify("intersects empty", not stdlib.ui_rect_intersects(0, 0, 0, 10, 0, 0, 10, 10));
+
+  verify(
+    "drop trash",
+    stdlib.ui_icon_drop(0, 0, 2, 3, 100, 80, 300, 300, 50, 50, 320, 320) = -2);
+  verify(
+    "drop cell",
+    stdlib.ui_icon_drop(0, 0, 2, 3, 100, 80, 300, 300, 50, 50, 110, 10) = 1);
+  verify(
+    "drop outside",
+    stdlib.ui_icon_drop(0, 0, 2, 3, 100, 80, 300, 300, 50, 50, 250, 10) = -1);
+  verify("trash hit", stdlib.ui_trash_hit(300, 300, 50, 50, 320, 320));
+  verify("trash miss", not stdlib.ui_trash_hit(300, 300, 50, 50, 299, 320));
+end;
+
+procedure host_checks();
+begin
+  verify("icon disabled", stdlib.ui_icon(0, 0, folder_rows, black) = Invalid);
+  verify(
+    "icon bad color",
+    stdlib.ui_icon(0, 0, folder_rows, uint(0x01000000)) = Invalid);
+  verify("label disabled", stdlib.ui_icon_label(0, 0, "x") = Invalid);
+  verify("selection disabled", stdlib.ui_selection_rect(0, 0, 10, 10) = Invalid);
+end;
+
+// ---- kernel proof ------------------------------------------------------
+
+procedure kernel_proof();
+var
+  folder_x: int;
+  folder_y: int;
+  doc_x: int;
+  doc_y: int;
+  term_x: int;
+  term_y: int;
+  cell3_x: int;
+  cell3_y: int;
+  trash_cx: int;
+  trash_cy: int;
+  folder_probe: int;
+  cell3_probe: int;
+  band_x1: int;
+  band_y1: int;
+  band_x2: int;
+  band_y2: int;
+  label_x: int;
+  label_y: int;
+  text_w: int;
+begin
+  draw_desktop();
+  folder_x := icon_x_at(0);
+  folder_y := icon_y_at(0);
+  doc_x := icon_x_at(1);
+  doc_y := icon_y_at(1);
+  term_x := icon_x_at(2);
+  term_y := icon_y_at(2);
+  cell3_x := icon_x_at(3);
+  cell3_y := icon_y_at(3);
+  trash_cx := trash_x + TrashSize div 2;
+  trash_cy := trash_y + TrashSize div 2;
+  folder_probe := dither_white_x(folder_x + 8, folder_y + 8);
+  cell3_probe := dither_white_x(cell3_x + 8, cell3_y + 8);
+
+  // 1. The dithered desktop, the three icon plates/bitmaps and the trash.
+  probe_x := rect.x + 400;
+  probe_y := rect.y + 20;
+  if (probe_x + probe_y) mod 2 = 0 then
+  begin
+    verify("dither dark", syslib.get_pixel(probe_x, probe_y) = black);
+    verify("dither light", syslib.get_pixel(probe_x + 1, probe_y) = white);
+  end
+  else
+  begin
+    verify("dither dark", syslib.get_pixel(probe_x + 1, probe_y) = black);
+    verify("dither light", syslib.get_pixel(probe_x, probe_y) = white);
+  end;
+  verify("folder plate", syslib.get_pixel(folder_x + 1, folder_y + 1) = white);
+  verify("folder icon", syslib.get_pixel(folder_x + 9, folder_y + 8) = black);
+  verify("document icon", syslib.get_pixel(doc_x + 12, doc_y + 11) = black);
+  verify("terminal icon", syslib.get_pixel(term_x + 10, term_y + 27) = black);
+  verify("trash outline", syslib.get_pixel(trash_x, trash_y) = black);
+  verify("trash icon", syslib.get_pixel(trash_x + 26, trash_y + 17) = black);
+  label_y := stdlib.ui_icon_label_y(folder_y);
+  text_w := stdlib.ui_text_width(labels[0]);
+  label_x := folder_x + (IconSize - text_w) div 2;
+  verify("folder label", syslib.get_pixel(label_x, label_y) = black);
+
+  // 2. A double-click on the document prints the open marker.
+  pointer_to(doc_x + 16, doc_y + 16);
+  pointer_down();
+  pointer_up();
+  pointer_down();
+  pointer_up();
+  verify("double click opens", opens = 1 and selected[1]);
+
+  // 3. Drag the folder from cell 0 to the empty cell 3.
+  verify("folder set", syslib.get_pixel(folder_probe, folder_y + 8) = black);
+  pointer_to(folder_x + 16, folder_y + 16);
+  pointer_down();
+  verify("folder grabbed", dragging and drag_item = 0);
+  pointer_to_held(cell3_x + 16, cell3_y + 16);
+  verify("source cell cleared", syslib.get_pixel(folder_probe, folder_y + 8) = white);
+  verify("folder follows", syslib.get_pixel(cell3_x + 9, cell3_y + 8) = black);
+  pointer_up();
+  verify("folder moved", item_cell[0] = 3 and moves = 1);
+  verify("old cell empty", syslib.get_pixel(folder_probe, folder_y + 8) = white);
+  verify("new cell icon", syslib.get_pixel(cell3_x + 9, cell3_y + 8) = black);
+
+  // 4. Drag the folder into the trash; the drop removes it.
+  pointer_to(cell3_x + 16, cell3_y + 16);
+  pointer_down();
+  verify("trash drag", dragging and drag_item = 0);
+  pointer_to_held(trash_cx, trash_cy);
+  verify(
+    "over trash",
+    stdlib.ui_trash_hit(
+      trash_x, trash_y, TrashSize, TrashSize, trash_cx, trash_cy));
+  pointer_up();
+  verify("trash removed", not item_alive[0] and trashed = 1);
+  verify("trash cell empty", syslib.get_pixel(cell3_probe, cell3_y + 8) = white);
+  verify("trash still drawn", syslib.get_pixel(trash_x + 26, trash_y + 17) = black);
+
+  // 5. Rubber-band select the two live icons.
+  band_x1 := grid_x + 9;
+  band_y1 := grid_y + 9;
+  band_x2 := grid_x + 2 * CellW - 9;
+  band_y2 := grid_y + 2 * CellH - 9;
+  pointer_to(band_x1, band_y1);
+  pointer_down();
+  verify("band starts", selecting);
+  pointer_to_held(band_x2, band_y2);
+  verify("band selects document", selected[1]);
+  verify("band selects terminal", selected[2]);
+  verify("band skips removed", not selected[0]);
+  verify("band selects two", selected_count() = 2);
+  verify("band outline", syslib.get_pixel(band_x2, band_y2) = black);
+  pointer_up();
+  verify("band cleared", syslib.get_pixel(band_x2, band_y2) = white);
+
+  // The selected labels are accent bands with white text.
+  text_w := stdlib.ui_text_width(labels[1]);
+  label_x := doc_x + (IconSize - text_w) div 2;
+  label_y := stdlib.ui_icon_label_y(doc_y);
+  verify("document selected band", syslib.get_pixel(label_x - 1, label_y) = accent);
+  text_w := stdlib.ui_text_width(labels[2]);
+  label_x := term_x + (IconSize - text_w) div 2;
+  label_y := stdlib.ui_icon_label_y(term_y);
+  verify("terminal selected band", syslib.get_pixel(label_x - 1, label_y) = accent);
+  verify("document still drawn", syslib.get_pixel(doc_x + 12, doc_y + 11) = black);
+  verify("terminal still drawn", syslib.get_pixel(term_x + 10, term_y + 27) = black);
+
+  status := syslib.window_present(id);
+  verify("window present", status = Ok);
+  verify("only the double click opened", opens = 1);
+  status := syslib.window_close(id);
+  verify("window closed", status = Ok);
+end;
+
+procedure draw_shot();
+begin
+  selected[1] := true;
+  selected[2] := true;
+  draw_desktop();
+end;
+
+procedure report_and_exit();
+begin
+  if failed then
+  begin
+    say("ui_icons: failed check ");
+    at := core.format_int_into(digits, fail_step, uint(10), uint(0));
+    say(digits);
+    say(" (");
+    say(fail_label);
+    say(")\n");
+  end
+  else
+    say("ui_icons: ok\n");
+end;
+
+// The four 32x32 assets, written as 32 row masks each (bit 0 = left pixel).
+procedure load_assets();
+begin
+  folder_rows[0] := uint(0x00000000);
+  folder_rows[1] := uint(0x00000000);
+  folder_rows[2] := uint(0x00000000);
+  folder_rows[3] := uint(0x00000000);
+  folder_rows[4] := uint(0x00000000);
+  folder_rows[5] := uint(0x00000000);
+  folder_rows[6] := uint(0x00000000);
+  folder_rows[7] := uint(0x0000FFF0);
+  folder_rows[8] := uint(0x0000FFF0);
+  folder_rows[9] := uint(0x0000FFF0);
+  folder_rows[10] := uint(0x3FFFFFF0);
+  folder_rows[11] := uint(0x3FFFFFF0);
+  folder_rows[12] := uint(0x3FFFFFF0);
+  folder_rows[13] := uint(0x3FFFFFF0);
+  folder_rows[14] := uint(0x30000030);
+  folder_rows[15] := uint(0x30000030);
+  folder_rows[16] := uint(0x30000030);
+  folder_rows[17] := uint(0x30000030);
+  folder_rows[18] := uint(0x30000030);
+  folder_rows[19] := uint(0x30000030);
+  folder_rows[20] := uint(0x30000030);
+  folder_rows[21] := uint(0x30000030);
+  folder_rows[22] := uint(0x30000030);
+  folder_rows[23] := uint(0x30000030);
+  folder_rows[24] := uint(0x30000030);
+  folder_rows[25] := uint(0x30000030);
+  folder_rows[26] := uint(0x3FFFFFF0);
+  folder_rows[27] := uint(0x3FFFFFF0);
+  folder_rows[28] := uint(0x00000000);
+  folder_rows[29] := uint(0x00000000);
+  folder_rows[30] := uint(0x00000000);
+  folder_rows[31] := uint(0x00000000);
+
+  doc_rows[0] := uint(0x00000000);
+  doc_rows[1] := uint(0x00000000);
+  doc_rows[2] := uint(0x00000000);
+  doc_rows[3] := uint(0x00000000);
+  doc_rows[4] := uint(0x0000FF00);
+  doc_rows[5] := uint(0x0001FF00);
+  doc_rows[6] := uint(0x00030300);
+  doc_rows[7] := uint(0x00060300);
+  doc_rows[8] := uint(0x000C0300);
+  doc_rows[9] := uint(0x00180300);
+  doc_rows[10] := uint(0x00C00300);
+  doc_rows[11] := uint(0x00DFFB00);
+  doc_rows[12] := uint(0x00DFFB00);
+  doc_rows[13] := uint(0x00C00300);
+  doc_rows[14] := uint(0x00C00300);
+  doc_rows[15] := uint(0x00DFFB00);
+  doc_rows[16] := uint(0x00C00300);
+  doc_rows[17] := uint(0x00C00300);
+  doc_rows[18] := uint(0x00DFFB00);
+  doc_rows[19] := uint(0x00C00300);
+  doc_rows[20] := uint(0x00C00300);
+  doc_rows[21] := uint(0x00DFFB00);
+  doc_rows[22] := uint(0x00C00300);
+  doc_rows[23] := uint(0x00C00300);
+  doc_rows[24] := uint(0x00DFFB00);
+  doc_rows[25] := uint(0x00C00300);
+  doc_rows[26] := uint(0x00C00300);
+  doc_rows[27] := uint(0x00FFFF00);
+  doc_rows[28] := uint(0x00FFFF00);
+  doc_rows[29] := uint(0x00000000);
+  doc_rows[30] := uint(0x00000000);
+  doc_rows[31] := uint(0x00000000);
+
+  term_rows[0] := uint(0x00000000);
+  term_rows[1] := uint(0x00000000);
+  term_rows[2] := uint(0x00000000);
+  term_rows[3] := uint(0x00000000);
+  term_rows[4] := uint(0x00000000);
+  term_rows[5] := uint(0x00000000);
+  term_rows[6] := uint(0x1FFFFFF8);
+  term_rows[7] := uint(0x1FFFFFF8);
+  term_rows[8] := uint(0x18000018);
+  term_rows[9] := uint(0x18000018);
+  term_rows[10] := uint(0x180FFF98);
+  term_rows[11] := uint(0x18000018);
+  term_rows[12] := uint(0x18000018);
+  term_rows[13] := uint(0x1801FF98);
+  term_rows[14] := uint(0x18000018);
+  term_rows[15] := uint(0x18000018);
+  term_rows[16] := uint(0x18001F98);
+  term_rows[17] := uint(0x18000018);
+  term_rows[18] := uint(0x18000018);
+  term_rows[19] := uint(0x18000018);
+  term_rows[20] := uint(0x18000018);
+  term_rows[21] := uint(0x18000018);
+  term_rows[22] := uint(0x18000018);
+  term_rows[23] := uint(0x1FFFFFF8);
+  term_rows[24] := uint(0x1FFFFFF8);
+  term_rows[25] := uint(0x0003C000);
+  term_rows[26] := uint(0x0003E000);
+  term_rows[27] := uint(0x00FFFF00);
+  term_rows[28] := uint(0x00FFFF00);
+  term_rows[29] := uint(0x00000000);
+  term_rows[30] := uint(0x00000000);
+  term_rows[31] := uint(0x00000000);
+
+  trash_rows[0] := uint(0x00000000);
+  trash_rows[1] := uint(0x00000000);
+  trash_rows[2] := uint(0x00000000);
+  trash_rows[3] := uint(0x00000000);
+  trash_rows[4] := uint(0x00000000);
+  trash_rows[5] := uint(0x003FFC00);
+  trash_rows[6] := uint(0x003FFC00);
+  trash_rows[7] := uint(0x003FFC00);
+  trash_rows[8] := uint(0x07FFFFE0);
+  trash_rows[9] := uint(0x07FFFFE0);
+  trash_rows[10] := uint(0x07FFFFE0);
+  trash_rows[11] := uint(0x01FFFF80);
+  trash_rows[12] := uint(0x01FFFF80);
+  trash_rows[13] := uint(0x01800180);
+  trash_rows[14] := uint(0x01999980);
+  trash_rows[15] := uint(0x01999980);
+  trash_rows[16] := uint(0x01999980);
+  trash_rows[17] := uint(0x01999980);
+  trash_rows[18] := uint(0x01999980);
+  trash_rows[19] := uint(0x01999980);
+  trash_rows[20] := uint(0x01999980);
+  trash_rows[21] := uint(0x01999980);
+  trash_rows[22] := uint(0x01999980);
+  trash_rows[23] := uint(0x01999980);
+  trash_rows[24] := uint(0x01999980);
+  trash_rows[25] := uint(0x01999980);
+  trash_rows[26] := uint(0x01800180);
+  trash_rows[27] := uint(0x01FFFF80);
+  trash_rows[28] := uint(0x01FFFF80);
+  trash_rows[29] := uint(0x00000000);
+  trash_rows[30] := uint(0x00000000);
+  trash_rows[31] := uint(0x00000000);
+end;
+
+procedure main(args: const string[1024]);
+begin
+  failed := false;
+  fail_step := 0;
+  step := 0;
+  shot := args = "shot";
+  black := stdlib.ui_black();
+  white := stdlib.ui_white();
+  accent := stdlib.ui_accent();
+
+  dragging := false;
+  drag_item := -1;
+  drag_moved := false;
+  drag_dx := 0;
+  drag_dy := 0;
+  drag_x := 0;
+  drag_y := 0;
+  selecting := false;
+  sel_x := 0;
+  sel_y := 0;
+  sel_w := 0;
+  sel_h := 0;
+  last_click_ns := uint(0);
+  last_click_item := -1;
+  opens := 0;
+  moves := 0;
+  trashed := 0;
+
+  load_assets();
+  labels[0] := "Folder";
+  labels[1] := "Document";
+  labels[2] := "Terminal";
+  item_cell[0] := 0;
+  item_cell[1] := 1;
+  item_cell[2] := 2;
+  item_alive[0] := true;
+  item_alive[1] := true;
+  item_alive[2] := true;
+  selected[0] := false;
+  selected[1] := false;
+  selected[2] := false;
+
+  pure_checks();
+
+  screen_w := syslib.screen_width();
+  screen_h := syslib.screen_height();
+  if screen_w = uint(0) then
+  begin
+    host_checks();
+    if failed then
+      report_and_exit()
+    else
+      say("ui_icons: host ok\n");
+  end
+  else if screen_w < uint(120 + ContentW + 30) or screen_h < uint(80 + ContentH + 30) then
+    say("ui_icons: screen too small\n")
+  else
+  begin
+    status := syslib.window_open(120, 80, ContentW, ContentH, "Desktop Icons", id);
+    if status <> Ok then
+      say("ui_icons: no window\n")
+    else
+    begin
+      status := syslib.window_content_rect(id, rect);
+      if status <> Ok then
+        say("ui_icons: no content rect\n")
+      else
+      begin
+        grid_x := rect.x + GridX;
+        grid_y := rect.y + GridY;
+        trash_x := rect.x + rect.w - TrashMargin - TrashSize;
+        trash_y := rect.y + rect.h - TrashMargin - TrashSize;
+        dirty := false;
+        flushed := syslib.event_flush();
+        if shot then
+        begin
+          draw_shot();
+          say("ui_icons: ready\n");
+          flushed := core.clock();
+          while core.clock() - flushed < uint(3000000000) do
+            at := 0;
+          status := syslib.window_close(id);
+          say("ui_icons: done\n");
+        end
+        else
+          kernel_proof();
+        report_and_exit();
+      end;
+    end;
+  end;
+end;

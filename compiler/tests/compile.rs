@@ -286,7 +286,7 @@ fn a_tiny_manifest_buffer_is_a_capacity_error() {
 #[test]
 fn compile_into_reports_its_caps() {
     assert_eq!(compiler::MAX_SOURCE_BYTES, 128 * 1024);
-    assert_eq!(compiler::MAX_ARENA_BYTES, 4 * 1024 * 1024);
+    assert_eq!(compiler::MAX_ARENA_BYTES, 8 * 1024 * 1024);
     assert_eq!(compiler::MAX_CODE_BYTES, 256 * 1024);
     assert_eq!(compiler::MAX_MANIFEST_BYTES, 4 * 1024);
 }
@@ -2935,7 +2935,7 @@ fn the_embedded_stdlib_compiles_on_its_own() {
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(manifest_unit(&package), "stdlib");
     assert_eq!(
-        header.function_count, 109,
+        header.function_count, 125,
         "trim_into, split_once, parse_int_into, parse_f64_into, starts_with, contains_byte, \
          split_all, drain_into, map_get_or, utf8_decode_into, utf8_len, utf8_decode, \
          utf8_valid, recv_exact, send_frame, recv_frame_into, send_line, recv_line_into, \
@@ -2962,7 +2962,11 @@ fn the_embedded_stdlib_compiles_on_its_own() {
          ui_menu_hit, and the M2.4.4 dialogs layer: ui_message, \
          ui_dialog_button_width, ui_dialog_button_left, ui_dialog_button_top, \
          ui_dialog_button, ui_alert, ui_alert_hit, ui_input_dialog, \
-         ui_input_dialog_hit, ui_dialog_key"
+         ui_input_dialog_hit, ui_dialog_key, and the M2.4.5 icons layer: \
+         ui_icon_size, ui_icon_row_bit, ui_icon, ui_icon_label, ui_icon_cell_x, \
+         ui_icon_cell_y, ui_icon_label_y, ui_icon_grid_hit, ui_double_click, \
+         ui_icon_grab, ui_icon_follow, ui_selection_normalize, \
+         ui_selection_rect, ui_rect_intersects, ui_icon_drop, ui_trash_hit"
     );
     assert_eq!(header.entry, 0);
     assert_eq!(header.state_size, 0, "the stdlib declares no state");
@@ -3089,8 +3093,8 @@ end;
     let package = compile(source, "ui.ig").expect("the UI helpers compile");
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(
-        header.entry, 109,
-        "the entry follows the 109 library functions"
+        header.entry, 125,
+        "the entry follows the 125 library functions"
     );
     assert!(header_function_count(&package) > 84);
 }
@@ -3131,8 +3135,8 @@ end;
     let package = compile(source, "edit.ig").expect("the editing helpers compile");
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(
-        header.entry, 109,
-        "the entry follows the 109 library functions"
+        header.entry, 125,
+        "the entry follows the 125 library functions"
     );
     assert!(header_function_count(&package) > 84);
 }
@@ -3187,10 +3191,10 @@ end;
     let package = compile(source, "menus.ig").expect("the menu helpers compile");
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(
-        header.entry, 109,
-        "the entry follows the 109 library functions"
+        header.entry, 125,
+        "the entry follows the 125 library functions"
     );
-    assert!(header_function_count(&package) > 109);
+    assert!(header_function_count(&package) > 125);
 }
 
 #[test]
@@ -3226,10 +3230,10 @@ end;
     let package = compile(source, "dlg.ig").expect("the dialog helpers compile");
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(
-        header.entry, 109,
-        "the entry follows the 109 library functions"
+        header.entry, 125,
+        "the entry follows the 125 library functions"
     );
-    assert!(header_function_count(&package) > 109);
+    assert!(header_function_count(&package) > 125);
 }
 
 #[test]
@@ -3267,6 +3271,103 @@ var
 procedure main(args: const string[1024]);
 begin
   n := stdlib.ui_dialog_key(v, true);
+end;
+"#;
+    let error = compile(sum, "t.ig").expect_err("a sum is not a uint");
+    assert!(
+        error.message.contains("cannot be used as a scalar"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn an_application_calls_the_icon_helpers() {
+    let source = br#"
+unit icons;
+uses core, stdlib, syslib;
+
+var
+  rows: array[uint, 32];
+  x: int;
+  y: int;
+  dx: int;
+  dy: int;
+  w: int;
+  h: int;
+  st: Status;
+  on: bool;
+
+procedure main(args: const string[1024]);
+begin
+  rows[0] := uint(3);
+  st := stdlib.ui_icon(0, 0, rows, stdlib.ui_black());
+  st := stdlib.ui_icon_label(0, 34, "Doc");
+  x := stdlib.ui_icon_size();
+  x := stdlib.ui_icon_cell_x(1, 0, 100);
+  x := stdlib.ui_icon_cell_y(1, 0, 80);
+  x := stdlib.ui_icon_label_y(0);
+  x := stdlib.ui_icon_grid_hit(0, 0, 2, 4, 100, 80, 10, 10);
+  on := stdlib.ui_double_click(uint(0), uint(1), true);
+  on := stdlib.ui_icon_row_bit(rows[0], 1);
+  on := stdlib.ui_icon_grab(0, 0, 5, 5, dx, dy);
+  st := stdlib.ui_icon_follow(100, 100, dx, dy, x, y);
+  st := stdlib.ui_selection_normalize(10, 10, 0, 0, x, y, w, h);
+  st := stdlib.ui_selection_rect(0, 0, 10, 10);
+  on := stdlib.ui_rect_intersects(0, 0, 10, 10, 5, 5, 10, 10);
+  x := stdlib.ui_icon_drop(0, 0, 2, 4, 100, 80, 300, 300, 50, 50, 10, 10);
+  on := stdlib.ui_trash_hit(300, 300, 50, 50, 310, 310);
+end;
+"#;
+    let package = compile(source, "icons.ig").expect("the icon helpers compile");
+    let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
+    assert_eq!(
+        header.entry, 125,
+        "the entry follows the 125 library functions"
+    );
+    assert!(header_function_count(&package) > 125);
+}
+
+#[test]
+fn ui_icons_reject_a_record_or_sum_argument() {
+    // The M2.4.5 icons follow the same cross-unit rule: the bitmap rows are
+    // `array[uint, 32]` and the bit index is a scalar, so a record and a sum
+    // are rejected at the unit boundary.
+    let record = br#"
+unit t;
+uses core, stdlib;
+
+type P = record x: int; end;
+
+var
+  p: P;
+  st: Status;
+
+procedure main(args: const string[1024]);
+begin
+  st := stdlib.ui_icon(0, 0, p, uint(0));
+end;
+"#;
+    let error = compile(record, "t.ig").expect_err("a record is not an array");
+    assert!(
+        error.message.contains("expects `array[uint, 32]`"),
+        "{}",
+        error.message
+    );
+
+    let sum = br#"
+unit t;
+uses core, stdlib;
+
+type V = A | B;
+
+var
+  v: V;
+  on: bool;
+
+procedure main(args: const string[1024]);
+begin
+  on := stdlib.ui_icon_row_bit(v, 0);
 end;
 "#;
     let error = compile(sum, "t.ig").expect_err("a sum is not a uint");

@@ -1663,6 +1663,80 @@ without touching the buffer. It prints `ui_dialogs: ok` on `-smp 4` and `-smp 1`
 `scripts/ui_dialogs_screenshot_qmp.py` captures `/home/sinan/Desktop/igis-dialogs.png`
 (1024×768).
 
+#### UI icons and desktop (M2.4.5)
+
+A 32×32 monochrome icon, grid geometry, double-click timing, drag offsets, a selection
+rectangle and a trash drop rule, as ordinary language code over the `syslib` drawing
+primitives. There is no new opcode, builtin, record, sum, user enum, generic or `state`.
+The **application** owns the bitmap assets, the cell assignment, the live/selected flags,
+the drag offset and position, the last click's time and target, and the rubber-band
+origin; the library draws and computes only.
+
+**Icon bit layout.** An icon is `array[uint, 32]`: one row mask per row, row 0 the top
+row, bit 0 the left pixel and bit 31 the right one. `ui_icon` draws one 1-pixel-high
+`syslib.fill_rect` per maximal run of set bits, so a bitmap costs at most 64 calls, and an
+all-zero row draws nothing. The caller paints any white plate or background it wants; the
+helper draws only set bits, so the desktop dither shows through an unfilled stencil. A
+colour above `0x00FFFFFF` is `Invalid` before anything is drawn, and `syslib` clips the
+bitmap instead of faulting.
+
+| Helper | Semantics |
+|--------|-----------|
+| `stdlib.ui_icon_size() -> int` | `32`, the bitmap and grid-icon side. |
+| `stdlib.ui_icon_row_bit(row, col) -> bool` | Bit `col` of `row` (0 = left); a `col` outside `0..31` is false. `div`/`mod` with a doubling mask, because the language has no bitwise operators. |
+| `stdlib.ui_icon(x, y, rows, color) -> Status` | Draws the 32×32 bitmap at `(x, y)`; clipped, `Invalid` for a bad colour or disabled graphics. |
+| `stdlib.ui_icon_label(x, y, label) -> Status` | A black 8×8 label at `(x, y)`, transparent background (`syslib.draw_text`); the app centres it. |
+| `stdlib.ui_icon_cell_x(col, origin_x, cell_w) -> int` | `origin_x + col * cell_w`. |
+| `stdlib.ui_icon_cell_y(row, origin_y, cell_h) -> int` | `origin_y + row * cell_h`. |
+| `stdlib.ui_icon_label_y(icon_y) -> int` | `icon_y + 32 + 2`, the top of the label under an icon. |
+| `stdlib.ui_icon_grid_hit(x, y, cols, count, cell_w, cell_h, px, py) -> int` | Row-major cell index under a point: `(px - x) / cell_w` and `(py - y) / cell_h`, `row * cols + col`; -1 outside, past `count`, or for a non-positive `cols`, `count`, `cell_w` or `cell_h`. |
+| `stdlib.ui_double_click(last_ns, now_ns, same_target) -> bool` | True when `same_target` and `now_ns - last_ns` is at most 400 ms (`UiDoubleClickNs`, inclusive); false for a different target, a clock that went backwards or a longer gap. No internal state. |
+| `stdlib.ui_icon_grab(icon_x, icon_y, px, py, dx: var int, dy: var int) -> bool` | True only inside the 32×32 bitmap, writing `px - icon_x` and `py - icon_y`; outside, both offsets are 0, so a label press selects but does not drag. |
+| `stdlib.ui_icon_follow(px, py, dx, dy, x: var int, y: var int) -> Status` | `x = px - dx`, `y = py - dy`; the app clamps the result to its own content. |
+| `stdlib.ui_selection_normalize(x1, y1, x2, y2, x: var int, y: var int, w: var int, h: var int) -> Status` | An inclusive normalized band: `x`/`y` are the smaller ordinates and `w`/`h` the absolute differences plus one, so both endpoints are inside. |
+| `stdlib.ui_selection_rect(x, y, w, h) -> Status` | The dotted 1-pixel black rubber-band outline (the `ui_focus_ring` pattern), transparent interior; `Invalid` below 1×1. |
+| `stdlib.ui_rect_intersects(ax, ay, aw, ah, bx, by, bw, bh) -> bool` | Axis-aligned overlap of two positive rectangles; touching edges do not count, and a non-positive extent is false. |
+| `stdlib.ui_icon_drop(x, y, cols, count, cell_w, cell_h, tx, ty, tw, th, px, py) -> int` | The release target: -2 inside the trash rectangle, otherwise the grid cell index or -1. |
+| `stdlib.ui_trash_hit(x, y, w, h, px, py) -> bool` | The `ui_rect_hit` rule named for the trash drop target. |
+
+**Grid.** The application chooses the origin, the column count, the cell size and the
+number of valid cells; `ui_icon_cell_x`/`_y` place a cell and `ui_icon_grid_hit` maps a
+point back, so drawing and hit-testing cannot disagree. Cell edges belong to the cell to
+the right/below (the `ui_rect_hit` rule). `count` is the number of valid cells, which may
+be larger than the number of live icons so an empty cell is still a drag/drop target.
+
+**Double-click.** The app records the last press time (`core.clock()` nanoseconds) and
+the last target itself and calls `ui_double_click` on each icon press; 400 ms is the
+threshold and a same-target repeat at exactly 400 ms counts. When it returns true the app
+opens something (or prints a marker) and resets the remembered time and target. A drag
+cancels the pending click: a press that moved before release is not a double-click
+candidate.
+
+**Drag, selection and trash.** A press inside a live icon's bitmap starts a drag with the
+offset from `ui_icon_grab`; every `PointerMove` with the button held updates the icon
+origin through `ui_icon_follow`, the application draws the icon at the dragged position
+and leaves its cell showing the desktop, and `PointerUp` asks `ui_icon_drop`: -2 removes
+the icon (its live flag clears and the trash stays drawn), a cell index moves it when
+that cell is empty or its own, and -1 leaves it where it was. A press on empty desktop
+starts a rubber band: the app normalizes the origin and current point with
+`ui_selection_normalize` and selects every live icon whose cell rectangle
+`ui_rect_intersects`, drawing the band with `ui_selection_rect`. The library never
+touches the window service; the app keeps every icon inside its content by clamping the
+drag origin, and `syslib` clips any overhang.
+
+The M2.4.5 proof is `samples/apps/ui_icons`: it opens a `Desktop Icons` window, draws a
+dithered desktop with a 2×2 icon grid (folder, document, terminal) and a trash target,
+checks the dither, three bitmaps, labels and the trash with `get_pixel`, double-clicks the
+document (prints `ui_icons: open Document` and counts exactly one open), drags the folder
+to the empty cell (source cleared, icon redrawn, cell recorded), drags it into the trash
+(the drop removes it and the cell clears), rubber-band selects the two remaining icons
+(accent label bands, removed folder excluded), checks the band outline and its removal,
+presents and closes the window, and prints `ui_icons: ok` on `-smp 4` and `-smp 1` or
+`ui_icons: host ok` on `langhost`, where the pure helpers and the disabled-screen
+`Invalid` contract run. `ui_icons shot` composes the desktop with the document and
+terminal selected and `scripts/ui_icons_screenshot_qmp.py` captures
+`/home/sinan/Desktop/igis-icons.png` (1024×768).
+
 Still missing for a complete standard library: `f32` (Q40) and the remaining float-text
 work (Q41: correctly rounded decimal-to-binary parsing and its subnormal edges); the
 fixed-point `core.format_f64_into`, the shortest round-trip
@@ -1689,8 +1763,11 @@ hit tests, `ui_menu_bit`/`has`/`set`, `ui_menu_first`/`open`/`close`/`move`, `ui
 and `ui_menu_selectable`), again with no opcode or builtin. The M2.4.4 dialogs layer landed
 as ordinary language code over the same chrome, controls and editing helpers (`ui_message`,
 the dialog button geometry, `ui_alert`, `ui_input_dialog`, their hit tests and
-`ui_dialog_key`), again with no opcode or builtin. Icons (M2.4.5) and the widgets demo
-(M2.4.6) are still ahead.
+`ui_dialog_key`), again with no opcode or builtin. The M2.4.5 icons and desktop layer
+landed as ordinary language code over the drawing primitives (`ui_icon`, the bit and grid
+geometry helpers, `ui_double_click`, the grab/follow pair, the selection
+normalize/outline/intersection helpers and the drop/trash rules), again with no opcode or
+builtin. The widgets demo (M2.4.6) is still ahead.
 
 ## Failure modes
 
@@ -1844,3 +1921,4 @@ the dialog button geometry, `ui_alert`, `ui_input_dialog`, their hit tests and
 | 2026-11-17 | M2.4.2 adds the `stdlib` controls layer (32 drawing, hit-test, transition, focus and key-decode helpers, 84 total): button (normal/pressed/focused), checkbox (box, check mark, label, toggle), text field (visible slice, accent selection, caret, reveal), vertical scrollbar (track, thumb, page hit, clamp), list (rows, selection, scroll into view, row hit, move), `ui_rect_hit`, `ui_focus_ring`, `ui_focus_next` and the packed-key decoders. The application owns the event loop and all state; the library has no widget object, callback, event pump or `state`. Drawing uses the M2.4.0 metrics/palette; too-small geometry is `Invalid` and disabled graphics draw nothing while the pure helpers keep working. No new opcode or builtin. The embedded source cap rises to 128 KiB and the compile arena to 4 MiB (the library is 72,426 B and needs 2,428,888 B of scratch). Proof `samples/apps/ui_controls` (injected pointer/key events, `get_pixel` checks) and the `langhost` sequence test. |
 | 2026-11-17 | M2.4.3 adds the `stdlib` menus layer (15 helpers, 99 total): a menu-bar model and drawing (`ui_menu_bar`, `ui_menu_bar_hit`, `ui_menu_bar_height`), pull-downs (`ui_menu_dropdown`, `ui_menu_hit`) with a check column, right-aligned shortcut text, accent selection, gray disabled rows and `-` separators, `uint` mask helpers (`ui_menu_bit`/`has`/`set`), the selectability and state transitions (`ui_menu_selectable`, `ui_menu_first`, `ui_menu_open`, `ui_menu_close`, `ui_menu_move`), and a pure key mapping (`ui_menu_key`: Escape closes, Enter activates, arrows move/switch menus). The app owns the open menu, the highlight and the masks; checked and disabled are independent and the highlight never changes them. No record/sum/generic/`state`, no new opcode or builtin. Too-small geometry is `Invalid`, disabled graphics draw nothing while the pure helpers work, and clipping is `syslib`'s. Proof `samples/apps/ui_menus` (injected pointer/key events, `get_pixel`), the `langhost` sequence test and `/home/sinan/Desktop/igis-menus.png`. |
 | 2026-11-17 | M2.4.4 adds the `stdlib` dialogs layer (10 helpers, 109 total): `ui_message` (word-wrapped text in a fixed box), the dialog button geometry (`ui_dialog_button_width`, `ui_dialog_button_left`, `ui_dialog_button_top`), `ui_dialog_button` (a button with the default action's double border), `ui_alert`/`ui_alert_hit` (frame, focused title bar, wrapped message, default/cancel pair; alert slots 0 default, 1 cancel, the close box cancels), `ui_input_dialog`/`ui_input_dialog_hit` (prompt, `ui_text_field`, OK/Cancel; slots 0 field, 1 default, 2 cancel, the close box cancels) and `ui_dialog_key` (Enter = result 1 default, Escape = result 2 cancel when `has_cancel`, Tab/Shift+Tab = actions 3/4 focus next/previous, everything else 0). The app owns the modal loop, the focus slot, the result and the text buffer; the input dialog only draws and never mutates the buffer, and editing stays exclusively the M2.4.1 helpers. No record/sum/generic/`state`, no new opcode or builtin. Too-small geometry is `Invalid` (80 px alert, 106 px input dialog, buttons fitting the width); disabled graphics draw nothing while the pure helpers work. Proof `samples/apps/ui_dialogs` (injected key/pointer events, `get_pixel`), the `langhost` sequence test and `/home/sinan/Desktop/igis-dialogs.png`. |
+| 2026-11-17 | M2.4.5 adds the `stdlib` icons and desktop interaction layer (16 helpers, 125 total): `ui_icon` draws a 32×32 monochrome bitmap supplied as `array[uint, 32]` row masks (row 0 the top, bit 0 the left pixel) with one `fill_rect` per maximal set-bit run, and `ui_icon_size`/`ui_icon_row_bit`/`ui_icon_label` complete the asset surface; `ui_icon_cell_x`/`_y`, `ui_icon_label_y` and `ui_icon_grid_hit` are the grid geometry (row-major, `count` valid cells, -1 outside or for non-positive geometry); `ui_double_click` is a pure 400 ms inclusive same-target test with no state; `ui_icon_grab`/`ui_icon_follow` carry the drag offset (inside the bitmap only) and position; `ui_selection_normalize` returns an inclusive band, `ui_selection_rect` the dotted outline and `ui_rect_intersects` the cell overlap (touching edges excluded); `ui_icon_drop` returns -2 inside the trash, else the cell or -1, and `ui_trash_hit` names the rectangle rule. The four bitmaps live in the sample and the app owns the cells, live/selected flags, click time/target and drag clamp; a drag cancels the pending double-click. No record/sum/generic/`state`, no new opcode or builtin. Proof `samples/apps/ui_icons` (injected pointer events, double-click marker, drag to a cell and to the trash, rubber-band selection, `get_pixel`), the `langhost` sequence/pure test and `/home/sinan/Desktop/igis-icons.png`. The compile arena cap rises to 8 MiB (spec 0008). |
