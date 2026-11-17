@@ -4132,3 +4132,71 @@ fn event_defaults_refuse_an_injection_and_report_an_empty_queue() {
     assert_eq!(host.event_drops(), 0);
     assert_eq!(host.event_flush(), 0);
 }
+
+/// Builds a minimal package with one function and a line table naming `units`.
+fn build_with_units(units: &[u32]) -> Vec<u8> {
+    let mut instructions = Vec::new();
+    op(&mut instructions, opcodes::RET);
+    let header = CodeHeader {
+        magic: CODE_MAGIC,
+        abi_version: ABI_VERSION,
+        profile: PROFILE_X86_64_LE,
+        function_count: 1,
+        entry: 0,
+        code_len: instructions.len() as u32,
+        const_len: 0,
+        line_len: (units.len() * abi::LINE_ENTRY_SIZE) as u32,
+        state_size: 0,
+        stack_size: 64,
+        diag_offset: NO_DIAGNOSTIC,
+    };
+    let mut code = Vec::new();
+    code.extend_from_slice(&header.to_bytes());
+    code.extend_from_slice(
+        &Function {
+            code_off: 0,
+            frame_size: 40,
+            operand_off: 40,
+            line_base: 0,
+            name_off: NO_NAME,
+            param_count: 1,
+            has_destination: false,
+            _reserved: [0, 0],
+        }
+        .to_bytes(),
+    );
+    while code.len() % 8 != 0 {
+        code.push(0);
+    }
+    code.extend_from_slice(&instructions);
+    while code.len() % 8 != 0 {
+        code.push(0);
+    }
+    // Constants are empty; the line table follows, sorted by code offset.
+    for unit in units {
+        code.extend_from_slice(&0u32.to_le_bytes());
+        code.extend_from_slice(&unit.to_le_bytes());
+        code.extend_from_slice(&1u32.to_le_bytes());
+        code.extend_from_slice(&1u32.to_le_bytes());
+    }
+    code
+}
+
+#[test]
+fn line_table_unit_ids_accept_the_whole_package_range() {
+    // Unit ids 0..=16: application, stdlib and up to fifteen `/lib` modules
+    // (spec 0018, M8).
+    let code = build_with_units(&[0, 1, 2, 8, 16]);
+    let mut scratch = scratch_for(&code);
+    interpreter::verify(&code, &mut scratch).expect("ids 0..=16 are in range");
+
+    let code = build_with_units(&[0, 17]);
+    let mut scratch = scratch_for(&code);
+    let error = interpreter::verify(&code, &mut scratch).expect_err("17 is out of range");
+    assert_eq!(error.status, Status::Invalid);
+    assert!(
+        error.message.contains("unit id is out of range"),
+        "{}",
+        error.message
+    );
+}

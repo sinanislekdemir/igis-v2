@@ -25,9 +25,11 @@ const MAX_SECTION: u32 = 1 << 20;
 /// Maximum number of functions in one package.
 const MAX_FUNCTIONS: u32 = 1 << 16;
 
-/// Maximum line-table unit id. ABI v1 packages name at most two units: the
-/// application (0) and the embedded `stdlib` (1). The compiler assigns them.
-const MAX_UNITS: u32 = 1;
+/// Maximum line-table unit id. ABI v1 packages name at most 17 units: the
+/// application (0), the embedded `stdlib` (1) and imported `/lib` modules
+/// (2..=16). The compiler assigns them; [`abi::MAX_UNIT_ID`] is the shared
+/// bound (spec 0018, M8).
+const MAX_UNITS: u32 = abi::MAX_UNIT_ID;
 
 /// A package that failed verification, or a verifier whose scratch buffer was
 /// too small.

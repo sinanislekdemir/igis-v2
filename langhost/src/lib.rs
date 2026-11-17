@@ -49,19 +49,130 @@ pub struct OwnedPackage {
 
 /// Compiles one unit into an owned package.
 ///
-/// This is the host wrapper around [`compiler::compile_into`]: it allocates the
-/// boundeds buffers the kernel will later place statically, compiles, and copies
-/// the artifact out so the diagnostic can outlive the scratch.
+/// This is the host wrapper around [`compiler::compile_with_imports`]: it
+/// allocates the bounded buffers the kernel will later place statically,
+/// compiles, and copies the artifact out so the diagnostic can outlive the
+/// scratch. `/lib` modules resolve through a [`TreeReader`] over the same
+/// source tree `core.spawn` and the file API use (spec 0018, X5).
 #[allow(clippy::result_large_err)]
 pub fn compile(source: &[u8], path: &str) -> Result<OwnedPackage, compiler::Diagnostic> {
+    compile_in(source, path, &app_dir())
+}
+
+/// [`compile`] against an explicit tree root. Tests use it to pin a fixture.
+#[allow(clippy::result_large_err)]
+fn compile_in(
+    source: &[u8],
+    path: &str,
+    root: &std::path::Path,
+) -> Result<OwnedPackage, compiler::Diagnostic> {
+    let mut reader = TreeReader {
+        root: root.to_path_buf(),
+    };
+    compile_with_reader(source, path, &mut reader)
+}
+
+/// The reader-agnostic core of [`compile`]; tests supply an in-memory reader.
+#[allow(clippy::result_large_err)]
+fn compile_with_reader(
+    source: &[u8],
+    path: &str,
+    reader: &mut dyn compiler::SourceReader,
+) -> Result<OwnedPackage, compiler::Diagnostic> {
     let mut arena = vec![0u8; compiler::MAX_ARENA_BYTES];
     let mut code = vec![0u8; compiler::MAX_CODE_BYTES];
     let mut manifest = vec![0u8; compiler::MAX_MANIFEST_BYTES];
-    let package = compiler::compile_into(source, path, &mut arena, &mut code, &mut manifest)?;
+    let package =
+        compiler::compile_with_imports(source, path, reader, &mut arena, &mut code, &mut manifest)?;
     Ok(OwnedPackage {
         manifest: package.manifest.to_vec(),
         code: package.code.to_vec(),
     })
+}
+
+/// Reads `/lib` module sources from the image tree (spec 0018, X5).
+///
+/// The rules match the kernel's ext2 reader: only a regular file is readable,
+/// a symlink is refused instead of followed, a missing component is
+/// `NotFound`, and a path that walks through a file is `Invalid`.
+struct TreeReader {
+    root: PathBuf,
+}
+
+/// Maps a host I/O error onto the file API's statuses.
+fn io_status(error: &std::io::Error) -> Status {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => Status::NotFound,
+        std::io::ErrorKind::NotADirectory => Status::Invalid,
+        _ => Status::IoError,
+    }
+}
+
+impl TreeReader {
+    fn metadata(&self, path: &str) -> Result<std::fs::Metadata, Status> {
+        let target = resolve_in(&self.root, path)?;
+        let metadata = std::fs::symlink_metadata(&target).map_err(|e| io_status(&e))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(Status::Invalid);
+        }
+        Ok(metadata)
+    }
+}
+
+impl compiler::SourceReader for TreeReader {
+    fn size(&self, path: &str) -> Result<usize, Status> {
+        let metadata = self.metadata(path)?;
+        usize::try_from(metadata.len()).map_err(|_| Status::CapacityExceeded)
+    }
+
+    fn read(&self, path: &str, out: &mut [u8]) -> Result<usize, Status> {
+        self.metadata(path)?;
+        let target = resolve_in(&self.root, path)?;
+        let mut file = std::fs::File::open(&target).map_err(|e| io_status(&e))?;
+        let mut written = 0usize;
+        while written < out.len() {
+            match file.read(&mut out[written..]) {
+                Ok(0) => break,
+                Ok(count) => written += count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err(Status::IoError),
+            }
+        }
+        // `size` promised this many bytes; a growing file is a race, not a
+        // truncated read, so refuse it instead of returning a short length.
+        let mut extra = [0u8; 1];
+        match file.read(&mut extra) {
+            Ok(0) => Ok(written),
+            Ok(_) => Err(Status::CapacityExceeded),
+            Err(_) => Err(Status::IoError),
+        }
+    }
+}
+
+/// Resolves an image path under `root`, component by component, so a file used
+/// as a directory reports `Invalid` exactly as the ext2 walker does (spec 0018,
+/// L6). `""` and `"."` are the root.
+fn resolve_in(root: &std::path::Path, path: &str) -> Result<PathBuf, Status> {
+    let mut current = root.to_path_buf();
+    if path.is_empty() || path == "." {
+        return Ok(current);
+    }
+    let mut parts = path.split('/').peekable();
+    while let Some(part) = parts.next() {
+        current.push(part);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if parts.peek().is_some() && !metadata.is_dir() {
+                    return Err(Status::Invalid);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(Status::NotFound)
+            }
+            Err(_) => return Err(Status::IoError),
+        }
+    }
+    Ok(current)
 }
 
 /// A finished, or budget-terminated, run.
@@ -112,30 +223,9 @@ impl ConsoleHost {
         Self::with_input(depth, HOST_INPUT)
     }
 
-    /// Resolves an image path under the sample tree, component by component,
-    /// so a file used as a directory reports `Invalid` exactly as the ext2
-    /// walker does (spec 0018, L6). `""` and `"."` are the root.
+    /// Resolves an image path under the sample tree (spec 0018, L6).
     fn resolve_path(&self, path: &str) -> Result<PathBuf, Status> {
-        let mut current = self.source_dir.clone();
-        if path.is_empty() || path == "." {
-            return Ok(current);
-        }
-        let mut parts = path.split('/').peekable();
-        while let Some(part) = parts.next() {
-            current.push(part);
-            match std::fs::symlink_metadata(&current) {
-                Ok(metadata) => {
-                    if parts.peek().is_some() && !metadata.is_dir() {
-                        return Err(Status::Invalid);
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(Status::NotFound)
-                }
-                Err(_) => return Err(Status::IoError),
-            }
-        }
-        Ok(current)
+        resolve_in(&self.source_dir, path)
     }
 
     fn with_input(depth: u32, input: &[u8]) -> Self {
@@ -603,6 +693,115 @@ pub fn write_package(path: &std::path::Path, package: &OwnedPackage) -> std::io:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The repository's staged source tree; the same one the image is built
+    /// from. `compile_in` is `compile` with an explicit root, so this test does
+    /// not depend on the process working directory or `IGIS_APP_DIR`.
+    fn sample_tree() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../samples/apps")
+    }
+
+    #[test]
+    fn an_application_imports_lib_math_through_the_tree_reader() {
+        let source = br#"
+unit module_host;
+uses core, lib.math;
+
+var
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := math.clamp(42, 0, 9);
+  if n = 9
+     and math.min_int(2, 5) = 2
+     and math.max_int(2, 5) = 5
+     and math.abs_int(0 - 3) = 3
+     and math.sign(0 - 3) = 0 - 1 then
+    core.write("module: ok\n")
+  else
+    core.write("module: FAILED\n");
+end;
+"#;
+        let package = compile_in(source, "module_host", &sample_tree()).expect("compiles");
+        let result = run(&package.code, b"", DEFAULT_BUDGET).expect("verifies and runs");
+        assert_eq!(String::from_utf8(result.output).unwrap(), "module: ok\n");
+        assert_eq!(result.reason, ExitReason::Ok);
+    }
+
+    #[test]
+    fn an_in_memory_reader_supplies_modules_to_compile() {
+        // spec 0018 X5: the host path is reader-agnostic, so a test can supply
+        // module sources without touching the filesystem.
+        struct Memory {
+            path: &'static str,
+            source: &'static [u8],
+        }
+        impl compiler::SourceReader for Memory {
+            fn size(&self, path: &str) -> Result<usize, Status> {
+                if path == self.path {
+                    Ok(self.source.len())
+                } else {
+                    Err(Status::NotFound)
+                }
+            }
+            fn read(&self, path: &str, out: &mut [u8]) -> Result<usize, Status> {
+                if path != self.path {
+                    return Err(Status::NotFound);
+                }
+                if out.len() < self.source.len() {
+                    return Err(Status::CapacityExceeded);
+                }
+                out[..self.source.len()].copy_from_slice(self.source);
+                Ok(self.source.len())
+            }
+        }
+        let source = br#"
+unit in_memory;
+uses core, lib.math;
+
+var
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := math.clamp(0 - 5, 0, 10);
+  if n = 0 then
+    core.write("memory: ok\n")
+  else
+    core.write("memory: FAILED\n");
+end;
+"#;
+        let math: &'static [u8] = include_bytes!("../../samples/apps/lib/math.ig");
+        let mut reader = Memory {
+            path: "lib/math.ig",
+            source: math,
+        };
+        let package = compile_with_reader(source, "in_memory", &mut reader).expect("compiles");
+        let result = run(&package.code, b"", DEFAULT_BUDGET).expect("verifies and runs");
+        assert_eq!(String::from_utf8(result.output).unwrap(), "memory: ok\n");
+        assert_eq!(result.reason, ExitReason::Ok);
+    }
+
+    #[test]
+    fn a_missing_module_is_a_compile_diagnostic() {
+        let source = br#"
+unit missing_module;
+uses lib.no_such_module;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+        let error = compile_in(source, "missing_module", &sample_tree())
+            .expect_err("the reader cannot find it");
+        assert_eq!(error.path, "lib/no_such_module.ig");
+        assert!(
+            error.message.contains("cannot read `lib.no_such_module`"),
+            "{}",
+            error.message
+        );
+    }
 
     #[test]
     fn package_container_records_both_sections() {

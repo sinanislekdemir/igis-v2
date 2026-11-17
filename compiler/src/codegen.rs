@@ -46,7 +46,9 @@ use crate::arena::{Bump, OutOfSpace, SliceVec};
 use crate::ast::*;
 use crate::package::LineEntry;
 use crate::types::{align8, Kind, Type, MAX_CAPACITY, STATUS_ENUM};
-use crate::{diag, out_of_space, package, Diagnostic, Package, Resource, MAX_NESTING};
+use crate::{
+    diag, out_of_space, package, Diagnostic, ModuleUnit, Package, Resource, UnitRole, MAX_NESTING,
+};
 
 /// Bytes reserved at the bottom of every frame (spec 0008, "Frames" plus the
 /// saved `return_sp` and the destination reference this ABI version adds).
@@ -556,10 +558,10 @@ fn array_of(arrays: &[ArrayDef], ty: Type) -> Option<ArrayDef> {
 
 /// Interns `elem × count` structurally and returns the array type.
 ///
-/// The table is shared by both units of one compilation (the application and
-/// the embedded library), so the same written `array[T, N]` resolves to the
-/// same id on either side of a call. Interning scans existing entries, so the
-/// numbering is first-use order and deterministic.
+/// The table is shared by every unit of one compilation (the application, the
+/// embedded library and each module), so the same written `array[T, N]`
+/// resolves to the same id on either side of a call. Interning scans existing
+/// entries, so the numbering is first-use order and deterministic.
 fn intern_array<'a>(
     arrays: &mut SliceVec<'a, '_, ArrayDef>,
     elem: Type,
@@ -626,7 +628,7 @@ fn ring_of(rings: &[RingDef], ty: Type) -> Option<RingDef> {
 
 /// Interns `elem × count` structurally and returns the ring type.
 ///
-/// The table is shared by both units of one compilation, so the same written
+/// The table is shared by every unit of one compilation, so the same written
 /// `ring[T, N]` resolves to the same id on either side of a call. Interning
 /// scans existing entries, so the numbering is first-use order and
 /// deterministic.
@@ -715,7 +717,7 @@ fn map_table_capacity(count: u32) -> Option<u32> {
 
 /// Interns `(key, value, count)` structurally and returns the map type.
 ///
-/// The table is shared by both units of one compilation, so the same written
+/// The table is shared by every unit of one compilation, so the same written
 /// `map[K, V, N]` resolves to the same id on either side of a call. Interning
 /// scans existing entries, so the numbering is first-use order and
 /// deterministic.
@@ -893,8 +895,9 @@ fn is_builtin_type_name(name: &str) -> bool {
 }
 
 /// Builds one unit's symbol tables: constants, enums, records, sums, state and
-/// signatures. Type ids are local to the unit, so two units can be compiled
-/// side by side without a shared declaration namespace.
+/// signatures. Type ids are local to the unit, so units can be compiled side
+/// by side without a shared declaration namespace.
+#[derive(Clone, Copy)]
 struct UnitTables<'a> {
     name: &'a str,
     consts: &'a [Const<'a>],
@@ -910,26 +913,29 @@ struct UnitTables<'a> {
 }
 
 /// Rejects a `uses` name the unit's role does not provide.
-fn check_uses<'a>(unit: &Unit<'a>, path: &'a str, is_application: bool) -> Result<(), Diagnostic> {
+pub(crate) fn check_uses(unit: &Unit<'_>, path: &str, role: UnitRole) -> Result<(), Diagnostic> {
     let name = unit.name;
     for used in unit.uses {
         let known = match *used {
             "core" | "syslib" => true,
-            // Only an application may import the library; the library may not
-            // import the application or itself (no cycles, spec 0003 M4).
-            "stdlib" => is_application,
-            _ => false,
+            // The embedded library is for applications and modules; it may not
+            // import itself or a `/lib` module (spec 0018, M5/M12).
+            "stdlib" => role != UnitRole::Library,
+            // Only a `/lib` module is resolvable by name (spec 0018, M1/M5).
+            _ => role != UnitRole::Library && used.starts_with("lib."),
         };
         if !known {
+            let detail = if role == UnitRole::Library {
+                "the embedded `stdlib` may import only `core` and `syslib`"
+            } else {
+                "this slice provides `core`, `syslib`, `stdlib` and `lib.*` modules"
+            };
             return Err(diag(
                 path,
                 name,
-                1,
-                1,
-                format_args!(
-                    "unknown unit `{used}`; this slice provides `core` and `syslib`{}",
-                    if is_application { " and `stdlib`" } else { "" }
-                ),
+                unit.uses_line,
+                unit.uses_column,
+                format_args!("unknown unit `{used}`; {detail}"),
             ));
         }
     }
@@ -1625,15 +1631,15 @@ fn build_tables<'a>(
 
 /// Compiles every procedure of one unit, returning the function images in
 /// declaration order. `call_base` is the unit's first index in the shared
-/// function table; `library_sigs` is `Some` only for the application, whose
-/// qualified `stdlib.<name>` calls resolve there.
+/// function table; `imports` lists the other units this one may call by name
+/// (`stdlib` and imported modules).
 #[allow(clippy::too_many_arguments)]
 fn compile_procs<'a, 'b>(
     unit: &Unit<'a>,
     tables: &UnitTables<'a>,
     path: &'a str,
     call_base: u32,
-    library_sigs: Option<&'a [Sig<'a>]>,
+    imports: &'a [ImportedUnit<'a>],
     state_vars: &'a [StateVar<'a>],
     arrays: &mut SliceVec<'a, 'b, ArrayDef>,
     rings: &mut SliceVec<'a, 'b, RingDef>,
@@ -1660,7 +1666,7 @@ fn compile_procs<'a, 'b>(
             &mut *rings,
             &mut *maps,
             call_base,
-            library_sigs,
+            imports,
             unit_id,
             pool,
             current,
@@ -1744,20 +1750,82 @@ fn append_function<'a>(
     Ok(())
 }
 
-/// Compiles the application unit and, when it imports `stdlib`, the embedded
-/// library unit into one package (spec 0008, "One artifact per application").
+/// One imported unit visible to the unit being compiled.
 ///
-/// Function table order is library first, then application, so an application
-/// call and an intra-library call resolve to one index space. The application's
-/// `main` is the entry point; the manifest keeps the application's unit name.
-/// A `library` of `None` is how the host checks the library source in
-/// isolation: the unit then needs no `main` and its first function is the
-/// entry.
+/// `stdlib.<name>` and `<module>.<name>` calls resolve through this table
+/// (spec 0018, M7); `call_base` is the unit's first index in the shared
+/// function table.
+#[derive(Clone, Copy)]
+struct ImportedUnit<'a> {
+    name: &'a str,
+    sigs: &'a [Sig<'a>],
+    call_base: u32,
+}
+
+/// Builds the import table for one unit from its `uses` clause, in declaration
+/// order and with duplicates removed.
+#[allow(clippy::too_many_arguments)]
+fn import_list<'a>(
+    unit: &Unit<'a>,
+    path: &'a str,
+    modules: &[ModuleUnit<'a>],
+    tables: &[UnitTables<'a>],
+    bases: &[u32],
+    stdlib_sigs: Option<&'a [Sig<'a>]>,
+    bump: &Bump<'a>,
+) -> Result<&'a [ImportedUnit<'a>], Diagnostic> {
+    let mut list = SliceVec::<ImportedUnit<'a>>::new(bump)
+        .map_err(|_| arena_full(path, unit.name, unit.uses_line, unit.uses_column))?;
+    for used in unit.uses {
+        let imported = if *used == "stdlib" {
+            stdlib_sigs.map(|sigs| ImportedUnit {
+                name: "stdlib",
+                sigs,
+                call_base: 0,
+            })
+        } else if used.starts_with("lib.") {
+            modules
+                .iter()
+                .position(|module| module.use_name == *used)
+                .map(|index| ImportedUnit {
+                    name: modules[index].unit.name,
+                    sigs: tables[index].sigs,
+                    call_base: bases[index],
+                })
+        } else {
+            None
+        };
+        let Some(imported) = imported else {
+            continue;
+        };
+        if list
+            .as_slice()
+            .iter()
+            .any(|entry| entry.name == imported.name)
+        {
+            continue;
+        }
+        list.push(imported)
+            .map_err(|_| arena_full(path, unit.name, unit.uses_line, unit.uses_column))?;
+    }
+    Ok(list.into_slice())
+}
+
+/// Compiles the application, the embedded `stdlib` (when imported) and every
+/// imported `/lib` module into one package (spec 0008, "One artifact per
+/// application"; spec 0018, M7/M8).
+///
+/// Function table order is `stdlib`, then modules in discovery order, then the
+/// application, so every cross-unit call resolves in one index space. The
+/// application's `main` is the entry point; the manifest keeps the
+/// application's unit name. A `library` of `None` is how the host checks the
+/// library source in isolation: the unit then needs no `main` and its first
+/// function is the entry.
 pub(crate) fn compile_units<'a>(
     application: &Unit<'a>,
     application_path: &'a str,
-    library: Option<&Unit<'a>>,
-    library_path: &'a str,
+    library: Option<(&'a str, &Unit<'a>)>,
+    modules: &'a [ModuleUnit<'a>],
     bump: &Bump<'a>,
     code: &'a mut [u8],
     manifest: &'a mut [u8],
@@ -1765,9 +1833,9 @@ pub(crate) fn compile_units<'a>(
     assemble_units(
         application,
         application_path,
+        UnitRole::Application,
         library,
-        library_path,
-        true,
+        modules,
         bump,
         code,
         manifest,
@@ -1783,24 +1851,34 @@ pub(crate) fn compile_library<'a>(
     code: &'a mut [u8],
     manifest: &'a mut [u8],
 ) -> Result<Package<'a>, Diagnostic> {
-    assemble_units(unit, path, None, path, false, bump, code, manifest)
+    assemble_units(
+        unit,
+        path,
+        UnitRole::Library,
+        None,
+        &[],
+        bump,
+        code,
+        manifest,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
 fn assemble_units<'a>(
     application: &Unit<'a>,
     application_path: &'a str,
-    library: Option<&Unit<'a>>,
-    library_path: &'a str,
-    is_application: bool,
+    role: UnitRole,
+    library: Option<(&'a str, &Unit<'a>)>,
+    modules: &'a [ModuleUnit<'a>],
     bump: &Bump<'a>,
     code: &'a mut [u8],
     manifest: &'a mut [u8],
 ) -> Result<Package<'a>, Diagnostic> {
-    check_uses(application, application_path, is_application)?;
-    // One array, ring and map table serve both units: interning is
-    // structural, so an `array[T, N]`, `ring[T, N]` or `map[K, V, N]` written
-    // on either side of a call resolves to the same id.
+    let is_application = role == UnitRole::Application;
+    check_uses(application, application_path, role)?;
+    // One array, ring and map table serve every unit: interning is structural,
+    // so an `array[T, N]`, `ring[T, N]` or `map[K, V, N]` written on either side
+    // of a call resolves to the same id.
     let mut arrays = SliceVec::<ArrayDef>::new(bump)
         .map_err(|_| arena_full(application_path, application.name, 1, 1))?;
     let mut rings = SliceVec::<RingDef>::new(bump)
@@ -1816,13 +1894,17 @@ fn assemble_units<'a>(
         &mut rings,
         &mut maps,
     )?;
+    let (library_path, library_unit) = match library {
+        Some((path, unit)) => (path, Some(unit)),
+        None => (application_path, None),
+    };
     // A library unit may not declare a stream endpoint: the endpoint name is
     // application-wide and the handle belongs in the application's state
     // prefix. `const in_stream`/`out_stream` parameters are allowed for
     // framing helpers.
-    let lib = match library {
+    let lib = match library_unit {
         Some(unit) => {
-            check_uses(unit, library_path, false)?;
+            check_uses(unit, library_path, UnitRole::Library)?;
             Some(build_tables(
                 unit,
                 library_path,
@@ -1835,8 +1917,28 @@ fn assemble_units<'a>(
         }
         None => None,
     };
+    // A module may not declare state or a stream endpoint either (spec 0018,
+    // M6), so its tables carry an empty state region; the check lives in
+    // `compile_with_imports` so the diagnostic names the module's line.
+    let mut module_tables = SliceVec::<UnitTables<'a>>::new(bump)
+        .map_err(|_| arena_full(application_path, application.name, 1, 1))?;
+    for module in modules {
+        check_uses(module.unit, module.path, UnitRole::Module)?;
+        module_tables
+            .push(build_tables(
+                module.unit,
+                module.path,
+                false,
+                bump,
+                &mut arrays,
+                &mut rings,
+                &mut maps,
+            )?)
+            .map_err(|_| arena_full(module.path, module.unit.name, 1, 1))?;
+    }
+    let module_tables = module_tables.into_slice();
 
-    let entry = if is_application {
+    let entry_local = if is_application {
         match find_sig(app.sigs, "main") {
             Some(index) => {
                 let main_sig = app.sigs[index];
@@ -1872,8 +1974,11 @@ fn assemble_units<'a>(
     } else {
         0
     };
-    let library_len = lib.as_ref().map_or(0, |tables| tables.sigs.len());
-    let entry = u32::try_from(library_len + entry).map_err(|_| {
+    // Function table order: stdlib, modules in discovery order, application.
+    let stdlib_len = lib.as_ref().map_or(0, |tables| tables.sigs.len());
+    let mut bases =
+        SliceVec::<u32>::new(bump).map_err(|_| arena_full(application_path, app.name, 1, 1))?;
+    let mut next = u32::try_from(stdlib_len).map_err(|_| {
         diag(
             application_path,
             app.name,
@@ -1882,8 +1987,37 @@ fn assemble_units<'a>(
             format_args!("function table is too large"),
         )
     })?;
+    for tables in module_tables {
+        bases
+            .push(next)
+            .map_err(|_| arena_full(application_path, app.name, 1, 1))?;
+        next = next
+            .checked_add(u32::try_from(tables.sigs.len()).unwrap_or(u32::MAX))
+            .ok_or_else(|| {
+                diag(
+                    application_path,
+                    app.name,
+                    1,
+                    1,
+                    format_args!("function table is too large"),
+                )
+            })?;
+    }
+    let app_base = next;
+    let entry = u32::try_from(entry_local)
+        .ok()
+        .and_then(|index| app_base.checked_add(index))
+        .ok_or_else(|| {
+            diag(
+                application_path,
+                app.name,
+                1,
+                1,
+                format_args!("function table is too large"),
+            )
+        })?;
 
-    // One constant pool and one instruction section serve both units.
+    // One constant pool and one instruction section serve every unit.
     let mut pool = ConstantPool::new(application_path, app.name, bump)?;
     let library_compiled = match &lib {
         Some(tables) => {
@@ -1901,11 +2035,11 @@ fn assemble_units<'a>(
             }
             let rebased: &'a [StateVar<'a>] = rebased.into_slice();
             Some(compile_procs(
-                library.expect("library tables imply a unit"),
+                library_unit.expect("library tables imply a unit"),
                 tables,
                 library_path,
                 0,
-                None,
+                &[],
                 rebased,
                 &mut arrays,
                 &mut rings,
@@ -1917,13 +2051,54 @@ fn assemble_units<'a>(
         }
         None => None,
     };
-    let library_sigs = lib.as_ref().map(|tables| tables.sigs);
+    let stdlib_sigs = lib.as_ref().map(|tables| tables.sigs);
+    let mut module_compiled = SliceVec::<&'a [CompiledFn<'a>]>::new(bump)
+        .map_err(|_| arena_full(application_path, app.name, 1, 1))?;
+    for (index, module) in modules.iter().enumerate() {
+        let tables = module_tables[index];
+        let imports = import_list(
+            module.unit,
+            module.path,
+            modules,
+            module_tables,
+            bases.as_slice(),
+            stdlib_sigs,
+            bump,
+        )?;
+        let unit_id = u32::try_from(2 + index).unwrap_or(u32::MAX);
+        let compiled = compile_procs(
+            module.unit,
+            &tables,
+            module.path,
+            bases.as_slice()[index],
+            imports,
+            tables.state_vars,
+            &mut arrays,
+            &mut rings,
+            &mut maps,
+            unit_id,
+            &mut pool,
+            bump,
+        )?;
+        module_compiled
+            .push(compiled)
+            .map_err(|_| arena_full(module.path, module.unit.name, 1, 1))?;
+    }
+    let app_imports = import_list(
+        application,
+        application_path,
+        modules,
+        module_tables,
+        bases.as_slice(),
+        stdlib_sigs,
+        bump,
+    )?;
     let app_compiled = compile_procs(
         application,
         &app,
         application_path,
-        u32::try_from(library_len).unwrap_or(u32::MAX),
-        library_sigs,
+        app_base,
+        app_imports,
         app.state_vars,
         &mut arrays,
         &mut rings,
@@ -1939,14 +2114,32 @@ fn assemble_units<'a>(
         .map_err(|_| arena_full(application_path, app.name, 1, 1))?;
     let mut lines = SliceVec::<LineEntry>::new(bump)
         .map_err(|_| arena_full(application_path, app.name, 1, 1))?;
+    let module_compiled = module_compiled.into_slice();
     let mut stack_size = STACK_MARGIN;
     if let (Some(tables), Some(compiled)) = (&lib, library_compiled) {
+        let unit = library_unit.expect("library tables imply a unit");
         for (index, function) in compiled.iter().enumerate() {
-            let proc = library.expect("library tables imply a unit").procs[index];
+            let proc = unit.procs[index];
             append_function(
                 function,
                 library_path,
                 tables.name,
+                proc.line,
+                proc.column,
+                &mut instructions,
+                &mut functions,
+                &mut lines,
+                &mut stack_size,
+            )?;
+        }
+    }
+    for (index, module) in modules.iter().enumerate() {
+        for (position, function) in module_compiled[index].iter().enumerate() {
+            let proc = module.unit.procs[position];
+            append_function(
+                function,
+                module.path,
+                module.unit.name,
                 proc.line,
                 proc.column,
                 &mut instructions,
@@ -2495,21 +2688,20 @@ struct FnCompiler<'a, 'b, 'p> {
     enums: &'b [EnumDef<'a>],
     records: &'b [RecordDef<'a>],
     sums: &'b [SumDef<'a>],
-    /// Every array type of this compilation, shared with the library unit.
-    /// Codegen may intern a local's element type here, so the table stays
-    /// mutable until both units are compiled.
+    /// Every array type of this compilation, shared by every unit. Codegen may
+    /// intern a local's element type here, so the table stays mutable until all
+    /// units are compiled.
     arrays: &'p mut SliceVec<'a, 'b, ArrayDef>,
-    /// Every ring type of this compilation, shared with the library unit.
+    /// Every ring type of this compilation, shared by every unit.
     rings: &'p mut SliceVec<'a, 'b, RingDef>,
-    /// Every map type of this compilation, shared with the library unit.
+    /// Every map type of this compilation, shared by every unit.
     maps: &'p mut SliceVec<'a, 'b, MapDef>,
     /// Index of this unit's first function in the shared function table.
     call_base: u32,
-    /// Top-level procedures of the imported `stdlib` unit, reachable only as
-    /// `stdlib.<name>` from the application. `None` inside the stdlib itself,
-    /// which resolves its own names unqualified.
-    library_sigs: Option<&'b [Sig<'a>]>,
-    /// Line-table unit id (0 application, 1 stdlib).
+    /// Other units this one may call by name: `stdlib` and the modules its
+    /// `uses` clause names. Its own names resolve unqualified (spec 0018, M7).
+    imports: &'b [ImportedUnit<'a>],
+    /// Line-table unit id (0 application, 1 stdlib, 2.. modules).
     unit_id: u32,
     pool: &'p mut ConstantPool<'a, 'b>,
     current: Sig<'a>,
@@ -2668,7 +2860,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         rings: &'p mut SliceVec<'a, 'b, RingDef>,
         maps: &'p mut SliceVec<'a, 'b, MapDef>,
         call_base: u32,
-        library_sigs: Option<&'b [Sig<'a>]>,
+        imports: &'b [ImportedUnit<'a>],
         unit_id: u32,
         pool: &'p mut ConstantPool<'a, 'b>,
         current: Sig<'a>,
@@ -2694,7 +2886,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             rings,
             maps,
             call_base,
-            library_sigs,
+            imports,
             unit_id,
             pool,
             current,
@@ -6911,36 +7103,48 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 Ok(Some(Type::enumeration(STATUS_ENUM)))
             }
             target => {
-                let (signature, function_index) = if let Some(name) = target.strip_prefix("stdlib.")
+                // Qualified calls resolve through the import table: `stdlib.*`
+                // and `<module>.*` reach other units; an unqualified name
+                // resolves only in the current unit (spec 0018, M7).
+                let (signature, function_index, cross_unit) = if let Some((qualifier, name)) =
+                    target.split_once('.')
                 {
-                    // Qualified library names (`stdlib.trim_into`) resolve in
-                    // the embedded unit; the application cannot see the
-                    // library's names unqualified (spec 0003, M3).
-                    let Some(sigs) = self.library_sigs else {
-                        return Err(self.err(
-                            line,
-                            column,
-                            format_args!(
-                                "`stdlib` is not imported; add `uses stdlib;` to the `uses` clause"
-                            ),
-                        ));
-                    };
-                    let index = find_sig(sigs, name).ok_or_else(|| {
-                        self.err(
-                            line,
-                            column,
-                            format_args!("undefined procedure `{target}` in `stdlib`"),
-                        )
-                    })?;
-                    (sigs[index], u32::try_from(index).unwrap_or(u32::MAX))
-                } else {
-                    if target.contains('.') {
-                        return Err(self.err(
-                            line,
-                            column,
-                            format_args!("undefined procedure `{target}`"),
-                        ));
+                    match self.imports.iter().find(|entry| entry.name == qualifier) {
+                        Some(unit) => {
+                            let index = find_sig(unit.sigs, name).ok_or_else(|| {
+                                self.err(
+                                    line,
+                                    column,
+                                    format_args!("undefined procedure `{target}` in `{qualifier}`"),
+                                )
+                            })?;
+                            let call_base = unit.call_base;
+                            (
+                                unit.sigs[index],
+                                call_base
+                                    .checked_add(u32::try_from(index).unwrap_or(u32::MAX))
+                                    .ok_or_else(|| self.internal("function index overflows"))?,
+                                true,
+                            )
+                        }
+                        None if qualifier == "stdlib" => {
+                            return Err(self.err(
+                                    line,
+                                    column,
+                                    format_args!(
+                                        "`stdlib` is not imported; add `uses stdlib;` to the `uses` clause"
+                                    ),
+                                ));
+                        }
+                        None => {
+                            return Err(self.err(
+                                line,
+                                column,
+                                format_args!("undefined procedure `{target}`"),
+                            ));
+                        }
                     }
+                } else {
                     let index = find_sig(self.sigs, target).ok_or_else(|| {
                         self.err(line, column, format_args!("undefined procedure `{target}`"))
                     })?;
@@ -6949,14 +7153,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                         self.call_base
                             .checked_add(u32::try_from(index).unwrap_or(u32::MAX))
                             .ok_or_else(|| self.internal("function index overflows"))?,
+                        false,
                     )
                 };
                 // Types are compiler-local per unit, so a cross-unit
                 // parameter or result that names a record, sum or user enum
                 // has no shared identity yet. Scalars, buffers, arrays of
                 // those and the two predeclared enums (`Status`, `FaultCode`)
-                // are safe; the array table itself is shared by both units.
-                if target.starts_with("stdlib.") {
+                // are safe; the array table itself is shared by every unit.
+                if cross_unit {
                     let arrays = self.arrays.as_slice();
                     let rings = self.rings.as_slice();
                     let maps = self.maps.as_slice();
@@ -6972,7 +7177,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                             line,
                             column,
                             format_args!(
-                                "`{target}` uses a record, sum or user enum across units; cross-unit aggregate types are not implemented"
+                                "`{target}` uses a record, sum or user enum across units; aggregate types cannot cross a unit boundary"
                             ),
                         ));
                     }

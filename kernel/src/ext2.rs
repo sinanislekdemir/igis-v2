@@ -385,8 +385,8 @@ impl<'a> Ext2<'a> {
     ///
     /// Proves that the path walk works before the REPL serves anything: the
     /// four top-level directories exist and are directories, `base/shell`,
-    /// `home/readme.txt` and `system/system_probe` are readable files, an
-    /// empty `lib` lists as `NotFound`, a missing component is `NotFound`, and
+    /// `home/readme.txt` and `system/system_probe` are readable files, `lib`
+    /// lists the staged `math.ig` module, a missing component is `NotFound`, and
     /// `..`, an over-deep path and a file used as a directory are `Invalid`.
     /// Returns the failed step number; the caller halts.
     pub fn tree_self_check(&self) -> Result<(), u32> {
@@ -462,10 +462,30 @@ impl<'a> Ext2<'a> {
             return Err(5);
         }
 
-        // 6: `lib` is an empty directory in this milestone.
-        match self.list_entry("lib", 0, &mut name) {
-            Err(Status::NotFound) => {}
-            _ => return Err(6),
+        // 6: `lib` lists the staged module `math.ig` as a non-empty file, and
+        // that path is readable (spec 0018, M3.2).
+        let mut listed_math = false;
+        let mut index = 0u32;
+        loop {
+            match self.list_entry("lib", index, &mut name) {
+                Ok(entry) => {
+                    if &name[..entry.name_len] == b"math.ig" {
+                        listed_math = entry.kind == abi::fs::KIND_FILE && entry.size > 0;
+                    }
+                    index += 1;
+                    if index > 64 {
+                        return Err(6);
+                    }
+                }
+                Err(Status::NotFound) => break,
+                Err(_) => return Err(6),
+            }
+        }
+        if !listed_math {
+            return Err(6);
+        }
+        if !matches!(self.file_size("lib/math.ig"), Ok(size) if size > 0) {
+            return Err(6);
         }
 
         // 7: a missing component is NotFound.

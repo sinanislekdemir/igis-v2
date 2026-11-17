@@ -224,10 +224,19 @@ impl<'a, 'b> Parser<'a, 'b> {
         self.expect(&TokenKind::Semi, "`;`")?;
 
         let mut uses = self.list::<&'a str>(start.line, start.column)?;
-        if self.eat(&TokenKind::Uses) {
+        // Diagnostics for a bad import point at the clause itself (spec 0018,
+        // M2), so remember where it starts. A unit without one keeps 1:1.
+        let (mut uses_line, mut uses_column) = (1u32, 1u32);
+        if self.check(&TokenKind::Uses) {
+            let clause = self.peek();
+            uses_line = clause.line;
+            uses_column = clause.column;
+            self.advance();
             loop {
-                let used = self.ident("a unit name")?;
-                self.push(&mut uses, used, start.line, start.column)?;
+                // A module import is a dotted name (`lib.ui.menu`); the parser
+                // accepts the dotted shape and the compiler validates it.
+                let (used, line, column) = self.name_path()?;
+                self.push(&mut uses, used, line, column)?;
                 if self.eat(&TokenKind::Comma) {
                     continue;
                 }
@@ -267,6 +276,8 @@ impl<'a, 'b> Parser<'a, 'b> {
         Ok(Unit {
             name,
             uses: uses.into_slice(),
+            uses_line,
+            uses_column,
             types: types.into_slice(),
             consts: consts.into_slice(),
             vars: vars.into_slice(),

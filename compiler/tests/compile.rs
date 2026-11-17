@@ -286,9 +286,13 @@ fn a_tiny_manifest_buffer_is_a_capacity_error() {
 #[test]
 fn compile_into_reports_its_caps() {
     assert_eq!(compiler::MAX_SOURCE_BYTES, 128 * 1024);
-    assert_eq!(compiler::MAX_ARENA_BYTES, 8 * 1024 * 1024);
+    assert_eq!(compiler::MAX_APPLICATION_SOURCE_BYTES, 384 * 1024);
+    assert_eq!(compiler::MAX_ARENA_BYTES, 16 * 1024 * 1024);
     assert_eq!(compiler::MAX_CODE_BYTES, 256 * 1024);
     assert_eq!(compiler::MAX_MANIFEST_BYTES, 4 * 1024);
+    // Unit ids 0..=16: application, stdlib and at most 15 `/lib` modules.
+    assert_eq!(abi::MAX_UNIT_ID, 16);
+    assert_eq!(compiler::MAX_MODULE_UNITS, 15);
 }
 
 #[test]
@@ -7129,4 +7133,823 @@ end;
         let error = compile(source.as_bytes(), "t.ig").expect_err("must be a compile error");
         assert!(error.message.contains(expected), "{}", error.message);
     }
+}
+
+// ---------------------------------------------------------------------------
+// M3.2: `/lib` modules (spec 0018, M1–M13)
+// ---------------------------------------------------------------------------
+
+/// The staged module, so the tests pin the file the image will carry.
+const LIB_MATH: &[u8] = include_bytes!("../../samples/apps/lib/math.ig");
+
+/// An in-memory [`compiler::SourceReader`] (spec 0018, "Compiler interface").
+struct MemoryReader {
+    files: Vec<(String, Vec<u8>)>,
+}
+
+impl MemoryReader {
+    fn new(files: &[(&str, &[u8])]) -> Self {
+        MemoryReader {
+            files: files
+                .iter()
+                .map(|(path, data)| ((*path).to_string(), data.to_vec()))
+                .collect(),
+        }
+    }
+
+    fn lookup(&self, path: &str) -> Result<&[u8], abi::Status> {
+        self.files
+            .iter()
+            .find(|(name, _)| name == path)
+            .map(|(_, data)| data.as_slice())
+            .ok_or(abi::Status::NotFound)
+    }
+}
+
+impl compiler::SourceReader for MemoryReader {
+    fn size(&self, path: &str) -> Result<usize, abi::Status> {
+        Ok(self.lookup(path)?.len())
+    }
+
+    fn read(&self, path: &str, out: &mut [u8]) -> Result<usize, abi::Status> {
+        let data = self.lookup(path)?;
+        if out.len() < data.len() {
+            return Err(abi::Status::CapacityExceeded);
+        }
+        out[..data.len()].copy_from_slice(data);
+        Ok(data.len())
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn compile_imports(
+    source: &[u8],
+    path: &str,
+    files: &[(&str, &[u8])],
+) -> Result<Owned, compiler::Diagnostic> {
+    let mut arena = vec![0u8; compiler::MAX_ARENA_BYTES];
+    let mut code = vec![0u8; compiler::MAX_CODE_BYTES];
+    let mut manifest = vec![0u8; compiler::MAX_MANIFEST_BYTES];
+    let mut reader = MemoryReader::new(files);
+    let package = compiler::compile_with_imports(
+        source,
+        path,
+        &mut reader,
+        &mut arena,
+        &mut code,
+        &mut manifest,
+    )?;
+    Ok(Owned {
+        manifest: package.manifest.to_vec(),
+        code: package.code.to_vec(),
+    })
+}
+
+#[test]
+fn a_module_is_compiled_as_its_own_unit_and_called_qualified() {
+    let source = br#"
+unit demo;
+uses core, lib.math;
+
+var
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := math.clamp(15, 0, 10);
+  if math.min_int(n, 3) = 3 and math.max_int(n, 3) = 10 then
+    n := math.abs_int(-7) + math.sign(-2);
+  core.write("ok\n");
+end;
+"#;
+    let package = compile_imports(source, "demo.ig", &[("lib/math.ig", LIB_MATH)])
+        .expect("a module import compiles");
+    let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
+    // Five module functions come first, then the application's `main`.
+    assert_eq!(header.function_count, 5 + 1);
+    assert_eq!(header.entry, 5, "the entry is the application's main");
+    let units = line_units(&package.code);
+    assert!(units.contains(&0), "application lines");
+    assert!(units.contains(&2), "module lines use unit id 2");
+    assert!(
+        !units.contains(&1),
+        "unit id 1 is reserved for stdlib even when it is absent"
+    );
+    assert_eq!(manifest_unit(&package), "demo");
+}
+
+#[test]
+fn a_module_with_stdlib_reserves_unit_one() {
+    let source = br#"
+unit layered;
+uses stdlib, lib.math;
+
+var
+  n: int;
+  text: string[256];
+
+procedure main(args: const string[1024]);
+begin
+  n := math.clamp(1, 0, 10);
+  n := stdlib.trim_into(text, args);
+end;
+"#;
+    let package = compile_imports(source, "layered.ig", &[("lib/math.ig", LIB_MATH)])
+        .expect("stdlib and a module share one package");
+    let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
+    let stdlib = compile_library(compiler::STDLIB_SOURCE.as_bytes(), compiler::STDLIB_PATH)
+        .expect("stdlib compiles on its own");
+    let stdlib_header =
+        CodeHeader::from_bytes(&stdlib.code[..abi::CODE_HEADER_SIZE]).expect("header");
+    let stdlib_fns = stdlib_header.function_count;
+    assert_eq!(header.function_count, stdlib_fns + 5 + 1);
+    assert_eq!(header.entry, stdlib_fns + 5, "stdlib, module, then the app");
+    let units = line_units(&package.code);
+    for unit in [0u32, 1u32, 2u32] {
+        assert!(units.contains(&unit), "unit id {unit} appears");
+    }
+}
+
+#[test]
+fn a_module_importing_another_module_is_discovered_depth_first() {
+    let a = br#"
+unit a;
+uses lib.b;
+
+function via_b(): int;
+begin
+  return b.value();
+end;
+"#;
+    let b = br#"
+unit b;
+
+function value(): int;
+begin
+  return 7;
+end;
+"#;
+    let app = br#"
+unit nested;
+uses lib.a;
+
+var
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := a.via_b();
+end;
+"#;
+    let package = compile_imports(app, "nested.ig", &[("lib/a.ig", a), ("lib/b.ig", b)])
+        .expect("module-to-module call compiles");
+    let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
+    assert_eq!(header.function_count, 2 + 1);
+    let units = line_units(&package.code);
+    assert!(units.contains(&0) && units.contains(&2) && units.contains(&3));
+    assert!(!units.contains(&1));
+}
+
+#[test]
+fn structural_types_cross_the_unit_boundary() {
+    let shapes = br#"
+unit shapes;
+uses core;
+
+function sum4(values: const array[int, 4]): int;
+var
+  i: int;
+  total: int;
+begin
+  total := 0;
+  i := 0;
+  while i < 4 do
+  begin
+    total := total + values[i];
+    i := i + 1;
+  end;
+  return total;
+end;
+
+function text_len(src: const string[0]): int;
+begin
+  return int(core.len(src));
+end;
+
+function widen(v: int): int;
+begin
+  return v * 2;
+end;
+"#;
+    let app = br#"
+unit shapes_app;
+uses core, lib.shapes;
+
+var
+  values: array[int, 4];
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  values[0] := 1;
+  values[1] := 2;
+  values[2] := 3;
+  values[3] := 4;
+  n := shapes.sum4(values) + shapes.text_len("abc") + shapes.widen(5);
+  core.write("ok\n");
+end;
+"#;
+    compile_imports(app, "shapes_app.ig", &[("lib/shapes.ig", shapes)])
+        .expect("arrays, buffers and scalars cross the boundary");
+}
+
+#[test]
+fn aggregate_types_are_still_rejected_across_the_unit_boundary() {
+    let types = br#"
+unit types;
+
+type Pair = record left: int; right: int; end;
+
+function total(p: const Pair): int;
+begin
+  return p.left + p.right;
+end;
+"#;
+    let app = br#"
+unit types_app;
+uses lib.types;
+
+type Pair = record left: int; right: int; end;
+
+var
+  p: Pair;
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := types.total(p);
+end;
+"#;
+    let error = compile_imports(app, "types_app.ig", &[("lib/types.ig", types)])
+        .expect_err("a record may not cross units");
+    assert!(error.message.contains("across units"), "{}", error.message);
+    assert!(
+        error.message.contains("record, sum or user enum"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_module_call_checks_buffer_capacity() {
+    let module = br#"
+unit caps;
+uses core;
+
+function text_len(src: const string[16]): int;
+begin
+  return int(core.len(src));
+end;
+"#;
+    let app = br#"
+unit caps_app;
+uses lib.caps;
+
+var
+  short: string[8];
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := caps.text_len(short);
+end;
+"#;
+    let error = compile_imports(app, "caps_app.ig", &[("lib/caps.ig", module)])
+        .expect_err("a narrower buffer may not be passed");
+    assert!(
+        error.message.contains("requires at least 16"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn compiling_imports_twice_is_byte_identical() {
+    let source = br#"
+unit determinism;
+uses lib.math;
+
+var
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := math.clamp(3, 0, 2);
+end;
+"#;
+    let first =
+        compile_imports(source, "determinism.ig", &[("lib/math.ig", LIB_MATH)]).expect("compiles");
+    let second = compile_imports(source, "determinism.ig", &[("lib/math.ig", LIB_MATH)])
+        .expect("compiles again");
+    assert_eq!(first, second);
+}
+
+#[test]
+fn duplicate_uses_entries_are_one_unit() {
+    let source = br#"
+unit dedup;
+uses lib.math, lib.math;
+
+var
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := math.clamp(3, 0, 2);
+end;
+"#;
+    let package = compile_imports(source, "dedup.ig", &[("lib/math.ig", LIB_MATH)])
+        .expect("duplicate imports are one unit");
+    let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
+    assert_eq!(header.function_count, 5 + 1);
+    let units = line_units(&package.code);
+    assert!(!units.contains(&3));
+}
+
+#[test]
+fn a_nested_module_path_resolves_from_the_dotted_name() {
+    let menu = br#"
+unit menu;
+
+function width(): int;
+begin
+  return 120;
+end;
+"#;
+    let app = br#"
+unit menu_app;
+uses lib.ui.menu;
+
+var
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := menu.width();
+end;
+"#;
+    let package = compile_imports(app, "menu_app.ig", &[("lib/ui/menu.ig", menu)])
+        .expect("`lib.ui.menu` resolves to `lib/ui/menu.ig`");
+    let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
+    assert_eq!(header.function_count, 1 + 1);
+    assert_eq!(manifest_unit(&package), "menu_app");
+}
+
+#[test]
+fn a_module_that_is_not_utf8_is_a_diagnostic() {
+    let source = br#"
+unit badtext;
+uses lib.bad;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let bytes = b"unit bad;\n\xFF\xFE\n";
+    let error = compile_imports(source, "badtext.ig", &[("lib/bad.ig", bytes)])
+        .expect_err("module bytes must be UTF-8");
+    assert_eq!(error.path, "lib/bad.ig");
+    assert!(
+        error.message.contains("not valid UTF-8"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_missing_module_names_the_uses_clause_and_the_path() {
+    let source = br#"
+unit missing;
+uses lib.nope;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile_imports(source, "missing.ig", &[]).expect_err("no module source");
+    assert_eq!(error.unit, "missing");
+    assert_eq!(error.path, "lib/nope.ig");
+    assert_eq!(error.line, 3);
+    assert!(
+        error.message.contains("cannot read `lib.nope`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_module_directory_is_refused_as_invalid() {
+    let source = br#"
+unit missing;
+uses lib.thing;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    struct DirectoryReader;
+    impl compiler::SourceReader for DirectoryReader {
+        fn size(&self, _path: &str) -> Result<usize, abi::Status> {
+            Err(abi::Status::Invalid)
+        }
+        fn read(&self, _path: &str, _out: &mut [u8]) -> Result<usize, abi::Status> {
+            Err(abi::Status::Invalid)
+        }
+    }
+    let mut arena = vec![0u8; compiler::MAX_ARENA_BYTES];
+    let mut code = vec![0u8; compiler::MAX_CODE_BYTES];
+    let mut manifest = vec![0u8; compiler::MAX_MANIFEST_BYTES];
+    let mut reader = DirectoryReader;
+    let error = compiler::compile_with_imports(
+        source,
+        "missing.ig",
+        &mut reader,
+        &mut arena,
+        &mut code,
+        &mut manifest,
+    )
+    .expect_err("a directory is not a module");
+    assert_eq!(error.status, abi::Status::Invalid);
+    assert!(
+        error.message.contains("not a regular file"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_module_unit_header_must_match_the_last_component() {
+    let wrong = br#"
+unit other;
+
+function value(): int;
+begin
+  return 0;
+end;
+"#;
+    let source = br#"
+unit header;
+uses lib.math;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile_imports(source, "header.ig", &[("lib/math.ig", wrong)])
+        .expect_err("the unit header must match");
+    assert!(
+        error.message.contains("requires `unit math`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn two_paths_declaring_one_unit_name_are_a_diagnostic() {
+    let source = br#"
+unit duplicate;
+uses lib.a.math, lib.math;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile_imports(
+        source,
+        "duplicate.ig",
+        &[("lib/a/math.ig", LIB_MATH), ("lib/math.ig", LIB_MATH)],
+    )
+    .expect_err("one unit name cannot come from two paths");
+    assert!(
+        error.message.contains("already declared by"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_module_may_not_reuse_the_application_unit_name() {
+    let source = br#"
+unit math;
+uses lib.math;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile_imports(source, "math.ig", &[("lib/math.ig", LIB_MATH)])
+        .expect_err("the application already owns the name");
+    assert!(
+        error
+            .message
+            .contains("already declared by the application"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn an_import_cycle_names_the_chain() {
+    let a = br#"
+unit a;
+uses lib.b;
+
+function f(): int;
+begin
+  return b.g();
+end;
+"#;
+    let b = br#"
+unit b;
+uses lib.a;
+
+function g(): int;
+begin
+  return a.f();
+end;
+"#;
+    let source = br#"
+unit cyclic;
+uses lib.a;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile_imports(source, "cyclic.ig", &[("lib/a.ig", a), ("lib/b.ig", b)])
+        .expect_err("a cycle is an error");
+    assert!(error.message.contains("import cycle:"), "{}", error.message);
+    assert!(error.message.contains("lib/a.ig"), "{}", error.message);
+    assert!(error.message.contains("lib/b.ig"), "{}", error.message);
+}
+
+#[test]
+fn a_self_import_is_an_import_cycle() {
+    let a = br#"
+unit a;
+uses lib.a;
+
+function f(): int;
+begin
+  return f();
+end;
+"#;
+    let source = br#"
+unit selfish;
+uses lib.a;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile_imports(source, "selfish.ig", &[("lib/a.ig", a)])
+        .expect_err("a self-import is a cycle");
+    assert!(error.message.contains("import cycle:"), "{}", error.message);
+}
+
+#[test]
+fn a_module_may_not_declare_main() {
+    let module = br#"
+unit appish;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let source = br#"
+unit host;
+uses lib.appish;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile_imports(source, "host.ig", &[("lib/appish.ig", module)])
+        .expect_err("a module is not an application");
+    assert_eq!(error.unit, "appish");
+    assert!(
+        error.message.contains("may not declare `main`"),
+        "{}",
+        error.message
+    );
+    assert_eq!(error.line, 4);
+}
+
+#[test]
+fn a_module_may_not_declare_state() {
+    let module = br#"
+unit stateful;
+
+var
+  count: int;
+
+function value(): int;
+begin
+  return 0;
+end;
+"#;
+    let source = br#"
+unit host;
+uses lib.stateful;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile_imports(source, "host.ig", &[("lib/stateful.ig", module)])
+        .expect_err("a module has no state");
+    assert!(
+        error
+            .message
+            .contains("may not declare top-level `var` state"),
+        "{}",
+        error.message
+    );
+    assert_eq!(error.line, 5);
+}
+
+#[test]
+fn a_module_may_not_declare_a_stream_endpoint() {
+    let module = br#"
+unit plumbed;
+
+var
+  pipe: out_stream[8];
+
+function value(): int;
+begin
+  return 0;
+end;
+"#;
+    let source = br#"
+unit host;
+uses lib.plumbed;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile_imports(source, "host.ig", &[("lib/plumbed.ig", module)])
+        .expect_err("a module has no stream endpoints");
+    assert!(
+        error.message.contains("may not declare a stream endpoint"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_module_may_not_declare_a_reserved_unit_name() {
+    let module = br#"
+unit stdlib;
+
+function value(): int;
+begin
+  return 0;
+end;
+"#;
+    let source = br#"
+unit host;
+uses lib.stdlib;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile_imports(source, "host.ig", &[("lib/stdlib.ig", module)])
+        .expect_err("stdlib is reserved");
+    assert!(
+        error.message.contains("reserved unit name"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn the_embedded_stdlib_may_not_import_a_module() {
+    let stdlib = br#"
+unit stdlib;
+uses core, lib.math;
+
+function value(): int;
+begin
+  return 0;
+end;
+"#;
+    let error = compile_library(stdlib, compiler::STDLIB_PATH)
+        .expect_err("the embedded unit may not import /lib");
+    assert_eq!(error.unit, "stdlib");
+    assert!(
+        error.message.contains("unknown unit `lib.math`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn compile_into_rejects_a_module_import() {
+    let source = br#"
+unit t;
+uses lib.math;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("compile_into has no reader");
+    assert!(
+        error.message.contains("needs a module reader"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_module_over_the_per_unit_cap_is_a_capacity_error() {
+    let big = vec![b' '; compiler::MAX_SOURCE_BYTES + 1];
+    let source = br#"
+unit big;
+uses lib.big;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile_imports(source, "big.ig", &[("lib/big.ig", big.as_slice())])
+        .expect_err("the module is over its cap");
+    assert_eq!(error.status, abi::Status::CapacityExceeded);
+    assert!(error.message.contains("per-unit cap"), "{}", error.message);
+}
+
+#[test]
+fn an_application_over_the_combined_cap_is_a_capacity_error() {
+    // Three modules at the per-unit cap already fill the 384 KiB application
+    // cap; the application source pushes the total over it.
+    let mut files: Vec<(&str, Vec<u8>)> = Vec::new();
+    for (path, name) in [
+        ("lib/pad_a.ig", "pad_a"),
+        ("lib/pad_b.ig", "pad_b"),
+        ("lib/pad_c.ig", "pad_c"),
+    ] {
+        let mut text = format!("unit {name};\nfunction value(): int;\nbegin\n  return 0;\nend;\n");
+        text.push_str(&" ".repeat(compiler::MAX_SOURCE_BYTES - text.len()));
+        assert_eq!(text.len(), compiler::MAX_SOURCE_BYTES);
+        files.push((path, text.into_bytes()));
+    }
+    let mut source = String::from("unit wide;\nuses lib.pad_a, lib.pad_b, lib.pad_c;\n");
+    source.push_str("procedure main(args: const string[1024]);\nbegin\nend;\n");
+    let borrowed: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(path, data)| (*path, data.as_slice()))
+        .collect();
+    let error = compile_imports(source.as_bytes(), "wide.ig", &borrowed)
+        .expect_err("the package is over the combined cap");
+    assert_eq!(error.status, abi::Status::CapacityExceeded);
+    assert!(
+        error.message.contains("application cap"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn too_many_modules_are_refused_at_the_unit_cap() {
+    let mut uses = String::new();
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for index in 0..=compiler::MAX_MODULE_UNITS {
+        if index > 0 {
+            uses.push_str(", ");
+        }
+        uses.push_str(&format!("lib.m{index}"));
+        files.push((
+            format!("lib/m{index}.ig"),
+            format!("unit m{index};\nfunction value(): int;\nbegin\n  return {index};\nend;\n")
+                .into_bytes(),
+        ));
+    }
+    let source = format!(
+        "unit many;\nuses {uses};\n\nprocedure main(args: const string[1024]);\nbegin\nend;\n"
+    );
+    let borrowed: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(path, data)| (path.as_str(), data.as_slice()))
+        .collect();
+    let error =
+        compile_imports(source.as_bytes(), "many.ig", &borrowed).expect_err("one module too many");
+    assert!(
+        error.message.contains("too many modules"),
+        "{}",
+        error.message
+    );
+    assert_eq!(compiler::MAX_MODULE_UNITS, 15);
 }

@@ -14,8 +14,13 @@
 pub struct Unit<'a> {
     /// Name from the `unit <name>;` declaration.
     pub name: &'a str,
-    /// Names in the optional `uses ...;` clause.
+    /// Names in the optional `uses ...;` clause. A dotted name such as
+    /// `lib.ui.menu` is stored as written (spec 0018, M1).
     pub uses: &'a [&'a str],
+    /// 1-based line of the `uses` clause, or 1 when the clause is absent.
+    pub uses_line: u32,
+    /// 1-based column of the `uses` clause, or 1 when the clause is absent.
+    pub uses_column: u32,
     /// Top-level `type` declarations, in declaration order.
     pub types: &'a [TypeDecl<'a>],
     /// Top-level constants, in declaration order.

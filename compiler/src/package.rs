@@ -23,7 +23,8 @@ use crate::{diag, out_of_space, Diagnostic, Package, Resource};
 const MAX_SECTION: usize = 1 << 20;
 
 /// One line-table entry: a code offset, its unit id (0 application, 1 the
-/// embedded stdlib) and a 1-based source position.
+/// embedded stdlib, 2.. imported `/lib` modules) and a 1-based source
+/// position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LineEntry {
     pub off: u32,

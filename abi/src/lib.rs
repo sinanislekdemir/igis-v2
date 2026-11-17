@@ -36,8 +36,10 @@
 //! [code_off: u32][unit: u32][line: u32][column: u32]
 //! ```
 //!
-//! `line_len` is a byte length, like `code_len` and `const_len`. ABI v1 has
-//! exactly one unit per package (`unit == 0`).
+//! `line_len` is a byte length, like `code_len` and `const_len`. ABI v1 assigns
+//! unit ids `0..=`[`MAX_UNIT_ID`]: `0` is the application, `1` the embedded
+//! `stdlib` and `2..` are imported `/lib` modules in discovery order (spec
+//! 0018, M8).
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -75,6 +77,14 @@ pub const ENDPOINT_SIZE: usize = 8;
 
 /// Size of one line-table entry in bytes.
 pub const LINE_ENTRY_SIZE: usize = 16;
+
+/// Largest unit id a package may carry (spec 0018, M8).
+///
+/// Id `0` is the application, `1` the embedded `stdlib` and `2..=16` imported
+/// modules, so one package holds at most 17 units (15 modules). The compiler
+/// assigns the ids and the interpreter's verifier rejects anything above this
+/// bound, so both sides read the same constant.
+pub const MAX_UNIT_ID: u32 = 16;
 
 /// Value of `CodeHeader::diag_offset` when no hidden diagnostic slot is
 /// reserved. ABI v1 has no `fault`/`exit` handlers, so the compiler always
