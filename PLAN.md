@@ -14,10 +14,9 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `50b957f` (Q41: correctly rounded decimal → binary64 parsing as
-  `core.parse_f64_into`, builtin 50, with the `stdlib` wrapper, the exact-bit and
-  round-trip tests, the builtin/compiler/langhost tests and `samples/apps/f64parse`)
-  plus this docs/resume commit on top.
+- **Last commit:** `9fcfc35` (docs: Q44 archive corrections) on top of Q44
+  (`5e7be4c`/`a7c4d88`) and Q39 (`8555ebe`/`b58c9a9`); the tree is clean. The M3
+  planning docs (spec 0018, ADR 0038, this file) are the next docs commit.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -68,11 +67,12 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `scripts/mouse_burst_qmp.py --cores 1 --batch 300` 600/600. The desktop image root
   lists 61 entries (59 staged files plus the `entrypoint` alias and `lost+found`); the
   shell image lists 60. `stdlib` stays at 125 functions and no cap changed.
-- **Next slice:** **M2 is complete** (M2.6.4 was the last ticket) and Q41 is complete
-  (`f64parse: ok 52 cases` on `-smp 4` and `-smp 1`, 390 host tests). The remaining
-  items are the M2 limitations listed below and the deferred backlog (`f32`/Q40, the
-  blocked `substr_into` move/Q46, Q43, Q45, Q47, Q51); the next milestone is not yet
-  planned.
+- **Next slice:** **M3.1 — the image tree and boot from it** (spec 0018, ADR 0038).
+  M2 is complete and Q39/Q41/Q44 are done; M3 is now planned below. The first ticket
+  moves the samples into `samples/apps/{lib,base,home,system}`, teaches the ext2 reader
+  path traversal, stages real directories, resolves a short launch name under `base/`,
+  and boots `system/entrypoint` (falling back to `base/shell`). No language change and
+  no file-API change in that ticket.
 
 - **M2.6.3 complete:** the headless visual-regression harness (spec 0009 "Visual proof",
   G21; ADR 0032) and the resolution of M2.1.2. `samples/apps/visual` opens a window whose
@@ -702,6 +702,69 @@ or global work area, the boot desktop is a permanent consumer of the one event q
 so event-injecting regressions run on the shell-entry image (spec 0012, D19), and the
 system menu/About are application-drawn with direct Restart/Halt (ADRs 0032, 0033).
 
+
+## M3 — filesystem hierarchy and importable modules
+
+Normative: spec 0018, ADR 0038. Goal: a real image tree (`lib`, `base`, `home`,
+`system`), a path-walking file API, and `uses lib.x;` compiled into the
+application's package. One ticket per session; the parent verifies each.
+
+- [ ] **M3.1 The image tree, ext2 path traversal and boot from the tree.**
+  Move `samples/apps/*` into `samples/apps/base/` (applications) and
+  `samples/apps/system/` (`entrypoint`, `system_probe`, `terminal_probe`); add
+  `samples/apps/home/readme.txt`; create `samples/apps/lib/` (empty until M3.2).
+  - `abi::fs`: one L6 path rule for every call site (`validate_path`), plus
+    `validate_dir`; delete `validate_root`/`validate_root_name`; update tests.
+  - `kernel/src/ext2.rs`: `find(path)`, `list(path, index, name)`,
+    `read_file(path)`, `read_at(path, ...)`, `file_size(path)`; 8-component depth
+    cap, 64-byte components, no symlink following; boot self-check
+    `ext2: tree ok` on scratch lookups.
+  - `kernel/src/repl.rs`: boot tries `system/entrypoint` then `base/shell`; a
+    spawn path with no `/` resolves to `base/<name>`; the source read is a path.
+  - `kernel/src/sched.rs` `KernelHost::fs_*` and `langhost` `ConsoleHost::fs_*`
+    pass paths through; `langhost` resolves a bare run name under `base` and
+    module paths from the `samples/apps` root.
+  - `xtask/src/main.rs`: stage the four directories with real directories; stage
+    the desktop once as `system/entrypoint`; `--shell` omits it; no file at the
+    image root.
+  - Samples that address paths or counts: `files` (root lists 5, `base/child`),
+    `browser` (`base/child`, `base/text`), `editor` (`base/child`), `terminal`
+    (`system/terminal_probe`); update printed counts and status text.
+  - Verification: `cargo test -p abi -p compiler -p interpreter -p langhost`;
+    `cargo xtask build`/`image`/`image --shell`; a typed serial transcript on
+    `-smp 4` and `-smp 1` (`help`, `run files`, `run child world`, `run
+    base/child world`, `exit`); `scripts/boot_desktop_qmp.py`;
+    `scripts/visual_regression.py` golden unchanged. No language change.
+
+- [ ] **M3.2 Compiler multi-unit modules (`uses lib.*`).**
+  `compiler::SourceReader` + `compile_with_imports` (arena-copied unit sources);
+  dotted resolution `lib.a.b` → `lib/a/b.ig`; `unit <last>` header check; unique
+  unit names; cycle detection; modules may not declare `main`, top-level `var` or
+  streams; unit ids (app 0, `stdlib` 1, modules 2.. in depth-first `uses` order);
+  `interpreter::MAX_UNITS` 1 → 16; caps 384 KiB / 16 MiB; deterministic output.
+  Add `samples/apps/lib/math.ig` (`clamp`, `min_int`, `max_int`, `abs_int`,
+  `sign`) and a compiler/langhost test that imports it. `compile_into` keeps its
+  signature and rejects `lib.*`. Verification: host tests only (compiler
+  fixtures, in-memory reader, `langhost` runs a sample importing `lib.math`).
+
+- [ ] **M3.3 Kernel-side modules and the `/lib` proof.**
+  `repl::compile` uses `compile_with_imports` over the mounted `Ext2`; the static
+  source buffer becomes 384 KiB and the arena 16 MiB; add
+  `samples/apps/base/module_demo` (imports `lib.math`, prints
+  `module_demo: ok`); `run module_demo` proves the whole path on `-smp 4` and
+  `-smp 1`; `langhost` prints the host path. Update image entry counts and the
+  regression set.
+
+- [ ] **M3.4 Browser subdirectory navigation (Q51 partial).**
+  `samples/apps/base/browser` descends into directories (`Enter` opens a
+  directory, `Backspace`/`..`-equivalent goes up within the content view),
+  previews files at any depth, and keeps the 2048-byte preview cap. Spec 0013
+  "The file browser" amended; proof on both core counts.
+
+- [ ] **M3.5 Docs, spec amendments and AGENTS status row.**
+  Apply the 0018 amendments to specs 0003 (units/`uses`), 0008 (unit ids, caps),
+  0012/0013 (boot path, file paths), refresh this resume point and add the
+  AGENTS.md status row.
 
 ## Deferred (not UI; pick up when they matter)
 

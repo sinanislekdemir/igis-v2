@@ -62,3 +62,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0035 | [Correctly rounded float parsing is a `core` interpreter primitive](0035-correctly-rounded-float-parsing.md) | Accepted | 2026-11-17 |
 | 0036 | [Multi-source waits are one `WaitSet` condition with readiness probes](0036-multi-source-waits.md) | Accepted (source `0` refined by 0037) | 2026-11-17 |
 | 0037 | [The console is a raw byte stream; the application owns echo and line editing](0037-console-byte-stream.md) | Accepted | 2026-11-17 |
+| 0038 | [A hierarchical read-only image and compile-time `/lib` modules](0038-hierarchical-image-and-modules.md) | Accepted | 2026-11-17 |
