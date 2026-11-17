@@ -103,7 +103,8 @@ impl Region {
     /// Allocates `len` bytes (at least one frame, so the slice is never empty).
     fn allocate(len: usize) -> Result<Self, Status> {
         let len = len.max(1);
-        let frames = (len + frame::FRAME_SIZE as usize - 1) / frame::FRAME_SIZE as usize;
+        let frame_size = frame::FRAME_SIZE as usize;
+        let frames = len / frame_size + if len % frame_size == 0 { 0 } else { 1 };
         let start = frame::alloc_contiguous(frames).ok_or(Status::Full)?;
         Ok(Region {
             start,
@@ -126,11 +127,25 @@ impl Region {
     ///
     /// The allocation is `frames + 1` contiguous frames; failing to find that
     /// run is `Status::Full`, as for any other region.
+    ///
+    /// The constructed fields are checked against [`Region::layout_ok`] before
+    /// the allocation is returned. A geometry bug is therefore a recoverable
+    /// placement failure (`Status::Invalid`) instead of a fault at a task guard
+    /// much later (Q47). The guard is restored and the frames are freed on the
+    /// way out; only a failure to restore the guard halts (the existing kernel
+    /// bug path in [`Region::free`]).
     fn allocate_guarded(len: usize, task: u64) -> Result<Self, Status> {
         let len = len.max(1);
-        let frames = (len + frame::FRAME_SIZE as usize - 1) / frame::FRAME_SIZE as usize;
-        let span = frames + 1;
+        let frame_size = frame::FRAME_SIZE as usize;
+        let frames = len / frame_size + if len % frame_size == 0 { 0 } else { 1 };
+        let Some(span) = frames.checked_add(1) else {
+            return Err(Status::Invalid);
+        };
         let base = frame::alloc_contiguous(span).ok_or(Status::Full)?;
+        let Some(start) = base.checked_add(frame::FRAME_SIZE) else {
+            frame::free_contiguous(base, span);
+            return Err(Status::Invalid);
+        };
         if !guard::guard(base, guard::GuardKind::Task, task) {
             frame::free_contiguous(base, span);
             return Err(Status::Full);
@@ -143,13 +158,74 @@ impl Region {
             frame::free_contiguous(base, span);
             return Err(Status::Full);
         }
-        Ok(Region {
-            start: base + frame::FRAME_SIZE,
+        let region = Region {
+            start,
             frames,
             len,
             base,
             span,
-        })
+        };
+        if !region.geometry_ok() {
+            println!(
+                "stack: guarded region layout invalid (base {:#x}, start {:#x}, frames {}, len {}); rejecting",
+                base, start, frames, len
+            );
+            if !guard::unguard(base) {
+                println!(
+                    "guard: cannot restore the frame at {:#x} (task stack); halting",
+                    base
+                );
+                arch_x86_64::halt();
+            }
+            frame::free_contiguous(base, span);
+            return Err(Status::Invalid);
+        }
+        Ok(region)
+    }
+
+    /// Pure geometry rule for a guarded stack (spec 0004 C6).
+    ///
+    /// A guarded allocation is `span = frames + 1` contiguous frames: the
+    /// lowest is the not-present guard and the `frames` above it are usable.
+    /// `start` is exactly one frame above `base`, and `[start, start + len)`
+    /// must lie inside those usable frames, so the region can never overlap the
+    /// guard or run past the allocation. Every arithmetic step is checked: a
+    /// geometry bug is rejected at placement, not faulted at a task guard much
+    /// later (Q47).
+    fn layout_ok(base: u64, start: u64, frames: usize, len: usize, span: usize) -> bool {
+        if frames == 0 || len == 0 || base % frame::FRAME_SIZE != 0 {
+            return false;
+        }
+        if frames.checked_add(1) != Some(span) {
+            return false;
+        }
+        let Some(guard_end) = base.checked_add(frame::FRAME_SIZE) else {
+            return false;
+        };
+        if start != guard_end {
+            return false;
+        }
+        let Some(capacity) = (frames as u64).checked_mul(frame::FRAME_SIZE) else {
+            return false;
+        };
+        if len as u64 > capacity {
+            return false;
+        }
+        let Some(end) = start.checked_add(len as u64) else {
+            return false;
+        };
+        let Some(allocation_end) = (span as u64)
+            .checked_mul(frame::FRAME_SIZE)
+            .and_then(|bytes| base.checked_add(bytes))
+        else {
+            return false;
+        };
+        start >= guard_end && end <= allocation_end
+    }
+
+    /// Whether this region satisfies the guarded-stack layout above.
+    fn geometry_ok(&self) -> bool {
+        Self::layout_ok(self.base, self.start, self.frames, self.len, self.span)
     }
 
     pub fn as_slice(&self) -> &[u8] {
@@ -602,6 +678,72 @@ pub fn take_kill(slot: usize, id: u64) -> bool {
     KILL_ID
         .get(slot)
         .is_some_and(|record| take_record(record, id))
+}
+
+/// Boot self-check for the guarded-stack placement invariant (spec 0004 C6).
+///
+/// Pure arithmetic only: the same [`Region::layout_ok`] the guarded constructor
+/// enforces is run over valid and invalid scratch tuples. No frame is allocated
+/// and no PTE is touched. `Err(step)` names the first mismatch; the caller halts
+/// loudly so a broken rule cannot pass silently.
+pub fn stack_layout_self_check() -> Result<(), u8> {
+    const F: u64 = frame::FRAME_SIZE;
+    let base = 0x0020_0000u64;
+    let frames = 64usize;
+    let span = frames + 1;
+    let start = base + F;
+    let len = frames * F as usize;
+
+    // Valid: a full region, a minimal region and a partial last frame.
+    if !Region::layout_ok(base, start, frames, len, span) {
+        return Err(1);
+    }
+    if !Region::layout_ok(base, start, 1, 1, 2) {
+        return Err(2);
+    }
+    if !Region::layout_ok(base, start, frames, 100, span) {
+        return Err(3);
+    }
+    // The usable region starts exactly one frame above the guard.
+    if Region::layout_ok(base, base, frames, len, span) {
+        return Err(4);
+    }
+    if Region::layout_ok(base, base + 2 * F, frames, len, span) {
+        return Err(5);
+    }
+    // A region always has at least one frame and one byte.
+    if Region::layout_ok(base, start, 0, len, 1) {
+        return Err(6);
+    }
+    if Region::layout_ok(base, start, frames, 0, span) {
+        return Err(7);
+    }
+    // The span is the guard plus exactly the region's frames.
+    if Region::layout_ok(base, start, frames, len, frames) {
+        return Err(8);
+    }
+    // The declared length cannot exceed the usable frames.
+    if Region::layout_ok(base, start, frames, len + 1, span) {
+        return Err(9);
+    }
+    // The base must be frame-aligned.
+    if Region::layout_ok(base + 1, start, frames, len, span) {
+        return Err(10);
+    }
+    // No overflow at the guard end or the region end.
+    let top = u64::MAX & !(F - 1);
+    if Region::layout_ok(top, top.wrapping_add(F), 1, F as usize, 2) {
+        return Err(11);
+    }
+    let high = top - F;
+    if Region::layout_ok(high, high + F, 1, F as usize, 2) {
+        return Err(12);
+    }
+    // `frames * FRAME_SIZE` must not overflow either.
+    if Region::layout_ok(base, start, usize::MAX - 1, 1, usize::MAX) {
+        return Err(13);
+    }
+    Ok(())
 }
 
 /// Boot self-check for the id-tagged kill record and the block race (Q50).

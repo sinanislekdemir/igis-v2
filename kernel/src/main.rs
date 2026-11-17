@@ -388,6 +388,19 @@ extern "C" fn kmain_on_stack(mb2_info: u64) -> ! {
                     sched::set_image(&fs);
                     stream::init();
 
+                    // Spec 0004 C6: the guarded-stack placement invariant.
+                    // `Region::allocate_guarded` enforces it and rejects a bad
+                    // geometry as `Status::Invalid`; the same rule is run here
+                    // over scratch tuples, so a broken layout cannot reach a
+                    // task guard. Pure arithmetic; no frame is allocated.
+                    match task::stack_layout_self_check() {
+                        Ok(()) => println!("stack: layout ok"),
+                        Err(step) => {
+                            println!("stack: layout FAIL at step {step}");
+                            arch_x86_64::halt();
+                        }
+                    }
+
                     // Q50: the id-tagged kill record and the block re-check,
                     // proved on real slot state with a scratch task. Runs before
                     // the APs start, so no other core can claim that task.
