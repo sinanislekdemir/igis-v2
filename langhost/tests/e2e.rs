@@ -2078,3 +2078,201 @@ end;
         );
     }
 }
+
+#[test]
+fn widgets_compiles_and_reports_the_host_path() {
+    let path = format!("{}/../samples/apps/widgets", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "widgets").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"widgets: host ok\n".to_vec());
+}
+
+#[test]
+fn widgets_draw_the_documented_sequence() {
+    // A composed panel: menu bar and one pull-down, every control, one icon
+    // row, an alert and an input dialog, plus the pure control/key results the
+    // widgets app drives.
+    let source = br#"
+unit widseq;
+
+uses core, stdlib, syslib;
+
+var
+  st: Status;
+  items: array[string[64], 8];
+  file_items: array[string[64], 16];
+  shortcuts: array[string[32], 16];
+  titles: array[string[32], 8];
+  rows: array[uint, 32];
+  text: string[256];
+  cursor: int;
+  start: int;
+  stop: int;
+  mask: uint;
+  disabled: uint;
+  open: int;
+  selected: int;
+  ok: bool;
+
+procedure main(args: const string[1024]);
+begin
+  titles[0] := "File";
+  titles[1] := "Edit";
+  titles[2] := "View";
+  file_items[0] := "New";
+  file_items[1] := "Rename...";
+  file_items[2] := "About...";
+  file_items[3] := "-";
+  file_items[4] := "Quit";
+  shortcuts[0] := "Ctrl+N";
+  shortcuts[1] := "Ctrl+R";
+  shortcuts[2] := "";
+  shortcuts[3] := "";
+  shortcuts[4] := "Ctrl+Q";
+  items[0] := "Alpha";
+  items[1] := "Bravo";
+  items[2] := "Charlie";
+  items[3] := "Delta";
+  items[4] := "Echo";
+  items[5] := "Foxtrot";
+  rows[2] := uint(5);
+  text := "Hi";
+  cursor := 2;
+  start := 0;
+  stop := 1;
+  mask := stdlib.ui_menu_bit(0);
+  disabled := stdlib.ui_menu_set(uint(0), 4, true);
+  open := stdlib.ui_menu_open(0, 5, file_items, disabled, selected);
+  st := stdlib.ui_menu_bar(10, 20, 240, titles, 3, open);
+  st := stdlib.ui_menu_dropdown(
+    14, 42, 220, file_items, shortcuts, 5, selected, mask, disabled, true);
+  st := stdlib.ui_button(10, 120, 112, 24, "Press", false, true);
+  st := stdlib.ui_checkbox(10, 152, "Enabled", true, false);
+  st := stdlib.ui_text_field(10, 176, 180, 22, text, cursor, 0, start, stop, true);
+  st := stdlib.ui_scrollbar(210, 120, 16, 150, 8, 8, 16, true);
+  st := stdlib.ui_list(10, 210, 340, 98, items, 6, 2, 0, true);
+  st := stdlib.ui_icon(10, 320, rows, stdlib.ui_black());
+  st := stdlib.ui_alert(
+    380, 20, 360, 160, "About Widgets", "The widgets demo.", "OK", "Cancel", 0);
+  st := stdlib.ui_input_dialog(
+    380, 200, 360, 200, "Rename", "Enter a name:", "OK", "Cancel",
+    text, cursor, 0, start, stop, 0);
+  ok := stdlib.ui_focus_next(4, 5, 1) = 0
+    and stdlib.ui_list_move(6, 8, 1) = 7
+    and stdlib.ui_list_ensure_visible(7, 0, 6) = 2
+    and stdlib.ui_scrollbar_hit(0, 0, 16, 150, 8, 140, 0, 8, 16) = 2
+    and stdlib.ui_scrollbar_clamp(99, 8, 16) = 8
+    and stdlib.ui_menu_key(uint(0x100 * 65536), true) = 6
+    and stdlib.ui_menu_key(uint(0x103 * 65536), true) = 5
+    and stdlib.ui_menu_move(2, 5, 1, file_items, stdlib.ui_menu_set(uint(0), 4, true)) = 2
+    and stdlib.ui_dialog_key(uint(0x103 * 65536), true) = 1
+    and stdlib.ui_dialog_key(uint(0x102 * 65536 + 256), true) = 4
+    and stdlib.ui_text_field_reveal("abcdef", 6, 0, 24) = 3
+    and stdlib.ui_icon_grid_hit(0, 0, 2, 2, 72, 56, 80, 10) = 1
+    and stdlib.ui_double_click(uint(0), uint(400000000), true)
+    and stdlib.ui_alert_hit(380, 20, 360, 160, "OK", "Cancel", 594, 152) = 0
+    and stdlib.ui_input_dialog_hit(380, 200, 360, 200, "OK", "Cancel", 400, 250) = 0;
+  if ok and st = Ok then
+    core.write("widgets sequence ok\n");
+end;
+"#;
+    let package = langhost::compile(source, "widseq").expect("compiles");
+    let mut scratch = vec![0u8; package.code.len().div_ceil(32)];
+    let program = interpreter::Program::parse(&package.code, &mut scratch).expect("verifies");
+    let header = *program.header();
+    let mut state = vec![0u8; header.state_size as usize];
+    let mut stack = vec![0u8; header.stack_size as usize];
+    let args = vec![0u8; 8 + 1024];
+    let mut machine = interpreter::Machine::new();
+    let mut host = Painter {
+        fills: Vec::new(),
+        outlines: Vec::new(),
+        texts: Vec::new(),
+        output: Vec::new(),
+    };
+    let outcome = machine.run(
+        &program,
+        &mut host,
+        &mut state,
+        &mut stack,
+        &args,
+        langhost::DEFAULT_BUDGET,
+    );
+    assert_eq!(outcome, interpreter::Outcome::Exited(ExitReason::Ok));
+    assert_eq!(host.output, b"widgets sequence ok\n");
+
+    const BLACK: u32 = 0x000000;
+    const WHITE: u32 = 0x00FF_FFFF;
+    const GRAY: u32 = 0x00CC_CCCC;
+    const ACCENT: u32 = 0x000080;
+
+    // Menu bar: white bar, inverted File cell and the bottom rule.
+    assert!(host.fills.contains(&(10, 20, 240, 22, WHITE)));
+    assert!(host.fills.contains(&(14, 22, 40, 18, BLACK)));
+    assert!(host.fills.contains(&(10, 41, 240, 1, BLACK)));
+    assert!(host.texts.contains(&(18, 27, b"File".to_vec(), WHITE)));
+    assert!(host.texts.contains(&(66, 27, b"Edit".to_vec(), BLACK)));
+    assert!(host.texts.contains(&(114, 27, b"View".to_vec(), BLACK)));
+
+    // Pull-down: selected accent row, checked mark, shortcut, separator and a
+    // gray disabled row.
+    assert!(host.outlines.contains(&(14, 42, 220, 82, BLACK)));
+    assert!(host.fills.contains(&(15, 43, 218, 16, ACCENT)));
+    assert!(host.fills.contains(&(24, 48, 1, 1, WHITE)));
+    assert!(host.texts.contains(&(36, 47, b"New".to_vec(), WHITE)));
+    assert!(host.texts.contains(&(178, 47, b"Ctrl+N".to_vec(), WHITE)));
+    assert!(host.fills.contains(&(22, 99, 204, 1, BLACK)));
+    assert!(host.texts.contains(&(36, 111, b"Quit".to_vec(), GRAY)));
+
+    // Controls: button face/frame/label/ring, checkbox mark, text field
+    // selection and caret, scrollbar thumb and the list selection.
+    assert!(host.fills.contains(&(11, 121, 110, 22, WHITE)));
+    assert!(host.outlines.contains(&(10, 120, 112, 24, BLACK)));
+    assert!(host.texts.contains(&(46, 128, b"Press".to_vec(), BLACK)));
+    assert!(host.fills.contains(&(13, 123, 1, 1, BLACK)));
+    assert!(host.outlines.contains(&(10, 152, 11, 11, BLACK)));
+    assert!(host.fills.contains(&(14, 159, 1, 1, BLACK)));
+    assert!(host.texts.contains(&(27, 153, b"Enabled".to_vec(), BLACK)));
+    assert!(host.fills.contains(&(11, 177, 178, 20, WHITE)));
+    assert!(host.texts.contains(&(13, 183, b"Hi".to_vec(), BLACK)));
+    assert!(host.fills.contains(&(13, 183, 8, 8, ACCENT)));
+    assert!(host.texts.contains(&(13, 183, b"H".to_vec(), WHITE)));
+    assert!(host.fills.contains(&(29, 183, 1, 8, BLACK)));
+    assert!(host.fills.contains(&(211, 121, 14, 148, WHITE)));
+    assert!(host.fills.contains(&(212, 195, 12, 73, GRAY)));
+    assert!(host.fills.contains(&(11, 243, 338, 16, ACCENT)));
+    assert!(host.texts.contains(&(14, 247, b"Charlie".to_vec(), WHITE)));
+    assert!(host.texts.contains(&(14, 215, b"Alpha".to_vec(), BLACK)));
+
+    // The icon row is one pixel run per maximal set-bit run.
+    assert!(host.fills.contains(&(10, 322, 1, 1, BLACK)));
+    assert!(host.fills.contains(&(12, 322, 1, 1, BLACK)));
+
+    // Alert: frame, focused stripe, message, double-bordered default, cancel.
+    assert!(host.outlines.contains(&(380, 20, 360, 160, BLACK)));
+    assert!(host.fills.contains(&(381, 22, 358, 1, BLACK)));
+    assert!(host
+        .texts
+        .contains(&(518, 24, b"About Widgets".to_vec(), BLACK)));
+    assert!(host
+        .texts
+        .contains(&(388, 44, b"The widgets demo.".to_vec(), BLACK)));
+    assert!(host.outlines.contains(&(578, 150, 68, 20, BLACK)));
+    assert!(host.texts.contains(&(604, 156, b"OK".to_vec(), BLACK)));
+    assert!(host.texts.contains(&(672, 156, b"Cancel".to_vec(), BLACK)));
+
+    // Input dialog: prompt, focused field with its selection and caret, buttons.
+    assert!(host.outlines.contains(&(380, 200, 360, 200, BLACK)));
+    assert!(host.texts.contains(&(546, 204, b"Rename".to_vec(), BLACK)));
+    assert!(host
+        .texts
+        .contains(&(388, 224, b"Enter a name:".to_vec(), BLACK)));
+    assert!(host.outlines.contains(&(388, 244, 344, 22, BLACK)));
+    assert!(host.texts.contains(&(391, 251, b"Hi".to_vec(), BLACK)));
+    assert!(host.fills.contains(&(391, 251, 8, 8, ACCENT)));
+    assert!(host.fills.contains(&(407, 251, 1, 8, BLACK)));
+    assert!(host.texts.contains(&(604, 376, b"OK".to_vec(), BLACK)));
+    assert!(host.texts.contains(&(672, 376, b"Cancel".to_vec(), BLACK)));
+}
