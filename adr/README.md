@@ -60,4 +60,5 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0033 | [System control has no capability check and uses focus-scoped shortcuts](0033-system-control-authority.md) | Accepted | 2026-11-17 |
 | 0034 | [Kill requests are id-tagged per-slot records resolved under the slot lock](0034-id-tagged-kill-records.md) | Accepted | 2026-11-17 |
 | 0035 | [Correctly rounded float parsing is a `core` interpreter primitive](0035-correctly-rounded-float-parsing.md) | Accepted | 2026-11-17 |
-| 0036 | [Multi-source waits are one `WaitSet` condition with readiness probes](0036-multi-source-waits.md) | Accepted | 2026-11-17 |
+| 0036 | [Multi-source waits are one `WaitSet` condition with readiness probes](0036-multi-source-waits.md) | Accepted (source `0` refined by 0037) | 2026-11-17 |
+| 0037 | [The console is a raw byte stream; the application owns echo and line editing](0037-console-byte-stream.md) | Accepted | 2026-11-17 |

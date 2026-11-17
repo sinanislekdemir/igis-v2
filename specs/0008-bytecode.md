@@ -342,7 +342,7 @@ artifact:
 | Comparisons | `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `cmp_buffers` for buffers |
 | Conversions | `i2f`, `f2i` (truncate and range-check), `trunc8`, `sext`, `zext` |
 | Control flow | `jmp`, `jz`, `jnz`, `call`, `ret` |
-| Buffers and aggregates | `append` (capacity-checked), `load_u8`/`store_u8` (length- and capacity-checked), `find` (byte scan), `substr` (checked slice; `a` = destination kind, `b` = source kind), `format_int` (decimal/hex formatting), `format_f64` (fixed-point float text: `a` = destination kind, a capacity immediate), `format_f64_short` (shortest round-trip float text: same encoding, no width operand), `enum_cast` (range-checked ordinal → enum), `ref_offset` (field reference), `ref_element` (array element reference, index-checked), `copy_refs` (record, sum, array, ring and `case` payload copies), `map_put`/`map_get`/`map_has`/`map_remove`/`map_count` (open-addressing map, layout in the immediates), `stream_send`/`stream_try_send`/`stream_recv`/`stream_try_recv` (kernel byte FIFO; receive carries the destination capacity) |
+| Buffers and aggregates | `append` (capacity-checked), `read_input` (raw non-blocking console read, capacity immediate), `load_u8`/`store_u8` (length- and capacity-checked), `find` (byte scan), `substr` (checked slice; `a` = destination kind, `b` = source kind), `format_int` (decimal/hex formatting), `format_f64` (fixed-point float text: `a` = destination kind, a capacity immediate), `format_f64_short` (shortest round-trip float text: same encoding, no width operand), `enum_cast` (range-checked ordinal → enum), `ref_offset` (field reference), `ref_element` (array element reference, index-checked), `copy_refs` (record, sum, array, ring and `case` payload copies), `map_put`/`map_get`/`map_has`/`map_remove`/`map_count` (open-addressing map, layout in the immediates), `stream_send`/`stream_try_send`/`stream_recv`/`stream_try_recv` (kernel byte FIFO; receive carries the destination capacity) |
 | Builtins | `call_builtin n` — host-interface and `core` primitives |
 | System | `safe` (explicit poll), `trap` (compiler-inserted fault) |
 
@@ -463,7 +463,9 @@ the bump arena, isolated in `compiler/src/arena.rs`.
 - Field validation is per opcode: a reserved field must be zero unless the opcode defines
   it. `substr` is the one buffer opcode with two kind fields — `a` is the destination kind
   and `b` the source kind, each `0..=1` (`string`, `bytes`) — so the verifier accepts both
-  and rejects anything else; the capacity immediate must fit a section. `format_int`,
+  and rejects anything else; the capacity immediate must fit a section. `read_input`
+  carries a capacity immediate and no kind field: the destination is always `bytes`
+  (the compiler enforces it), so `a = b = c = 0`. `format_int`,
   `format_f64` and `format_f64_short` carry one kind field (`a`, `0..=1`), require
   `b = c = 0`, and bound their immediate to a section; `format_f64` and `format_f64_short`
   additionally require a non-zero capacity, because no digit can ever be written into an
@@ -594,3 +596,4 @@ pub fn run(task: &mut Task);
 | 2026-11-17 | M2.6.1 adds builtins 45–47 (spec 0015): `text_width_prop` (1 → 1), `text_height_prop` (0 → 1) and `draw_text_prop` (4 → 1). The machine resolves the text reference with the same bounds checks as `draw_text` and pushes the measured width, the 12-pixel line height or the drawing status; the host defaults are 0/0/`Invalid` for a disabled screen. The proportional font itself is kernel data with a lazy glyph cache, so no opcode is added and ABI v1 stays at **75**. |
 | 2026-11-17 | M2.6.4 adds builtins 48/49 (spec 0017): `halt` (0 → 1) and `reboot` (0 → 1). The machine stages no operands, calls `Host::halt`/`Host::reboot` and pushes the `Status`; the kernel host owns the stop/reset path and a bare host defaults to `Invalid`. No opcode; ABI v1 stays at **75**. |
 | 2026-11-17 | Correctly rounded float parsing adds builtin 50 `parse_f64` (2 → 1, spec 0003 "Floating-point text"; Q41): a source buffer reference and a `var f64` reference. The machine copies nothing: it takes the source bytes, runs the spec grammar and `core`'s `f64: FromStr` (both in `interpreter/src/f64parse.rs`) and writes the bit pattern through the out-parameter only on `Ok`, otherwise pushing `Invalid`. There is no `Host` method and no opcode; ABI v1 stays at **75**. |
+| 2026-11-17 | Q44 resolved (ADR 0037): the `read_line` opcode (`0x42`) becomes `read_input` in the same slot — capacity immediate, a `var bytes` destination reference on the stack, a raw non-blocking console read that pushes the copied count (`0` when empty) and always publishes the destination length. The kind field stays zero (the compiler requires `bytes`). This is a semantic change inside ABI v1, not a new opcode: the table stays at **75**. |

@@ -12,7 +12,7 @@
 ## Context
 
 M2.3.4 gave the console two kernel-owned text windows: a terminal for
-`core.write` and the line-discipline echo, and a system log for
+`core.write` (and, at the time, the kernel's line echo), and a system log for
 `println!`/`print!`. The M2.5.1–M2.5.4 applications are ordinary windowed
 clients, while the REPL's terminal is still a kernel window, so the shell and
 the desktop do not share one user model: the shell cannot place, move or own
@@ -20,9 +20,10 @@ its terminal, and the terminal cannot follow the shell into the desktop.
 
 M2.5.5 makes the existing shell run in a real (task-owned) window without
 changing the language's console contract: `core.write` still writes a byte
-stream and `core.read_line` still blocks on the staged line discipline. It does
-not replace the line discipline with application-side key editing (M2.5.3/M2.6),
-add a second terminal, a writable console or a stream-based terminal protocol.
+stream. The kernel line discipline this slice inherited was removed afterwards
+(Q44, ADR 0037): `core.read_input` is a raw byte read and the shell echoes and
+edits its own line. This slice does not add a second terminal, a writable console
+or a stream-based terminal protocol.
 
 The desktop boot entry is `entrypoint` from M2.5.6 (the `desktop_shell` source staged
 under that file name); it launches this shell from its `Terminal` menu item. The
@@ -51,7 +52,7 @@ second shell gets `Full`.
   window) is `Ok` and changes nothing; the same owner may rebind to another of
   its windows.
 - **T3 (MUST):** There is exactly **one** terminal machine-wide, because there is
-  one line discipline and one console byte stream. The kernel's boot terminal
+  one console byte stream and one output grid. The kernel's boot terminal
   (owner `0`) is released by the first successful task attach: its record and
   grid are dropped and its window is closed through the ordinary owner-0 path.
   The System Log window stays owner `0` and is not affected. A second live task
@@ -62,10 +63,11 @@ second shell gets `Full`.
   only inside that content rectangle and its visible parts, through the existing
   explicit-clip helpers (`gfx::draw_cell`/`present_within`); it never narrows the
   shadow's global clip.
-- **T5 (MUST):** `core.write` and the line-discipline echo go to the attached
-  terminal window. `println!`/`print!` still go to the System Log. Every byte of
-  both is still mirrored to COM1; `core.read_line` and its blocking behaviour are
-  unchanged. Text is never echoed to both windows.
+- **T5 (MUST):** `core.write` goes to the attached terminal window; the
+  application echoes its own input through the same call. `println!`/`print!` still
+  go to the System Log. Every byte of both is still mirrored to COM1.
+  `core.read_input` reads the machine-wide byte ring regardless of attachment.
+  Text is never echoed to both windows.
 - **T6 (MUST):** A terminal whose window was closed (its task terminated, or the
   owner closed it) is **detached** at the next service opportunity. Its bytes
   still reach serial, nothing is drawn into a stale id, and the next successful
@@ -103,12 +105,12 @@ second shell gets `Full`.
 
 - **T12 (MUST):** `samples/apps/shell` opens one ordinary window (`560×360`
   content at `(24, 64)`, title `Terminal`) and attaches it before its first
-  banner byte, then uses the existing `core.write`/`core.read_line` command loop
-  unchanged. If the window cannot be opened or the attach fails, it closes its
+  banner byte, then runs its `core.write`/`core.read_input` command loop. If the
+  window cannot be opened or the attach fails, it closes its
   window (when one was opened) and keeps the serial path, printing one status
   line; it does not draw into a window it does not own.
 - **T13 (MUST):** `terminal` is a shell command that proves the surface without a
-  second line discipline: it reports the attached window id, checks that an
+  second terminal: it reports the attached window id, checks that an
   unknown id is `NotFound`, checks one foreground and one background pixel in the
   window's content rectangle with `syslib.get_pixel`, spawns `terminal_probe`
   (which opens its own window and must be refused with `Full` while the shell
@@ -172,8 +174,8 @@ opportunity.
 
 | Alternative | Why not |
 |-------------|---------|
-| A writable terminal/console API with application-side line editing | This ticket routes the existing stream; editing is M2.5.3/M2.6 and the staged line discipline stays one implementation |
-| One terminal per task | There is one line discipline and one console byte stream; per-task routing would need a task id in `Host::console_write` and would break child output |
+| A writable terminal/console API with application-side line editing | This ticket routes the existing stream; editing moved to the shell later (ADR 0037) rather than into the kernel |
+| One terminal per task | There is one console byte stream; per-task routing would need a task id in `Host::console_write` and would break child output |
 | Let the window repair call `console::repaint` | It holds `WINDOW`; a callback would invert the lock order (`WINDOW → CONSOLE`), which ADR 0025 rejects |
 | Reopen a boot terminal when the owner exits | The next attach should own the window; a kernel-owned fallback would race the new owner and is not needed for the milestone |
 | Make the shell draw its own terminal cells | The console already owns the grid, font and clipping; duplicating them would create a second text device |

@@ -14,9 +14,9 @@
 The desktop (M2) has one image — the shadow screen of spec 0009 — and applications draw
 into it through `syslib`. What it does not have is input. A desktop needs a pointer that
 moves and clicks, a cursor the user can see, and eventually a keyboard event stream that a
-window manager can route. Today the only input path is the kernel's staged line discipline:
-the service opportunity polls COM1 and the PS/2 keyboard into a byte FIFO, and
-`core.read_line` blocks the shell until a line is complete (spec 0005, Q44).
+window manager can route. In the original slice the only input path was the kernel's
+staged line discipline; it has since been replaced by a raw serial byte stream
+(`core.read_input`) plus this event queue (spec 0005, ADR 0037, Q44).
 
 This spec covers the first half of that work:
 
@@ -53,8 +53,8 @@ Non-goals for this slice (deferred or rejected):
 - no event queue, no `Event` record, no `next_event`/`poll_event`, no `WaitFor::Input`
   *in the original M2.2.0 slice*; M2.2.3/M2.2.4 add them below (I18/I19).
 - no keyboard key codes, modifiers or arrows in the language *in the original slice*: the
-  console keeps its byte stream and `core.read_line` for the shell. M2.2.3 adds the key
-  event layer alongside it (I18).
+  console kept its byte stream for the shell. M2.2.3 adds the key event layer alongside it
+  (I18), and ADR 0037 later removes the kernel line discipline.
 - no pointer acceleration, no wheel, no double-click detection, no pointer grab;
 - no per-application cursor and no hardware cursor sprite;
 - no window focus or routing: until M2.3, input is machine-wide and no application "owns"
@@ -214,11 +214,12 @@ Buttons are a bit mask: bit 0 left, bit 1 right, bit 2 middle.
 These slices are part of the normative surface; the design sub-sections below ("Key
 events", "The event queue") record how they were implemented.
 
-- **I18 (MUST):** The keyboard grows a **key event** layer separate from the line
-  discipline: scan-code set 1 is decoded to a key code plus an ASCII/text field with
+- **I18 (MUST):** The keyboard grows a **key event** layer separate from the console:
+  scan-code set 1 is decoded to a key code plus an ASCII/text field with
   Shift/Ctrl/Alt/Caps Lock state, arrows and function keys, into a bounded queue that
-  does not drop under fast typing. `core.read_line` stays for the shell. The same byte
-  feeds both consumers: a key that produces console text still produces its event.
+  does not drop under fast typing. Since ADR 0037 the keyboard feeds **only** this queue:
+  a key produces an event with its text byte, never a console byte. Serial input remains
+  the console byte stream (`core.read_input`).
 - **I19 (MUST):** Events are delivered through a predeclared `Event` record
   `(kind, x, y, code, window)` and two primitives: `syslib.next_event(var ev) -> Status`
   blocks (via a new `WaitFor::Input`, SMP-safe wake) until one is queued, and
@@ -439,10 +440,11 @@ the text is back.
 
 ### Key events (M2.2.3)
 
-`arch/x86_64::keyboard::poll` drains controller bytes once and reports both outputs of
-each byte through one callback: the console byte (for the line discipline) and the key
-event (for the queue). A byte that produces both is delivered to both, so the shell and an
-event-driven application never steal each other's keys.
+`arch/x86_64::keyboard::poll` drains controller bytes once and reports the decoded key
+event (and, at the time of this slice, a console byte through the same callback). Since
+ADR 0037 the console byte is no longer produced: the keyboard feeds **only** the event
+queue, so a key reaches exactly one consumer, and serial input is the console byte stream
+(`core.read_input`).
 
 | Scan-code set 1 | Console byte | `KeyEvent` |
 |---|---|---|

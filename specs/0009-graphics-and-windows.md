@@ -85,9 +85,9 @@ grows down. Colours are `0x00RRGGBB`.
   it touched. Kernel `print!`/`println!` output therefore has one path to the screen.
   The existing console lock and line atomicity are preserved across cores. Since
   M2.3.4 (spec 0012) the console paints into two kernel-owned text windows instead of
-  the whole screen: application output and the line-discipline echo go to a terminal
-  window, kernel diagnostics to a system-log window, and no text scrolls the shadow.
-  The one-shadow and one-lock rules are unchanged.
+  the whole screen: application output (including the shell's own input echo) goes to a
+  terminal window, kernel diagnostics to a system-log window, and no text scrolls the
+  shadow. The one-shadow and one-lock rules are unchanged.
 - **G15 (MUST):** When the framebuffer is missing, is not 32 bpp, or the shadow cannot
   be allocated, graphics are disabled: `screen_width`/`screen_height` return 0, every
   drawing primitive returns `Status.Invalid`, `get_pixel` returns 0, and the kernel and
@@ -161,7 +161,7 @@ repaints that window; the drawing code does not change.
 
 ### Console
 
-`kernel/src/console.rs` keeps its line discipline and lock but loses its direct
+`kernel/src/console.rs` keeps its lock and byte-output paths but loses its direct
 framebuffer access. Each glyph is painted into the shadow with an opaque background and
 its 16×16 cell is presented; scrolling copies the shadow up by 16 rows, clears the
 exposed band and presents the screen once. The console draws through the same helper as

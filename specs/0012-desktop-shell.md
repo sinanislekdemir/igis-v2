@@ -36,8 +36,8 @@ resize. Those are M2.4/M2.5.
 
 - **D1 (MUST):** After `gfx::init` and before the first kernel `println!`,
   `console::init` opens exactly two kernel-owned text windows with owner id `0`: a
-  **terminal** for application output (`core.write`) and the staged line-discipline
-  echo, and a **system log** for kernel `println!`/`print!` diagnostics. When graphics
+  **terminal** for application output (`core.write`, including the shell's own input
+  echo), and a **system log** for kernel `println!`/`print!` diagnostics. When graphics
   are disabled, no window is opened and every byte still reaches serial through the
   existing mirror.
 - **D2 (MUST):** Each window has its own character grid, cursor and scroll state. The
@@ -53,8 +53,8 @@ resize. Those are M2.4/M2.5.
   core. A cell that is partly or wholly covered leaves the covering window untouched. A
   painted cell joins the terminal's bounded dirty rectangle instead of being presented
   immediately (M2.6.2, spec 0016): `console::write_bytes` and `_print` present once after
-  their byte run, the line-discipline echo defers to one flush at the end of
-  `poll_input`, and a whole-window repaint presents each visible part once. The flush
+  their byte run, one flush at the end of `poll_input` presents anything still
+  pending, and a whole-window repaint presents each visible part once. The flush
   reads the visible parts under the window lock and copies only the dirty rectangle from
   the current shadow, so a window that moved above the console in between cannot be
   overwritten. Because a window on another core can open, raise or move above the
@@ -70,9 +70,8 @@ resize. Those are M2.4/M2.5.
   the same `console::poll_input`). This keeps the lock order `CONSOLE → WINDOW →
   SCREEN`; no path takes `WINDOW` and then `CONSOLE`.
 - **D5 (MUST):** The routing is fixed: `print!`/`println!` (`console::_print`) feed the
-  system log; `core.write` and the line-discipline echo feed the terminal; `core.read_line`
-  and its blocking behaviour are unchanged; every byte of both is still mirrored to
-  COM1. Text is never echoed to both windows.
+  system log; `core.write` feeds the terminal (the application echoes its own input);
+  every byte of both is still mirrored to COM1. Text is never echoed to both windows.
 - **D6 (MUST):** Owner id `0` means "the kernel". Global task ids start at `1`, so no
   task can be confused with a kernel window. A kernel window is an ordinary window for
   the service: it has geometry, z-order, focus, `Expose`, hit-testing and
@@ -184,8 +183,9 @@ resize. Those are M2.4/M2.5.
   consumer of the one machine-wide event queue (spec 0010 I31), so an application that
   also calls `next_event` competes with it; the event-injecting regression suite runs on
   the shell-entry image (`cargo xtask image --shell`), which has no `entrypoint` and is
-  exactly the pre-M2.5.6 boot. The shell's byte-stream terminal (`core.write` /
-  `core.read_line`) is unaffected by the queue.
+  exactly the pre-M2.5.6 boot. The shell's terminal (`core.write` and its own
+  `core.read_input` echo) is independent of the queue, though the shell's input loop
+  also consumes key events when it is waiting at the prompt.
 
 ## Design
 
@@ -194,7 +194,7 @@ resize. Those are M2.4/M2.5.
 ```text
 Console
   enabled: bool                  // false until console::init; gates text output
-  term: Terminal                 // core.write + line discipline echo
+  term: Terminal                 // core.write (the client echoes its input)
   log:  Terminal                 // println!/print!
 
 Terminal

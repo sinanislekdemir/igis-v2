@@ -115,19 +115,19 @@ The interface is split into two namespaces:
   heartbeat. The TSC is deliberately not used: in QEMU TCG it is per-vCPU and can drift,
   which would make two cores disagree about a task's budget or heartbeat. The APIC timer
   frequency is calibrated against the PIT or HPET at boot (`0007-scheduler.md`).
-- `console_read` is a byte stream. It blocks until at least one byte is available,
-  returns as many bytes as are available up to the destination length, and never waits for
-  a line or a full key sequence.
-- The kernel does not echo, does not assemble lines, does no editing and exposes no key
-  events; prompt, echo, history and line editing are `stdlib`/shell code. The staged
-  `core.read_line` below is a deliberate first-milestone exception: the language now has
-  code-point-safe insert/delete/cursor/selection helpers (`stdlib.str_*`, M2.4.1), but the
-  shell still consumes console lines outside a window, so the kernel keeps the staged
-  discipline until the terminal window can do application-side editing (Q44, M2.5.5).
+- `console_read` is a byte stream. It returns as many bytes as are available up to the
+  destination length and never waits for a line or a full key sequence. The kernel does
+  not echo, does not assemble lines, does no editing and exposes no key events; prompt,
+  echo, history and line editing are application code (Q44 resolved, ADR 0037).
+- The service opportunity drains **COM1** into a fixed raw byte ring and feeds **PS/2 key
+  presses** only into the machine-wide event queue. Serial is the byte stream; the
+  keyboard is events. A key is therefore delivered exactly once, and a console reader
+  and an event reader see different bytes rather than duplicates (spec 0010).
 - Console bytes pass through unvalidated: the kernel never checks UTF-8 and never
-  interprets escape sequences. In the first milestone the keyboard driver emits US ASCII,
-  with `Enter` as `\n` (LF only), `Backspace` as `0x7F`, `Tab` as `\t` and `Ctrl+C` as
-  `0x03`. Every other non-text key is discarded.
+  interprets escape sequences. A serial terminal delivers US ASCII and control bytes,
+  with `Enter` as CR or LF, `Backspace` as `0x7F` or `0x08`, `Tab` as `\t` and `Ctrl+C` as
+  `0x03`; control-byte policy belongs to the application. PS/2 key events carry the text
+  byte and modifiers in `Event.code` (`abi::key`).
 - `Ctrl+C` is not interpreted by the kernel. It is a byte an application may read, for
   example to kill or interrupt the child it is waiting on.
 - The console has no owner. Any task may read, and a byte is consumed by the first task
@@ -138,9 +138,9 @@ The interface is split into two namespaces:
   unchanged and both windows are text-only targets, not a change to this host contract.
 - Since Q39 a task may wait on several input sources at once. `core.poll_any` is a
   non-blocking readiness probe and `core.next_any` blocks on the whole set; both inspect
-  a `const array[uint, 8]` whose entries are `0` (completed console line), `1` (input
-  event) or a stream handle (`core.stream_source`). Readiness is a snapshot, not a
-  reservation: the following `read_line`/`next_event`/`recv` is authoritative if another
+  a `const array[uint, 8]` whose entries are `0` (console input byte available), `1`
+  (input event) or a stream handle (`core.stream_source`). Readiness is a snapshot, not a
+  reservation: the following `read_input`/`next_event`/`recv` is authoritative if another
   task consumed the source in between (see "Multi-source waits").
 - `send` is atomic (`0006-streams.md`): it either enqueues the whole slice or returns an
   error. A slice larger than the endpoint capacity can never succeed and is a
@@ -238,35 +238,35 @@ above (spec 0006, spec 0008):
 - The loader, not the host, creates or pairs the endpoints before the task is placed, so
   `stream_send`/`stream_recv` never see an unopened endpoint.
 
-#### Staged line discipline: `core.read_line`
+#### Console input: `core.read_input` (Q44, ADR 0037)
 
-The target rule above stands: `console_read` is a byte stream, the kernel does not echo
-or assemble lines, and prompt/history/editing are application code. The language side of
-editing now exists (`stdlib.str_insert_into`, `str_delete_into`, `str_backspace`, the cursor
-helpers and the selection helpers, all code-point-safe; M2.4.1, spec 0003). The shell still
-runs outside a window, though, and the terminal window that would let it drive
-application-side editing is M2.5.5, so this slice keeps a line reader in the kernel console
-layer:
+The console is a raw byte stream and the kernel is out of line editing.
 
-| Primitive | Staged signature | Result |
-|-----------|------------------|--------|
-| `core.read_line` | `(var buf: string[N]) -> int` | copied length (`0..=N`), or blocks until a line is complete |
+| Primitive | Implemented signature | Result |
+|-----------|-----------------------|--------|
+| `core.read_input` | `(var dst: bytes[N]) -> int` | copies the bytes that are waiting (`0..=N`) and returns the count; `0` when none. Never blocks |
 
-- The service opportunity polls COM1 and the PS/2 keyboard into one static FIFO.
-  Printable bytes append to a 256-byte pending line and are echoed; Backspace erases
-  (`\b \b`); Enter completes the line into a four-line ring and echoes `\n`; Ctrl+C
-  clears the pending line and echoes `^C\n`. Other keys are dropped.
-- A byte past the pending capacity is refused: it is neither stored nor echoed. A
-  finished line longer than `N` is truncated to `N`; the rest is discarded and the
-  copied length is returned. There is no `CapacityExceeded` result in this staged form.
-- `read_line` returns `None` when no line is complete; the interpreter then returns
-  `Blocked(Console)` without advancing and retries the instruction after the scheduler
-  wakes the task.
-- The host mock has no line ring: `langhost` returns one fixed line (`host`) per call so
-  host-side programs exercise the same code path without blocking.
-- This is temporary. M2.5.5 routes the same discipline into the shell's attached
-  terminal window (spec 0014) but does not replace it; application-side editing remains
-  M2.5.3/M2.6 (Q44), and the `stdlib` editing primitives it needs are already in place.
+- The service opportunity drains COM1 into a fixed **512-byte ring**. Bytes are stored
+  verbatim: no echo, no editing, no line completion, no byte interpretation.
+- If the ring is full, the **newest** byte is dropped and counted (the oldest bytes
+  survive); the ring never rewinds and the drop is not visible because the kernel does
+  not echo. This policy is deterministic and is proved by the boot self-check
+  `console: input ok`.
+- PS/2 key presses do **not** enter the ring; they become events in the machine-wide
+  queue (spec 0010). Serial is the byte stream; the keyboard is events.
+- A non-zero return publishes the destination length word together with the bytes; a
+  zero return publishes length `0`. There is no `WouldBlock` status: an empty read is a
+  result, and an application that wants to sleep first waits on source `0` with
+  `core.poll_any`/`core.next_any`.
+- The interpreter's `READ_INPUT` opcode carries the destination capacity as its
+  immediate and writes a raw `bytes` buffer. It reuses the retired `READ_LINE` slot
+  (`0x42`), so ABI v1 still has 75 opcodes (spec 0008).
+- `langhost` drains a scripted byte queue (`HOST_INPUT`, or `run_with_input`) so the same
+  application-side editing runs on the host without blocking.
+- Echo, prompts, history, cursor movement and line assembly are application code. The
+  shell echoes each accepted byte through `core.write` (Backspace as `\x08 \x08`,
+  Enter as `\n`, Ctrl+C as `^C\n`), and edits its `string[256]` with the M2.4.1
+  `stdlib.str_*` helpers (spec 0003, "String editing").
 
 #### Multi-source waits (Q39, implemented)
 
@@ -277,24 +277,24 @@ The language surface is spec 0003, "Multi-source waits"; this is the host contra
 | `core.poll_any` | `(sources: const array[uint, 8], count: int, var ready: int) -> Status` | `Ok` with the zero-based index of the first ready source written through `ready`; `WouldBlock` when none is ready; `Invalid` when `count` is outside `1..=8`. `ready` is untouched on a non-`Ok` result |
 | `core.next_any` | same | identical readiness report; when none is ready the task blocks on the set and retries the instruction after a wake-up |
 
-- Source `0` is one completed line (`core.read_line`), `1` is one input event
-  (`syslib.next_event`, including a pending window `Expose`), and any other value is a
-  stream handle whose data or close is ready. This is a read select; send-space
-  readiness is not included.
+- Source `0` is a console input byte being available (`core.read_input` would return at
+  least one byte), `1` is one input event (`syslib.next_event`, including a pending
+  window `Expose`), and any other value is a stream handle whose data or close is ready.
+  This is a read select; send-space readiness is not included.
 - The interpreter validates `count` and the array region, then calls one `Host` probe per
-  source in caller order: `console_line_ready()`, `input_ready()` and
+  source in caller order: `console_byte_ready()`, `input_ready()` and
   `stream_readable(handle)`. All three default to `false`, so a host with no sources
   reports `WouldBlock` and `next_any` blocks exactly like an absent source.
-- The kernel host maps them to `console::has_line`, `event::has_event() ||
+- The kernel host maps them to `console::has_byte`, `event::has_event() ||
   window::has_expose(current)` and `stream::readable(task, handle)`. `stream::readable`
   is data-or-close on the caller's receive side; a stale or foreign handle reports ready
   so the following receive errors instead of sleeping.
 - `core.stream_source(ep) -> uint` is compiler-lowered (a value reference plus
   `load_ref`, no builtin) and is the only way to name a stream in the array. It does not
   change the endpoint rules: every other use as a value is still a compile error.
-- `core.read_line` and `syslib.next_event` keep their signatures, their single-source
-  waits and their wake paths. A finished line, an event insertion and a stream
-  send/receive/close now also wake a matching `WaitFor::Any` set (spec 0006, spec 0007).
+- `syslib.next_event` keeps its signature, single-source wait and wake path. A console
+  byte, an event insertion and a stream send/receive/close wake a matching
+  `WaitFor::Any` set (spec 0006, spec 0007); `core.read_input` itself never sleeps.
 - Readiness is not consumption. Another task may take the source before the caller's
   read; that read's `WouldBlock`, `Closed` or short count is the authoritative result.
 
@@ -334,10 +334,11 @@ service compiles from.
   owner-0 boot terminal on the first task attach, and repaints the new grid.
 - `Host::terminal_attach(window: u64) -> Status` defaults to `Invalid`: `langhost` and a
   bare mock have no terminal window, so the shell falls back to serial there.
-- `console_write` and `read_line` keep their signatures and semantics. The attached
-  terminal receives `core.write` and the line echo; `println!` stays in the System Log;
-  serial mirroring is unchanged. A terminal whose window disappears is detached and the
-  stream becomes serial-only until the next attach.
+- `console_write` keeps its signature and semantics; `core.read_input` reads the same
+  byte ring wherever output is painted. The attached terminal receives `core.write` only
+  (the application echoes its own input); `println!` stays in the System Log; serial
+  mirroring is unchanged. A terminal whose window disappears is detached and output
+  becomes serial-only until the next attach.
 
 #### Implemented ABI: system control (M2.6.4)
 
@@ -458,7 +459,8 @@ aspirational.
 trait Host {
     fn console_write(&self, bytes: &[u8]);
     fn console_read(&mut self, buf: &mut [u8]) -> usize;
-    fn read_line(&mut self, buf: &mut [u8]) -> Option<usize>;
+    // Raw console read behind `core.read_input`: non-blocking, 0 when empty.
+    fn read_input(&mut self, dst: &mut [u8]) -> usize;
     fn yield_now(&mut self);
     // Non-blocking in the host; the interpreter blocks on WouldBlock for the
     // blocking opcodes and maps it to the staged status for try_*.
@@ -466,7 +468,7 @@ trait Host {
     fn stream_recv(&mut self, handle: u64, dst: &mut [u8]) -> Result<usize, StreamError>;
     // Readiness probes for `core.poll_any`/`core.next_any` (Q39); all default
     // to `false` on a host with no sources.
-    fn console_line_ready(&mut self) -> bool;
+    fn console_byte_ready(&mut self) -> bool;
     fn input_ready(&mut self) -> bool;
     fn stream_readable(&mut self, handle: u64) -> bool;
     fn monotonic_ns(&self) -> u64;
@@ -496,11 +498,11 @@ signal for origin and cost (`0003-language.md`).
 
 | Situation | Behaviour |
 |-----------|-----------|
-| `console_read` with no input | Task blocks; no CPU consumed |
-| `core.read_line` with no finished line | Task blocks; no CPU consumed (staged line discipline, above) |
-| `console_read` sees a non-text key | Key is discarded; no byte is produced |
+| `core.read_input` with no bytes waiting | Returns `0` immediately; the task blocks only by calling `core.next_any` first |
+| `syslib.next_event` with no event | Task blocks; no CPU consumed |
+| A non-text key | It is a key event (code, no text), never a console byte |
 | Two tasks read the console | Bytes are split between them; no ownership, no arbitration |
-| Task needs the console and a stream at once | Not expressible; one blocking wait at a time (open question 12) |
+| Task needs the console and a stream at once | Expressed with `core.next_any` over both sources (Q39) |
 | `send` with a full queue | Blocks by default; `try_send` returns `WouldBlock` |
 | `send` larger than capacity | `CapacityExceeded`; cannot ever succeed |
 | `receive` from an empty queue | Blocks; `try_receive` returns `WouldBlock` |
@@ -579,3 +581,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-17 | Terminal window (spec 0014, M2.5.5): `Host::terminal_attach(window: u64) -> Status` (builtin 44, default `Invalid`) binds the one machine-wide console terminal to a window owned by the calling task. The kernel host passes its task id, checks ownership and geometry under `CONSOLE → WINDOW`, releases the owner-0 boot terminal on first attach and detaches when the owner's window disappears. `console_write`/`read_line` signatures and semantics are unchanged; the line discipline is not replaced. No opcode. |
 | 2026-11-17 | System control (spec 0017, M2.6.4): `Host::halt`/`Host::reboot` (0 → 1, builtins 48/49, default `Invalid`) drive `sched::halt_system`/`sched::reboot`. The shutdown flag plus the existing `0x40` wake IPI stop every other core in the handler (acknowledge then halt), the wait is bounded by the clock and a spin ceiling, and `reboot` resets through `0xCF9` and the 8042 pulse command, halting if the firmware ignores both. No opcode. |
 | 2026-11-17 | Multi-source waits (Q39, ADR 0036): `Host::console_line_ready`/`input_ready`/`stream_readable` (all default `false`) back `core.poll_any`/`core.next_any` (builtins 51/52, no opcode). Sources are `0` console line, `1` input event and `>= 2` stream read readiness; `core.stream_source` is compiler-lowered and adds no host method. The kernel maps the probes to `console::has_line`, `event::has_event`/`window::has_expose` and `stream::readable`, and a single `WaitFor::Any` set carries the block; `read_line`/`next_event` are unchanged. |
+| 2026-11-17 | Q44 resolved (ADR 0037): the kernel line discipline is gone. COM1 drains into a 512-byte raw ring (newest byte dropped and counted when full, no echo); PS/2 key presses go only to the event queue. `Host::read_input(dst) -> usize` (non-blocking, `0` when empty) behind `core.read_input(var bytes[N]) -> int` replaces `Host::read_line`; it reuses the `READ_LINE` opcode slot as `READ_INPUT` (`0x42`), so ABI v1 stays at 75. Source `0` is now "a console byte is available" and the probe is `Host::console_byte_ready`. The shell echoes and edits its own `string[256]` with the `stdlib.str_*` helpers and blocks in `core.next_any`; `langhost` drains a scripted byte queue. |

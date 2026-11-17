@@ -645,7 +645,24 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
   Proof `samples/apps/multiplex` (+ `multiplex_sender`) waits on all three, self-injects
   the input event and takes the console line typed by
   `scripts/multiplex_qmp.py`; `multiplex check` is deterministic. Specs 0003/0005/0006/
-  0007, ADR 0036.
+  0007, ADR 0036. (Source `0` is redefined as "a console byte is available" when Q44
+  removes the line discipline; the rest of the source set is unchanged.)
+
+- [x] **Q44 the kernel line discipline removed; the console is a raw byte stream.** COM1
+  drains into a 512-byte ring with the newest byte dropped and counted on overflow; the
+  PS/2 keyboard feeds only the event queue. `core.read_input(var dst: bytes[N]) -> int`
+  reuses the `READ_LINE` opcode slot as `READ_INPUT` (`0x42`, ABI v1 stays 75): a raw,
+  non-blocking read that publishes the destination length and returns the count, `0`
+  when empty. Q39 source `0` is now a console byte being available
+  (`Host::console_byte_ready`, `console::has_byte`), `WaitFor::Console`/`WaitKind::Console`
+  are gone, and `task::wake_console_input` wakes matching sets. The shell echoes and
+  edits its own `string[256]` with `stdlib.str_*`, selects on source `0`/`1`, and handles
+  Backspace, Enter, Ctrl+C and Tab; `multiplex` reads its console arm with
+  `core.read_input`, `kill_victim line` blocks in `core.next_any`, and `langhost` drains a
+  scripted byte queue. Boot adds `console: input ok`. Proofs: a typed serial shell
+  session (Backspace, `help`, `echo hi`, `run child world`, `exit`) on `-smp 4`/`-smp 1`,
+  `kill_stress` 300/300 killed on both, `scripts/multiplex_qmp.py` on both, and the full
+  regression set. Specs 0003/0005/0007/0008/0010/0012/0014, ADR 0037.
 
 ### Post-M2 hardening
 

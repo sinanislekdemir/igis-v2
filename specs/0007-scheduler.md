@@ -259,34 +259,36 @@ accepted: no core is reserved.
 
 - A blocking primitive sets `Blocked(reason)`, records the wait condition, and returns to
   the loop without re-enqueueing.
-- The blocking conditions are `core.wait(child)`, the staged `core.read_line` (`Console`),
-  a stream send/receive (`Stream(handle)`), `syslib.next_event` (`Input`) and
-  `core.next_any` (`Any(WaitSet)`). A blocked task stays in its slot with
-  `state = Blocked` and a `WaitFor` condition (`Child(id)`, `Console`, `Stream(handle)`,
-  `Input` or `Any(set)`); `claim` skips blocked slots and the wake-up path clears the
-  condition in place, so the task's regions and machine never move. A `Blocked` task
-  counts as live, so the system does not halt.
+- The blocking conditions are `core.wait(child)`, a stream send/receive
+  (`Stream(handle)`), `syslib.next_event` (`Input`) and `core.next_any`
+  (`Any(WaitSet)`). Console input itself never blocks: `core.read_input` returns `0`
+  when no byte is waiting, and a task that wants to sleep names source `0` in
+  `core.next_any`. A blocked task stays in its slot with `state = Blocked` and a
+  `WaitFor` condition (`Child(id)`, `Stream(handle)`, `Input` or `Any(set)`); `claim`
+  skips blocked slots and the wake-up path clears the condition in place, so the task's
+  regions and machine never move. A `Blocked` task counts as live, so the system does
+  not halt.
 - A blocking builtin that cannot complete returns `Blocked` from the interpreter without
   advancing `pc` or the operand stack; the instruction is retried after the wake-up, so a
   retry sees the same frame. The service dispatcher still runs before every claim (and
   polls console input), so a queued child is compiled even while its parent is blocked.
-- A child termination wakes `Child(id)`; a finished console line wakes `Console`. A send
-  wakes a receiver blocked on `Stream(handle)`, a receive that frees space wakes a sender,
-  and a stream close wakes both. An event insertion wakes `Input`. A `WaitFor::Any` set is
-  woken by any of its sources: the console line path wakes a set containing `0`, the
-  event path a set containing `1`, and `wake_stream(handle)` a set containing that handle.
-  The condition enqueues the task and marks it `Runnable`.
+- A child termination wakes `Child(id)`. A send wakes a receiver blocked on
+  `Stream(handle)`, a receive that frees space wakes a sender, and a stream close wakes
+  both. An event insertion wakes `Input`. A `WaitFor::Any` set is woken by any of its
+  sources: a console input byte wakes a set containing `0` (`wake_console_input`), the
+  event path a set containing `1`, and `wake_stream(handle)` a set containing that
+  handle. The condition enqueues the task and marks it `Runnable`.
 - `WaitSet` is `abi::wait::WaitSet` (`Copy + Eq`, at most eight sources), so the
   interpreter's `WaitKind::Any` and the task's `WaitFor::Any` carry the same value without
-  either side depending on the other. Source `0` is a console line, `1` an input event and
-  every other value a stream handle.
+  either side depending on the other. Source `0` is a console input byte being available,
+  `1` an input event and every other value a stream handle.
 - After `task::block` the scheduler rechecks the condition (`repl::has_exit` for a child,
-  `stream::ready_for` for a stream, `console::has_line`/`event::has_event` or
-  `window::has_expose` for the input paths, and `task::wait_any_ready` for
-  `Any(set)`): it may have become true between the failed attempt and the block, and the
-  wake-up path would then have found nobody to wake. The `Any` recheck probes exactly the
-  same sources as the builtin (`console::has_line`, `event::has_event`/
-  `window::has_expose`, `stream::readable`); when one is ready it calls
+  `stream::ready_for` for a stream, `event::has_event` or `window::has_expose` for the
+  input path, and `task::wait_any_ready` for `Any(set)`): it may have become true between
+  the failed attempt and the block, and the wake-up path would then have found nobody to
+  wake. The `Any` recheck probes exactly the same sources as the builtin
+  (`console::has_byte`, `event::has_event`/`window::has_expose`, `stream::readable`); when
+  one is ready it calls
   `task::wake_any_sources(set)` so the blocked task (and any other waiter on an
   intersecting source) gets a chance to retry. Every check takes its own subsystem lock
   and releases it before any slot lock is taken.
@@ -462,7 +464,7 @@ There is no per-core ownership of any application region.
   handler only acknowledges with an EOI; the loop re-checks the runnable set after
   `hlt` returns. Producers are `task::spawn`, `task::release`, `task::wake` and the REPL
   enqueue.
-- With no live task, no pending/in-service request and no console line anywhere, and
+- With no live task, no pending/in-service request and no console input byte anywhere, and
   every other online core idle, the boot core prints the summary, sets a shutdown flag,
   broadcasts the IPI, waits bounded for each AP's acknowledgement and halts. Each AP
   acknowledges from its idle loop and halts.
@@ -573,3 +575,4 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 2026-11-17 | Sch12 made concrete as round-robin: `claim_class` starts its scan at a global `NEXT_CLAIM` cursor, stores the claimed slot + 1 after a successful take, and wraps; the old always-from-slot-0 scan let a busy parent starve its higher-slot children on `-smp 1` (observed by the M2.3.5 two-application proof). On SMP the races make the rotation approximate but never permanently skip a runnable slot. Realtime-first claim is unchanged. |
 | 2026-11-17 | Q50 fixed: Sch17 states the kill invariant, the per-slot record is an id-tagged `AtomicU64` (task ids are monotonic, so it cannot reach a later tenant), `request_kill` publishes under the slot lock, `task::block` re-checks the record under that lock after the boundary check (the lost-wake window), `take_kill(slot, id)` compare-exchanges its own id only, and `reclaim` clears the reservation and record under the lock for its own id. The in-service window is now stated explicitly: a request popped for compilation has no slot, so `kill` returns `NotFound` there and never interrupts the compile; the caller retries once the task is live. Boot self-check `kill: records ok` proves the interleaving on real slot state; `samples/apps/kill_stress` (300 spawn/kill/wait iterations across the three blocking waits) passes on `-smp 4` and `-smp 1` and hangs on the first iteration of the pre-fix kernel (ADR 0034). |
 | 2026-11-17 | Multi-source waits (Q39, ADR 0036): `WaitFor::Any(abi::wait::WaitSet)` is the fifth blocking condition, carrying up to eight sources in one `Copy` value. `wake_console`/`wake_input`/`wake_stream` wake a matching `Any` set in addition to their single wait; the block arm maps `WaitKind::Any` and rechecks with `task::wait_any_ready`, then `task::wake_any_sources` when a source became ready in the failed-probe-to-block window. The `Any` probes are the same functions the builtins use (`console::has_line`, `event::has_event`/`window::has_expose`, `stream::readable`). Single-source wait behaviour and the id-tagged kill path are unchanged. |
+| 2026-11-17 | Q44 resolved (ADR 0037): `WaitFor::Console` and `WaitKind::Console` are gone because `core.read_input` never blocks. Console input is one `WaitFor::Any` source `0` ("a byte is available"); `task::wake_console_input` wakes matching sets and the post-block recheck uses `console::has_byte`. All other conditions and the id-tagged kill path are unchanged. |

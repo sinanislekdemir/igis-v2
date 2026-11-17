@@ -496,8 +496,8 @@ bounded backstop for a machine without an I/O APIC. The cursor is a 16×16 monoc
 composited at present time into the framebuffer, never stored in the shadow, so `get_pixel`
 keeps reading uncomposited pixels. Applications see only `syslib.pointer_x`/`pointer_y`/
 `pointer_buttons`/`pointer_source` and the debug-only `syslib.inject_pointer`; the console
-keeps its byte stream and `core.read_line` for the shell. Keyboard key events and the event
-queue are later M2.2 slices.
+keeps its raw byte stream (`core.read_input`) for the shell. Keyboard key events and the
+event queue are later M2.2 slices.
 
 The primary pointer is an **absolute USB HID tablet** when one is present (spec 0010,
 ADR 0022): `kernel/src/pci.rs` scans configuration space for the PIIX3 UHCI controller

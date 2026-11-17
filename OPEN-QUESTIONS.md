@@ -26,7 +26,6 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | Q8 | Debug/introspection primitive | shape open (task listing, counters, trace); none in M1 | after the shell exists |
 | Q9 | DMA and block primitives | handle model fixed; no primitive in M1 | first real block device |
 | Q43 | Distinct `TaskId` type | `core.run`, `spawn`, `wait` and `kill` are implemented; task ids are still `int` (0 invalid). Introduce a nominal `TaskId` when `stdlib` exposes these primitives, so an id cannot be confused with another integer (spec 0003, "Task ids"). The `stdlib` has started (text helpers only) and still exposes no task primitives | before `stdlib` exposes `run` |
-| Q44 | Staged kernel line discipline (`core.read_line`) | the kernel polls COM1/PS-2, echoes, assembles and stores lines in a 4-line ring; `core.read_line(var buf)` blocks until a line exists and truncates to the buffer. The language side is now done (M2.4.1): `stdlib.str_insert_into`, `str_delete_into`, `str_backspace`, the code-point-safe cursor helpers and the selection helpers can edit a `string[256]` atomically. What remains is the terminal window: the shell still consumes console lines outside a window, so the kernel keeps the staged discipline until M2.5.5 runs the shell in a window with application-side editing (spec 0005, "Staged line discipline") | when the terminal window lands (M2.5.5) |
 | Q45 | Staged `syslib` handles | `syslib.port_in8`/`port_out8` are implemented with `Port` as a plain scalar `uint` (low 16 bits used); there are no opaque `Port`/`MmioRegion` types, MMIO mapping, or DMA/block primitives yet. Replace with the handle model when MMIO or DMA lands (specs 0003, 0005) | first MMIO or DMA device |
 | Q48 | Pointer feel: acceleration, wheel, extra buttons | not in M2.2: motion is 1:1 (one count, one pixel) and only three buttons exist. Acceleration needs a tuning curve (and a clock or a count accumulator), a wheel adds a fourth axis, and both want a control to use them. `syslib.inject_pointer` takes only `dx`/`dy`/`buttons`, so a wider device surface would need a new primitive or a field on `Event` (spec 0010, open questions 1–2) | when a desktop application actually uses a real mouse, or a control needs scrolling (M2.4) |
 
@@ -55,7 +54,7 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 **Q47 blocker (2026-11-17 feasibility study).** The per-core `CURRENT` task plus a
 recovery trampoline is not sufficient. A guard hit happens in a *native kernel frame*, and
 the fault may have interrupted a kernel path that holds a `SpinLock` while copying into or
-out of task memory: `console::read_line` (console lock), `stream_recv` (stream record
+out of task memory: `console::read_input` (console lock), `stream_recv` (stream record
 lock), and the `window_info` copy (window table lock) are concrete examples, and any
 future host primitive has the same shape. The kernel has no lock-ownership tracking, so
 abandoning that frame would either leave the lock held (a machine-wide hang the next time
