@@ -2445,3 +2445,17 @@ fn the_font_sample_reports_the_host_path() {
     assert_eq!(result.reason, ExitReason::Ok);
     assert_eq!(result.output, b"font: host ok\n".to_vec());
 }
+
+/// The M2.6.2 performance sample against `langhost`'s disabled screen (spec
+/// 0016): without a framebuffer there is no frame to measure, so it reports
+/// the host path and exits instead of spinning.
+#[test]
+fn the_perf_sample_reports_the_host_path() {
+    let path = format!("{}/../samples/apps/perf", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "perf").expect("the perf sample compiles");
+    let result =
+        langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies and runs");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"perf: no graphics\nperf: host ok\n".to_vec());
+}

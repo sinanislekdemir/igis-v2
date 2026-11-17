@@ -39,7 +39,7 @@
 
 use core::fmt::{self, Write};
 
-use abi::Status;
+use abi::{Rect, Status};
 use arch_x86_64::{keyboard, serial};
 
 use crate::font8x8::FONT8X8_BASIC;
@@ -99,6 +99,10 @@ struct Terminal {
     /// The window-service generation the cached geometry was read at, so a
     /// moved terminal is followed without a table query per byte.
     generation: u64,
+    /// Cells drawn since the last present. One bounded bounding box is enough:
+    /// a write run is a line, and the whole box is presented once per flush
+    /// (spec 0012, D3; spec 0016).
+    dirty: Option<Rect>,
     grid: [[u8; MAX_COLS]; MAX_ROWS],
 }
 
@@ -115,8 +119,23 @@ const EMPTY_TERMINAL: Terminal = Terminal {
     fg: 0,
     bg: 0,
     generation: 0,
+    dirty: None,
     grid: [[0; MAX_COLS]; MAX_ROWS],
 };
+
+/// The bounding-box union of two rectangles.
+fn union_rect(a: Rect, b: Rect) -> Rect {
+    let x0 = a.x.min(b.x);
+    let y0 = a.y.min(b.y);
+    let x1 = a.x.saturating_add(a.w).max(b.x.saturating_add(b.w));
+    let y1 = a.y.saturating_add(a.h).max(b.y.saturating_add(b.h));
+    Rect {
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
+    }
+}
 
 impl Terminal {
     /// Resets every field in place (the grid is 16 KiB, so no stack temporary).
@@ -133,6 +152,7 @@ impl Terminal {
         self.fg = fg;
         self.bg = bg;
         self.generation = 0;
+        self.dirty = None;
         for line in self.grid.iter_mut() {
             line.fill(0);
         }
@@ -155,6 +175,7 @@ impl Terminal {
         self.owner = 0;
         self.attached = false;
         self.generation = 0;
+        self.dirty = None;
     }
 
     /// Re-reads the window's content rectangle and follows a move (spec 0014).
@@ -216,8 +237,60 @@ impl Terminal {
         }
     }
 
+    /// Records a painted cell rectangle for the next [`Terminal::flush`].
+    fn mark_dirty(&mut self, rect: Rect) {
+        if rect.w <= 0 || rect.h <= 0 {
+            return;
+        }
+        self.dirty = Some(match self.dirty {
+            Some(current) => union_rect(current, rect),
+            None => rect,
+        });
+    }
+
+    /// Presents the cells drawn since the last flush in one go (spec 0012 D3;
+    /// spec 0016). The visible parts are read now, under the window table lock
+    /// across the present (`WINDOW → SCREEN`), and only the dirty rectangle is
+    /// copied. A window that moved above the terminal in between is already in
+    /// the shadow, so the copy cannot resurrect stale pixels.
+    fn flush(&mut self) {
+        let Some(dirty) = self.dirty.take() else {
+            return;
+        };
+        if !self.attached || dirty.w <= 0 || dirty.h <= 0 {
+            return;
+        }
+        let id = self.id;
+        let _ = window::paint_visible_parts(id, &mut |parts| {
+            for part in parts {
+                let x0 = dirty.x.max(part.x);
+                let y0 = dirty.y.max(part.y);
+                let x1 = dirty
+                    .x
+                    .saturating_add(dirty.w)
+                    .min(part.x.saturating_add(part.w));
+                let y1 = dirty
+                    .y
+                    .saturating_add(dirty.h)
+                    .min(part.y.saturating_add(part.h));
+                if x1 <= x0 || y1 <= y0 {
+                    continue;
+                }
+                let clip = gfx::Clip {
+                    x: x0,
+                    y: y0,
+                    w: x1 - x0,
+                    h: y1 - y0,
+                };
+                let _ = gfx::present_within(x0, y0, x1 - x0, y1 - y0, clip);
+            }
+        });
+    }
+
     /// Draws the cell background and glyph inside every visible part that the
-    /// cell intersects, and presents that intersection (spec 0012 D3).
+    /// cell intersects (spec 0012 D3). The cell is not presented here: its
+    /// rectangle joins the terminal's dirty box and one [`Terminal::flush`]
+    /// presents the run, so typing a line costs one present, not one per cell.
     ///
     /// The window table lock is held for the whole paint, so a window opened,
     /// raised or moved on another core cannot change the visible parts between
@@ -250,8 +323,13 @@ impl Terminal {
                     h: part.h,
                 };
                 let _ = gfx::draw_cell(x0, y0, code, fg, bg, clip);
-                let _ = gfx::present_within(x0, y0, CELL, CELL, clip);
             }
+        });
+        self.mark_dirty(Rect {
+            x: x0,
+            y: y0,
+            w: CELL,
+            h: CELL,
         });
     }
 
@@ -262,6 +340,9 @@ impl Terminal {
         if !self.attached {
             return;
         }
+        // The whole content is drawn and presented below, so any pending
+        // per-cell dirty box is covered.
+        self.dirty = None;
         let id = self.id;
         let x0 = self.x;
         let y0 = self.y;
@@ -440,12 +521,17 @@ pub fn _print(args: fmt::Arguments<'_>) {
         return;
     }
     let _ = console.log.write_fmt(args);
+    console.log.flush();
 }
 
 /// Writes raw application bytes to the terminal window (the interpreter's host
 /// `console_write`, spec 0005). The bytes are not validated: they may be
 /// arbitrary binary data, and non-printable bytes are dropped by the text
 /// terminal after being mirrored to serial.
+///
+/// All cells of the call are drawn first and the terminal's dirty rectangle is
+/// presented once, so a line costs one present instead of one per cell
+/// (spec 0016).
 pub fn write_bytes(bytes: &[u8]) {
     let mut console = CONSOLE.lock();
     if !console.enabled {
@@ -454,6 +540,29 @@ pub fn write_bytes(bytes: &[u8]) {
     for byte in bytes {
         console.term.put_byte(*byte);
     }
+    console.term.flush();
+}
+
+/// Draws application bytes without presenting. Used by the line-discipline
+/// echo so [`poll_input`] can batch a whole service opportunity into one flush.
+fn write_bytes_pending(bytes: &[u8]) {
+    let mut console = CONSOLE.lock();
+    if !console.enabled {
+        return;
+    }
+    for byte in bytes {
+        console.term.put_byte(*byte);
+    }
+}
+
+/// Presents any cells the console drew without a flush (the input echo path).
+fn flush_pending() {
+    let mut console = CONSOLE.lock();
+    if !console.enabled {
+        return;
+    }
+    console.term.flush();
+    console.log.flush();
 }
 
 /// Attaches the console's machine-wide terminal grid to a window owned by
@@ -719,13 +828,17 @@ impl Input {
 static INPUT: SpinLock<Input> = SpinLock::new(Input::new());
 
 fn echo(bytes: &[u8]) {
-    write_bytes(bytes);
+    write_bytes_pending(bytes);
 }
 
 /// Polls both byte sources into the line discipline, feeds the keyboard's
 /// decoded key events into the machine-wide event queue, and pulls pending
 /// kernel-window repaints. Called once per service opportunity, before the
 /// scheduler claims a task (spec 0012 D4).
+///
+/// The echo draws without presenting and one flush at the end presents the
+/// whole opportunity's cells (spec 0016); a repaint pulled by [`pump`] already
+/// presents the grid and clears the pending box.
 pub fn poll_input() {
     let mut input = INPUT.lock();
     for _ in 0..64 {
@@ -744,6 +857,7 @@ pub fn poll_input() {
     });
     drop(input);
     pump();
+    flush_pending();
 }
 
 /// Pops one finished line into `out`, truncating to its length. Returns the

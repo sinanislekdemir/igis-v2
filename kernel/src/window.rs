@@ -175,6 +175,57 @@ fn touches(a: Rect, b: Rect) -> bool {
     a.x <= bx1 && b.x <= ax1 && a.y <= by1 && b.y <= ay1
 }
 
+/// Whether `outer` fully contains `inner` (equal edges count).
+fn contains(outer: Rect, inner: Rect) -> bool {
+    inner.w <= 0
+        || inner.h <= 0
+        || (outer.x <= inner.x
+            && outer.y <= inner.y
+            && outer.x.saturating_add(outer.w) >= inner.x.saturating_add(inner.w)
+            && outer.y.saturating_add(outer.h) >= inner.y.saturating_add(inner.h))
+}
+
+/// Greedy coalescing of a damage rectangle list (spec 0011, W11).
+///
+/// Empty rectangles are dropped, then any overlapping or edge/corner-touching
+/// pair is replaced by its bounding box and the pass repeats until stable, so
+/// contained rectangles disappear and a chain of touching pieces becomes one
+/// piece. `MAX_DAMAGE` is small (32), so the bounded O(n^3) worst case costs
+/// little and runs once per repair.
+///
+/// The output covers the input union: a merge only grows the covered area. The
+/// added area of a diagonal merge is re-presented from the current shadow (and
+/// re-painted from the window records), never left stale, so growth is safe.
+fn coalesce<const N: usize>(rects: &mut [Rect; N], count: usize) -> usize {
+    let mut count = count.min(N);
+    let mut write = 0;
+    for read in 0..count {
+        if rects[read].w > 0 && rects[read].h > 0 {
+            rects[write] = rects[read];
+            write += 1;
+        }
+    }
+    count = write;
+    loop {
+        let mut merged = false;
+        'pairs: for left in 0..count {
+            for right in (left + 1)..count {
+                if touches(rects[left], rects[right]) {
+                    rects[left] = union(rects[left], rects[right]);
+                    rects[right] = rects[count - 1];
+                    count -= 1;
+                    merged = true;
+                    break 'pairs;
+                }
+            }
+        }
+        if !merged {
+            break;
+        }
+    }
+    count
+}
+
 /// The bounding-box union of two rectangles.
 fn union(a: Rect, b: Rect) -> Rect {
     let x0 = a.x.min(b.x);
@@ -250,6 +301,47 @@ impl EraseList {
         }
     }
 
+    /// Merges duplicate work before the paint pass (spec 0011, W11).
+    ///
+    /// Equal-coverage requests that touch are merged into their bounding box.
+    /// A request contained in one whose coverage limit is at least as high is
+    /// dropped: the covering request subtracts no more windows, so it paints
+    /// the desktop across every pixel the contained one would. Different
+    /// coverage limits are never merged, because their subtraction sets differ.
+    fn coalesce(&mut self) {
+        loop {
+            let mut changed = false;
+            'restart: for left in 0..self.count {
+                for right in 0..self.count {
+                    if left == right {
+                        continue;
+                    }
+                    let a = self.entries[left];
+                    let b = self.entries[right];
+                    if contains(a.rect, b.rect) && a.covers_from >= b.covers_from {
+                        self.entries[right] = self.entries[self.count - 1];
+                        self.count -= 1;
+                        changed = true;
+                        break 'restart;
+                    }
+                    if a.covers_from == b.covers_from && touches(a.rect, b.rect) {
+                        self.entries[left].rect = union(a.rect, b.rect);
+                        self.entries[right] = self.entries[self.count - 1];
+                        self.count -= 1;
+                        changed = true;
+                        break 'restart;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        if self.count == 0 {
+            self.clear();
+        }
+    }
+
     /// True when an entry with this coverage limit contains `rect` (used by the
     /// paint self-check).
     fn covers(&self, rect: Rect, covers_from: usize) -> bool {
@@ -302,6 +394,14 @@ impl ChromeList {
             self.rects[self.count] = rect;
             self.count += 1;
         }
+    }
+
+    /// Merges duplicate chrome work before the paint/present pass (spec 0011,
+    /// W11). Chrome damage carries no coverage limit, so the generic greedy
+    /// coalescing applies: contained rectangles disappear and touching pieces
+    /// become one.
+    fn coalesce(&mut self) {
+        self.count = coalesce(&mut self.rects, self.count);
     }
 
     fn covers(&self, rect: Rect) -> bool {
@@ -400,21 +500,77 @@ fn subtract_into(rect: Rect, cover: Rect, out: &mut Parts) {
     }
 }
 
-/// Accumulates the bounding box presented once at the end of a repair pass.
+/// Accumulates the damage presented at the end of a repair pass (spec 0011,
+/// W11). The list is coalesced before presenting, so a repair presents a few
+/// tight rectangles instead of one screen-sized bounding box. Store room for
+/// both damage lists, so no damage is ever dropped here.
+const MAX_PRESENT: usize = MAX_DAMAGE * 2;
+
 struct Presentation {
-    rect: Option<Rect>,
+    rects: [Rect; MAX_PRESENT],
+    count: usize,
 }
 
 impl Presentation {
     const fn new() -> Self {
-        Presentation { rect: None }
+        Presentation {
+            rects: [Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            }; MAX_PRESENT],
+            count: 0,
+        }
     }
 
     fn add(&mut self, rect: Rect) {
-        self.rect = Some(match self.rect {
-            Some(current) => union(current, rect),
-            None => rect,
-        });
+        if rect.w <= 0 || rect.h <= 0 {
+            return;
+        }
+        if self.count < MAX_PRESENT {
+            self.rects[self.count] = rect;
+            self.count += 1;
+        } else {
+            // Never drop damage: fold the overflow into the last rectangle.
+            let last = MAX_PRESENT - 1;
+            self.rects[last] = union(self.rects[last], rect);
+        }
+    }
+
+    /// Coalesces the accumulated rectangles (contained dropped, touching
+    /// merged) and returns the resulting count.
+    fn coalesce(&mut self) -> usize {
+        self.count = coalesce(&mut self.rects, self.count);
+        self.count
+    }
+
+    /// Total present area in pixels (the measurement metric; the old
+    /// single-bounding-box behaviour is [`Presentation::bounds_area`]).
+    fn area(&self) -> i64 {
+        self.rects[..self.count]
+            .iter()
+            .map(|rect| rect.w.saturating_mul(rect.h))
+            .sum()
+    }
+
+    /// Area of the single bounding box of every accumulated rectangle, i.e.
+    /// what the pre-M2.6.2 repair presented.
+    fn bounds_area(&self) -> i64 {
+        if self.count == 0 {
+            return 0;
+        }
+        let mut rect = self.rects[0];
+        for next in self.rects[1..self.count].iter() {
+            rect = union(rect, *next);
+        }
+        rect.w.saturating_mul(rect.h)
+    }
+
+    fn present(&self) {
+        for rect in self.rects[..self.count].iter() {
+            let _ = gfx::present(rect.x, rect.y, rect.w, rect.h);
+        }
     }
 }
 
@@ -918,6 +1074,11 @@ impl Table {
             return false;
         }
         let marked = self.mark_exposes();
+        // Coalesce after expose marking so the exact original damage decides
+        // which clients repaint; the paint/present pass then works on the
+        // smaller merged set (spec 0011, W11).
+        self.erases.coalesce();
+        self.chrome.coalesce();
         gfx::reset_clip();
         let mut present = Presentation::new();
 
@@ -970,9 +1131,8 @@ impl Table {
             }
         }
 
-        if let Some(rect) = present.rect {
-            let _ = gfx::present(rect.x, rect.y, rect.w, rect.h);
-        }
+        present.coalesce();
+        present.present();
         self.clear_damage();
         marked
     }
@@ -1600,6 +1760,248 @@ pub fn paint_self_check() -> Result<(), u32> {
     }
 
     Ok(())
+}
+
+/// The damage-coalescing measurement from [`damage_self_check`]: present
+/// rectangles and pixels before (one bounding box, the pre-M2.6.2 behaviour)
+/// and after (coalesced rectangles, the current repair).
+#[derive(Clone, Copy)]
+pub struct DamageStats {
+    pub before_rects: usize,
+    pub after_rects: usize,
+    pub before_px: i64,
+    pub after_px: i64,
+}
+
+/// Boot self-check for damage coalescing and present batching (spec 0011,
+/// W11): the generic merge (contained dropped, touching merged, disjoint kept),
+/// the erase list's coverage rule, and a realistic window move measured before
+/// and after coalescing. Pure: it works on scratch lists and a scratch table
+/// and never touches the screen.
+///
+/// Returns the measurement, or the first failing step; `kmain` prints
+/// `window: damage ok (present ...)` and halts on a mismatch.
+pub fn damage_self_check() -> Result<DamageStats, u32> {
+    const SCREEN_W: i64 = 1024;
+    const SCREEN_H: i64 = 768;
+
+    // 1. Generic coalescing: a contained rectangle disappears, a touching
+    //    chain becomes one piece and a disjoint piece stays separate.
+    let mut rects = [Rect {
+        x: 0,
+        y: 0,
+        w: 0,
+        h: 0,
+    }; 8];
+    rects[0] = Rect {
+        x: 0,
+        y: 0,
+        w: 10,
+        h: 10,
+    };
+    rects[1] = Rect {
+        x: 2,
+        y: 2,
+        w: 4,
+        h: 4,
+    };
+    rects[2] = Rect {
+        x: 10,
+        y: 0,
+        w: 10,
+        h: 10,
+    };
+    rects[3] = Rect {
+        x: 40,
+        y: 40,
+        w: 5,
+        h: 5,
+    };
+    rects[4] = Rect {
+        x: 0,
+        y: 0,
+        w: 0,
+        h: 0,
+    };
+    let count = coalesce(&mut rects, 5);
+    let expected = Rect {
+        x: 0,
+        y: 0,
+        w: 20,
+        h: 10,
+    };
+    let disjoint = Rect {
+        x: 40,
+        y: 40,
+        w: 5,
+        h: 5,
+    };
+    if count != 2 || !rects[..count].contains(&expected) || !rects[..count].contains(&disjoint) {
+        return Err(1);
+    }
+
+    // 2. Erase coalescing respects the coverage limit. A contained request
+    //    with a lower limit is redundant (the container paints a superset).
+    let mut erases = EraseList::new();
+    erases.add(
+        Rect {
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 10,
+        },
+        2,
+    );
+    erases.add(
+        Rect {
+            x: 2,
+            y: 2,
+            w: 4,
+            h: 4,
+        },
+        0,
+    );
+    erases.coalesce();
+    if erases.count != 1 || erases.entries[0].covers_from != 2 {
+        return Err(2);
+    }
+
+    // 3. The same containment with a higher limit is real work and survives.
+    let mut erases = EraseList::new();
+    erases.add(
+        Rect {
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 10,
+        },
+        0,
+    );
+    erases.add(
+        Rect {
+            x: 2,
+            y: 2,
+            w: 4,
+            h: 4,
+        },
+        2,
+    );
+    erases.coalesce();
+    if erases.count != 2 {
+        return Err(3);
+    }
+
+    // 4. Equal-coverage touching requests merge; different limits do not.
+    let mut erases = EraseList::new();
+    erases.add(
+        Rect {
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 10,
+        },
+        1,
+    );
+    erases.add(
+        Rect {
+            x: 10,
+            y: 0,
+            w: 10,
+            h: 10,
+        },
+        1,
+    );
+    erases.add(
+        Rect {
+            x: 20,
+            y: 0,
+            w: 10,
+            h: 10,
+        },
+        2,
+    );
+    erases.coalesce();
+    if erases.count != 2 {
+        return Err(4);
+    }
+    if !erases.covers(
+        Rect {
+            x: 0,
+            y: 0,
+            w: 20,
+            h: 10,
+        },
+        1,
+    ) {
+        return Err(5);
+    }
+
+    // 5. Realistic repair: two windows, then a diagonal move of the lower one.
+    //    The old repair presented one bounding box covering both the old and
+    //    new positions; the coalesced present covers only the two frames.
+    let mut table = Table::new();
+    let alpha = table
+        .open(SCREEN_W, SCREEN_H, 1, 100, 100, 200, 120, b"Alpha")
+        .map_err(|_| 6u32)?;
+    let _beta = table
+        .open(SCREEN_W, SCREEN_H, 2, 600, 400, 200, 120, b"Beta")
+        .map_err(|_| 7u32)?;
+    table.clear_damage();
+    if table.move_to(SCREEN_W, SCREEN_H, 1, alpha, 700, 600) != Status::Ok {
+        return Err(8);
+    }
+
+    let mut originals = [Rect {
+        x: 0,
+        y: 0,
+        w: 0,
+        h: 0,
+    }; MAX_PRESENT];
+    let mut original_count = 0;
+    let mut presentation = Presentation::new();
+    for entry in table.erases.entries[..table.erases.count].iter() {
+        presentation.add(entry.rect);
+        originals[original_count] = entry.rect;
+        original_count += 1;
+    }
+    for rect in table.chrome.rects[..table.chrome.count].iter() {
+        presentation.add(*rect);
+        originals[original_count] = *rect;
+        original_count += 1;
+    }
+    if original_count == 0 || original_count > MAX_PRESENT {
+        return Err(9);
+    }
+    let before_rects = original_count;
+    let before_px = presentation.bounds_area();
+    let after_rects = presentation.coalesce();
+    let after_px = presentation.area();
+    if after_rects == 0 || after_rects > before_rects {
+        return Err(10);
+    }
+    if after_px <= 0 || after_px >= before_px {
+        return Err(11);
+    }
+    // Every damaged rectangle is still covered by a coalesced present
+    // rectangle: coalescing may grow the area but may never lose a pixel.
+    for original in originals[..original_count].iter() {
+        if !presentation.rects[..after_rects]
+            .iter()
+            .any(|rect| contains(*rect, *original))
+        {
+            return Err(12);
+        }
+    }
+
+    table.close_task(1);
+    table.close_task(2);
+
+    Ok(DamageStats {
+        before_rects,
+        after_rects,
+        before_px,
+        after_px,
+    })
 }
 
 /// The title-bar rectangle of a window id in a scratch table.

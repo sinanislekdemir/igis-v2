@@ -160,6 +160,19 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
             arch_x86_64::halt();
         }
     }
+    // Damage coalescing and present batching (spec 0011, W11; spec 0016): the
+    // merge rules, the coverage rule, and the measured reduction on a realistic
+    // move, all on scratch state.
+    match window::damage_self_check() {
+        Ok(stats) => println!(
+            "window: damage ok (present {} -> {} rects, {} -> {} px)",
+            stats.before_rects, stats.after_rects, stats.before_px, stats.after_px
+        ),
+        Err(step) => {
+            println!("window: damage FAIL at step {step}");
+            arch_x86_64::halt();
+        }
+    }
     // Routing and expose ownership (spec 0011, W12/W16/W17): pending exposes,
     // owner isolation, topmost-first order and hit-testing, all on scratch
     // state.

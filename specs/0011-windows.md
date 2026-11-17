@@ -154,6 +154,17 @@ an `int`; `0` is never a valid id.
   an ordinary window: it has geometry, z-order, focus, `Expose`, hit-testing and
   `window_present`, and the kernel calls the same public functions with owner `0`
   (spec 0012 D6).
+- **W21 (MUST):** A repair coalesces its damage before painting and presenting (M2.6.2).
+  Empty and contained rectangles are dropped, overlapping or edge-touching rectangles are
+  merged into their bounding box by a bounded greedy pass, and the result stays within
+  the static list size. Erase requests with different coverage limits are never merged; a
+  request contained in one whose coverage limit is at least as high is redundant and is
+  dropped. The coalesced set MUST cover the union of the original damage: a merge may
+  grow the repainted area (the bounding box of diagonal neighbours), but no damaged pixel
+  may be lost. The presentation is the coalesced rectangles, not one bounding box of all
+  damage, and every presented rectangle is copied from the current shadow. Coalescing
+  happens after the per-window `Expose` flags are marked, so the exact original damage —
+  not a grown bounding box — decides which clients repaint.
 
 ## Design
 
@@ -271,13 +282,46 @@ lock:
    frames of every higher window) intersected with the damage. Drawing in z-order and
    clipping to visible parts means a lower window can never corrupt a higher window's
    content or chrome.
-3. **Present.** The bounding-box union of all damage is presented once with
-   `gfx::present`, which composites the cursor as before (spec 0010, I7). Undamaged
-   windows are not repainted.
+3. **Present.** The damage is coalesced (W21) and each coalesced rectangle is presented
+   with `gfx::present`, which composites the cursor as before (spec 0010, I7). This
+   replaces the single bounding-box present of M2.3.2: a scattered repair such as a
+   diagonal move now copies the two frames, not the rectangle that spans both.
+   Undamaged windows are not repainted.
 
 `move` to the same origin records nothing. A refused operation (`NotFound`, `Invalid`)
 records nothing. `close_task` accumulates every removed frame and repairs once, so a
 terminated task's windows disappear together.
+
+#### Damage coalescing and present batching (implemented in M2.6.2)
+
+The damage lists are bounded (32 rectangles each) and a repair pass may collect the old
+and new frame of a move, several chrome frames and a focus change. Before painting, two
+coalescing passes reduce that work:
+
+- **Erase damage.** Requests with the same coverage limit that overlap or touch merge
+  into their bounding box. A request fully contained in another whose limit is at least
+  as high is dropped: the container subtracts no more windows, so it paints the desktop
+  across every pixel the contained request would. Different limits stay separate, because
+  their subtraction sets differ. This is exact with respect to the coverage semantics;
+  no live window is painted over beyond what the container already did.
+- **Chrome damage.** Chrome carries no coverage limit, so the generic pass applies: empty
+  and contained rectangles disappear and touching or overlapping pieces merge. Chrome is
+  redrawn per window in its visible parts, so a grown rectangle can only re-draw chrome
+  from the window records (never content), and a higher window is never touched.
+
+The presentation accumulates every erase and chrome rectangle, coalesces that set the
+same way, and presents each result once. The added area of a merge is copied from the
+current shadow, so it is up to date by construction. `Expose` marking runs before
+coalescing, so a window in the hole of a merged bounding box is not woken for damage that
+never existed.
+
+`damage_self_check` (boot line `window: damage ok (present ...)`) proves the merge rules,
+the erase coverage rule and the coverage invariant on scratch state, then measures a
+realistic diagonal move of a 200 × 120 window across a 1024 × 768 screen: four damage
+rectangles presented as one bounding box of 510 874 pixels become two coalesced rectangles
+of 55 348 pixels, an 89 % reduction in present area (2 rects instead of 4). It never
+touches the screen. The same pass is what makes a drag/scroll repair charge the client for
+its own frame, not for the span between the old and new origin.
 
 #### Chrome
 
@@ -581,7 +625,7 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | # | Question | Trigger / owner |
 |---|----------|-----------------|
 | 1 | ~~Expose delivery: a new `EventKind.Expose` event, a dedicated blocking wait, or a callback-like `window_present` handshake~~ | Resolved in M2.3.3: `EventKind.Expose` (ordinal 5), one coalesced pending expose per damaged window, owner-only take at poll time; `window_present` is the presentation call, not the delivery mechanism (W12/W17) |
-| 2 | Damage coalescing across several operations in one pass (union vs per-window flags) | M2.3.2/M2.6, when a drag produces many moves per frame |
+| 2 | ~~Damage coalescing across several operations in one pass (union vs per-window flags)~~ | Resolved in M2.6.2: damage is coalesced per list before paint (W21), the presentation is the coalesced rectangle set rather than one bounding box, and `Expose` is still a per-window whole-content flag |
 | 3 | ~~Client liveness: a window whose owner never calls `next_event` or never repaints — close it, or leave stale content forever~~ | Resolved for M2: leave stale content; no timeout, forced close or kill for a missed expose (W18). Revisit when the desktop shell can judge a client (M2.3.5/M2.4) |
 | 4 | Resize and minimum/maximum size interaction with the 8 × 8 content floor | M2.3.5/M2.4 |
 | 5 | Title truncation for proportional text in M2.6 (the 8 × 8 font truncates by bytes, a proportional font by glyphs) | M2.6 |
@@ -597,3 +641,4 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | 2026-11-16 | M2.3.3 implemented: `EventKind.Expose` (ordinal 5); producer-free routing at poll time in the kernel host (pending owner expose first, pointer-down hit-test → raise/focus → delivery, other pointer/key events to the focus, explicitly addressed injections passed through); per-window coalesced expose flags marked by `repair` and input waiters woken after the window unlock, with the scheduler's input-block re-check; `syslib.window_present` (builtin 39) presenting exactly the content's visible parts; `window: route ok`; and `samples/apps/windows_events` proving routing, expose fields, foreign isolation, `window_present` and close-on-termination. Open questions 1, 3 and 6 resolved; M2.3.4 is the desktop shell. |
 | 2026-11-16 | M2.3.4 (spec 0012, ADR 0025): read-only `syslib.window_info` (builtin 40, no new opcode) returning a topmost-first id, frame and 64-byte title snapshot; owner `0` admitted as the kernel owner (task ids start at 1) and kernel windows are ordinary windows; the kernel's terminal and system-log windows use the same public functions. The three samples that assumed an empty window baseline record `window_focus()` at start and compare against it. |
 | 2026-11-17 | M2.3.5 implemented: `samples/apps/windows_proof` plus the `windows_proof_a`/`windows_proof_b` children prove two side-by-side windows owned by separate tasks, a focus switch and raise by real injected pointer clicks (state asserted, because the queue is machine-wide), a four-step scripted owner drag with old-area restoration, and an `Expose`/`window_present` repaint after another task moves over and away (including the covered-content check and the visible-part-only draw that M2's missing per-task clip requires). The parent-owned `Proof Control` frame origin is the persistent command channel; teardown is a stage-4 close-and-exit acknowledged by `core.wait`. `run windows_proof shot` and `scripts/windows_proof_screenshot_qmp.py` capture the composed frame. The two prerequisites the proof exposed are fixed separately: a fair claim cursor (spec 0007, Sch12) and the console's stale-parts retry (spec 0012, D3). Pointer-driven continuous dragging remains M2.4. |
+| 2026-11-17 | M2.6.2 implemented (W21, ADR 0031): a repair coalesces erase and chrome damage before painting (empty/contained dropped, touching/overlapping merged; different erase coverage limits never merged) and presents the coalesced rectangles instead of one bounding box of all damage. `window::damage_self_check` proves the merge rules, the erase coverage rule and the coverage invariant on scratch state and measures a diagonal move: 4 rectangles / 510 874 px as a bounding box become 2 rectangles / 55 348 px (89 % less present area); boot prints `window: damage ok (present 4 -> 2 rects, 510874 -> 55348 px)`. Expose marking still uses the exact original damage. Open question 2 is resolved. |

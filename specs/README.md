@@ -17,11 +17,12 @@ revised as understanding improves, and their history lives in git.
 | 0008 | [Bytecode format and the compiler/runtime split](0008-bytecode.md) | Accepted | abi, compiler, interpreter, repl | 2026-11-13 |
 | 0009 | [Graphics, the shadow screen and the window service](0009-graphics-and-windows.md) | Accepted | syslib, kernel gfx/console, compiler, interpreter | 2026-11-16 |
 | 0010 | [Input, the pointer and events](0010-input-and-events.md) | Accepted | syslib, kernel mouse/usb/pci/gfx/console/sched, arch i8042/ports, compiler, interpreter | 2026-11-16 |
-| 0011 | [Windows](0011-windows.md) | Accepted | abi, compiler, interpreter, kernel window/gfx/task/sched, syslib | 2026-11-16 |
-| 0012 | [The desktop shell and kernel text windows](0012-desktop-shell.md) | Accepted | kernel console/gfx/window/sched, compiler, interpreter, abi, samples/apps | 2026-11-16 |
+| 0011 | [Windows](0011-windows.md) | Accepted | abi, compiler, interpreter, kernel window/gfx/task/sched, syslib | 2026-11-17 |
+| 0012 | [The desktop shell and kernel text windows](0012-desktop-shell.md) | Accepted | kernel console/gfx/window/sched, compiler, interpreter, abi, samples/apps | 2026-11-17 |
 | 0013 | [The application file API](0013-application-files.md) | Accepted | abi, compiler, interpreter, kernel ext2/sched/repl, langhost, samples/apps | 2026-11-17 |
 | 0014 | [The terminal window](0014-terminal-window.md) | Accepted | abi, compiler, interpreter, kernel console/window/sched, langhost, samples/apps | 2026-11-17 |
 | 0015 | [The proportional font](0015-proportional-font.md) | Implemented | abi, compiler, interpreter, kernel font/gfx/window/console, langhost, samples/apps | 2026-11-17 |
+| 0016 | [Performance measurement](0016-performance.md) | Implemented | kernel window/console/gfx/clock, samples/apps/perf | 2026-11-17 |
 
 ## Lifecycle
 

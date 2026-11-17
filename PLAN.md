@@ -15,7 +15,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 ## Resume point (update this when a session ends)
 
 - **Last commit:** `68d7ba1` (M2.6.1 proportional font, spec 0015 and ADR 0030, the
-  `font` proof and its screenshot) plus this docs/resume commit on top.
+  `font` proof and its screenshot) plus the M2.6.2 commit (damage coalescing, present
+  batching, spec 0016/ADR 0031 and the `perf` sample) and this docs/resume commit on top.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -36,41 +37,56 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   and screenshot harness (`65f4875`), M2.5.3 the text editor plus its
   check/shot modes and screenshot harness (`648e1de`), M2.5.4 the file browser
   plus its check/shot modes, `langhost` test and screenshot harness, M2.5.5 the
-  terminal window, M2.5.6 boot to the desktop, and M2.6.1 the proportional font
-  (this commit).
-- **Verified at that point (M2.6.1):** **374 host tests** (abi 18, compiler 153,
-  interpreter 131, langhost 70, including doctests); `cargo xtask build`/`image` and
-  `cargo xtask image --shell` clean; boot self-checks gain `font: glyphs ok`
-  (`console: terminal ok`, `console: log ok`, `console: route ok`, `graphics: clip ok`,
-  `window: rules ok`, `window: paint ok`, `window: route ok`); the desktop boot image
-  needs no manual `run` (`repl: trying entrypoint` → `entrypoint: spawned as task 1` →
-  `desktop_shell: ready`), the `Terminal` menu click spawns the shell
-  (`desktop_shell: launched shell task 2`, `shell> `) and `terminal` prints
-  `terminal: ok`; the shell image shows `entrypoint: not found` → `shell: spawned as
-  task 2` and boots the pre-M2.5.6 shell; a `-vga none` boot shows
-  `desktop_shell: no graphics` → `desktop_shell: serial shell task 2` → a working
-  `shell> ` prompt on serial. The event-injecting suite runs on
-  `build/igis-shell.iso`: `terminal`, `files`, `text_edit`, `ui_layout`, `ui_controls`,
-  `ui_menus`, `ui_dialogs`, `ui_icons`, `widgets check`, `clock_window check`,
-  `editor check`, `browser check`, `desktop_shell check`, `windows`, `windows_events`,
-  `windows_demo`, `events`, `text 42 hi`, `frames`, `streams`, `deep`, `utf8`,
-  `realtime`, `cores`, `windows_proof` and `font` all pass on `-smp 4` and `-smp 1`
-  (the event-injecting samples on `build/igis-shell.iso`; `windows_proof` in its own
-  boot, its step-23 pixel being the known sensitivity).
-  `scripts/tablet_qmp.py` 7/7, `--no-tablet` → `mouse: ok`,
-  `scripts/mouse_burst_qmp.py --cores 1 --batch 300` 600/600.
-  Screenshots: `igis-font.png` (1024×768, 33080 bytes), `igis-boot-desktop.png`
-  (1024×768, 31481 bytes with the proportional menu bar), plus the M2.5 screenshots `igis-terminal.png` (32228), `igis-browser.png`
-  (32847), `igis-editor.png` (30492), `igis-clock.png` (31443), `igis-widgets.png`
-  (25894), `igis-icons.png` (33991), `igis-dialogs.png` (29544), `igis-menus.png`
-  (27590), `igis-controls.png` (32967), `igis-m23-proof.png` (30901),
-  `igis-windows.png` (28169) and `igis-desktop.png` (31555 bytes). Desktop source
-  17,289 B / package 14,952 B code (4 frames), 752 B state, 1,136 B stack; the desktop
-  image root lists 57 entries, the shell image 56; `stdlib` 125 functions and no cap
-  change.
-- **Next slice (not started):** **M2.6.2** — performance: damage coalescing, present
-  batching, and measured event latency / frame time under load (realtime controller +
-  UI together).
+  terminal window, M2.5.6 boot to the desktop, M2.6.1 the proportional font
+  (`68d7ba1`), and M2.6.2 the coalesced damage repair, batched console present and
+  the `perf` measurement (this commit).
+- **Verified at that point (M2.6.2):** **375 host tests** (abi 18, compiler 153,
+  interpreter 131, langhost 71, including doctests); `cargo xtask build`/`image` and
+  `cargo xtask image --shell` clean; boot self-checks gain
+  `window: damage ok (present 4 -> 2 rects, 510874 -> 55348 px)` beside
+  `font: glyphs ok`, `console: terminal/log/route ok`, `graphics: clip ok` and
+  `window: rules/paint/route ok`. `run perf` on `build/igis-shell.iso` (representative
+  runs; TCG timings vary between boots): `-smp 4` idle frames 60 total 18–27 ms (avg
+  300–450 µs), idle events 200 total 17–34 ms (avg 85–170 µs), load frames 60 total
+  109–121 ms (avg 1.8–2.0 ms, max 6–37 ms), load events 200 total 22–31 ms (avg
+  110–155 µs); `-smp 1` idle frames 13–14 ms (avg 216–233 µs), idle events 21–27 ms
+  (avg 105–135 µs), load frames 175–177 ms (avg 2.9 ms, max 163–165 ms — the realtime
+  controller is not preempted), load events 19–23 ms (avg 95–115 µs); every run
+  delivered 200/200 injected events and reaped all four children. The damage self-check measures
+  the diagonal-move repair: 4 rectangles / 510 874 px as a bounding box become
+  2 rectangles / 55 348 px (89 % less present area). The event-injecting suite
+  (`terminal`, `files`, `text_edit`, `ui_layout`, `ui_controls`, `ui_menus`,
+  `ui_dialogs`, `ui_icons`, `widgets check`, `clock_window check`, `editor check`,
+  `browser check`, `desktop_shell check`, `windows`, `windows_events`, `windows_demo`,
+  `events`, `text 42 hi`, `frames`, `streams`, `deep`, `utf8`, `realtime`, `cores`,
+  `font`, `perf`) passes on `-smp 4` and `-smp 1` and `windows_proof` in its own boot on
+  both; `scripts/tablet_qmp.py` 7/7, `--no-tablet` → `mouse: ok`,
+  `scripts/mouse_burst_qmp.py --cores 1 --batch 300` 600/600; the boot desktop still
+  reaches `desktop_shell: ready` → `terminal: ok` and refreshes
+  `igis-boot-desktop.png` (31777 bytes, 1024×768; `igis-font.png` 33080 stays).
+  The desktop image root now lists 59 entries (58 staged files, including the
+  `entrypoint` copy, plus `lost+found`); the shell image lists 58. `stdlib`
+  stays at 125 functions and no cap changed.
+- **Next slice (not started):** **M2.6.3** — visual regression harness: screenshot dump
+  plus a hash/compare of known frames, run headless.
+- **M2.6.2 complete:** performance (spec 0016, ADR 0031). `kernel/src/window.rs`
+  coalesces the two bounded damage lists before painting (empty/contained dropped,
+  touching/overlapping merged; erase requests merge only within one coverage limit and a
+  contained request with a higher-or-equal container limit is dropped), presents the
+  coalesced rectangle set instead of one bounding box of all damage, and marks exposes
+  before coalescing. `window::damage_self_check` proves the rules and the coverage
+  invariant on scratch state and measures a diagonal move (4 rects / 510 874 px →
+  2 rects / 55 348 px); boot prints `window: damage ok (present ...)`. `kernel/src/console.rs`
+  replaces the per-cell `present_within` with a bounded dirty rectangle: `write_bytes` and
+  `_print` flush once per byte run, the input echo defers to one `flush_pending` at the end
+  of `poll_input`, and `repaint` presents each visible part once; the flush re-reads the
+  visible parts under `WINDOW` and copies the dirty rectangle from the current shadow, and
+  the lock order stays `CONSOLE → WINDOW → SCREEN`. `samples/apps/perf` measures frame time
+  and event latency (`core.clock()`, min/avg/max plus the phase total; a 1 ms clock makes a
+  single sample coarse and the average carries the signal) with no load and with
+  `realtime` + three `worker` children, then reaps every child and prints the numbers;
+  `langhost` prints `perf: no graphics` / `perf: host ok`. Specs 0011 (W21) and 0012 (D3)
+  are amended; spec 0016 and ADR 0031 are new.
 - **M2.6.1 complete:** the proportional (Chicago-like) 12-pixel bitmap font (spec 0015,
   ADR 0030). `kernel/src/font.rs` holds 95 printable-ASCII glyphs as 10-column ASCII
   art plus explicit advances; the first use renders a glyph into a fixed
@@ -272,17 +288,21 @@ Trust the repository, not a summary. On a fresh start:
    - `python3 scripts/tablet_qmp.py build/igis-shell.iso --no-tablet` → `mouse: ok` fallback.
    - `python3 scripts/mouse_burst_qmp.py build/igis-shell.iso` → `600/600` px with a
      `mouse: aux IRQ12 delivered ...` line; `--cores 1` is the single-core variant.
-6. The next slice is **M2.6.2** (performance: damage coalescing, present batching and
-   measured event latency/frame time under load). **M2.6.1 is complete**: the 12-pixel
-   proportional font (spec 0015, ADR 0030) drives the service title bar and the desktop
-   menu bar/clock, keeps 8×8 as the console/toolkit fallback, and is proved by
-   `samples/apps/font` and `scripts/font_screenshot_qmp.py`. **M2.5 is complete** with
-   M2.5.6: boot lands on the desktop (`entrypoint`, staged from `desktop_shell`), the
-   `Terminal` menu item spawns the shell non-blocking and later clicks raise it, and
-   `scripts/boot_desktop_qmp.py` proves the boot-to-terminal path with a QMP menu click.
-   M2.5.5's terminal attaches the one console grid to the shell's window; M2.5.4 is the
-   file browser; M2.5.3 the text editor; M2.5.2 the clock window; M2.5.1 `core.fs_list`,
-   `core.fs_read` and `core.fs_size` over the image root.
+6. The next slice is **M2.6.3** (the visual regression harness: screenshot dump plus a
+   hash/compare of known frames, run headless). **M2.6.2 is complete**: damage is
+   coalesced before repair and presented as a tight rectangle set (89 % less present area
+   on the measured diagonal move), the console batches cells into one present per byte
+   run, and `samples/apps/perf` measures frame time and event latency under the realtime
+   load on `-smp 4` and `-smp 1` (spec 0016, ADR 0031). **M2.6.1 is complete**: the
+   12-pixel proportional font (spec 0015, ADR 0030) drives the service title bar and the
+   desktop menu bar/clock, keeps 8×8 as the console/toolkit fallback, and is proved by
+   `samples/apps/font`. **M2.5 is complete** with M2.5.6: boot lands on the desktop
+   (`entrypoint`, staged from `desktop_shell`), the `Terminal` menu item spawns the shell
+   non-blocking and later clicks raise it, and `scripts/boot_desktop_qmp.py` proves the
+   boot-to-terminal path with a QMP menu click. M2.5.5's terminal attaches the one console
+   grid to the shell's window; M2.5.4 is the file browser; M2.5.3 the text editor; M2.5.2
+   the clock window; M2.5.1 `core.fs_list`, `core.fs_read` and `core.fs_size` over the
+   image root.
    The M2 limitations still in force: an app that ignores an `Expose` keeps stale
    content, a full-screen `syslib.clear` erases the kernel windows' pixels, there is no
    per-task clip (a covered client must repaint only its visible part), there is no
@@ -516,8 +536,9 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
 
 - [x] **M2.6.1** Proportional font (Chicago-like) with a glyph cache and text metrics;
   keep 8×8 as the fallback. Spec 0015, ADR 0030, `samples/apps/font`.
-- [ ] **M2.6.2** Performance: damage coalescing, present batching, measured event latency
-  and frame time under load (realtime controller + UI together).
+- [x] **M2.6.2** Performance: damage coalescing, present batching, measured event latency
+  and frame time under load (realtime controller + UI together). Specs 0011 (W21) and
+  0012 (D3), spec 0016, ADR 0031, `samples/apps/perf`.
 - [ ] **M2.6.3** Visual regression harness: screenshot dump (M2.1.2) plus a hash/compare
   of known frames, run headless.
 - [ ] **M2.6.4** System menu: About box, restart, halt; keyboard shortcuts.

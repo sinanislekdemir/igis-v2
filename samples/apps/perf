@@ -1,0 +1,309 @@
+unit perf;
+
+// M2.6.2 performance evidence (spec 0016). Measures, with `core.clock()`:
+//
+//   1. frame time: draw a window frame and `window_present` it, N times;
+//   2. event latency: inject a key event, poll it back, repaint and present;
+//
+// first with no other load, then with the realtime controller (`realtime`) and
+// three `worker` tasks running, so the UI runs beside the realtime class.
+// Reports min/avg/max in microseconds and the phase total in milliseconds.
+//
+// The global clock ticks at 1 ms (spec 0007), so a single sample is a multiple
+// of 1 ms; the aggregate total over N iterations gives the sub-millisecond
+// average. `perf: ok` ends a complete run. Graphics-disabled hosts and
+// `langhost` print `perf: host ok` without measuring.
+//
+// `run perf` is a normal (non-realtime) task: it never calls `core.run`, all
+// loops are bounded, and it waits for every child before exit. Like the other
+// event-injecting samples it is meant for a shell boot (`build/igis-shell.iso`),
+// because the boot desktop is a permanent consumer of the one event queue.
+
+uses core, syslib;
+
+const
+  WindowX = 120;
+  WindowY = 90;
+  ContentW = 320;
+  ContentH = 220;
+  Frames = 60;
+  Events = 200;
+  LoadWorkers = 3;
+
+  NanosPerMilli = 1000000;
+  NanosPerMicro = 1000;
+
+  // `abi::key` packs text | modifiers << 8 | key code << 16; 'A' with no
+  // modifiers is just the key code.
+  KeyCode = 65 * 65536;
+
+  BarSide = 24;
+
+var
+  st: Status;
+  ignored: Status;
+  id: int;
+  rect: Rect;
+  ev: Event;
+  diag: Diagnostic;
+  reason: ExitReason;
+  child: int;
+  load_ids: array[int, 4];
+  load_count: int;
+  i: int;
+  written: int;
+  screen_w: uint;
+  screen_h: uint;
+  black: uint;
+  white: uint;
+  red: uint;
+  t0: uint;
+  t1: uint;
+
+  idle_min: uint;
+  idle_max: uint;
+  idle_total: uint;
+  idle_ev_min: uint;
+  idle_ev_max: uint;
+  idle_ev_total: uint;
+  idle_delivered: int;
+
+  load_min: uint;
+  load_max: uint;
+  load_total: uint;
+  load_ev_min: uint;
+  load_ev_max: uint;
+  load_ev_total: uint;
+  load_delivered: int;
+
+  digits: string[24];
+
+procedure say(text: const string[0]);
+begin
+  core.write(text);
+end;
+
+procedure say_int(value: int);
+begin
+  written := core.format_int_into(digits, value, uint(10), uint(0));
+  core.write(digits);
+end;
+
+// One complete frame: a white face, a border, a moving block, a progress bar
+// and a text label. Only the client content rectangle is written.
+procedure draw_frame(frame: int);
+var
+  x: int;
+  span: int;
+begin
+  span := ContentW - 16;
+  ignored := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, white);
+  ignored := syslib.draw_rect(rect.x + 2, rect.y + 2, rect.w - 4, rect.h - 4, black);
+  x := rect.x + 8 + (frame * 4) mod (ContentW - BarSide - 16);
+  ignored := syslib.fill_rect(x, rect.y + 8, BarSide, BarSide, black);
+  ignored := syslib.fill_rect(rect.x + 8, rect.y + ContentH - 24,
+                              (frame * 7) mod span, 6, red);
+  ignored := syslib.draw_text(rect.x + 8, rect.y + ContentH - 12, "perf frame", black);
+end;
+
+// One complete frame; reports the elapsed nanoseconds of every sample and the
+// total. A zero minimum means "not set yet" only on the first sample, so the
+// comparison keeps a real zero.
+procedure measure_frames(out_low: var uint; out_high: var uint; out_total: var uint);
+var
+  frame: int;
+  elapsed: uint;
+  first: bool;
+begin
+  out_low := uint(0);
+  out_high := uint(0);
+  out_total := uint(0);
+  first := true;
+  frame := 0;
+  while frame < Frames do
+  begin
+    t0 := core.clock();
+    draw_frame(frame);
+    ignored := syslib.window_present(id);
+    t1 := core.clock();
+    elapsed := t1 - t0;
+    if first or elapsed < out_low then
+      out_low := elapsed;
+    first := false;
+    if elapsed > out_high then
+      out_high := elapsed;
+    out_total := out_total + elapsed;
+    frame := frame + 1;
+  end;
+end;
+
+// One event round trip: drain stale events (bounded), inject a key event,
+// poll until it returns, then repaint and present the frame. Reports the same
+// statistics and how many injected events were actually delivered.
+procedure measure_events(out_low: var uint; out_high: var uint;
+                         out_total: var uint; out_delivered: var int);
+var
+  iter: int;
+  tries: int;
+  elapsed: uint;
+  got: bool;
+  first: bool;
+begin
+  out_low := uint(0);
+  out_high := uint(0);
+  out_total := uint(0);
+  out_delivered := 0;
+  first := true;
+  iter := 0;
+  while iter < Events do
+  begin
+    // Leave at most eight stale events behind; then the next injection is the
+    // one the poll must find.
+    tries := 0;
+    while tries < 8 do
+    begin
+      if syslib.poll_event(ev) = Ok then
+        tries := tries + 1
+      else
+        tries := 8;
+    end;
+    ev.kind := EventKind.KeyDown;
+    ev.x := 0;
+    ev.y := 0;
+    ev.code := uint(KeyCode);
+    ev.window := 0;
+    t0 := core.clock();
+    ignored := syslib.inject_event(ev);
+    got := false;
+    tries := 0;
+    while (not got) and (tries < 64) do
+    begin
+      if syslib.poll_event(ev) = Ok then
+        got := true
+      else
+        tries := tries + 1;
+    end;
+    if got then
+      out_delivered := out_delivered + 1;
+    ignored := syslib.fill_rect(rect.x + ContentW - 20, rect.y + 8, 8, 8, black);
+    ignored := syslib.window_present(id);
+    t1 := core.clock();
+    elapsed := t1 - t0;
+    if first or elapsed < out_low then
+      out_low := elapsed;
+    first := false;
+    if elapsed > out_high then
+      out_high := elapsed;
+    out_total := out_total + elapsed;
+    iter := iter + 1;
+  end;
+end;
+
+// `perf: <label> <count> total <ms> ms avg <us> us min <us> us max <us> us`.
+procedure report(label: const string[0]; total: uint; low: uint; high: uint; count: int);
+begin
+  say(label);
+  say(" ");
+  say_int(count);
+  say(" total ");
+  say_int(int(total div uint(NanosPerMilli)));
+  say(" ms avg ");
+  say_int(int((total div uint(count)) div uint(NanosPerMicro)));
+  say(" us min ");
+  say_int(int(low div uint(NanosPerMicro)));
+  say(" us max ");
+  say_int(int(high div uint(NanosPerMicro)));
+  say(" us\n");
+end;
+
+procedure main(args: const string[1024]);
+begin
+  black := uint(0x000000);
+  white := uint(0xFFFFFF);
+  red := uint(0xCC0000);
+  screen_w := syslib.screen_width();
+  screen_h := syslib.screen_height();
+  if screen_w = uint(0) then
+  begin
+    say("perf: no graphics\n");
+    say("perf: host ok\n");
+  end
+  else if screen_w < uint(WindowX + ContentW + 40)
+          or screen_h < uint(WindowY + ContentH + 60) then
+    say("perf: screen too small\n")
+  else
+  begin
+    st := syslib.window_open(WindowX, WindowY, ContentW, ContentH, "Perf", id);
+    if st <> Ok then
+      say("perf: no window\n")
+    else
+    begin
+      st := syslib.window_content_rect(id, rect);
+      if st <> Ok then
+        say("perf: no content rect\n")
+      else
+      begin
+        // Phase A: the UI alone.
+        measure_frames(idle_min, idle_max, idle_total);
+        measure_events(idle_ev_min, idle_ev_max, idle_ev_total, idle_delivered);
+        report("perf: idle frames", idle_total, idle_min, idle_max, Frames);
+        report("perf: idle events", idle_ev_total, idle_ev_min, idle_ev_max, Events);
+        say("perf: idle events delivered ");
+        say_int(idle_delivered);
+        say("\n");
+
+        // Phase B: the realtime controller plus worker tasks. Spawning is
+        // non-blocking (never `core.run`); every child is reaped at the end.
+        load_count := 0;
+        st := core.spawn("realtime", "", diag, child);
+        if st = Ok then
+        begin
+          load_ids[load_count] := child;
+          load_count := load_count + 1;
+          say("perf: load realtime spawned\n");
+        end
+        else
+        begin
+          say("perf: load realtime failed: ");
+          say(diag.message);
+          say("\n");
+        end;
+        i := 0;
+        while i < LoadWorkers do
+        begin
+          st := core.spawn("worker", "", diag, child);
+          if st = Ok then
+          begin
+            load_ids[load_count] := child;
+            load_count := load_count + 1;
+          end
+          else
+          begin
+            say("perf: load worker failed: ");
+            say(diag.message);
+            say("\n");
+          end;
+          i := i + 1;
+        end;
+
+        measure_frames(load_min, load_max, load_total);
+        measure_events(load_ev_min, load_ev_max, load_ev_total, load_delivered);
+        report("perf: load frames", load_total, load_min, load_max, Frames);
+        report("perf: load events", load_ev_total, load_ev_min, load_ev_max, Events);
+        say("perf: load events delivered ");
+        say_int(load_delivered);
+        say("\n");
+
+        i := 0;
+        while i < load_count do
+        begin
+          st := core.wait(load_ids[i], reason);
+          i := i + 1;
+        end;
+        say("perf: load children reaped\n");
+        ignored := syslib.window_close(id);
+        say("perf: ok\n");
+      end;
+    end;
+  end;
+end;
