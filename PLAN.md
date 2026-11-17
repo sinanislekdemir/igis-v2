@@ -14,9 +14,9 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `9fcfc35` (docs: Q44 archive corrections) on top of Q44
-  (`5e7be4c`/`a7c4d88`) and Q39 (`8555ebe`/`b58c9a9`); the tree is clean. The M3
-  planning docs (spec 0018, ADR 0038, this file) are the next docs commit.
+- **Last commit:** `0f08c54` (M3.1: the image is a real directory tree, ext2 walks
+  paths, the file API and `spawn` take hierarchical paths, boot is
+  `system/entrypoint` → `base/shell`) plus this docs commit. The tree is clean.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -42,37 +42,32 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   the `perf` measurement (`2c0df71`), M2.6.3 the deterministic specimen plus the
   headless golden-frame harness (`tests/golden/visual.png`), and M2.6.4 the System
   menu, About panel, `core.halt`/`core.reboot` and the halt/reboot probes.
-- **Verified at that point (M2.6.4):** **382 host tests** (abi 18, compiler 156,
-  interpreter 134, langhost 74, including doctests); `cargo xtask build`/`image` and
-  `cargo xtask image --shell` clean; boot self-checks unchanged (`font: glyphs ok`,
-  `console: terminal/log/route ok`, `graphics: clip ok`, `window: rules/paint/route ok`,
-  `window: damage ok (present 4 -> 2 rects, 510874 -> 55348 px)`). `run desktop_shell
-  check` prints `desktop_shell: ok` on `-smp 4` and `-smp 1` (it opens the System menu,
-  checks the accent row/separator, traverses with Up/Down, closes with Escape, reopens
-  with F10, activates About with Enter, checks the panel pixels, closes with Escape and
-  a routed click, opens it with Ctrl+A, and verifies no system action fired). The boot
-  desktop still reaches `desktop_shell: ready` → Terminal click → `shell> ` →
-  `terminal: ok` on `-smp 4` (`scripts/boot_desktop_qmp.py`, PNG refreshed); the visual
-  harness still matches its golden on both core counts. The system-menu harness opens
-  About through pointer events and closes it with Escape; `scripts/system_control_qmp.py
-  --mode halt` shows `system: 3 of 3 APs stopped` on `-smp 4` and `0 of 0` on `-smp 1`
-  with no further serial output, and `--mode reboot` shows a second `igis-v2: long mode
-  entered` banner on both. The event-injecting suite (`terminal`, `files`, `visual`,
-  `text_edit`, `ui_layout`, `ui_controls`, `ui_menus`, `ui_dialogs`, `ui_icons`,
-  `widgets check`, `clock_window check`, `editor check`, `browser check`,
-  `desktop_shell check`, `windows`, `windows_events`, `windows_demo`, `events`,
-  `text 42 hi`, `frames`, `streams`, `deep`, `utf8`, `realtime`, `cores`, `font`,
-  `perf`) passes on `-smp 4` and `-smp 1` and `windows_proof` in its own boot on both;
-  `scripts/tablet_qmp.py` 7/7, `--no-tablet` → `mouse: ok`,
-  `scripts/mouse_burst_qmp.py --cores 1 --batch 300` 600/600. The desktop image root
-  lists 61 entries (59 staged files plus the `entrypoint` alias and `lost+found`); the
-  shell image lists 60. `stdlib` stays at 125 functions and no cap changed.
-- **Next slice:** **M3.1 — the image tree and boot from it** (spec 0018, ADR 0038).
-  M2 is complete and Q39/Q41/Q44 are done; M3 is now planned below. The first ticket
-  moves the samples into `samples/apps/{lib,base,home,system}`, teaches the ext2 reader
-  path traversal, stages real directories, resolves a short launch name under `base/`,
-  and boots `system/entrypoint` (falling back to `base/shell`). No language change and
-  no file-API change in that ticket.
+- **Verified at that point (M3.1, independently by the parent):** **408 host tests**
+  (abi 23, compiler 158, interpreter 149 + 1 doctest, langhost 77); `cargo xtask
+  build`/`image`/`image --shell` clean. Boot prints `ext2: mounted`, a five-entry root
+  (`lost+found base home lib system`), `ext2: base/shell is 10144 bytes`,
+  `ext2: tree ok`, then `repl: trying \`system/entrypoint\`` → `not found` →
+  `repl: trying \`base/shell\`` on the shell image. A typed serial transcript on
+  `-smp 4` and `-smp 1` accepts `help`, `run files` (`files: ok`), `run child world`
+  and `run base/child world` (`child: args world`), `run system/system_probe`
+  (usage line), `exit`. A 26-command regression batch passes on both core counts
+  (`files`, `browser check`, `editor check`, the shell's `terminal`, `desktop_shell
+  check`, `widgets check`, `windows`, `windows_events`, `kill_stress`, `realtime`,
+  `multiplex check`, `streams`, `frames`, `deep`, `utf8`, `text 42 hi`,
+  `clock_window check`, `f64parse`, the five `ui_*` apps, `text_edit`, `font`,
+  `perf`); `windows_proof` passes in its own boot on both, and its timeout inside a
+  long shared boot is the pre-existing sample sensitivity, not this slice.
+  `run system/system_probe halt` prints `system: 3 of 3 APs stopped` on `-smp 4` and
+  `0 of 0` on `-smp 1`. `boot_desktop_qmp.py` reaches `desktop_shell: ready` →
+  Terminal click → `terminal: ok` on both, and the visual golden still matches on
+  both (`37802052…e9e81c9f`).
+- **Next slice:** **M3.2 — compiler multi-unit modules (`uses lib.*`)** (spec 0018
+  M1–M13). A fresh subagent implements `compiler::SourceReader` +
+  `compile_with_imports`, dotted resolution to `lib/*.ig`, unit name checks, cycle
+  detection, module restrictions, unit ids and the new caps, adds
+  `samples/apps/lib/math.ig`, and proves it on the host. The kernel wiring and the
+  in-kernel proof are M3.3. M3.2 must also update the ext2 boot self-check, whose
+  step 6 currently assumes `lib` is empty.
 
 - **M2.6.3 complete:** the headless visual-regression harness (spec 0009 "Visual proof",
   G21; ADR 0032) and the resolution of M2.1.2. `samples/apps/visual` opens a window whose
@@ -709,7 +704,7 @@ Normative: spec 0018, ADR 0038. Goal: a real image tree (`lib`, `base`, `home`,
 `system`), a path-walking file API, and `uses lib.x;` compiled into the
 application's package. One ticket per session; the parent verifies each.
 
-- [ ] **M3.1 The image tree, ext2 path traversal and boot from the tree.**
+- [x] **M3.1 The image tree, ext2 path traversal and boot from the tree.**
   Move `samples/apps/*` into `samples/apps/base/` (applications) and
   `samples/apps/system/` (`entrypoint`, `system_probe`, `terminal_probe`); add
   `samples/apps/home/readme.txt`; create `samples/apps/lib/` (empty until M3.2).
@@ -738,8 +733,15 @@ application's package. One ticket per session; the parent verifies each.
     `-smp 4` and `-smp 1` (`help`, `run files`, `run child world`, `run
     base/child world`, `exit`); `scripts/boot_desktop_qmp.py`;
     `scripts/visual_regression.py` golden unchanged. No language change.
+  **Done (`0f08c54`):** 408 host tests; boot `ext2: tree ok` with a five-entry root;
+  `run files`/`run child world`/`run base/child world`/`run system/system_probe` typed
+  on both core counts; 26-command regression batch on both; `windows_proof` in its own
+  boot; `boot_desktop_qmp.py` and the visual golden pass on both; `system_probe halt`
+  resolves through `system/`.
 
 - [ ] **M3.2 Compiler multi-unit modules (`uses lib.*`).**
+  Update the ext2 boot self-check first: its step 6 asserts `lib` is empty, which
+  stops being true once `lib/math.ig` is staged (assert the file is listed instead).
   `compiler::SourceReader` + `compile_with_imports` (arena-copied unit sources);
   dotted resolution `lib.a.b` → `lib/a/b.ig`; `unit <last>` header check; unique
   unit names; cycle detection; modules may not declare `main`, top-level `var` or
