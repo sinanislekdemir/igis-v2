@@ -5,7 +5,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0002, 0004, 0005, 0007, 0010, 0011, 0016, 0018, 0021, 0024
-- **Updated:** 2026-11-16
+- **Updated:** 2026-11-17
 
 ## Context
 
