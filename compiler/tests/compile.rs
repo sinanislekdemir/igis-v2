@@ -2935,7 +2935,7 @@ fn the_embedded_stdlib_compiles_on_its_own() {
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(manifest_unit(&package), "stdlib");
     assert_eq!(
-        header.function_count, 99,
+        header.function_count, 109,
         "trim_into, split_once, parse_int_into, parse_f64_into, starts_with, contains_byte, \
          split_all, drain_into, map_get_or, utf8_decode_into, utf8_len, utf8_decode, \
          utf8_valid, recv_exact, send_frame, recv_frame_into, send_line, recv_line_into, \
@@ -2959,7 +2959,10 @@ fn the_embedded_stdlib_compiles_on_its_own() {
          ui_menu_bar_height, ui_menu_is_separator, ui_menu_bit, ui_menu_has, \
          ui_menu_set, ui_menu_selectable, ui_menu_first, ui_menu_open, ui_menu_close, \
          ui_menu_move, ui_menu_key, ui_menu_bar, ui_menu_bar_hit, ui_menu_dropdown, \
-         ui_menu_hit"
+         ui_menu_hit, and the M2.4.4 dialogs layer: ui_message, \
+         ui_dialog_button_width, ui_dialog_button_left, ui_dialog_button_top, \
+         ui_dialog_button, ui_alert, ui_alert_hit, ui_input_dialog, \
+         ui_input_dialog_hit, ui_dialog_key"
     );
     assert_eq!(header.entry, 0);
     assert_eq!(header.state_size, 0, "the stdlib declares no state");
@@ -3086,8 +3089,8 @@ end;
     let package = compile(source, "ui.ig").expect("the UI helpers compile");
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(
-        header.entry, 99,
-        "the entry follows the 99 library functions"
+        header.entry, 109,
+        "the entry follows the 109 library functions"
     );
     assert!(header_function_count(&package) > 84);
 }
@@ -3128,8 +3131,8 @@ end;
     let package = compile(source, "edit.ig").expect("the editing helpers compile");
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(
-        header.entry, 99,
-        "the entry follows the 99 library functions"
+        header.entry, 109,
+        "the entry follows the 109 library functions"
     );
     assert!(header_function_count(&package) > 84);
 }
@@ -3184,10 +3187,94 @@ end;
     let package = compile(source, "menus.ig").expect("the menu helpers compile");
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(
-        header.entry, 99,
-        "the entry follows the 99 library functions"
+        header.entry, 109,
+        "the entry follows the 109 library functions"
     );
-    assert!(header_function_count(&package) > 99);
+    assert!(header_function_count(&package) > 109);
+}
+
+#[test]
+fn an_application_calls_the_dialog_helpers() {
+    let source = br#"
+unit dlg;
+uses core, stdlib, syslib;
+
+var
+  st: Status;
+  n: int;
+  focus: int;
+  action: int;
+  text: string[256];
+
+procedure main(args: const string[1024]);
+begin
+  text := "abc";
+  focus := 0;
+  st := stdlib.ui_message(0, 0, 200, 64, "hello");
+  n := stdlib.ui_dialog_button_width("OK");
+  n := stdlib.ui_dialog_button_left(0, 300, "OK", "Cancel", focus);
+  n := stdlib.ui_dialog_button_top(0, 120);
+  st := stdlib.ui_dialog_button(0, 0, 72, 24, "OK", true, true);
+  st := stdlib.ui_alert(0, 0, 300, 120, "t", text, "OK", "Cancel", focus);
+  n := stdlib.ui_alert_hit(0, 0, 300, 120, "OK", "Cancel", 1, 1);
+  st := stdlib.ui_input_dialog(
+    0, 0, 300, 200, "t", "p", "OK", "Cancel", text, 3, 0, 0, 0, focus);
+  n := stdlib.ui_input_dialog_hit(0, 0, 300, 200, "OK", "Cancel", 1, 1);
+  action := stdlib.ui_dialog_key(uint(0x103 * 65536), true);
+end;
+"#;
+    let package = compile(source, "dlg.ig").expect("the dialog helpers compile");
+    let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
+    assert_eq!(
+        header.entry, 109,
+        "the entry follows the 109 library functions"
+    );
+    assert!(header_function_count(&package) > 109);
+}
+
+#[test]
+fn ui_dialogs_reject_a_record_or_sum_argument() {
+    // The M2.4.4 dialogs follow the same cross-unit rule: a record or sum has
+    // no identity across the unit boundary, so it is a scalar/buffer mismatch.
+    let record = br#"
+unit t;
+uses core, stdlib;
+
+type P = record x: int; end;
+
+var
+  p: P;
+  st: Status;
+
+procedure main(args: const string[1024]);
+begin
+  st := stdlib.ui_alert(0, 0, 300, 120, "t", p, "OK", "Cancel", 0);
+end;
+"#;
+    let error = compile(record, "t.ig").expect_err("a record is not a string");
+    assert!(error.message.contains("not a buffer"), "{}", error.message);
+
+    let sum = br#"
+unit t;
+uses core, stdlib;
+
+type V = A | B;
+
+var
+  v: V;
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := stdlib.ui_dialog_key(v, true);
+end;
+"#;
+    let error = compile(sum, "t.ig").expect_err("a sum is not a uint");
+    assert!(
+        error.message.contains("cannot be used as a scalar"),
+        "{}",
+        error.message
+    );
 }
 
 #[test]

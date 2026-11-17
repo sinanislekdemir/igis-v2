@@ -1750,3 +1750,199 @@ end;
     assert!(host.texts.contains(&(56, 7, b"Edit".to_vec(), BLACK)));
     assert!(host.texts.contains(&(104, 7, b"View".to_vec(), BLACK)));
 }
+
+#[test]
+fn ui_dialogs_compiles_and_reports_the_host_path() {
+    let path = format!("{}/../samples/apps/ui_dialogs", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "ui_dialogs").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"ui_dialogs: host ok\n".to_vec());
+}
+
+#[test]
+fn ui_dialogs_draw_the_documented_sequence() {
+    let source = br#"
+unit uidialog;
+
+uses core, stdlib, syslib;
+
+var
+  st: Status;
+  text: string[256];
+
+procedure main(args: const string[1024]);
+begin
+  text := "Hi";
+  st := stdlib.ui_alert(10, 20, 300, 120, "Title", "The message.", "OK", "Cancel", 0);
+  st := stdlib.ui_input_dialog(
+    10, 160, 300, 200, "Rename", "Name:", "OK", "Cancel", text, 2, 0, 0, 0, 0);
+  st := stdlib.ui_message(0, 300, 88, 32, "alpha beta gamma");
+  if st = Ok
+    and stdlib.ui_dialog_key(uint(0x103 * 65536), true) = 1
+    and stdlib.ui_dialog_key(uint(0x100 * 65536), true) = 2
+    and stdlib.ui_dialog_key(uint(0x100 * 65536), false) = 0
+    and stdlib.ui_dialog_key(uint(0x102 * 65536), true) = 3
+    and stdlib.ui_dialog_key(uint(0x102 * 65536 + 256), true) = 4
+    and stdlib.ui_alert_hit(10, 20, 300, 120, "OK", "Cancel", 150, 112) = 0
+    and stdlib.ui_alert_hit(10, 20, 300, 120, "OK", "Cancel", 234, 112) = 1
+    and stdlib.ui_input_dialog_hit(10, 160, 300, 200, "OK", "Cancel", 20, 210) = 0
+    and stdlib.ui_input_dialog_hit(10, 160, 300, 200, "OK", "Cancel", 150, 332) = 1
+    and stdlib.ui_input_dialog_hit(10, 160, 300, 200, "OK", "Cancel", 234, 332) = 2 then
+    core.write("ui dialogs sequence ok\n");
+end;
+"#;
+    let package = langhost::compile(source, "uidialog").expect("compiles");
+    let mut scratch = vec![0u8; package.code.len().div_ceil(32)];
+    let program = interpreter::Program::parse(&package.code, &mut scratch).expect("verifies");
+    let header = *program.header();
+    let mut state = vec![0u8; header.state_size as usize];
+    let mut stack = vec![0u8; header.stack_size as usize];
+    let args = vec![0u8; 8 + 1024];
+    let mut machine = interpreter::Machine::new();
+    let mut host = Painter {
+        fills: Vec::new(),
+        outlines: Vec::new(),
+        texts: Vec::new(),
+        output: Vec::new(),
+    };
+    let outcome = machine.run(
+        &program,
+        &mut host,
+        &mut state,
+        &mut stack,
+        &args,
+        langhost::DEFAULT_BUDGET,
+    );
+    assert_eq!(outcome, interpreter::Outcome::Exited(ExitReason::Ok));
+    assert_eq!(host.output, b"ui dialogs sequence ok\n");
+
+    const BLACK: u32 = 0x000000;
+    const WHITE: u32 = 0x00FF_FFFF;
+
+    // The exact frame/outline order: the alert frame, its close box and both
+    // buttons, then the input dialog, its close box and field, and both buttons.
+    assert_eq!(
+        host.outlines,
+        vec![
+            (10, 20, 300, 120, BLACK),
+            (14, 23, 11, 11, BLACK),
+            (146, 108, 72, 24, BLACK),
+            (148, 110, 68, 20, BLACK),
+            (230, 108, 72, 24, BLACK),
+            (10, 160, 300, 200, BLACK),
+            (14, 163, 11, 11, BLACK),
+            (18, 204, 284, 22, BLACK),
+            (146, 328, 72, 24, BLACK),
+            (148, 330, 68, 20, BLACK),
+            (230, 328, 72, 24, BLACK),
+        ],
+        "the dialog frames, close boxes, fields and default rings"
+    );
+
+    // The alert background, the focused title bar with a stripe row and the
+    // separator, its band, and both button faces.
+    assert!(
+        host.fills.contains(&(10, 20, 300, 120, WHITE)),
+        "alert background: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(11, 21, 298, 15, WHITE)),
+        "alert title bar: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(11, 22, 298, 1, BLACK)),
+        "alert title stripe: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(11, 35, 298, 1, BLACK)),
+        "alert title separator: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(148, 23, 44, 10, WHITE)),
+        "alert title band: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(147, 109, 70, 22, WHITE)),
+        "alert default face: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(231, 109, 70, 22, WHITE)),
+        "alert cancel face: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(149, 111, 1, 1, BLACK)),
+        "alert default focus ring: {:?}",
+        host.fills
+    );
+
+    // The input dialog: white background, title bar, prompt row, field face,
+    // caret and both button faces; the field ring marks its focus.
+    assert!(
+        host.fills.contains(&(10, 160, 300, 200, WHITE)),
+        "input background: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(11, 161, 298, 15, WHITE)),
+        "input title bar: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(19, 205, 282, 20, WHITE)),
+        "field face: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(37, 211, 1, 8, BLACK)),
+        "field caret: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(20, 206, 1, 1, BLACK)),
+        "field focus ring: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(147, 329, 70, 22, WHITE)),
+        "ok face: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(231, 329, 70, 22, WHITE)),
+        "cancel face: {:?}",
+        host.fills
+    );
+    assert!(
+        !host.fills.contains(&(149, 331, 1, 1, BLACK)),
+        "the unfocused OK button has no focus ring: {:?}",
+        host.fills
+    );
+
+    // Text in paint order: the title and message, the alert buttons, the title,
+    // prompt, field text, the input buttons, then the wrapped message lines.
+    assert_eq!(
+        host.texts,
+        vec![
+            (150, 24, b"Title".to_vec(), BLACK),
+            (18, 44, b"The message.".to_vec(), BLACK),
+            (174, 116, b"OK".to_vec(), BLACK),
+            (242, 116, b"Cancel".to_vec(), BLACK),
+            (146, 164, b"Rename".to_vec(), BLACK),
+            (18, 184, b"Name:".to_vec(), BLACK),
+            (21, 211, b"Hi".to_vec(), BLACK),
+            (174, 336, b"OK".to_vec(), BLACK),
+            (242, 336, b"Cancel".to_vec(), BLACK),
+            (0, 300, b"alpha beta".to_vec(), BLACK),
+            (0, 316, b"gamma".to_vec(), BLACK),
+        ]
+    );
+}

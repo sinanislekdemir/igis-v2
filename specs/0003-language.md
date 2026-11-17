@@ -1594,6 +1594,75 @@ with two check marks, the disabled Zoom row and a separator;
 `scripts/ui_menus_screenshot_qmp.py` captures `/home/sinan/Desktop/igis-menus.png`
 (1024×768).
 
+#### UI dialogs (M2.4.4)
+
+A framed alert, a text-input dialog, word-wrapped message text and a pure modal key
+mapping, as ordinary language code over the M2.4.0 metrics/palette/chrome, the M2.4.1
+editing helpers and the M2.4.2 controls. There is no new opcode, builtin, record, sum,
+user enum, generic or `state`. The **application** owns the modal loop
+(`syslib.next_event`/`poll_event`), the focus slot, the result and the text buffer; the
+library stores nothing, runs no event pump, takes no callback and never mutates the text.
+
+**Layout.** Both dialogs take their full client extent `(x, y, w, h)`: a white interior, a
+1-px `ui_frame`, a focused `ui_title_bar` (a modal dialog is focused by definition) and a
+bottom-right button row of height 24.
+
+| Helper | Semantics |
+|--------|-----------|
+| `stdlib.ui_dialog_button_width(label) -> int` | `max(72, ui_text_width(label) + 24)`. |
+| `stdlib.ui_dialog_button_left(x, w, default_label, cancel_label, which) -> int` | The left edge of a dialog button; the cancel button is right-aligned `ui_content_inset` from `x + w` and the default button is `12` px to its left. `which` 0 is the default button and 1 the cancel button (any other value is treated as 0). |
+| `stdlib.ui_dialog_button_top(y, h) -> int` | `y + h - 8 - 24`: the top of the button row. |
+| `stdlib.ui_dialog_button(x, y, w, h, label, focused, is_default) -> Status` | `ui_button` at rest plus, when `is_default`, a solid inset black ring at `(x + 2, y + 2, w - 4, h - 4)` — the classic double border. The dotted focus ring from `ui_button` is one pixel inside it, so "default" and "focused" stay independent. |
+| `stdlib.ui_message(x, y, w, h, text) -> Status` | Word-wrapped black text: whole 8-px rows on a 16-px line advance, at most `h / 16` lines, breaking at the last space that fits (`w / 8` cells per line) and hard-breaking an unbroken run; `\n` starts a new line. One byte is one cell (the font's rule); a hard break never splits a code point; text past the last whole line is dropped. `w < 8` or `h < 8` is `Invalid`. |
+| `stdlib.ui_alert(x, y, w, h, title, message, default_label, cancel_label, focus) -> Status` | The alert: white interior, frame, focused title bar, the wrapped message between the title bar and the button row, and the right-aligned default/cancel buttons. `focus` 0 draws the default button's focus ring, 1 the cancel button's, anything else neither (the default keeps its double border). Minimum `h = 80` and `w = default_w + cancel_w + 12 + 16 + 2`. |
+| `stdlib.ui_alert_hit(x, y, w, h, default_label, cancel_label, px, py) -> int` | The alert slot under a point: 0 default, 1 cancel, -1 outside. The title bar's close box also returns 1. A dialog too small to be drawn returns -1. |
+| `stdlib.ui_input_dialog(x, y, w, h, title, prompt, default_label, cancel_label, text, cursor, scroll, sel_start, sel_stop, focus) -> Status` | The text-input dialog: a one-line prompt at `y + 24`, a `ui_text_field` at `y + 44` spanning `w - 16` and 22 tall, and the button row. `focus` 0 is the field, 1 the default button, 2 cancel; the field shows its caret and focus ring only while focused. Minimum `h = 106` and the alert's width rule. |
+| `stdlib.ui_input_dialog_hit(x, y, w, h, default_label, cancel_label, px, py) -> int` | The input-dialog slot under a point: 0 field, 1 default, 2 cancel, -1 outside. The close box returns 2. Too-small geometry returns -1. |
+| `stdlib.ui_dialog_key(code, has_cancel) -> int` | The modal action for a packed `Event.code` (below). |
+
+**Focus and result codes.** Focus slots are dialog-local and equal the hit-test value:
+0 is the default button in an alert and the text field in an input dialog, 1 is the default
+button in an input dialog and the cancel button in an alert, and 2 is the input dialog's
+cancel button. `ui_dialog_key` returns an action, and two of its values are also the result
+codes the app closes with:
+
+| Key | Action | Result |
+|-----|--------|--------|
+| Enter `0x103` | default/OK | 1 |
+| Escape `0x100` | cancel when `has_cancel` | 2; 0 when the dialog has no cancel |
+| Tab `0x102` | focus next | 3 |
+| Shift+Tab | focus previous | 4 |
+| anything else | none | 0 |
+
+Result 0 means "none/open"; 1 and 2 are the closing results (default/OK, cancel); 3 and 4
+only move the focus. Enter always takes the default action, whatever slot has the focus;
+focused cancel is still cancelled by Escape, never by Enter. The app applies an action:
+1/2 close the dialog with that result, 3/4 call `ui_focus_next(focus, count, ±1)` with
+`count = 2` for an alert and 3 for an input dialog. A pointer press sets the focus slot
+from the hit test and a release on the same slot activates it; slot 0 in an input dialog
+places the caret at the end and never closes.
+
+**Text ownership.** `ui_input_dialog` takes `text` as `const string[0]` plus the cursor,
+scroll and selection scalars and only draws through `ui_text_field`; it never mutates the
+buffer. The text therefore belongs to the caller on OK and is still unchanged on cancel
+(the helper cannot have changed it); the app decides whether to discard it. Editing is
+exclusively the M2.4.1 helpers; there is no second editing API. The `langhost` and
+disabled-screen model still runs every pure helper (geometry, hit tests, key mapping,
+`ui_message` guards) and returns `Invalid` from every drawing helper.
+
+The M2.4.4 proof is `samples/apps/ui_dialogs`: it draws an alert with a two-line message
+and a default/cancel pair, checks the frame, focused title bar, message lines, double
+border and focus ring with `syslib.get_pixel`, moves the focus with Tab/Shift+Tab, takes
+the default action with Enter and cancel with Escape and with a close-box click, then
+opens a text-input dialog, injects printable text, Backspace, Home/End and Left/Right,
+edits the buffer with `str_*`, checks the caret/glyph/selection pixels, cycles the focus
+through field/OK/Cancel, commits with Enter and a pointer click and cancels with Escape
+without touching the buffer. It prints `ui_dialogs: ok` on `-smp 4` and `-smp 1` and
+`ui_dialogs: host ok` on `langhost`, where the pure helpers and the disabled-screen
+`Invalid` contract run. `ui_dialogs shot` composes the alert and the input dialog and
+`scripts/ui_dialogs_screenshot_qmp.py` captures `/home/sinan/Desktop/igis-dialogs.png`
+(1024×768).
+
 Still missing for a complete standard library: `f32` (Q40) and the remaining float-text
 work (Q41: correctly rounded decimal-to-binary parsing and its subnormal edges); the
 fixed-point `core.format_f64_into`, the shortest round-trip
@@ -1617,8 +1686,11 @@ text-field/scrollbar/list helpers and their hit tests and transitions), again wi
 opcode or builtin. The M2.4.3 menus layer landed as ordinary language code over the
 metrics/palette and the mask/key helpers (`ui_menu_bar`, `ui_menu_dropdown`, the bar/item
 hit tests, `ui_menu_bit`/`has`/`set`, `ui_menu_first`/`open`/`close`/`move`, `ui_menu_key`
-and `ui_menu_selectable`), again with no opcode or builtin. Dialogs (M2.4.4), icons
-(M2.4.5) and the widgets demo (M2.4.6) are still ahead.
+and `ui_menu_selectable`), again with no opcode or builtin. The M2.4.4 dialogs layer landed
+as ordinary language code over the same chrome, controls and editing helpers (`ui_message`,
+the dialog button geometry, `ui_alert`, `ui_input_dialog`, their hit tests and
+`ui_dialog_key`), again with no opcode or builtin. Icons (M2.4.5) and the widgets demo
+(M2.4.6) are still ahead.
 
 ## Failure modes
 
@@ -1712,6 +1784,11 @@ and `ui_menu_selectable`), again with no opcode or builtin. Dialogs (M2.4.4), ic
 | `stdlib.str_delete_into`/`str_insert_into`/`str_backspace` with an incoming text longer than 256 bytes | `Status.CapacityExceeded`; nothing read or written |
 | A `stdlib.str_cursor_*` call with a negative, past-the-end or in-code-point position | Clamped to 0, the length or the code point's first byte; never `Invalid` |
 | `stdlib.str_selection_replace` on an unnormalized pair | The pair is clamped and ordered first; no fault |
+| `stdlib.ui_alert` or `ui_input_dialog` too small or on a disabled screen | `Status.Invalid`; nothing drawn |
+| `stdlib.ui_alert_hit`/`ui_input_dialog_hit` on a dialog too small to be drawn | `-1` (the dialog draws nothing) |
+| `stdlib.ui_message` with `w < 8` or `h < 8` | `Status.Invalid`; nothing drawn |
+| A click in a dialog's title-bar close box | The cancel slot (1 in an alert, 2 in an input dialog) |
+| Enter while a dialog's cancel button is focused | The default action (result 1), never cancel |
 
 ## Open questions
 
@@ -1766,3 +1843,4 @@ and `ui_menu_selectable`), again with no opcode or builtin. Dialogs (M2.4.4), ic
 | 2026-11-17 | M2.4.1 adds the `stdlib` string editing and selection layer: `str_boundary`, `str_cursor_clamp`/`left`/`right`/`home`/`end`, `str_insert_into`, `str_delete_into`, `str_backspace`, `str_selection_normalize`/`all`/`collapse`/`replace` (13 helpers, 52 total). Positions are byte offsets; insertion and deletion require code-point boundaries, a mutator stages into `bytes[256]`, converts with `core.substr_into` and publishes with one copy, so a failure leaves the destination untouched and the text valid UTF-8. Cursors clamp instead of failing (SE5); backspace at 0 is an `Ok` no-op (SE7); the selection is the scalar pair `start`/`stop` (SE6). The 256-byte working capacity returns `CapacityExceeded` without a partial write. No record/sum/generic/`state`, no new opcode or builtin. Closes the language side of Q44. |
 | 2026-11-17 | M2.4.2 adds the `stdlib` controls layer (32 drawing, hit-test, transition, focus and key-decode helpers, 84 total): button (normal/pressed/focused), checkbox (box, check mark, label, toggle), text field (visible slice, accent selection, caret, reveal), vertical scrollbar (track, thumb, page hit, clamp), list (rows, selection, scroll into view, row hit, move), `ui_rect_hit`, `ui_focus_ring`, `ui_focus_next` and the packed-key decoders. The application owns the event loop and all state; the library has no widget object, callback, event pump or `state`. Drawing uses the M2.4.0 metrics/palette; too-small geometry is `Invalid` and disabled graphics draw nothing while the pure helpers keep working. No new opcode or builtin. The embedded source cap rises to 128 KiB and the compile arena to 4 MiB (the library is 72,426 B and needs 2,428,888 B of scratch). Proof `samples/apps/ui_controls` (injected pointer/key events, `get_pixel` checks) and the `langhost` sequence test. |
 | 2026-11-17 | M2.4.3 adds the `stdlib` menus layer (15 helpers, 99 total): a menu-bar model and drawing (`ui_menu_bar`, `ui_menu_bar_hit`, `ui_menu_bar_height`), pull-downs (`ui_menu_dropdown`, `ui_menu_hit`) with a check column, right-aligned shortcut text, accent selection, gray disabled rows and `-` separators, `uint` mask helpers (`ui_menu_bit`/`has`/`set`), the selectability and state transitions (`ui_menu_selectable`, `ui_menu_first`, `ui_menu_open`, `ui_menu_close`, `ui_menu_move`), and a pure key mapping (`ui_menu_key`: Escape closes, Enter activates, arrows move/switch menus). The app owns the open menu, the highlight and the masks; checked and disabled are independent and the highlight never changes them. No record/sum/generic/`state`, no new opcode or builtin. Too-small geometry is `Invalid`, disabled graphics draw nothing while the pure helpers work, and clipping is `syslib`'s. Proof `samples/apps/ui_menus` (injected pointer/key events, `get_pixel`), the `langhost` sequence test and `/home/sinan/Desktop/igis-menus.png`. |
+| 2026-11-17 | M2.4.4 adds the `stdlib` dialogs layer (10 helpers, 109 total): `ui_message` (word-wrapped text in a fixed box), the dialog button geometry (`ui_dialog_button_width`, `ui_dialog_button_left`, `ui_dialog_button_top`), `ui_dialog_button` (a button with the default action's double border), `ui_alert`/`ui_alert_hit` (frame, focused title bar, wrapped message, default/cancel pair; alert slots 0 default, 1 cancel, the close box cancels), `ui_input_dialog`/`ui_input_dialog_hit` (prompt, `ui_text_field`, OK/Cancel; slots 0 field, 1 default, 2 cancel, the close box cancels) and `ui_dialog_key` (Enter = result 1 default, Escape = result 2 cancel when `has_cancel`, Tab/Shift+Tab = actions 3/4 focus next/previous, everything else 0). The app owns the modal loop, the focus slot, the result and the text buffer; the input dialog only draws and never mutates the buffer, and editing stays exclusively the M2.4.1 helpers. No record/sum/generic/`state`, no new opcode or builtin. Too-small geometry is `Invalid` (80 px alert, 106 px input dialog, buttons fitting the width); disabled graphics draw nothing while the pure helpers work. Proof `samples/apps/ui_dialogs` (injected key/pointer events, `get_pixel`), the `langhost` sequence test and `/home/sinan/Desktop/igis-dialogs.png`. |

@@ -1,0 +1,755 @@
+unit ui_dialogs;
+
+// M2.4.4 proof: the stdlib dialogs layer in a real window.
+//
+//   run ui_dialogs          (or `run ui_dialogs shot`)
+//
+// The app draws an alert and a text-input dialog and runs the modal state
+// machine itself; the library only draws and maps keys. Steps:
+//
+//   1. An alert with a focused title bar, a two-line word-wrapped message and
+//      a default button (double border) plus a cancel button. Tab and Shift+Tab
+//      move the focus ring between the two buttons.
+//   2. Enter takes the default action (result 1) and closes the alert; Escape
+//      takes cancel (result 2); a click on the title bar's close box cancels.
+//   3. The text-input dialog draws a prompt, a ui_text_field over the caller's
+//      buffer and the OK/Cancel buttons. Typed text, Backspace, Home/End and
+//      Left/Right edit the buffer through the M2.4.1 helpers, and the caret,
+//      glyph and accent selection are checked with get_pixel.
+//   4. Tab cycles field -> OK -> Cancel -> field; a printable key while a
+//      button is focused does not edit. Enter commits (result 1) and Escape
+//      cancels (result 2). The helper never mutates the buffer, so the text is
+//      unchanged on cancel.
+//   5. A pointer click on OK commits.
+//
+// The first failing check is printed with its step number. `langhost` and a
+// kernel without a framebuffer run the pure helpers and the disabled-screen
+// `Invalid` contract and print `ui_dialogs: host ok`. `shot` composes the alert
+// and the input dialog together and holds the frame for the QMP harness.
+
+uses core, stdlib, syslib;
+
+const
+  AlertH = 180;
+  InputH = 210;
+  InputShotOffset = 200;
+
+var
+  failed: bool;
+  fail_step: int;
+  fail_label: string[64];
+  step: int;
+  status: Status;
+  screen_w: uint;
+  screen_h: uint;
+  id: int;
+  rect: Rect;
+  ev: Event;
+  flushed: uint;
+
+  ax: int;
+  ay: int;
+  dw: int;
+  fx: int;
+  fy: int;
+  field_w: int;
+  axb: int;
+  cxb: int;
+  okx: int;
+  canx: int;
+  by: int;
+
+  dialog: int;     // 0 none, 1 alert, 2 input
+  focus: int;
+  result: int;
+  hit: int;
+  alert_results: int;
+  alert_cancels: int;
+  input_commits: int;
+  input_cancels: int;
+
+  alert_text: string[256];
+  input_text: string[256];
+  input_cursor: int;
+  input_scroll: int;
+  input_sel_start: int;
+  input_sel_stop: int;
+
+  one: bytes[1];
+  ch: string[1];
+  digits: string[16];
+  copied: int;
+  at: int;
+
+  black: uint;
+  white: uint;
+  accent: uint;
+
+  dirty: bool;
+  shot: bool;
+
+procedure say(line: const string[0]);
+begin
+  core.write(line);
+end;
+
+procedure verify(label: const string[0]; passed: bool);
+begin
+  step := step + 1;
+  if not passed and not failed then
+  begin
+    failed := true;
+    fail_step := step;
+    fail_label := label;
+  end;
+end;
+
+// ---- pure helpers and the disabled-screen contract ---------------------
+
+procedure pure_checks();
+begin
+  verify("enter default", stdlib.ui_dialog_key(uint(0x103 * 65536), true) = 1);
+  verify("escape cancel", stdlib.ui_dialog_key(uint(0x100 * 65536), true) = 2);
+  verify(
+    "escape without cancel",
+    stdlib.ui_dialog_key(uint(0x100 * 65536), false) = 0);
+  verify("tab next", stdlib.ui_dialog_key(uint(0x102 * 65536), true) = 3);
+  verify(
+    "shift tab previous",
+    stdlib.ui_dialog_key(uint(0x102 * 65536 + 256), true) = 4);
+  verify(
+    "ctrl tab next",
+    stdlib.ui_dialog_key(uint(0x102 * 65536 + 512), true) = 3);
+  verify(
+    "plain key none",
+    stdlib.ui_dialog_key(uint(97 * 65536 + 97), true) = 0);
+
+  verify("button width minimum", stdlib.ui_dialog_button_width("OK") = 72);
+  verify(
+    "button width grows",
+    stdlib.ui_dialog_button_width("Don't Save") = 104);
+  verify(
+    "default left of cancel",
+    stdlib.ui_dialog_button_left(0, 300, "OK", "Cancel", 0) = 136);
+  verify(
+    "cancel right aligned",
+    stdlib.ui_dialog_button_left(0, 300, "OK", "Cancel", 1) = 220);
+  verify("button row top", stdlib.ui_dialog_button_top(0, 200) = 168);
+
+  // Alert slots: 0 default, 1 cancel, -1 elsewhere; the close box cancels.
+  verify(
+    "alert hit default",
+    stdlib.ui_alert_hit(0, 0, 300, 120, "OK", "Cancel", 140, 92) = 0);
+  verify(
+    "alert hit cancel",
+    stdlib.ui_alert_hit(0, 0, 300, 120, "OK", "Cancel", 224, 92) = 1);
+  verify(
+    "alert close box cancels",
+    stdlib.ui_alert_hit(0, 0, 300, 120, "OK", "Cancel", 8, 8) = 1);
+  verify(
+    "alert hit outside",
+    stdlib.ui_alert_hit(0, 0, 300, 120, "OK", "Cancel", 100, 20) = -1);
+  verify(
+    "alert too narrow",
+    stdlib.ui_alert_hit(0, 0, 100, 120, "OK", "Cancel", 8, 8) = -1);
+  verify(
+    "alert too short",
+    stdlib.ui_alert_hit(0, 0, 300, 79, "OK", "Cancel", 8, 8) = -1);
+
+  // Input-dialog slots: 0 field, 1 default, 2 cancel.
+  verify(
+    "input hit field",
+    stdlib.ui_input_dialog_hit(0, 0, 300, 200, "OK", "Cancel", 10, 50) = 0);
+  verify(
+    "input hit default",
+    stdlib.ui_input_dialog_hit(0, 0, 300, 200, "OK", "Cancel", 140, 172) = 1);
+  verify(
+    "input hit cancel",
+    stdlib.ui_input_dialog_hit(0, 0, 300, 200, "OK", "Cancel", 224, 172) = 2);
+  verify(
+    "input close box cancels",
+    stdlib.ui_input_dialog_hit(0, 0, 300, 200, "OK", "Cancel", 8, 8) = 2);
+  verify(
+    "input hit outside",
+    stdlib.ui_input_dialog_hit(0, 0, 300, 200, "OK", "Cancel", 100, 20) = -1);
+  verify(
+    "input too short",
+    stdlib.ui_input_dialog_hit(0, 0, 300, 105, "OK", "Cancel", 10, 50) = -1);
+
+  input_text := "Hi";
+  verify("selection all", stdlib.str_selection_all(input_text, input_sel_start, input_sel_stop) = 2);
+  verify("selection spans", input_sel_start = 0 and input_sel_stop = 2);
+  input_sel_start := 0;
+  input_sel_stop := 0;
+end;
+
+procedure host_checks();
+begin
+  verify(
+    "alert disabled",
+    stdlib.ui_alert(0, 0, 300, 120, "t", "m", "OK", "Cancel", 0) = Invalid);
+  verify(
+    "input disabled",
+    stdlib.ui_input_dialog(
+      0, 0, 300, 200, "t", "p", "OK", "Cancel", "", 0, 0, 0, 0, 0) = Invalid);
+  verify("message disabled", stdlib.ui_message(0, 0, 100, 16, "m") = Invalid);
+  verify(
+    "dialog button disabled",
+    stdlib.ui_dialog_button(0, 0, 72, 24, "OK", true, true) = Invalid);
+  verify("message width guard", stdlib.ui_message(0, 0, 7, 16, "m") = Invalid);
+  verify("message height guard", stdlib.ui_message(0, 0, 100, 7, "m") = Invalid);
+end;
+
+// ---- modal state machine (the application owns it) ---------------------
+
+function focus_count(): int;
+begin
+  if dialog = 1 then
+    return 2;
+  return 3;
+end;
+
+procedure open_alert();
+begin
+  dialog := 1;
+  focus := 0;
+  result := 0;
+end;
+
+procedure open_input();
+begin
+  dialog := 2;
+  focus := 0;
+  result := 0;
+end;
+
+procedure close_dialog();
+begin
+  dialog := 0;
+  focus := 0;
+end;
+
+procedure apply_result(value: int);
+begin
+  result := value;
+  if dialog = 1 then
+  begin
+    alert_results := alert_results + 1;
+    if value = 2 then
+      alert_cancels := alert_cancels + 1;
+  end
+  else if dialog = 2 then
+  begin
+    if value = 1 then
+      input_commits := input_commits + 1
+    else if value = 2 then
+      input_cancels := input_cancels + 1;
+  end;
+  close_dialog();
+end;
+
+procedure move_caret();
+begin
+  input_sel_start := input_cursor;
+  input_sel_stop := input_cursor;
+end;
+
+// Edits the caller's buffer through the M2.4.1 helpers; the dialog helper only
+// draws. Called only while the field slot has the focus.
+procedure edit_input();
+var
+  text_byte: byte;
+  st: Status;
+begin
+  if stdlib.ui_key_is_backspace(ev.code) then
+  begin
+    if input_sel_start <> input_sel_stop then
+    begin
+      st := stdlib.str_delete_into(
+        input_text, input_sel_start, input_sel_stop - input_sel_start);
+      input_cursor := input_sel_start;
+      move_caret();
+    end
+    else
+    begin
+      st := stdlib.str_backspace(input_text, input_cursor);
+      move_caret();
+    end;
+  end
+  else if stdlib.ui_key_is_delete(ev.code) then
+  begin
+    if input_sel_start <> input_sel_stop then
+    begin
+      st := stdlib.str_delete_into(
+        input_text, input_sel_start, input_sel_stop - input_sel_start);
+      input_cursor := input_sel_start;
+      move_caret();
+    end
+    else if input_cursor < int(core.len(input_text)) then
+    begin
+      at := input_cursor;
+      at := stdlib.str_cursor_right(input_text, at);
+      if at > input_cursor then
+        st := stdlib.str_delete_into(input_text, input_cursor, at - input_cursor);
+    end;
+  end
+  else if stdlib.ui_key_is_left(ev.code) then
+  begin
+    input_cursor := stdlib.str_cursor_left(input_text, input_cursor);
+    move_caret();
+  end
+  else if stdlib.ui_key_is_right(ev.code) then
+  begin
+    input_cursor := stdlib.str_cursor_right(input_text, input_cursor);
+    move_caret();
+  end
+  else if stdlib.ui_key_is_home(ev.code) then
+  begin
+    input_cursor := stdlib.str_cursor_home(input_cursor);
+    move_caret();
+  end
+  else if stdlib.ui_key_is_end(ev.code) then
+  begin
+    input_cursor := stdlib.str_cursor_end(input_text, input_cursor);
+    move_caret();
+  end
+  else
+  begin
+    text_byte := stdlib.ui_key_text(ev.code);
+    if text_byte >= byte(32) and text_byte < byte(127) then
+    begin
+      one[0] := text_byte;
+      copied := core.substr_into(ch, one, 0, 1);
+      if copied = 1 then
+      begin
+        st := stdlib.str_selection_replace(
+          input_text, input_sel_start, input_sel_stop, ch);
+        input_cursor := input_sel_start;
+        input_sel_stop := input_sel_start;
+      end;
+    end;
+  end;
+  input_scroll := stdlib.ui_text_field_reveal(
+    input_text, input_cursor, input_scroll, field_w - 6);
+end;
+
+procedure handle_key();
+var
+  action: int;
+begin
+  if dialog = 0 then
+    return;
+  action := stdlib.ui_dialog_key(ev.code, true);
+  if action = 1 then
+    apply_result(1)
+  else if action = 2 then
+    apply_result(2)
+  else if action = 3 then
+    focus := stdlib.ui_focus_next(focus, focus_count(), 1)
+  else if action = 4 then
+    focus := stdlib.ui_focus_next(focus, focus_count(), -1)
+  else if dialog = 2 and focus = 0 then
+    edit_input();
+end;
+
+procedure handle_pointer();
+begin
+  if dialog = 1 then
+  begin
+    hit := stdlib.ui_alert_hit(ax, ay, dw, AlertH, "Save", "Don't Save", ev.x, ev.y);
+    if ev.kind = PointerDown then
+    begin
+      if hit >= 0 then
+        focus := hit;
+    end
+    else if ev.kind = PointerUp then
+    begin
+      if hit >= 0 and hit = focus then
+        apply_result(hit + 1);
+    end;
+  end
+  else if dialog = 2 then
+  begin
+    hit := stdlib.ui_input_dialog_hit(
+      ax, ay, dw, InputH, "OK", "Cancel", ev.x, ev.y);
+    if ev.kind = PointerDown then
+    begin
+      if hit >= 0 then
+      begin
+        focus := hit;
+        if hit = 0 then
+        begin
+          input_cursor := stdlib.str_cursor_end(input_text, input_cursor);
+          move_caret();
+          input_scroll := stdlib.ui_text_field_reveal(
+            input_text, input_cursor, input_scroll, field_w - 6);
+        end;
+      end;
+    end
+    else if ev.kind = PointerUp then
+    begin
+      if hit >= 1 and hit = focus then
+        apply_result(hit);
+    end;
+  end;
+end;
+
+// ---- drawing -----------------------------------------------------------
+
+procedure draw_dialog();
+var
+  st: Status;
+begin
+  if dialog = 1 then
+    st := stdlib.ui_alert(
+      ax, ay, dw, AlertH, "Save Changes", alert_text, "Save", "Don't Save", focus)
+  else if dialog = 2 then
+    st := stdlib.ui_input_dialog(
+      ax, ay, dw, InputH, "Rename", "Enter a new name:", "OK", "Cancel",
+      input_text, input_cursor, input_scroll, input_sel_start, input_sel_stop,
+      focus);
+end;
+
+procedure draw_screen();
+var
+  st: Status;
+begin
+  st := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, white);
+  draw_dialog();
+end;
+
+procedure present_screen();
+begin
+  draw_screen();
+  status := syslib.window_present(id);
+end;
+
+procedure draw_shot();
+var
+  st: Status;
+begin
+  st := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, white);
+  st := stdlib.ui_alert(
+    ax, ay, dw, AlertH, "Save Changes", alert_text, "Save", "Don't Save", 0);
+  st := stdlib.ui_input_dialog(
+    ax, ay + InputShotOffset, dw, InputH, "Rename", "Enter a new name:",
+    "OK", "Cancel", "Hello, world", 7, 0, 0, 5, 0);
+end;
+
+// ---- event pump --------------------------------------------------------
+
+procedure drain_events();
+var
+  running: bool;
+  count: int;
+begin
+  running := true;
+  count := 0;
+  while running and count < 64 do
+  begin
+    status := syslib.poll_event(ev);
+    if status = Ok then
+    begin
+      count := count + 1;
+      if ev.kind = Expose then
+        dirty := true
+      else if ev.kind = KeyDown then
+      begin
+        handle_key();
+        dirty := true;
+      end
+      else if ev.kind = PointerDown or ev.kind = PointerUp then
+      begin
+        handle_pointer();
+        dirty := true;
+      end;
+    end
+    else
+      running := false;
+  end;
+  if dirty then
+  begin
+    present_screen();
+    dirty := false;
+  end;
+end;
+
+// ---- injection ---------------------------------------------------------
+
+procedure pointer_to(x: int; y: int);
+begin
+  status := syslib.inject_pointer(-100000, -100000, uint(0));
+  flushed := syslib.event_flush();
+  status := syslib.inject_pointer(x, y, uint(0));
+  drain_events();
+end;
+
+procedure pointer_down();
+begin
+  status := syslib.inject_pointer(0, 0, uint(1));
+  drain_events();
+end;
+
+procedure pointer_up();
+begin
+  status := syslib.inject_pointer(0, 0, uint(0));
+  drain_events();
+end;
+
+procedure inject_key(key_code: int; text_byte: int);
+begin
+  ev.kind := KeyDown;
+  ev.x := 0;
+  ev.y := 0;
+  ev.code := uint(key_code * 65536 + text_byte);
+  ev.window := 0;
+  status := syslib.inject_event(ev);
+  drain_events();
+end;
+
+// ---- kernel proof ------------------------------------------------------
+
+procedure kernel_proof();
+begin
+  // 1. Alert: frame, focused title bar, wrapped message and both buttons.
+  open_alert();
+  present_screen();
+  axb := stdlib.ui_dialog_button_left(ax, dw, "Save", "Don't Save", 0);
+  cxb := stdlib.ui_dialog_button_left(ax, dw, "Save", "Don't Save", 1);
+  by := stdlib.ui_dialog_button_top(ay, AlertH);
+  verify("alert frame", syslib.get_pixel(ax, ay) = black);
+  verify("alert title stripe", syslib.get_pixel(ax + 2, ay + 2) = black);
+  verify("alert message line 1", syslib.get_pixel(ax + 8, ay + 24) = black);
+  verify("alert message line 2", syslib.get_pixel(ax + 8, ay + 40) = black);
+  verify("default double border", syslib.get_pixel(axb + 2, by + 2) = black);
+  verify("cancel has no default border", syslib.get_pixel(cxb + 2, by + 2) = white);
+  verify("default focus ring", syslib.get_pixel(axb + 3, by + 3) = black);
+  verify("cancel unfocused", syslib.get_pixel(cxb + 3, by + 3) = white);
+  verify(
+    "alert hit default",
+    stdlib.ui_alert_hit(ax, ay, dw, AlertH, "Save", "Don't Save", axb + 4, by + 4) = 0);
+  verify(
+    "alert hit cancel",
+    stdlib.ui_alert_hit(ax, ay, dw, AlertH, "Save", "Don't Save", cxb + 4, by + 4) = 1);
+
+  // 2. Tab moves the focus to cancel; Shift+Tab brings it back.
+  inject_key(0x102, 0);
+  verify("tab to cancel", focus = 1);
+  verify("cancel focus ring", syslib.get_pixel(cxb + 3, by + 3) = black);
+  verify("default ring stays", syslib.get_pixel(axb + 2, by + 2) = black);
+  verify("default focus cleared", syslib.get_pixel(axb + 3, by + 3) = white);
+  inject_key(0x102, 256);
+  verify("shift tab back", focus = 0);
+  verify("default focused again", syslib.get_pixel(axb + 3, by + 3) = black);
+
+  // 3. Enter takes the default action and closes the alert.
+  inject_key(0x103, 0);
+  verify(
+    "enter takes default",
+    alert_results = 1 and alert_cancels = 0 and dialog = 0 and result = 1);
+  verify("alert erased", syslib.get_pixel(ax, ay) = white);
+
+  // 4. Escape cancels.
+  open_alert();
+  present_screen();
+  inject_key(0x100, 0);
+  verify(
+    "escape cancels",
+    alert_results = 2 and alert_cancels = 1 and dialog = 0 and result = 2);
+
+  // 5. A click on the close box cancels too.
+  open_alert();
+  present_screen();
+  pointer_to(ax + 9, ay + 8);
+  pointer_down();
+  verify("close box focuses cancel", focus = 1);
+  pointer_up();
+  verify("close box cancels", alert_cancels = 2 and dialog = 0 and result = 2);
+
+  // 6. Text input: prompt, field, caret and editing.
+  input_text := "Hi";
+  input_cursor := 2;
+  input_scroll := 0;
+  input_sel_start := 2;
+  input_sel_stop := 2;
+  open_input();
+  present_screen();
+  verify("prompt line", syslib.get_pixel(ax + 8, ay + 24) = black);
+  verify("field border", syslib.get_pixel(fx, fy) = black);
+  verify("caret at end", syslib.get_pixel(fx + 19, fy + 7) = black);
+  verify(
+    "input hit field",
+    stdlib.ui_input_dialog_hit(ax, ay, dw, InputH, "OK", "Cancel", fx + 4, fy + 4) = 0);
+
+  inject_key(33, 33); // '!'
+  verify("typed append", input_text = "Hi!" and input_cursor = 3);
+  verify("caret moved", syslib.get_pixel(fx + 27, fy + 7) = black);
+  inject_key(0x101, 0); // Backspace
+  verify("backspace", input_text = "Hi" and input_cursor = 2);
+  verify("caret after backspace", syslib.get_pixel(fx + 19, fy + 7) = black);
+  verify("glyph drawn", syslib.get_pixel(fx, fy + 7) = black);
+  inject_key(0x114, 0); // Home
+  verify("home", input_cursor = 0);
+  verify("caret at home", syslib.get_pixel(fx + 3, fy + 7) = black);
+  inject_key(0x110, 0); // Left at 0
+  verify("left clamps", input_cursor = 0);
+  inject_key(0x111, 0); // Right
+  verify("right moves", input_cursor = 1);
+  inject_key(0x115, 0); // End
+  verify("end", input_cursor = 2);
+  verify("caret at end again", syslib.get_pixel(fx + 19, fy + 7) = black);
+
+  // 7. Tab cycles field -> OK -> Cancel -> field.
+  okx := stdlib.ui_dialog_button_left(ax, dw, "OK", "Cancel", 0);
+  canx := stdlib.ui_dialog_button_left(ax, dw, "OK", "Cancel", 1);
+  by := stdlib.ui_dialog_button_top(ay, InputH);
+  inject_key(0x102, 0);
+  verify("tab to ok", focus = 1);
+  verify("ok default ring", syslib.get_pixel(okx + 2, by + 2) = black);
+  verify("ok focus ring", syslib.get_pixel(okx + 3, by + 3) = black);
+  verify("caret hidden", syslib.get_pixel(fx + 19, fy + 7) = white);
+  inject_key(0x102, 0);
+  verify("tab to cancel", focus = 2);
+  verify("cancel focus ring", syslib.get_pixel(canx + 3, by + 3) = black);
+  verify("ok focus cleared", syslib.get_pixel(okx + 3, by + 3) = white);
+  inject_key(0x102, 0);
+  verify("tab wraps to field", focus = 0);
+  verify("caret back", syslib.get_pixel(fx + 19, fy + 7) = black);
+
+  // A printable key while a button is focused does not edit the field.
+  inject_key(0x102, 0);
+  inject_key(90, 122); // 'z'
+  verify("button focus blocks editing", input_text = "Hi" and focus = 1);
+  inject_key(0x102, 0);
+  inject_key(0x102, 0);
+  verify("back at the field", focus = 0);
+
+  // 8. Enter commits the text.
+  inject_key(0x103, 0);
+  verify(
+    "enter commits",
+    input_commits = 1 and input_cancels = 0 and dialog = 0 and result = 1);
+  verify("text kept on ok", input_text = "Hi" and input_cursor = 2);
+  verify("input dialog erased", syslib.get_pixel(ax, ay) = white);
+
+  // 9. Escape cancels and leaves the caller's buffer untouched.
+  open_input();
+  present_screen();
+  inject_key(0x100, 0);
+  verify(
+    "escape cancels input",
+    input_cancels = 1 and dialog = 0 and result = 2);
+  verify("text untouched on cancel", input_text = "Hi" and input_cursor = 2);
+
+  // 10. A selection paints the accent band.
+  open_input();
+  at := stdlib.str_selection_all(input_text, input_sel_start, input_sel_stop);
+  present_screen();
+  verify("selection spans", at = 2 and input_sel_start = 0 and input_sel_stop = 2);
+  verify("selection accent", syslib.get_pixel(fx + 17, fy + 7) = accent);
+  inject_key(0x100, 0);
+  verify("selection cancelled", dialog = 0 and input_cancels = 2);
+
+  // 11. A pointer click on OK commits.
+  open_input();
+  present_screen();
+  pointer_to(okx + 20, by + 12);
+  pointer_down();
+  verify("ok click focuses", focus = 1);
+  pointer_up();
+  verify("ok click commits", input_commits = 2 and dialog = 0 and result = 1);
+
+  status := syslib.window_close(id);
+  verify("window closed", status = Ok);
+end;
+
+procedure report_and_exit();
+begin
+  if failed then
+  begin
+    say("ui_dialogs: failed check ");
+    at := core.format_int_into(digits, fail_step, uint(10), uint(0));
+    say(digits);
+    say(" (");
+    say(fail_label);
+    say(")\n");
+  end
+  else
+    say("ui_dialogs: ok\n");
+end;
+
+procedure main(args: const string[1024]);
+begin
+  failed := false;
+  fail_step := 0;
+  step := 0;
+  shot := args = "shot";
+  black := stdlib.ui_black();
+  white := stdlib.ui_white();
+  accent := stdlib.ui_accent();
+  dialog := 0;
+  focus := 0;
+  result := 0;
+  alert_results := 0;
+  alert_cancels := 0;
+  input_commits := 0;
+  input_cancels := 0;
+  input_text := "";
+  input_cursor := 0;
+  input_scroll := 0;
+  input_sel_start := 0;
+  input_sel_stop := 0;
+  alert_text := "The document has unsaved changes.\nThe text was not saved.";
+
+  pure_checks();
+
+  screen_w := syslib.screen_width();
+  screen_h := syslib.screen_height();
+  if screen_w = uint(0) then
+  begin
+    host_checks();
+    if failed then
+      report_and_exit()
+    else
+      say("ui_dialogs: host ok\n");
+  end
+  else if screen_w < uint(120 + 560 + 20) or screen_h < uint(60 + 440 + 20) then
+    say("ui_dialogs: screen too small\n")
+  else
+  begin
+    status := syslib.window_open(120, 60, 560, 440, "Dialogs", id);
+    if status <> Ok then
+      say("ui_dialogs: no window\n")
+    else
+    begin
+      status := syslib.window_content_rect(id, rect);
+      if status <> Ok then
+        say("ui_dialogs: no content rect\n")
+      else
+      begin
+        ax := rect.x + 8;
+        ay := rect.y + 8;
+        dw := rect.w - 16;
+        fx := ax + 8;
+        fy := ay + stdlib.ui_title_bar_height() + stdlib.ui_content_inset() + stdlib.ui_line_height() + 4;
+        field_w := dw - 16;
+        dirty := false;
+        flushed := syslib.event_flush();
+        if shot then
+        begin
+          draw_shot();
+          status := syslib.window_present(id);
+          say("ui_dialogs: ready\n");
+          flushed := core.clock();
+          while core.clock() - flushed < uint(3000000000) do
+            at := 0;
+          status := syslib.window_close(id);
+          say("ui_dialogs: done\n");
+        end
+        else
+          kernel_proof();
+        report_and_exit();
+      end;
+    end;
+  end;
+end;

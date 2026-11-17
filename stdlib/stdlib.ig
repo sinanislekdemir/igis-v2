@@ -56,6 +56,20 @@ const
   UiMenuActionRight = 4;
   UiMenuActionActivate = 5;
   UiMenuActionClose = 6;
+  UiDialogResultNone = 0;
+  UiDialogResultDefault = 1;
+  UiDialogResultCancel = 2;
+  UiDialogFocusNext = 3;
+  UiDialogFocusPrevious = 4;
+  UiDialogButtonHeight = 24;
+  UiDialogButtonGap = 12;
+  UiDialogButtonMin = 72;
+  UiDialogButtonPad = 24;
+  UiDialogFieldHeight = 22;
+  UiDialogFieldGap = 4;
+  UiAlertMinHeight = 80;
+  UiInputMinHeight = 106;
+  UiMessageCapacity = 256;
   UiBlack = 0x000000;
   UiWhite = 0x00FFFFFF;
   UiGray = 0x00CCCCCC;
@@ -3000,4 +3014,415 @@ begin
   if ui_menu_is_separator(items[row]) then
     return -1;
   return row;
+end;
+
+// ---- UI dialogs (spec 0003, "UI dialogs") ------------------------------
+//
+// A framed alert, a text-input dialog, their layout/hit helpers, word-wrapped
+// text and the modal key mapping (M2.4.4). Ordinary language code over the
+// M2.4.0 chrome, the M2.4.1 editing helpers and the M2.4.2 controls; there is
+// no new opcode, builtin, record, sum, user enum, generic or `state`.
+//
+// The application owns the modal loop (`syslib.next_event`/`poll_event`), the
+// focus slot, the result and the text buffer. The library stores nothing, runs
+// no event pump and never mutates the text: `ui_input_dialog` only draws.
+//
+// Result and focus codes are documented in spec 0003 ("UI dialogs"):
+//   result: 0 none/open, 1 default/OK, 2 cancel
+//   `ui_dialog_key` also returns 3 focus next and 4 focus previous
+// Focus slots are dialog-local:
+//   alert: 0 default, 1 cancel
+//   input dialog: 0 text field, 1 default (OK), 2 cancel
+
+// Word-wrapped black text inside `(x, y, w, h)`: whole 8-pixel rows on a
+// 16-pixel line advance, at most `h / 16` lines, breaking at the last space that
+// fits and hard-breaking an unbroken run at `w / 8` cells. One byte is one cell
+// (the 8x8 font's rule), an explicit newline starts a new line, and a hard break
+// never splits a code point (a partial sequence is drawn as blank cells). Text
+// past the last whole line is dropped. `w < 8` or `h < 8` is `Invalid` and draws
+// nothing; `syslib` clips the rest, so off-screen geometry is safe.
+function ui_message(x: int; y: int; w: int; h: int; text: const string[0]): Status;
+var
+  st: Status;
+  cells: int;
+  max_lines: int;
+  length: int;
+  pos: int;
+  at: int;
+  col: int;
+  brk: int;
+  line_end: int;
+  next_pos: int;
+  line: int;
+  ch: byte;
+  span: int;
+  cut: int;
+  staged: string[256];
+  copied: int;
+  ink: uint;
+  done: bool;
+begin
+  if w < UiGlyphWidth or h < UiGlyphHeight then
+    return Invalid;
+  cells := w div UiGlyphWidth;
+  if cells < 1 then
+    cells := 1;
+  max_lines := h div UiLineHeight;
+  if max_lines < 1 then
+    max_lines := 1;
+  length := int(core.len(text));
+  ink := uint(UiBlack);
+  pos := 0;
+  line := 0;
+  while pos < length and line < max_lines do
+  begin
+    at := pos;
+    col := 0;
+    brk := -1;
+    line_end := pos;
+    next_pos := pos;
+    done := false;
+    while not done and at < length and col < cells do
+    begin
+      ch := text[at];
+      if ch = byte(10) then
+      begin
+        line_end := at;
+        next_pos := at + 1;
+        done := true;
+      end
+      else
+      begin
+        if ch = byte(32) then
+          brk := at;
+        at := at + 1;
+        col := col + 1;
+        if at >= length then
+        begin
+          line_end := at;
+          next_pos := at;
+          done := true;
+        end
+        else if col >= cells then
+        begin
+          if brk >= pos then
+          begin
+            line_end := brk;
+            next_pos := brk + 1;
+          end
+          else
+          begin
+            line_end := at;
+            next_pos := at;
+          end;
+          done := true;
+        end;
+      end;
+    end;
+    if line_end > pos then
+    begin
+      cut := line_end;
+      while cut > pos + 1 and not str_boundary(text, cut) do
+        cut := cut - 1;
+      span := cut - pos;
+      if span > UiMessageCapacity then
+      begin
+        span := UiMessageCapacity;
+        while span > 1 and not str_boundary(text, pos + span) do
+          span := span - 1;
+      end;
+      copied := core.substr_into(staged, text, pos, span);
+      if copied = span then
+      begin
+        st := syslib.draw_text(x, y + line * UiLineHeight, staged, ink);
+        if st <> Ok then
+          return st;
+      end;
+    end;
+    if next_pos <= pos then
+      next_pos := pos + 1;
+    pos := next_pos;
+    line := line + 1;
+  end;
+  return Ok;
+end;
+
+// The width of a dialog button for `label`: the label plus 24 pixels of padding
+// and border, at least 72. The alert and input-dialog layouts use it, and a
+// caller can size a matching button of its own.
+function ui_dialog_button_width(label: const string[0]): int;
+var
+  width: int;
+begin
+  width := ui_text_width(label) + UiDialogButtonPad;
+  if width < UiDialogButtonMin then
+    width := UiDialogButtonMin;
+  return width;
+end;
+
+// The left edge of a dialog button, right-aligned inside a dialog at `(x, w)`:
+// `which` 0 is the default button and 1 the cancel button (any other value is
+// treated as 0). The two buttons are `UiDialogButtonGap` apart and both inset
+// `ui_content_inset` from the dialog's right edge. Pure, so a hit test and the
+// drawing helper agree by construction.
+function ui_dialog_button_left(x: int; w: int; default_label: const string[0]; cancel_label: const string[0]; which: int): int;
+var
+  bw_d: int;
+  bw_c: int;
+  cancel_x: int;
+begin
+  bw_d := ui_dialog_button_width(default_label);
+  bw_c := ui_dialog_button_width(cancel_label);
+  cancel_x := x + w - UiContentInset - bw_c;
+  if which = 1 then
+    return cancel_x;
+  return cancel_x - UiDialogButtonGap - bw_d;
+end;
+
+// The top edge of the dialog button row inside a dialog at `(y, h)`: the button
+// height plus the content inset above the dialog's bottom edge.
+function ui_dialog_button_top(y: int; h: int): int;
+begin
+  return y + h - UiContentInset - UiDialogButtonHeight;
+end;
+
+// A dialog button: `ui_button` at rest plus, when `is_default`, a solid inset
+// black ring at (x + 2, y + 2) that marks the default action (the classic
+// double border). The dotted focus ring from `ui_button` sits one pixel inside
+// it, so focus and default stay distinguishable. Too-small geometry returns
+// `Invalid` from `ui_button` and draws nothing.
+function ui_dialog_button(x: int; y: int; w: int; h: int; label: const string[0]; focused: bool; is_default: bool): Status;
+var
+  st: Status;
+begin
+  st := ui_button(x, y, w, h, label, false, focused);
+  if st <> Ok then
+    return st;
+  if is_default and w > 8 and h > 8 then
+  begin
+    st := syslib.draw_rect(x + 2, y + 2, w - 4, h - 4, uint(UiBlack));
+    if st <> Ok then
+      return st;
+  end;
+  return Ok;
+end;
+
+// An alert dialog inside `(x, y, w, h)`: a white interior, a one-pixel frame, a
+// focused title bar, the word-wrapped `message` in the area between the title
+// bar and the button row (through `ui_message`), and the right-aligned
+// `default_label` and `cancel_label` buttons. `focus` is the alert's slot: 0
+// focuses the default button, 1 the cancel button, anything else draws no focus
+// ring (the default button keeps its double border). The app owns the modal
+// loop; Enter/Escape/clicks are applied with `ui_dialog_key`/`ui_alert_hit`.
+//
+// The buttons must fit and the message area must hold one 16-pixel line:
+// `w < default_w + cancel_w + 12 + 2 * 8 + 2` or `h < 80` returns `Invalid` and
+// draws nothing. Disabled graphics draw nothing (`Invalid`). Drawing is clipped
+// by `syslib`, never faulted.
+function ui_alert(x: int; y: int; w: int; h: int; title: const string[0]; message: const string[0]; default_label: const string[0]; cancel_label: const string[0]; focus: int): Status;
+var
+  st: Status;
+  bw_d: int;
+  bw_c: int;
+  msg_y: int;
+  msg_h: int;
+  row_y: int;
+  default_x: int;
+  cancel_x: int;
+begin
+  bw_d := ui_dialog_button_width(default_label);
+  bw_c := ui_dialog_button_width(cancel_label);
+  if w < bw_d + bw_c + UiDialogButtonGap + 2 * UiContentInset + 2 then
+    return Invalid;
+  if h < UiAlertMinHeight then
+    return Invalid;
+  st := syslib.fill_rect(x, y, w, h, uint(UiWhite));
+  if st <> Ok then
+    return st;
+  st := ui_frame(x, y, w, h);
+  if st <> Ok then
+    return st;
+  st := ui_title_bar(x, y, w, title, true);
+  if st <> Ok then
+    return st;
+  msg_y := y + UiTitleBarHeight + UiContentInset;
+  row_y := ui_dialog_button_top(y, h);
+  msg_h := row_y - UiContentInset - msg_y;
+  st := ui_message(x + UiContentInset, msg_y, w - 2 * UiContentInset, msg_h, message);
+  if st <> Ok then
+    return st;
+  default_x := ui_dialog_button_left(x, w, default_label, cancel_label, 0);
+  cancel_x := ui_dialog_button_left(x, w, default_label, cancel_label, 1);
+  st := ui_dialog_button(
+    default_x, row_y, bw_d, UiDialogButtonHeight, default_label, focus = 0, true);
+  if st <> Ok then
+    return st;
+  st := ui_dialog_button(
+    cancel_x, row_y, bw_c, UiDialogButtonHeight, cancel_label, focus = 1, false);
+  if st <> Ok then
+    return st;
+  return Ok;
+end;
+
+// The alert slot under `(px, py)`: 0 the default button, 1 the cancel button,
+// -1 anywhere else. The title bar's close box also returns 1 (closing cancels).
+// The geometry is exactly `ui_alert`'s, recomputed through the button helpers; a
+// dialog too small to be drawn returns -1.
+function ui_alert_hit(x: int; y: int; w: int; h: int; default_label: const string[0]; cancel_label: const string[0]; px: int; py: int): int;
+var
+  bw_d: int;
+  bw_c: int;
+  row_y: int;
+begin
+  bw_d := ui_dialog_button_width(default_label);
+  bw_c := ui_dialog_button_width(cancel_label);
+  if w < bw_d + bw_c + UiDialogButtonGap + 2 * UiContentInset + 2 then
+    return -1;
+  if h < UiAlertMinHeight then
+    return -1;
+  if w >= 16 and ui_rect_hit(x + 4, y + 3, UiCloseBoxSize, UiCloseBoxSize, px, py) then
+    return 1;
+  row_y := ui_dialog_button_top(y, h);
+  if ui_rect_hit(
+    ui_dialog_button_left(x, w, default_label, cancel_label, 0),
+    row_y, bw_d, UiDialogButtonHeight, px, py) then
+    return 0;
+  if ui_rect_hit(
+    ui_dialog_button_left(x, w, default_label, cancel_label, 1),
+    row_y, bw_c, UiDialogButtonHeight, px, py) then
+    return 1;
+  return -1;
+end;
+
+// A text-input dialog inside `(x, y, w, h)`: a white interior, a one-pixel
+// frame, a focused title bar, a one-line prompt, a `ui_text_field` over the
+// caller's text and the right-aligned default/cancel buttons. `focus` is 0 for
+// the text field, 1 for the default button and 2 for cancel; the text field only
+// shows its caret and focus ring while focused. `text`, `cursor`, `scroll` and
+// the selection are the caller's state; the helper draws and never mutates them,
+// so the text is the caller's on OK and unchanged on cancel (the app discards it
+// or keeps it, its choice).
+//
+// The buttons must fit and the prompt, field and button row must not overlap:
+// `w < default_w + cancel_w + 12 + 2 * 8 + 2` or `h < 106` returns `Invalid` and
+// draws nothing. Disabled graphics draw nothing (`Invalid`).
+function ui_input_dialog(x: int; y: int; w: int; h: int; title: const string[0]; prompt: const string[0]; default_label: const string[0]; cancel_label: const string[0]; text: const string[0]; cursor: int; scroll: int; sel_start: int; sel_stop: int; focus: int): Status;
+var
+  st: Status;
+  bw_d: int;
+  bw_c: int;
+  prompt_y: int;
+  field_y: int;
+  row_y: int;
+  default_x: int;
+  cancel_x: int;
+begin
+  bw_d := ui_dialog_button_width(default_label);
+  bw_c := ui_dialog_button_width(cancel_label);
+  if w < bw_d + bw_c + UiDialogButtonGap + 2 * UiContentInset + 2 then
+    return Invalid;
+  if h < UiInputMinHeight then
+    return Invalid;
+  st := syslib.fill_rect(x, y, w, h, uint(UiWhite));
+  if st <> Ok then
+    return st;
+  st := ui_frame(x, y, w, h);
+  if st <> Ok then
+    return st;
+  st := ui_title_bar(x, y, w, title, true);
+  if st <> Ok then
+    return st;
+  prompt_y := y + UiTitleBarHeight + UiContentInset;
+  st := ui_message(x + UiContentInset, prompt_y, w - 2 * UiContentInset, UiLineHeight, prompt);
+  if st <> Ok then
+    return st;
+  field_y := prompt_y + UiLineHeight + UiDialogFieldGap;
+  st := ui_text_field(
+    x + UiContentInset, field_y, w - 2 * UiContentInset, UiDialogFieldHeight,
+    text, cursor, scroll, sel_start, sel_stop, focus = 0);
+  if st <> Ok then
+    return st;
+  row_y := ui_dialog_button_top(y, h);
+  default_x := ui_dialog_button_left(x, w, default_label, cancel_label, 0);
+  cancel_x := ui_dialog_button_left(x, w, default_label, cancel_label, 1);
+  st := ui_dialog_button(
+    default_x, row_y, bw_d, UiDialogButtonHeight,
+    default_label, focus = 1, true);
+  if st <> Ok then
+    return st;
+  st := ui_dialog_button(
+    cancel_x, row_y, bw_c, UiDialogButtonHeight,
+    cancel_label, focus = 2, false);
+  if st <> Ok then
+    return st;
+  return Ok;
+end;
+
+// The input-dialog slot under `(px, py)`: 0 the text field, 1 the default
+// button, 2 the cancel button (and the title bar's close box, which cancels),
+// -1 elsewhere. The geometry is exactly `ui_input_dialog`'s; a dialog too small
+// to be drawn returns -1.
+function ui_input_dialog_hit(x: int; y: int; w: int; h: int; default_label: const string[0]; cancel_label: const string[0]; px: int; py: int): int;
+var
+  bw_d: int;
+  bw_c: int;
+  prompt_y: int;
+  field_y: int;
+  row_y: int;
+begin
+  bw_d := ui_dialog_button_width(default_label);
+  bw_c := ui_dialog_button_width(cancel_label);
+  if w < bw_d + bw_c + UiDialogButtonGap + 2 * UiContentInset + 2 then
+    return -1;
+  if h < UiInputMinHeight then
+    return -1;
+  if w >= 16 and ui_rect_hit(x + 4, y + 3, UiCloseBoxSize, UiCloseBoxSize, px, py) then
+    return 2;
+  prompt_y := y + UiTitleBarHeight + UiContentInset;
+  field_y := prompt_y + UiLineHeight + UiDialogFieldGap;
+  if ui_rect_hit(x + UiContentInset, field_y, w - 2 * UiContentInset, UiDialogFieldHeight, px, py) then
+    return 0;
+  row_y := ui_dialog_button_top(y, h);
+  if ui_rect_hit(
+    ui_dialog_button_left(x, w, default_label, cancel_label, 0),
+    row_y, bw_d, UiDialogButtonHeight, px, py) then
+    return 1;
+  if ui_rect_hit(
+    ui_dialog_button_left(x, w, default_label, cancel_label, 1),
+    row_y, bw_c, UiDialogButtonHeight, px, py) then
+    return 2;
+  return -1;
+end;
+
+// The modal action for a packed `Event.code` (spec 0010):
+//
+//   0 none, 1 default/OK, 2 cancel, 3 focus next, 4 focus previous.
+//
+// Enter (0x103) is always the default action, Escape (0x100) cancels only when
+// `has_cancel` is true, Tab (0x102) is focus next and Shift+Tab focus previous.
+// The application applies it: 1/2 close the dialog with that result, 3/4 call
+// `ui_focus_next` over the dialog's slot count (2 for an alert, 3 for an input
+// dialog), and every other key goes to the app (a text field edits through the
+// M2.4.1 helpers). Focused cancel is still cancelled by Escape, never by Enter;
+// Enter always takes the default action.
+function ui_dialog_key(code: uint; has_cancel: bool): int;
+var
+  key: int;
+begin
+  key := ui_key_code(code);
+  if key = 0x103 then
+    return UiDialogResultDefault;
+  if key = 0x100 then
+  begin
+    if has_cancel then
+      return UiDialogResultCancel;
+    return UiDialogResultNone;
+  end;
+  if key = 0x102 then
+  begin
+    if ui_key_modifiers(code) mod 2 = 1 then
+      return UiDialogFocusPrevious;
+    return UiDialogFocusNext;
+  end;
+  return UiDialogResultNone;
 end;
