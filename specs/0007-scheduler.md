@@ -375,8 +375,11 @@ and input waits, kills each at a varying delay, and requires every `wait` to ret
 - `kill` on a live task marks it for termination at its next safe point; `exit(Killed)`
   runs and the task is reclaimed. `kill` on a request that is still queued cancels the
   request: no task is created, and `Killed` is recorded in the exit ring under the
-  reserved id. `kill` on an unknown or already terminated id returns `Status.NotFound`.
-  It never waits.
+  reserved id. A request that has already been popped for compilation is not a task yet;
+  it has no slot and cannot be cancelled by id, so `kill` returns `Status.NotFound` in
+  that window (the caller can retry once the task is live). `kill` on an unknown or
+  already terminated id returns `Status.NotFound`. It never waits and never interrupts a
+  compile.
 - A request that fails to load (missing file, compile error, placement failure) creates no
   task: the compiler's diagnostic is printed, `Faulted(IoError)` is recorded under the
   reserved id together with a 192-byte `Diagnostic` image, and a parent blocked in
@@ -501,6 +504,7 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | `wait` on an unknown or evicted id | `Status.NotFound` |
 | `kill` on an unknown or terminated id | `Status.NotFound` |
 | `kill` on a queued request | Request cancelled; `Killed` recorded under the reserved id; no task created |
+| `kill` of a request being compiled | No task exists yet and the request has left the queue: `Status.NotFound`; the request is not cancelled (the caller retries once the task is live). Separate from the Sch17 record races |
 | `wait` on a killed id | `ExitReason.Killed` |
 | Request path malformed or not a regular file | `Status.Invalid`; no request enqueued |
 | Parent terminates with live children | Children continue (ADR 0017 addendum 2) |
@@ -554,4 +558,4 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 2026-11-15 | Stream blocking added as a third `WaitFor`: `WaitFor::Stream(handle)` with `task::wake_stream`, sender/receiver/close wake rules and a post-block `stream::ready_for` recheck that closes the failed-attempt-to-block race. Sends and receives take the stream lock without any slot lock and wake after releasing it. |
 | 2026-11-16 | Per-task stack guards: placement takes `stack_len + 4096` contiguous frames, the lowest is unmapped and excluded from the region, and reclaim restores it before returning guard and stack as one unit on every destruction path (failed spawn, verifier rejection, exit, kill, fault, stale eviction). Every PTE change is followed by a CR3 reload and an IPI shootdown to all online cores. |
 | 2026-11-17 | Sch12 made concrete as round-robin: `claim_class` starts its scan at a global `NEXT_CLAIM` cursor, stores the claimed slot + 1 after a successful take, and wraps; the old always-from-slot-0 scan let a busy parent starve its higher-slot children on `-smp 1` (observed by the M2.3.5 two-application proof). On SMP the races make the rotation approximate but never permanently skip a runnable slot. Realtime-first claim is unchanged. |
-| 2026-11-17 | Q50 fixed: Sch17 states the kill invariant, the per-slot record is an id-tagged `AtomicU64` (task ids are monotonic, so it cannot reach a later tenant), `request_kill` publishes under the slot lock, `task::block` re-checks the record under that lock after the boundary check (the lost-wake window), `take_kill(slot, id)` compare-exchanges its own id only, and `reclaim` clears the reservation and record under the lock for its own id. Boot self-check `kill: records ok` proves the interleaving on real slot state; `samples/apps/kill_stress` (300 spawn/kill/wait iterations across the three blocking waits) passes on `-smp 4` and `-smp 1` and hangs on the first iteration of the pre-fix kernel (ADR 0034). |
+| 2026-11-17 | Q50 fixed: Sch17 states the kill invariant, the per-slot record is an id-tagged `AtomicU64` (task ids are monotonic, so it cannot reach a later tenant), `request_kill` publishes under the slot lock, `task::block` re-checks the record under that lock after the boundary check (the lost-wake window), `take_kill(slot, id)` compare-exchanges its own id only, and `reclaim` clears the reservation and record under the lock for its own id. The in-service window is now stated explicitly: a request popped for compilation has no slot, so `kill` returns `NotFound` there and never interrupts the compile; the caller retries once the task is live. Boot self-check `kill: records ok` proves the interleaving on real slot state; `samples/apps/kill_stress` (300 spawn/kill/wait iterations across the three blocking waits) passes on `-smp 4` and `-smp 1` and hangs on the first iteration of the pre-fix kernel (ADR 0034). |

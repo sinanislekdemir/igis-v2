@@ -2,8 +2,8 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-17
-- **Supersedes:** none
-- **Superseded by:** none
+- **Deciders:** igis-v2 kernel/scheduler
+- **Related specs:** 0001, 0004, 0005, 0007
 
 ## Context
 

@@ -616,6 +616,19 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
   `samples/apps/system_probe` + `scripts/system_control_qmp.py` runs for halt/reboot.
   Spec 0017, ADR 0033. **M2 is complete.**
 
+### Post-M2 scheduler fixes
+
+- [x] **Q50** `core.kill` of a task another core has claimed: both races fixed. The
+  per-slot record is now an id-tagged `AtomicU64` (task ids are monotonic, so a record
+  never reaches a later tenant), `request_kill` publishes under the slot lock,
+  `task::block` re-checks and consumes its own record under that lock after the
+  quantum-boundary check (the lost wake that hung `core.wait`), and `reclaim` clears the
+  record and the reservation only for its own id. Boot self-check `kill: records ok`;
+  new `samples/apps/kill_stress` + `kill_victim` (300 spawn/kill/wait iterations over the
+  console, stream and input waits) passes on `-smp 4` and `-smp 1`, and hangs on its first
+  iteration against the pre-fix kernel. Spec 0007 Sch17, ADR 0034, OPEN-QUESTIONS Q50
+  resolved.
+
 ### M2 completion
 
 All M2.1–M2.6 tickets are done. The accepted M2 limitations remain documented and are

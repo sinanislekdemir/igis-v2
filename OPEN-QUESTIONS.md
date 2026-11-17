@@ -58,7 +58,6 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 
 | # | Question | Options / recommendation | Trigger |
 |---|----------|--------------------------|---------|
-| Q50 | `core.kill` of a task another core has already claimed | `request_kill` publishes `KILL_FLAGS` before taking the slot lock; a claimed task's owner reads the flag after its quantum. If the owner reads it just before the publication and then blocks the task, the request can be left with no runnable owner and `wait` can hang. M2.3.5's proof hit this once on `-smp 4` and avoids the path with a stage-4 close/exit acknowledged by `core.wait`; the two fixes are to re-check `KILL_FLAGS` in the block path under the slot lock, or to publish the flag while holding the slot lock and wake a blocked task after it. The hang is observed but the exact interleaving is unproven | when an application must kill an arbitrary running task (M2.4 window/task controls) |
 | Q51 | Application file API: subdirectories, writable save, and a handle model | M2.5.1 implements the read-only root-only view (`core.fs_list`/`fs_read`/`fs_size`, spec 0013, ADR 0027): no handle, no writable path, a path with `/` is `Invalid`. `lost+found` is listed as a directory and refused by reads. The editor can save only when a writable filesystem exists; the browser may need subdirectory listing if the image ever grows one. A per-open handle model is rejected for M2 but can be revisited if per-read root lookup measures badly | M2.5.4 (browser) for subdirectories; when a writable filesystem exists for save |
 
 ## Decided in the 2026-11-16 guards session
@@ -428,6 +427,27 @@ windows with frame/title bar/content rectangle and z-order, `expose` repaint und
 narrowed clip, and the service's own present of the affected union. A clip set/reset pair
 for applications, dirty-rectangle tracking and a soft-versus-hardware cursor shape are
 M2.2/M2.3 decisions, not open here.
+
+## Decided in the 2026-11-17 kill session
+
+**Q50 — `core.kill` of a claimed task (spec 0007 Sch17, ADR 0034).** Two races, fixed
+together. The *lost wake*: the owner's quantum-boundary check runs before it decides to
+block, and the block trace (a console write) is milliseconds long, so a request published in
+that window parked a record for an empty slot while the owner then put the task to sleep;
+nothing was runnable and `core.wait` hung. `task::block` now re-checks the record under the
+slot lock after the boundary check, consumes a match, and leaves the task `Runnable` with
+`kill_requested` set. The *slot reuse* race: the per-slot record is now an `AtomicU64`
+naming the target task id instead of a boolean, and `request_kill`, `block`, `take_kill` and
+`reclaim` all read/store/clear it under the slot lock; `take_kill(slot, id)` and `reclaim`
+consume only their own id, so a record can never reach a later tenant (ids are monotonic).
+A kill published between the boundary check and `release` leaves the task runnable with a
+pending record, consumed at the next boundary: one extra quantum, never a hang. Proof: the
+boot self-check `kill: records ok` drives the lost-wake interleaving on a real slot and a
+real task before the APs start, and `samples/apps/kill_stress` runs 300 spawn/kill/wait
+iterations across the console, stream and input waits on `-smp 4` (300 killed) and `-smp 1`
+(300 killed). The same application hangs on its first iteration against the pre-fix kernel,
+so the stress test really exercises the bug. The accepted cooperative hole is unchanged: a
+task that never reaches a safe point cannot be killed.
 
 ## Suggested next step
 
