@@ -6,7 +6,7 @@
 - **Supersedes:** the owner-`0`-only terminal of spec 0012 D1 (extended, not removed)
 - **Superseded by:** none
 - **ADRs:** 0025 (kernel text windows), 0028 (one machine-wide terminal attached to a
-  task-owned window)
+  task-owned window), 0029 (boot into the desktop and launch the shell from it)
 - **Updated:** 2026-11-17
 
 ## Context

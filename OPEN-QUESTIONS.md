@@ -313,9 +313,9 @@ These are no longer open; they were recorded in specs and ADRs:
 - Work-stealing interpreter loops, no core pinning (ADR 0011).
 - Rust, x86_64-first, GRUB/multiboot2, read-only ext2 (ADR 0012–0015).
 - Realtime class with heartbeat and `WatchdogTimeout`; no reserved core (ADR 0016).
-- REPL as a kernel service; `shell` then `entrypoint`; `run`/`spawn`/`wait`/`kill`;
-  global task ids; fixed `string[1024]` args delivered via `main(args)`; 1024-slot
-  request queue (ADR 0017 and addenda).
+- REPL as a kernel service; `entrypoint` (the desktop from M2.5.6) then `shell`;
+  `run`/`spawn`/`wait`/`kill`; global task ids; fixed `string[1024]` args delivered via
+  `main(args)`; 1024-slot request queue (ADR 0017 and addenda, ADR 0029).
 - Language: Pascal-like, nominal types, no user generics, `bytes`/`string`, built-in
   `array`/`ring`/`map`, `Status` errors, `core`/`stdlib`/`syslib`, streams + `yield`
   (spec 0003).

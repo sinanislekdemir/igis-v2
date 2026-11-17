@@ -5,7 +5,7 @@
   `interpreter`, `abi`; `samples/apps`; M2.3.4 of the desktop milestone
 - **Supersedes:** the full-screen console of spec 0009 G14 (superseded in part)
 - **Superseded by:** none
-- **ADRs:** 0020, 0024, 0025
+- **ADRs:** 0020, 0024, 0025, 0029
 - **Updated:** 2026-11-17
 
 ## Context
@@ -294,6 +294,9 @@ while that id is its own; otherwise it presents what the service last left.
   `repl: trying `shell`` and a working shell. The event-injecting regression suite runs
   on that image because the boot desktop is a permanent consumer of the machine-wide
   queue (D19).
+- No-graphics fallback: a `-vga none` boot prints `graphics: disabled (no framebuffer)`,
+  `desktop_shell: no graphics`, `desktop_shell: serial shell task N`, and then a working
+  `shell> ` prompt on serial (the desktop exits and the shell is the only task).
 - Screenshot: `scripts/desktop_screenshot_qmp.py` on the shell-entry image runs
   `desktop_shell`, waits for `desktop_shell: ready`, and captures
   `/home/sinan/Desktop/igis-desktop.png` through QMP `screendump` (PNG, PPM fallback).

@@ -41,7 +41,7 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0014 | [Boot via GRUB and multiboot2, with a hand-written long-mode transition](0014-grub-multiboot2-boot.md) | Accepted | 2026-11-12 |
 | 0015 | [Deliver applications on a read-only ext2 image over an in-memory block device](0015-read-only-ext2-delivery.md) | Accepted | 2026-11-12 |
 | 0016 | [Realtime tasks run without quantum preemption under a heartbeat contract](0016-realtime-heartbeat.md) | Accepted | 2026-11-12 |
-| 0017 | [The REPL is a kernel service; applications request runs through a spawn queue](0017-repl-spawn-service.md) | Accepted | 2026-11-12 |
+| 0017 | [The REPL is a kernel service; applications request runs through a spawn queue](0017-repl-spawn-service.md) | Accepted (boot order superseded by 0029) | 2026-11-12 |
 | 0018 | [Floating point is in the first milestone: one `f64` type and a per-task FPU region](0018-floating-point.md) | Accepted | 2026-11-13 |
 | 0019 | [Applications are always compiled from source at load; no precompiled packages, ever](0019-source-only-delivery.md) | Accepted | 2026-11-13 |
 | 0020 | [The window server is a kernel `syslib` service over one shadow screen](0020-kernel-window-service.md) | Accepted | 2026-11-16 |
@@ -53,3 +53,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0026 | [The standard library may import `syslib` for the UI layout layer](0026-stdlib-may-use-syslib.md) | Accepted | 2026-11-17 |
 | 0027 | [File access for applications is stateless, root-only host builtins](0027-stateless-root-only-file-api.md) | Accepted | 2026-11-17 |
 | 0028 | [One machine-wide terminal attached to a task-owned window](0028-one-terminal-attached-window.md) | Accepted | 2026-11-17 |
+| 0029 | [Boot into the desktop; launch the shell from its Terminal item](0029-boot-to-desktop.md) | Accepted | 2026-11-17 |

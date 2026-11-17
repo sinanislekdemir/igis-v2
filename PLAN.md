@@ -45,7 +45,9 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `desktop_shell: ready`), the `Terminal` menu click spawns the shell
   (`desktop_shell: launched shell task 2`, `shell> `) and `terminal` prints
   `terminal: ok`; the shell image shows `entrypoint: not found` → `shell: spawned as
-  task 2` and boots the pre-M2.5.6 shell. The event-injecting suite runs on
+  task 2` and boots the pre-M2.5.6 shell; a `-vga none` boot shows
+  `desktop_shell: no graphics` → `desktop_shell: serial shell task 2` → a working
+  `shell> ` prompt on serial. The event-injecting suite runs on
   `build/igis-shell.iso`: `terminal`, `files`, `text_edit`, `ui_layout`, `ui_controls`,
   `ui_menus`, `ui_dialogs`, `ui_icons`, `widgets check`, `clock_window check`,
   `editor check`, `browser check`, `desktop_shell check`, `windows`, `windows_events`,
