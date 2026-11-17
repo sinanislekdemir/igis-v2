@@ -652,9 +652,13 @@ fn loop_body(core: usize, image: &Ext2<'_>) -> ! {
 
                     // A kill may have been requested while this core owned the
                     // task value (in the slot) or, for a running task, by
-                    // another core through `KILL_FLAGS`. Both are honoured at
-                    // this safe point (spec 0007, "Termination").
-                    let killed = task.kill_requested || task::take_kill(task.slot);
+                    // another core through the id-tagged `KILL_ID` record. Both
+                    // are honoured at this safe point (spec 0007,
+                    // "Termination"). `task::block` re-checks the record again
+                    // under the slot lock, because this check precedes the
+                    // block and a request published in between would otherwise
+                    // be lost (spec 0007, Sch17).
+                    let killed = task.kill_requested || task::take_kill(task.slot, task.id);
 
                     match quantum.outcome {
                         Outcome::Exited(reason) => {

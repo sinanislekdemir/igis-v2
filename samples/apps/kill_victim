@@ -1,0 +1,38 @@
+unit kill_victim;
+
+// Victim for the `kill_stress` proof of Q50 (spec 0007, Sch17). It does one
+// thing: transition from runnable to blocked in one of the three wait kinds and
+// stay there until the parent kills the task.
+//
+//   run kill_victim line     // core.read_line      (WaitFor::Console)
+//   run kill_victim stream   // core.recv, no peer  (WaitFor::Stream)
+//   run kill_victim event    // syslib.next_event   (WaitFor::Input)
+//
+// No input arrives during the stress run, so a victim that is not terminated is
+// asleep forever and the parent's `core.wait` hangs: the harness timeout is the
+// hang detector. An accidental console line or event ends the block early; the
+// parent then sees `wait` return `Ok` instead of `Killed` and still passes, so
+// one stray event can never produce a false failure. The stream endpoint has no
+// peer, which is legal (a waiting endpoint) and closes with the task, freeing
+// the name for the next victim.
+
+uses core, syslib;
+
+var
+  report: in_stream[16];
+  line: string[64];
+  chunk: bytes[16];
+  ev: Event;
+  st: Status;
+  read: int;
+  got: int;
+
+procedure main(args: const string[1024]);
+begin
+  if args = "stream" then
+    got := core.recv(report, chunk)
+  else if args = "event" then
+    st := syslib.next_event(ev)
+  else
+    read := core.read_line(line);
+end;

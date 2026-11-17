@@ -387,6 +387,18 @@ extern "C" fn kmain_on_stack(mb2_info: u64) -> ! {
                     // not report.
                     sched::set_image(&fs);
                     stream::init();
+
+                    // Q50: the id-tagged kill record and the block re-check,
+                    // proved on real slot state with a scratch task. Runs before
+                    // the APs start, so no other core can claim that task.
+                    match task::kill_self_check() {
+                        Ok(()) => println!("kill: records ok"),
+                        Err(step) => {
+                            println!("kill: records FAIL at step {step}");
+                            arch_x86_64::halt();
+                        }
+                    }
+
                     smp::start();
 
                     // The REPL leaves the boot task in the runnable set; the

@@ -57,6 +57,13 @@ ADR 0011 concrete.
   rejected, `exit` runs, regions are reclaimed.
 - **Sch16 (MUST):** The realtime class is soft realtime. It removes time-slicing and adds
   priority; it does not promise deadlines or deterministic timing.
+- **Sch17 (MUST):** A `kill` request for a live task is never lost. The request is either
+  applied to the task value under its slot lock (`kill_requested` set, a blocked task made
+  `Runnable`) or parked in an id-tagged per-slot record that the owning core consumes at
+  its next quantum boundary or in `task::block`, under the slot lock. The record names one
+  monotonic task id and is cleared only by that id's task, so it can never reach a later
+  tenant of a reused slot; `Task::reclaim` clears the reservation and any record carrying
+  its own id under the same lock.
 
 ## Design
 
@@ -288,6 +295,56 @@ On budget expiry or an unrecovered fault:
 
 There are no zombies. A terminated task leaves nothing behind.
 
+### Kill, claim and slot reuse
+
+`core.kill` only requests termination; it never waits and never reclaims. The target may be
+in one of three places, and the request is delivered differently in each:
+
+- **Blocked in its slot.** The killer takes the slot lock and sets `kill_requested` and
+  `Runnable` on the value, then wakes an idle core. `wait` cannot sit behind a dead wait.
+- **Runnable in its slot.** The same lock applies the same fields; the next claim honours
+  them at the boundary.
+- **Claimed by another core.** The value is not in the table, so the request parks in a
+  per-slot record. The owner checks it at every quantum boundary and terminates the task
+  there.
+
+Two races had to be closed for that to be safe (Q50). The **lost wake** is the first: the
+owner's boundary check happens *before* it decides to block, and the block trace (a console
+write) can be several milliseconds long. A request published in that window found an empty
+slot, parked its record, and returned; the owner then put the task to sleep with the record
+still pending, no core runnable, and `core.wait` hung. `task::block` therefore re-checks the
+record **under the slot lock** that the publisher must also hold; a matching request is
+consumed, the task stays `Runnable` with `kill_requested` set, and the scheduler terminates
+it at the next boundary. Every wait kind (`Child`, `Console`, `Stream(handle)`, `Input`) goes
+through `block`, so one check covers all of them. A request published after the block is
+seen by `request_kill` itself, which finds the value in the slot and wakes it.
+
+The **slot reuse** race is the second: a bare per-slot flag could be published for a task
+that was terminating, and a later tenant of the same slot would find a stray request. The
+record is therefore an `AtomicU64` holding the **target task id** (`0` = none). Task ids are
+monotonic and never reused, so a record can never match a later tenant. `request_kill`
+re-reads the reservation under the slot lock before storing, and `reclaim` clears the
+reservation and the record (only when it still names its own id) under the same lock, so a
+record never outlives its id. `take_kill(slot, id)` and the block path use a
+compare-exchange, so only the named task consumes it.
+
+The invariant is: **for a live id, a kill is either observed by the owner or leaves the task
+runnable/terminated; a record never outlives its id.** A kill published between the boundary
+check and `release` is not lost either: the released task is runnable with the record
+pending, and the next boundary consumes it (or `block` does, if the task sleeps first). The
+worst case is one extra quantum, never a hang. The lock order is unchanged: the slot lock is
+the only lock taken, no slot lock is held across `Machine::run`, and kill never holds a
+stream, console or window lock. The accepted cooperative hole remains: a task that never
+reaches a safe point cannot be killed.
+
+The boot self-check (`task::kill_self_check`, `kill: records ok`) proves the id-tag rules and
+drives the exact interleaving on real slot state: it reserves a slot, keeps the task value
+claimed, parks a record, then calls `block` and requires the task back `Runnable` with
+`kill_requested` set and `waiting` cleared, with the frame count unchanged. The
+`samples/apps/kill_stress` application spawns 300 victims that block in the console, stream
+and input waits, kills each at a varying delay, and requires every `wait` to return
+`Killed`/`Ok`; on the pre-fix kernel the same run hangs on its first iteration.
+
 ### Services and task creation
 
 - Before claiming a task — and whenever the runnable set is empty — the loop calls the
@@ -454,7 +511,7 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | Two cores claim the same task | Must be impossible; a violation is a TCB defect (silent corruption) |
 | A claimed task's slot | Reserved by task id from `spawn` until `reclaim`, so a concurrent `spawn` cannot place a child where a running task will return |
 | `wait` on a child that is running, queued or being compiled | All three are "live", so the parent blocks and is woken by the exit record |
-| `kill` of a task another core has claimed | Recorded per slot; the owning core terminates it at its next quantum boundary |
+| `kill` of a task another core has claimed | Parked in an id-tagged per-slot record; the owning core terminates it at its next quantum boundary, or the block path consumes the record under the slot lock and keeps the task runnable (Sch17) |
 | Task never reaches a safe point | Core is stalled until the task reaches one; accepted liveness hole |
 | AP fails to start | Never reports; the boot core continues with fewer cores after the bounded wait |
 | Core idle | `sti; hlt` until an interrupt or IPI; no spinning |
@@ -497,3 +554,4 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 2026-11-15 | Stream blocking added as a third `WaitFor`: `WaitFor::Stream(handle)` with `task::wake_stream`, sender/receiver/close wake rules and a post-block `stream::ready_for` recheck that closes the failed-attempt-to-block race. Sends and receives take the stream lock without any slot lock and wake after releasing it. |
 | 2026-11-16 | Per-task stack guards: placement takes `stack_len + 4096` contiguous frames, the lowest is unmapped and excluded from the region, and reclaim restores it before returning guard and stack as one unit on every destruction path (failed spawn, verifier rejection, exit, kill, fault, stale eviction). Every PTE change is followed by a CR3 reload and an IPI shootdown to all online cores. |
 | 2026-11-17 | Sch12 made concrete as round-robin: `claim_class` starts its scan at a global `NEXT_CLAIM` cursor, stores the claimed slot + 1 after a successful take, and wraps; the old always-from-slot-0 scan let a busy parent starve its higher-slot children on `-smp 1` (observed by the M2.3.5 two-application proof). On SMP the races make the rotation approximate but never permanently skip a runnable slot. Realtime-first claim is unchanged. |
+| 2026-11-17 | Q50 fixed: Sch17 states the kill invariant, the per-slot record is an id-tagged `AtomicU64` (task ids are monotonic, so it cannot reach a later tenant), `request_kill` publishes under the slot lock, `task::block` re-checks the record under that lock after the boundary check (the lost-wake window), `take_kill(slot, id)` compare-exchanges its own id only, and `reclaim` clears the reservation and record under the lock for its own id. Boot self-check `kill: records ok` proves the interleaving on real slot state; `samples/apps/kill_stress` (300 spawn/kill/wait iterations across the three blocking waits) passes on `-smp 4` and `-smp 1` and hangs on the first iteration of the pre-fix kernel (ADR 0034). |

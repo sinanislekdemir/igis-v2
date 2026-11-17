@@ -16,7 +16,7 @@
 //! record can be executed by any core (spec 0004, C8). Region allocation is the
 //! only dynamic step and it happens before the task enters the set.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use abi::Status;
 use interpreter::Machine;
@@ -302,15 +302,28 @@ impl Task {
         self.regions.code.free();
         self.regions.state.free();
         self.regions.stack.free();
-        if let Some(slot) = SLOT_ID.get(self.slot) {
-            // The slot id is cleared only after the regions are back with the
-            // allocator, so a slot is never reused while its task still owns
-            // memory. A stale kill request must not reach the next tenant.
-            if let Some(kill) = KILL_FLAGS.get(self.slot) {
-                kill.store(false, Ordering::Release);
-            }
-            slot.store(0, Ordering::Release);
+        if SLOT_ID.get(self.slot).is_none() {
+            return;
         }
+        // The reservation and the kill record are cleared under the slot lock,
+        // and only by the id that owns the reservation. `request_kill` publishes
+        // its record under the same lock, so a record can never outlive the id
+        // it names: either the killer stores it before this clear (and it is
+        // removed here) or the killer's re-check sees the cleared reservation
+        // and stores nothing. The slot is never reused while its task still
+        // owns memory because the id is cleared only after the regions are back
+        // with the allocator.
+        let slot = SLOTS[self.slot].lock();
+        if SLOT_ID[self.slot].load(Ordering::Acquire) == self.id {
+            let _ = KILL_ID[self.slot].compare_exchange(
+                self.id,
+                0,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            SLOT_ID[self.slot].store(0, Ordering::Release);
+        }
+        drop(slot);
     }
 }
 
@@ -327,13 +340,20 @@ static SLOTS: [SpinLock<Option<Task>>; MAX_TASKS] = [const { SpinLock::new(None)
 /// `core.wait` needs (a running child is alive).
 static SLOT_ID: [AtomicU64; MAX_TASKS] = [const { AtomicU64::new(0) }; MAX_TASKS];
 
-/// Pending `core.kill` requests, one per slot.
+/// Pending `core.kill` request per slot, tagged with the target task id
+/// (`0` = none).
 ///
 /// A kill for a task that is *running* on another core cannot reach the task
 /// value (it lives in that core's registers and stack), so the request parks
 /// here and the owning core terminates the task at its next quantum boundary
 /// (Sch8's safe-point rule, with the boundary as the safe point).
-static KILL_FLAGS: [AtomicBool; MAX_TASKS] = [const { AtomicBool::new(false) }; MAX_TASKS];
+///
+/// The record carries the id, not just a boolean: task ids are monotonic and
+/// never reused, so a request that is still parked when its task terminates can
+/// never match the slot's next tenant. Publishing and clearing happen under the
+/// owning slot's lock, which makes the check-and-store atomic with respect to
+/// `spawn`, `reclaim` and `block`.
+static KILL_ID: [AtomicU64; MAX_TASKS] = [const { AtomicU64::new(0) }; MAX_TASKS];
 
 /// Rotating start of the claim scan (Sch12).
 ///
@@ -426,11 +446,45 @@ fn claim_class(class: TaskClass) -> Option<Task> {
 ///
 /// The record stays where it is (regions and machine included) but is no
 /// longer claimable until the matching wake-up clears the condition.
+///
+/// The kill record is re-checked *under the slot lock*, because the scheduler's
+/// quantum-boundary check happens before this call: a `core.kill` published in
+/// between (the owning core still had the task value, so the killer found the
+/// slot empty) would otherwise leave the task blocked with no runnable owner
+/// and `core.wait` would hang. A matching id-tagged request is consumed, the
+/// task stays `Runnable` with `kill_requested` set, and the scheduler
+/// terminates it at the next boundary. This closes the race for every wait
+/// kind, since all of them go through this function.
 pub fn block(task: Task, wait: WaitFor) {
     let mut task = task;
     task.state = TaskState::Blocked;
     task.waiting = Some(wait);
-    put(task);
+    let index = task.slot;
+    let Some(slot) = SLOTS.get(index) else {
+        println!("sched: task {} blocked before it was enqueued", task.id);
+        task.reclaim();
+        arch_x86_64::halt();
+    };
+    let mut guard = slot.lock();
+    let killed = take_record(&KILL_ID[index], task.id);
+    if killed {
+        task.kill_requested = true;
+        task.state = TaskState::Runnable;
+        task.waiting = None;
+    }
+    if let Some(stale) = guard.replace(task) {
+        drop(guard);
+        let stale_id = stale.id;
+        stale.reclaim();
+        println!("sched: two tasks in slot {index} (task {stale_id} evicted)");
+        arch_x86_64::halt();
+    }
+    drop(guard);
+    if killed {
+        // The task is runnable and must be observed; do not leave it to a core
+        // that is about to `hlt`.
+        crate::smp::kick_one();
+    }
 }
 
 /// Makes every task blocked on `child` runnable again.
@@ -488,40 +542,196 @@ fn wake_matching(matches: impl Fn(WaitFor) -> bool) {
 /// A blocked task is made runnable as well, so the request cannot sit behind a
 /// wait that will never complete. A task another core has claimed cannot be
 /// reached (its value is not in the table), so the request is recorded in
-/// [`KILL_FLAGS`] and the owning core terminates it at its next quantum
-/// boundary. The task is not reclaimed here.
+/// [`KILL_ID`] and the owning core terminates it at its next quantum boundary
+/// (or when it next blocks, see [`block`]). The task is not reclaimed here.
+///
+/// The reservation is re-read under the slot lock before anything is stored:
+/// `reclaim` clears it under the same lock, so a record can never be published
+/// for a slot whose id has already gone away.
 pub fn request_kill(id: u64) -> Status {
     for (index, slot) in SLOTS.iter().enumerate() {
         if SLOT_ID[index].load(Ordering::Acquire) != id {
             continue;
         }
-        // Recorded for a task that is running elsewhere; the scheduler checks
-        // it after every quantum.
-        KILL_FLAGS[index].store(true, Ordering::SeqCst);
         let mut guard = slot.lock();
-        let Some(task) = guard.as_mut() else {
-            // Claimed by another core; the flag above is the whole request.
-            return Status::Ok;
-        };
-        task.kill_requested = true;
-        task.machine.request_yield();
-        if task.state == TaskState::Blocked {
-            task.waiting = None;
-            task.state = TaskState::Runnable;
+        if SLOT_ID[index].load(Ordering::Acquire) != id {
+            // A concurrent termination cleared the reservation (or the slot was
+            // handed to a different tenant) between the scan and the lock.
             drop(guard);
-            crate::smp::kick_one();
+            continue;
+        }
+        match guard.as_mut() {
+            Some(task) => {
+                // The value is in the set, so no parked record is needed; a
+                // record left over from a release is redundant with the field.
+                let _ = KILL_ID[index].compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire);
+                task.kill_requested = true;
+                task.machine.request_yield();
+                if task.state == TaskState::Blocked {
+                    task.waiting = None;
+                    task.state = TaskState::Runnable;
+                    drop(guard);
+                    crate::smp::kick_one();
+                }
+            }
+            None => {
+                // Claimed by another core; the id-tagged record is the whole
+                // request. A later tenant of this slot has a different id and
+                // ignores it.
+                KILL_ID[index].store(id, Ordering::SeqCst);
+            }
         }
         return Status::Ok;
     }
     Status::NotFound
 }
 
+/// Consumes an id-tagged kill record for `id`, or returns `false`.
+///
+/// The record is cleared only when it names `id`: a stale request left behind
+/// by a previous tenant is never mistaken for this task's.
+fn take_record(record: &AtomicU64, id: u64) -> bool {
+    record
+        .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
+
 /// Takes a pending kill request for the task in `slot` (set by [`request_kill`]
 /// while the task was claimed by another core).
-pub fn take_kill(slot: usize) -> bool {
-    KILL_FLAGS
+pub fn take_kill(slot: usize, id: u64) -> bool {
+    KILL_ID
         .get(slot)
-        .is_some_and(|flag| flag.swap(false, Ordering::SeqCst))
+        .is_some_and(|record| take_record(record, id))
+}
+
+/// Boot self-check for the id-tagged kill record and the block race (Q50).
+///
+/// Two properties are proved on real slot and record state, with a real task
+/// value (not a mock):
+///
+/// 1. A record names exactly one id: a request for another id neither consumes
+///    it nor is consumed by it, and a later store replaces it.
+/// 2. The lost-wake interleaving: the owner has passed the quantum-boundary
+///    check and still owns the task value (the slot is empty) when the killer
+///    publishes the record; [`block`] must then put the task back `Runnable`
+///    with `kill_requested` set, not asleep.
+///
+/// It runs before `smp::start`, so no other core can claim the scratch task,
+/// and returns `Err(step)` on the first mismatch. The scratch task's regions are
+/// reclaimed, so the free-frame count must be unchanged.
+pub fn kill_self_check() -> Result<(), u8> {
+    // 1. The record is tenant-tagged.
+    let record = AtomicU64::new(0);
+    if take_record(&record, 5) {
+        return Err(1);
+    }
+    record.store(5, Ordering::SeqCst);
+    if take_record(&record, 6) {
+        return Err(2);
+    }
+    if !take_record(&record, 5) {
+        return Err(3);
+    }
+    if take_record(&record, 5) {
+        return Err(4);
+    }
+    record.store(5, Ordering::SeqCst);
+    record.store(7, Ordering::SeqCst);
+    if take_record(&record, 5) {
+        return Err(5);
+    }
+    if !take_record(&record, 7) {
+        return Err(6);
+    }
+
+    let free_before = frame::free_frames();
+
+    // 2. The block re-check. The task is placed and its slot reserved, but the
+    //    value stays with this core, exactly like a claimed task; the killer
+    //    finds the reservation and an empty slot and parks the record.
+    let id = reserve_id();
+    let mut task = Task::place(16, 16, 64, id).map_err(|_| 7u8)?;
+    let Some(index) = reserve_slot(id) else {
+        task.reclaim();
+        return Err(8);
+    };
+    task.slot = index;
+    KILL_ID[index].store(id, Ordering::SeqCst);
+    block(task, WaitFor::Console);
+    let killed_ok = {
+        let guard = SLOTS[index].lock();
+        guard.as_ref().is_some_and(|held| {
+            held.id == id
+                && held.state == TaskState::Runnable
+                && held.kill_requested
+                && held.waiting.is_none()
+        })
+    };
+    if !killed_ok {
+        return Err(9);
+    }
+    {
+        let mut guard = SLOTS[index].lock();
+        let held = guard.take().ok_or(10u8)?;
+        drop(guard);
+        // The block path consumed the record; the boundary check must not see
+        // it a second time.
+        if take_kill(index, id) {
+            return Err(11);
+        }
+        held.reclaim();
+    }
+    if frame::free_frames() != free_before {
+        return Err(12);
+    }
+
+    // 3. A request that finds the value in the slot marks it directly and wakes
+    //    a blocked task, so `wait` cannot sit behind a dead wait.
+    let id = reserve_id();
+    let mut task = Task::place(16, 16, 64, id).map_err(|_| 13u8)?;
+    let Some(index) = reserve_slot(id) else {
+        task.reclaim();
+        return Err(14);
+    };
+    task.slot = index;
+    block(task, WaitFor::Console);
+    if request_kill(id) != Status::Ok {
+        return Err(15);
+    }
+    let woken_ok = {
+        let guard = SLOTS[index].lock();
+        guard.as_ref().is_some_and(|held| {
+            held.id == id
+                && held.state == TaskState::Runnable
+                && held.kill_requested
+                && held.waiting.is_none()
+        })
+    };
+    if !woken_ok {
+        return Err(16);
+    }
+    {
+        let mut guard = SLOTS[index].lock();
+        let held = guard.take().ok_or(17u8)?;
+        drop(guard);
+        held.reclaim();
+    }
+    if frame::free_frames() != free_before {
+        return Err(18);
+    }
+    if request_kill(u64::MAX) != Status::NotFound {
+        return Err(19);
+    }
+    Ok(())
+}
+
+/// Reserves a free slot for a scratch task id (self-check only).
+fn reserve_slot(id: u64) -> Option<usize> {
+    (0..MAX_TASKS).find(|&index| {
+        SLOT_ID[index]
+            .compare_exchange(0, id, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+    })
 }
 
 /// True when `id` names a live task (runnable, blocked or running) in a

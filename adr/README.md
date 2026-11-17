@@ -58,3 +58,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0031 | [Coalesce damage before repair and batch console cells into one present](0031-damage-coalescing-present-batching.md) | Accepted | 2026-11-17 |
 | 0032 | [Visual regression uses exact host-side framebuffer goldens](0032-visual-regression-goldens.md) | Accepted | 2026-11-17 |
 | 0033 | [System control has no capability check and uses focus-scoped shortcuts](0033-system-control-authority.md) | Accepted | 2026-11-17 |
+| 0034 | [Kill requests are id-tagged records resolved under the slot lock](0034-id-tagged-kill-records.md) | Accepted | 2026-11-17 |
