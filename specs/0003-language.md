@@ -1498,6 +1498,102 @@ field with a selection, checked box, paged scrollbar, selected list row) and
 `scripts/ui_controls_screenshot_qmp.py` captures it through QMP `screendump` to
 `/home/sinan/Desktop/igis-controls.png` (1024×768).
 
+#### UI menus (M2.4.3)
+
+A menu-bar model, pull-down drawing, hit-testing, mask helpers and a pure keyboard mapping,
+as ordinary language code over the M2.4.0 metrics/palette and the `syslib` drawing
+primitives. There is no new opcode, builtin, record, sum, user enum, generic or `state`.
+The **application** owns the event loop and every state scalar: the open menu index
+(`-1` closed), the highlighted item, and the checked/disabled masks. The library stores
+nothing, takes no callback and runs no event pump; there is no command model.
+
+**Menu bar.** `ui_menu_bar` draws a white bar of height 22 with a black bottom rule, one
+label per title from `x + 8`, and a 16-pixel gap after each label. The active menu's label
+cell (the title width plus 4 pixels on each side) is inverted black with white text; every
+other label is black on white. `ui_menu_bar_hit` uses the same layout and returns the menu
+index under a point, or `-1` in a gap, outside the bar or past the last title. `count` is
+clamped to `0..8`; a title is cut at a code-point boundary to the remaining bar width (at
+most 32 bytes). `w <= 0` is `Invalid`.
+
+**Pull-down.** `ui_menu_dropdown` draws `count` 16-pixel rows at `(x, y)`: a white
+interior, a 1-px black border, a check column at `x + 8`, the label at `x + 22` and the
+shortcut right-aligned at `x + w - 8`. Height is `count * 16 + 2`, count is clamped to
+`0..16`, and `w < 32` or an empty menu is `Invalid`. A row layout:
+
+| State | Drawing |
+|---|---|
+| selected, enabled, `active` | accent-filled row; label and shortcut white |
+| enabled | black label and shortcut |
+| disabled | gray label, gray shortcut and gray check mark |
+| checked | the seven-pixel check mark in the row's ink (white on the accent, black, or gray when disabled) |
+| separator (label exactly `-`) | a 1-px black line inset 8 pixels; never highlighted, checked or selectable |
+
+Labels are cut at a code-point boundary to the space left after the shortcut (at most 64
+bytes); a shortcut that does not fit is omitted. `ui_menu_hit` returns the row under a
+point, including a disabled row, or `-1` outside, in the border, past the last item or on a
+separator. `ui_menu_selectable(label, disabled_mask, index)` is the shared rule: not a
+separator and the disabled bit clear. Drawing is clipped by `syslib`, never faulted, so a
+partly off-screen menu is safe.
+
+**Masks.** Checked and disabled are independent `uint` bit sets, one bit per item index
+`0..=63`: `ui_menu_bit(index)` returns the single-bit value (0 outside the range),
+`ui_menu_has(mask, index)` tests it and `ui_menu_set(mask, index, value)` returns the mask
+with the bit set or cleared. The language has no bitwise operators, so all three use
+`div`/`mod` and powers of two. The highlight never changes either mask. A mask is
+menu-scoped by the caller: an application with several menus keeps one checked mask per
+menu (or passes `0` where no item is checkable), because item indices are local to the open
+pull-down.
+
+**State transitions.**
+
+| Helper | Semantics |
+|--------|-----------|
+| `stdlib.ui_menu_bar_height() -> int` | 22, the bar height. |
+| `stdlib.ui_menu_is_separator(label) -> bool` | True when the label is exactly `-`. |
+| `stdlib.ui_menu_bit(index) -> uint` | The single-bit value for `0..=63`; 0 outside. |
+| `stdlib.ui_menu_has(mask, index) -> bool` | True when the mask has the item's bit; false outside. |
+| `stdlib.ui_menu_set(mask, index, value) -> uint` | The mask with the bit set or cleared; out-of-range is a no-op. |
+| `stdlib.ui_menu_selectable(label, disabled_mask, index) -> bool` | Not a separator and not disabled. |
+| `stdlib.ui_menu_first(count, items, disabled_mask) -> int` | The first selectable item, or -1 when there is none. |
+| `stdlib.ui_menu_open(menu, count, items, disabled_mask, selected) -> int` | Returns `menu` (or -1 for a negative index) and sets `selected` to the first selectable item. |
+| `stdlib.ui_menu_close() -> int` | -1, the closed menu index. |
+| `stdlib.ui_menu_move(selected, count, delta, items, disabled_mask) -> int` | The highlighted item after `delta` moves, skipping separators and disabled items and clamping without wrapping. A stale or unselectable start snaps to the nearest selectable item in the direction of travel (or the other way); -1 when nothing is selectable. |
+| `stdlib.ui_menu_key(code, open) -> int` | The keyboard action for a packed `Event.code` (below). |
+| `stdlib.ui_menu_bar(x, y, w, titles, count, active) -> Status` | The bar. |
+| `stdlib.ui_menu_bar_hit(x, y, w, titles, count, px, py) -> int` | The menu index under a point, or -1. |
+| `stdlib.ui_menu_dropdown(x, y, w, items, shortcuts, count, selected, checked_mask, disabled_mask, active) -> Status` | The pull-down. |
+| `stdlib.ui_menu_hit(x, y, w, items, count, px, py) -> int` | The item row under a point, or -1. |
+
+**Key mapping.** `ui_menu_key` decodes `Event.code` through the M2.4.2 key decoders and
+returns one of six app-facing action codes:
+
+| Key | Action | When |
+|-----|--------|------|
+| Escape `0x100` | `6` close | always (closed is a harmless no-op) |
+| Enter `0x103` | `5` activate | open only |
+| Up `0x112` / Down `0x113` | `1` / `2` | open only |
+| Left `0x110` / Right `0x111` | `3` / `4` | open only (switch the top-level menu; the app wraps with `ui_focus_next`) |
+| anything else | `0` none | always |
+
+The application applies the action: up/down call `ui_menu_move`, left/right call
+`ui_menu_open` on the wrapped neighbour, activate calls its own item action and then
+`ui_menu_close`, and close assigns `-1`. Disabled and separator items never become the
+highlight, so activate can never reach them. Shortcut text in the right column is display
+only in M2; the same M2.4.2 key decoders let an application add its own accelerators.
+
+The M2.4.3 proof is `samples/apps/ui_menus`: it opens a window, draws File/Edit/View and
+one pull-down, then uses injected pointer and key events to open a menu, move the
+highlight across a separator and a disabled item, activate a checked item, toggle its
+check mark, clamp on a disabled item, refuse a disabled click, close with Escape and
+switch menus with Left/Right. It checks the bar, inverted cell, border, accent row, check
+mark, separator and erased pull-down with `syslib.get_pixel`, prints `ui_menus: ok` on
+`-smp 4` and `-smp 1`, and prints `ui_menus: host ok` on `langhost` where the pure helpers
+and the disabled-screen `Invalid` contract run. `langhost/tests/e2e.rs` records the exact
+bar/pull-down drawing sequence and the mask/key results. `ui_menus shot` holds View open
+with two check marks, the disabled Zoom row and a separator;
+`scripts/ui_menus_screenshot_qmp.py` captures `/home/sinan/Desktop/igis-menus.png`
+(1024×768).
+
 Still missing for a complete standard library: `f32` (Q40) and the remaining float-text
 work (Q41: correctly rounded decimal-to-binary parsing and its subnormal edges); the
 fixed-point `core.format_f64_into`, the shortest round-trip
@@ -1518,8 +1614,11 @@ helpers), again with no opcode or builtin. The M2.4.2 controls layer landed as o
 language code over the same drawing primitives plus the M2.4.1 editing helpers
 (`ui_rect_hit`, `ui_focus_ring`, `ui_focus_next`, the key decoders, the button/checkbox/
 text-field/scrollbar/list helpers and their hit tests and transitions), again with no
-opcode or builtin. Menus (M2.4.3), dialogs (M2.4.4), icons (M2.4.5) and the widgets demo
-(M2.4.6) are still ahead.
+opcode or builtin. The M2.4.3 menus layer landed as ordinary language code over the
+metrics/palette and the mask/key helpers (`ui_menu_bar`, `ui_menu_dropdown`, the bar/item
+hit tests, `ui_menu_bit`/`has`/`set`, `ui_menu_first`/`open`/`close`/`move`, `ui_menu_key`
+and `ui_menu_selectable`), again with no opcode or builtin. Dialogs (M2.4.4), icons
+(M2.4.5) and the widgets demo (M2.4.6) are still ahead.
 
 ## Failure modes
 
@@ -1600,6 +1699,12 @@ opcode or builtin. Menus (M2.4.3), dialogs (M2.4.4), icons (M2.4.5) and the widg
 | `stdlib.ui_*` drawing on a disabled screen | `Status.Invalid`; nothing drawn |
 | `stdlib.ui_frame` with `w <= 0` or `h <= 0` | `Status.Invalid`; nothing drawn |
 | `stdlib.ui_title_bar` with `w < 3` | `Status.Invalid`; nothing drawn; a narrower interior omits the box/title |
+| `stdlib.ui_menu_bar` with `w <= 0` | `Status.Invalid`; nothing drawn |
+| `stdlib.ui_menu_dropdown` with `w < 32` or an empty menu | `Status.Invalid`; nothing drawn |
+| A partly off-screen menu bar or pull-down | Clipped by `syslib`; never faulted |
+| A separator item | Never highlighted, checked or activated; a 1-px line |
+| A disabled menu item | Gray, skipped by `ui_menu_move`/`ui_menu_first`, never activated |
+| An out-of-range menu mask index or `ui_menu_bit(>= 64)` | False/0; `ui_menu_set` is a no-op |
 | A `stdlib.ui_*` call with a record, sum or user enum argument | Compile error (aggregates still may not cross the unit boundary) |
 | `stdlib.str_insert_into` at a negative/past-the-end offset or a non-boundary | `Status.Invalid`; text untouched |
 | `stdlib.str_insert_into` or `str_selection_replace` whose result exceeds 256 bytes | `Status.CapacityExceeded`; text and selection untouched |
@@ -1660,3 +1765,4 @@ opcode or builtin. Menus (M2.4.3), dialogs (M2.4.4), icons (M2.4.5) and the widg
 | 2026-11-17 | M2.4.0 adds the `stdlib` UI layout/chrome layer (ADR 0026): the library now says `uses core, syslib;` and the helpers draw through the nine graphics primitives as ordinary language code. Metrics (`ui_text_width` = code points × 8, `ui_text_height`, `ui_line_height`, `ui_content_inset`, `ui_title_bar_height`, `ui_close_box_size`, `ui_text_center_x`, `ui_text_center_y`), the System 7.5 palette (`ui_black`, `ui_white`, `ui_gray`, `ui_focus`, `ui_accent`), and client chrome (`ui_frame`, `ui_title_bar`, `ui_close_box`, `ui_separator`, `ui_center_text`). No record/sum/generic/`state`, no new opcode or builtin. |
 | 2026-11-17 | M2.4.1 adds the `stdlib` string editing and selection layer: `str_boundary`, `str_cursor_clamp`/`left`/`right`/`home`/`end`, `str_insert_into`, `str_delete_into`, `str_backspace`, `str_selection_normalize`/`all`/`collapse`/`replace` (13 helpers, 52 total). Positions are byte offsets; insertion and deletion require code-point boundaries, a mutator stages into `bytes[256]`, converts with `core.substr_into` and publishes with one copy, so a failure leaves the destination untouched and the text valid UTF-8. Cursors clamp instead of failing (SE5); backspace at 0 is an `Ok` no-op (SE7); the selection is the scalar pair `start`/`stop` (SE6). The 256-byte working capacity returns `CapacityExceeded` without a partial write. No record/sum/generic/`state`, no new opcode or builtin. Closes the language side of Q44. |
 | 2026-11-17 | M2.4.2 adds the `stdlib` controls layer (32 drawing, hit-test, transition, focus and key-decode helpers, 84 total): button (normal/pressed/focused), checkbox (box, check mark, label, toggle), text field (visible slice, accent selection, caret, reveal), vertical scrollbar (track, thumb, page hit, clamp), list (rows, selection, scroll into view, row hit, move), `ui_rect_hit`, `ui_focus_ring`, `ui_focus_next` and the packed-key decoders. The application owns the event loop and all state; the library has no widget object, callback, event pump or `state`. Drawing uses the M2.4.0 metrics/palette; too-small geometry is `Invalid` and disabled graphics draw nothing while the pure helpers keep working. No new opcode or builtin. The embedded source cap rises to 128 KiB and the compile arena to 4 MiB (the library is 72,426 B and needs 2,428,888 B of scratch). Proof `samples/apps/ui_controls` (injected pointer/key events, `get_pixel` checks) and the `langhost` sequence test. |
+| 2026-11-17 | M2.4.3 adds the `stdlib` menus layer (15 helpers, 99 total): a menu-bar model and drawing (`ui_menu_bar`, `ui_menu_bar_hit`, `ui_menu_bar_height`), pull-downs (`ui_menu_dropdown`, `ui_menu_hit`) with a check column, right-aligned shortcut text, accent selection, gray disabled rows and `-` separators, `uint` mask helpers (`ui_menu_bit`/`has`/`set`), the selectability and state transitions (`ui_menu_selectable`, `ui_menu_first`, `ui_menu_open`, `ui_menu_close`, `ui_menu_move`), and a pure key mapping (`ui_menu_key`: Escape closes, Enter activates, arrows move/switch menus). The app owns the open menu, the highlight and the masks; checked and disabled are independent and the highlight never changes them. No record/sum/generic/`state`, no new opcode or builtin. Too-small geometry is `Invalid`, disabled graphics draw nothing while the pure helpers work, and clipping is `syslib`'s. Proof `samples/apps/ui_menus` (injected pointer/key events, `get_pixel`), the `langhost` sequence test and `/home/sinan/Desktop/igis-menus.png`. |

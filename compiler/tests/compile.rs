@@ -2935,7 +2935,7 @@ fn the_embedded_stdlib_compiles_on_its_own() {
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(manifest_unit(&package), "stdlib");
     assert_eq!(
-        header.function_count, 84,
+        header.function_count, 99,
         "trim_into, split_once, parse_int_into, parse_f64_into, starts_with, contains_byte, \
          split_all, drain_into, map_get_or, utf8_decode_into, utf8_len, utf8_decode, \
          utf8_valid, recv_exact, send_frame, recv_frame_into, send_line, recv_line_into, \
@@ -2947,7 +2947,7 @@ fn the_embedded_stdlib_compiles_on_its_own() {
          str_cursor_clamp, str_cursor_left, str_cursor_right, str_cursor_home, \
          str_cursor_end, str_insert_into, str_delete_into, str_backspace, \
          str_selection_normalize, str_selection_all, str_selection_collapse, \
-         str_selection_replace, and the M2.4.2 controls layer: ui_rect_hit, \
+         str_selection_replace, the M2.4.2 controls layer: ui_rect_hit, \
          ui_focus_ring, ui_focus_next, ui_key_text, ui_key_modifiers, ui_key_code, \
          ui_key_is_backspace, ui_key_is_tab, ui_key_is_enter, ui_key_is_left, \
          ui_key_is_right, ui_key_is_up, ui_key_is_down, ui_key_is_home, ui_key_is_end, \
@@ -2955,7 +2955,11 @@ fn the_embedded_stdlib_compiles_on_its_own() {
          ui_button_hit, ui_button_pressed, ui_checkbox, ui_checkbox_hit, \
          ui_checkbox_toggle, ui_text_field, ui_text_field_reveal, ui_scrollbar_clamp, \
          ui_scrollbar, ui_scrollbar_hit, ui_list_rows, ui_list, ui_list_hit, \
-         ui_list_ensure_visible, ui_list_move"
+         ui_list_ensure_visible, ui_list_move, and the M2.4.3 menus layer: \
+         ui_menu_bar_height, ui_menu_is_separator, ui_menu_bit, ui_menu_has, \
+         ui_menu_set, ui_menu_selectable, ui_menu_first, ui_menu_open, ui_menu_close, \
+         ui_menu_move, ui_menu_key, ui_menu_bar, ui_menu_bar_hit, ui_menu_dropdown, \
+         ui_menu_hit"
     );
     assert_eq!(header.entry, 0);
     assert_eq!(header.state_size, 0, "the stdlib declares no state");
@@ -3082,8 +3086,8 @@ end;
     let package = compile(source, "ui.ig").expect("the UI helpers compile");
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(
-        header.entry, 84,
-        "the entry follows the 84 library functions"
+        header.entry, 99,
+        "the entry follows the 99 library functions"
     );
     assert!(header_function_count(&package) > 84);
 }
@@ -3124,10 +3128,111 @@ end;
     let package = compile(source, "edit.ig").expect("the editing helpers compile");
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(
-        header.entry, 84,
-        "the entry follows the 84 library functions"
+        header.entry, 99,
+        "the entry follows the 99 library functions"
     );
     assert!(header_function_count(&package) > 84);
+}
+
+#[test]
+fn an_application_calls_the_menu_helpers() {
+    let source = br#"
+unit menus;
+uses core, stdlib;
+
+const
+  MenuCount = 3;
+
+var
+  titles: array[string[32], 8];
+  items: array[string[64], 16];
+  shortcuts: array[string[32], 16];
+  count: int;
+  selected: int;
+  open: int;
+  action: int;
+  mask: uint;
+  st: Status;
+  on: bool;
+
+procedure main(args: const string[1024]);
+begin
+  titles[0] := "File";
+  items[0] := "New";
+  items[1] := "-";
+  items[2] := "Open";
+  shortcuts[0] := "Ctrl+N";
+  count := 3;
+  selected := 0;
+  mask := stdlib.ui_menu_bit(0);
+  on := stdlib.ui_menu_has(mask, 0);
+  mask := stdlib.ui_menu_set(mask, 1, true);
+  on := stdlib.ui_menu_selectable(items[2], mask, 2);
+  count := stdlib.ui_menu_first(count, items, mask);
+  open := stdlib.ui_menu_open(0, 3, items, mask, selected);
+  selected := stdlib.ui_menu_move(selected, 3, 1, items, mask);
+  action := stdlib.ui_menu_key(uint(0x100 * 65536), open >= 0);
+  open := stdlib.ui_menu_close();
+  on := stdlib.ui_menu_is_separator(items[1]);
+  count := stdlib.ui_menu_bar_height();
+  st := stdlib.ui_menu_bar(0, 0, 200, titles, MenuCount, open);
+  count := stdlib.ui_menu_bar_hit(0, 0, 200, titles, MenuCount, 10, 10);
+  st := stdlib.ui_menu_dropdown(0, 22, 160, items, shortcuts, 3, selected, mask, mask, true);
+  count := stdlib.ui_menu_hit(0, 22, 160, items, 3, 10, 30);
+end;
+"#;
+    let package = compile(source, "menus.ig").expect("the menu helpers compile");
+    let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
+    assert_eq!(
+        header.entry, 99,
+        "the entry follows the 99 library functions"
+    );
+    assert!(header_function_count(&package) > 99);
+}
+
+#[test]
+fn ui_menus_reject_a_record_or_sum_argument() {
+    // The M2.4.3 menus follow the same cross-unit rule: a record or sum has no
+    // identity across the unit boundary, so it is a scalar/buffer mismatch.
+    let record = br#"
+unit t;
+uses core, stdlib;
+
+type P = record x: int; end;
+
+var
+  p: P;
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := stdlib.ui_menu_bit(p);
+end;
+"#;
+    let error = compile(record, "t.ig").expect_err("a record is not an int");
+    assert!(
+        error.message.contains("cannot be used as a scalar"),
+        "{}",
+        error.message
+    );
+
+    let sum = br#"
+unit t;
+uses core, stdlib;
+
+type V = A | B;
+
+var
+  v: V;
+  on: bool;
+
+procedure main(args: const string[1024]);
+begin
+  on := stdlib.ui_menu_is_separator(v);
+end;
+"#;
+    let error = compile(sum, "t.ig").expect_err("a sum is not a string");
+    assert!(error.message.contains("not a buffer"), "{}", error.message);
 }
 
 #[test]

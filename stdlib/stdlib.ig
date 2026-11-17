@@ -39,6 +39,23 @@ const
   UiCloseBoxSize = 11;
   UiCheckBoxSize = 11;
   UiFieldCapacity = 64;
+  UiMenuBarHeight = 22;
+  UiMenuBarInset = 8;
+  UiMenuBarPad = 4;
+  UiMenuBarGap = 16;
+  UiMenuRowHeight = 16;
+  UiMenuCheckX = 8;
+  UiMenuTextX = 22;
+  UiMenuEdge = 8;
+  UiMenuBarCount = 8;
+  UiMenuItemCount = 16;
+  UiMenuActionNone = 0;
+  UiMenuActionUp = 1;
+  UiMenuActionDown = 2;
+  UiMenuActionLeft = 3;
+  UiMenuActionRight = 4;
+  UiMenuActionActivate = 5;
+  UiMenuActionClose = 6;
   UiBlack = 0x000000;
   UiWhite = 0x00FFFFFF;
   UiGray = 0x00CCCCCC;
@@ -2402,4 +2419,585 @@ begin
   if at > count - 1 then
     at := count - 1;
   return at;
+end;
+
+// ---- menus (spec 0003, "UI menus") -------------------------------------
+//
+// A menu-bar model, pull-down drawing, hit-testing and small state-transition
+// helpers (M2.4.3). The application owns the event loop and every state scalar:
+// the open menu (-1 closed), the highlighted item, and one `uint` mask per
+// concern. The library stores nothing, takes no callback and runs no pump.
+//
+// The item masks are plain `uint` bit sets: bit `i` means item `i`, indices
+// 0..=63. The language has no bitwise operators, so `ui_menu_bit`/`ui_menu_has`/
+// `ui_menu_set` use `div`/`mod` over `uint` and powers of two. `checked` and
+// `disabled` are independent masks, so the highlight never changes them.
+//
+// A separator is an item whose label is exactly `-`; it is never selectable and
+// has no check mark, shortcut or highlight. A disabled item is drawn with gray
+// text, is skipped by `ui_menu_move` and `ui_menu_first`, and is never
+// activated. `ui_menu_hit` still returns a disabled row so the application can
+// decide what to do; `ui_menu_selectable` tells it whether the row may act.
+
+// Height of the menu bar drawn by `ui_menu_bar`, matching the desktop shell's
+// System 7.5 menu bar.
+function ui_menu_bar_height(): int;
+begin
+  return UiMenuBarHeight;
+end;
+
+// True when `label` is the separator marker, exactly `-`.
+function ui_menu_is_separator(label: const string[0]): bool;
+begin
+  return label = "-";
+end;
+
+// The `uint` with only bit `index` set. `index` outside 0..=63 returns 0,
+// which `ui_menu_has` and `ui_menu_set` treat as a no-op.
+function ui_menu_bit(index: int): uint;
+var
+  bit: uint;
+  i: int;
+begin
+  if index < 0 or index >= 64 then
+    return uint(0);
+  bit := uint(1);
+  i := 0;
+  while i < index do
+  begin
+    bit := bit * uint(2);
+    i := i + 1;
+  end;
+  return bit;
+end;
+
+// True when `mask` has bit `index` set. An out-of-range index is false.
+function ui_menu_has(mask: uint; index: int): bool;
+var
+  bit: uint;
+begin
+  bit := ui_menu_bit(index);
+  if bit = uint(0) then
+    return false;
+  return (mask div bit) mod uint(2) = uint(1);
+end;
+
+// `mask` with bit `index` set to `value`, returned as a new value. Setting a
+// set bit or clearing a clear bit leaves the mask unchanged; an out-of-range
+// index returns `mask` untouched. No bitwise operators are involved.
+function ui_menu_set(mask: uint; index: int; value: bool): uint;
+var
+  bit: uint;
+  present: bool;
+begin
+  bit := ui_menu_bit(index);
+  if bit = uint(0) then
+    return mask;
+  present := ui_menu_has(mask, index);
+  if value then
+  begin
+    if present then
+      return mask;
+    return mask + bit;
+  end;
+  if not present then
+    return mask;
+  return mask - bit;
+end;
+
+// True when item `index` may be highlighted or activated: it is not a
+// separator and its `disabled` bit is clear.
+function ui_menu_selectable(label: const string[0]; disabled_mask: uint; index: int): bool;
+begin
+  if ui_menu_is_separator(label) then
+    return false;
+  return not ui_menu_has(disabled_mask, index);
+end;
+
+// The first selectable item in `items[0..count)`, or -1 when every item is a
+// separator or disabled. `count` is clamped to `0..16`.
+function ui_menu_first(count: int; items: const array[string[64], 16]; disabled_mask: uint): int;
+var
+  total: int;
+  i: int;
+begin
+  total := count;
+  if total < 0 then
+    total := 0;
+  if total > UiMenuItemCount then
+    total := UiMenuItemCount;
+  i := 0;
+  while i < total do
+  begin
+    if ui_menu_selectable(items[i], disabled_mask, i) then
+      return i;
+    i := i + 1;
+  end;
+  return -1;
+end;
+
+// The open transition: returns `menu` (or -1 for a negative index) and sets
+// `selected` to the menu's first selectable item, or -1 when it has none.
+function ui_menu_open(menu: int; count: int; items: const array[string[64], 16]; disabled_mask: uint; selected: var int): int;
+begin
+  if menu < 0 then
+  begin
+    selected := -1;
+    return -1;
+  end;
+  selected := ui_menu_first(count, items, disabled_mask);
+  return menu;
+end;
+
+// The close transition: the closed menu index, -1.
+function ui_menu_close(): int;
+begin
+  return -1;
+end;
+
+// The highlighted item after a `delta` move (usually -1 or +1) over
+// `items[0..count)`, skipping separators and disabled items without wrapping:
+// the highlight stops at the last selectable item in the direction of travel.
+// A `selected` outside the menu is clamped first; an unselectable `selected`
+// snaps to the nearest selectable item in the direction of travel (or the
+// other way when there is none), and that snap is the whole move.
+// Returns -1 when the menu has no selectable item.
+function ui_menu_move(selected: int; count: int; delta: int; items: const array[string[64], 16]; disabled_mask: uint): int;
+var
+  total: int;
+  at: int;
+  probe: int;
+  found: int;
+  remaining: int;
+  dir: int;
+begin
+  total := count;
+  if total < 0 then
+    total := 0;
+  if total > UiMenuItemCount then
+    total := UiMenuItemCount;
+  if total <= 0 then
+    return -1;
+  at := selected;
+  if at < 0 then
+    at := 0;
+  if at > total - 1 then
+    at := total - 1;
+  if delta < 0 then
+    dir := -1
+  else
+    dir := 1;
+  if not ui_menu_selectable(items[at], disabled_mask, at) then
+  begin
+    // A stale or unselectable starting item snaps to the nearest selectable
+    // item in the direction of travel (then the other way); the snap is the
+    // whole move, so the caller never lands on a separator or disabled row.
+    found := -1;
+    probe := at;
+    while probe >= 0 and probe < total and found < 0 do
+    begin
+      if ui_menu_selectable(items[probe], disabled_mask, probe) then
+        found := probe
+      else
+        probe := probe + dir;
+    end;
+    probe := at - dir;
+    while probe >= 0 and probe < total and found < 0 do
+    begin
+      if ui_menu_selectable(items[probe], disabled_mask, probe) then
+        found := probe
+      else
+        probe := probe - dir;
+    end;
+    return found;
+  end;
+  remaining := delta;
+  if remaining < 0 then
+    remaining := 0 - remaining;
+  while remaining > 0 do
+  begin
+    found := -1;
+    probe := at + dir;
+    while probe >= 0 and probe < total and found < 0 do
+    begin
+      if ui_menu_selectable(items[probe], disabled_mask, probe) then
+        found := probe
+      else
+        probe := probe + dir;
+    end;
+    if found < 0 then
+      remaining := 0
+    else
+    begin
+      at := found;
+      remaining := remaining - 1;
+    end;
+  end;
+  return at;
+end;
+
+// The keyboard action for a packed `Event.code` (spec 0010) given whether a
+// menu is open, as one of:
+//
+//   0 none, 1 up, 2 down, 3 left, 4 right, 5 activate, 6 close.
+//
+// Escape (key code 0x100) is close whether a menu is open or not, so an
+// application can apply it unconditionally. While a menu is open Enter (0x103)
+// activates the highlight, Up/Down (0x112/0x113) move it and Left/Right
+// (0x110/0x111) switch to the previous/next top-level menu (the application
+// wraps with `ui_focus_next` and reopens). Every other key, and every key
+// except Escape while no menu is open, is none. There is no command or callback
+// model: the application applies the action to its own state.
+function ui_menu_key(code: uint; open: bool): int;
+var
+  key: int;
+begin
+  key := ui_key_code(code);
+  if key = 0x100 then
+    return UiMenuActionClose;
+  if not open then
+    return UiMenuActionNone;
+  if key = 0x103 then
+    return UiMenuActionActivate;
+  if key = 0x112 then
+    return UiMenuActionUp;
+  if key = 0x113 then
+    return UiMenuActionDown;
+  if key = 0x110 then
+    return UiMenuActionLeft;
+  if key = 0x111 then
+    return UiMenuActionRight;
+  return UiMenuActionNone;
+end;
+
+// A menu bar inside `(x, y, w, 22)`: a white bar, the bottom rule, and one
+// left-to-right label per title from `x + 8`, each followed by a 16-pixel gap.
+// The active menu's label cell is inverted black with white text; the others
+// are black on white. A label is cut at a code-point boundary to the remaining
+// bar width (at most 32 bytes). `count` is clamped to `0..8`; `active` outside
+// the count draws no active cell. `w <= 0` returns `Invalid` and draws nothing;
+// drawing is otherwise clipped by `syslib`, never faulted.
+function ui_menu_bar(x: int; y: int; w: int; titles: const array[string[32], 8]; count: int; active: int): Status;
+var
+  st: Status;
+  total: int;
+  i: int;
+  label_x: int;
+  label_w: int;
+  slot_x: int;
+  avail: int;
+  fits: int;
+  at: int;
+  next: int;
+  codepoint: int;
+  length: int;
+  shown_chars: int;
+  shown_bytes: int;
+  staged: string[32];
+  copied: int;
+  text_y: int;
+  ink: uint;
+begin
+  if w <= 0 then
+    return Invalid;
+  total := count;
+  if total < 0 then
+    total := 0;
+  if total > UiMenuBarCount then
+    total := UiMenuBarCount;
+  st := syslib.fill_rect(x, y, w, UiMenuBarHeight, uint(UiWhite));
+  if st <> Ok then
+    return st;
+  text_y := ui_text_center_y(y, UiMenuBarHeight);
+  label_x := x + UiMenuBarInset;
+  i := 0;
+  while i < total do
+  begin
+    label_w := ui_text_width(titles[i]);
+    ink := uint(UiBlack);
+    if i = active then
+    begin
+      slot_x := label_x - UiMenuBarPad;
+      if slot_x < x then
+        slot_x := x;
+      st := syslib.fill_rect(
+        slot_x, y + 2, label_w + 2 * UiMenuBarPad, UiMenuBarHeight - 4,
+        uint(UiBlack));
+      if st <> Ok then
+        return st;
+      ink := uint(UiWhite);
+    end;
+    avail := x + w - UiMenuBarInset - label_x;
+    if avail >= UiGlyphWidth then
+    begin
+      fits := avail div UiGlyphWidth;
+      length := int(core.len(titles[i]));
+      at := 0;
+      shown_chars := 0;
+      shown_bytes := 0;
+      while at < length and shown_chars < fits do
+      begin
+        st := utf8_decode(titles[i], at, codepoint, next);
+        if st <> Ok then
+          at := length
+        else if next > 32 then
+          at := length
+        else
+        begin
+          at := next;
+          shown_chars := shown_chars + 1;
+          shown_bytes := at;
+        end;
+      end;
+      if shown_bytes > 0 then
+      begin
+        copied := core.substr_into(staged, titles[i], 0, shown_bytes);
+        if copied <> shown_bytes then
+          return Invalid;
+        st := syslib.draw_text(label_x, text_y, staged, ink);
+        if st <> Ok then
+          return st;
+      end;
+    end;
+    label_x := label_x + label_w + UiMenuBarGap;
+    i := i + 1;
+  end;
+  return ui_separator(x, y + UiMenuBarHeight - 1, w);
+end;
+
+// The menu index under `(px, py)` in the bar drawn by `ui_menu_bar`, or -1
+// outside the bar, in a gap or past the last title. The layout is the draw
+// helper's: the first cell starts at `x + 8`, and each cell is the title's
+// width plus `4` pixels of padding on both sides.
+function ui_menu_bar_hit(x: int; y: int; w: int; titles: const array[string[32], 8]; count: int; px: int; py: int): int;
+var
+  total: int;
+  i: int;
+  label_x: int;
+  label_w: int;
+  slot_x: int;
+  slot_end: int;
+begin
+  if w <= 0 then
+    return -1;
+  if px < x or px >= x + w then
+    return -1;
+  if py < y or py >= y + UiMenuBarHeight then
+    return -1;
+  total := count;
+  if total < 0 then
+    total := 0;
+  if total > UiMenuBarCount then
+    total := UiMenuBarCount;
+  label_x := x + UiMenuBarInset;
+  i := 0;
+  while i < total do
+  begin
+    label_w := ui_text_width(titles[i]);
+    slot_x := label_x - UiMenuBarPad;
+    if slot_x < x then
+      slot_x := x;
+    slot_end := label_x + label_w + UiMenuBarPad;
+    if slot_end > x + w then
+      slot_end := x + w;
+    if px >= slot_x and px < slot_end then
+      return i;
+    label_x := label_x + label_w + UiMenuBarGap;
+    i := i + 1;
+  end;
+  return -1;
+end;
+
+// A pull-down for `items[0..count)` at `(x, y)`, width `w`: a white interior,
+// a 1-px black border, and one 16-pixel row per item. A row is laid out as a
+// check column at `x + 8` (a seven-pixel check mark when `checked_mask` has the
+// item's bit), the label at `x + 22`, and the shortcut right-aligned at
+// `x + w - 8`. The selected row is accent-filled with white text when `active`
+// and the item is enabled; other enabled labels are black, disabled labels and
+// their check marks are gray. A separator (label `-`) is a 1-px black line
+// inset by 8 pixels and is never highlighted or checked.
+//
+// The height is `count * 16 + 2`. `count` is clamped to `0..16`; `w < 32` or an
+// empty menu returns `Invalid` and draws nothing. Labels and shortcuts are cut
+// at a code-point boundary to the space they can occupy (labels at most 64
+// bytes, shortcuts at most 32); a shortcut that does not fit is omitted.
+// Drawing is clipped by `syslib`, never faulted.
+function ui_menu_dropdown(x: int; y: int; w: int; items: const array[string[64], 16]; shortcuts: const array[string[32], 16]; count: int; selected: int; checked_mask: uint; disabled_mask: uint; active: bool): Status;
+var
+  st: Status;
+  total: int;
+  height: int;
+  i: int;
+  row_y: int;
+  text_y: int;
+  enabled: bool;
+  chosen: bool;
+  ink: uint;
+  mark_ink: uint;
+  shortcut_w: int;
+  shortcut_x: int;
+  label_room: int;
+  fits: int;
+  at: int;
+  next: int;
+  codepoint: int;
+  length: int;
+  shown_chars: int;
+  shown_bytes: int;
+  staged: string[64];
+  copied: int;
+begin
+  total := count;
+  if total < 0 then
+    total := 0;
+  if total > UiMenuItemCount then
+    total := UiMenuItemCount;
+  if w < 32 or total <= 0 then
+    return Invalid;
+  height := total * UiMenuRowHeight + 2;
+  st := syslib.fill_rect(x + 1, y + 1, w - 2, height - 2, uint(UiWhite));
+  if st <> Ok then
+    return st;
+  st := ui_frame(x, y, w, height);
+  if st <> Ok then
+    return st;
+
+  i := 0;
+  while i < total do
+  begin
+    row_y := y + 1 + i * UiMenuRowHeight;
+    text_y := ui_text_center_y(row_y, UiMenuRowHeight);
+    if ui_menu_is_separator(items[i]) then
+    begin
+      if w > 2 * UiMenuEdge then
+      begin
+        st := syslib.fill_rect(
+          x + UiMenuEdge, row_y + UiMenuRowHeight div 2, w - 2 * UiMenuEdge, 1,
+          uint(UiBlack));
+        if st <> Ok then
+          return st;
+      end;
+    end
+    else
+    begin
+      enabled := not ui_menu_has(disabled_mask, i);
+      chosen := active and enabled and i = selected;
+      if chosen then
+      begin
+        st := syslib.fill_rect(
+          x + 1, row_y, w - 2, UiMenuRowHeight, uint(UiAccent));
+        if st <> Ok then
+          return st;
+        ink := uint(UiWhite);
+      end
+      else if enabled then
+        ink := uint(UiBlack)
+      else
+        ink := uint(UiGray);
+
+      if ui_menu_has(checked_mask, i) then
+      begin
+        if chosen then
+          mark_ink := uint(UiWhite)
+        else if enabled then
+          mark_ink := uint(UiBlack)
+        else
+          mark_ink := uint(UiGray);
+        st := syslib.fill_rect(x + UiMenuCheckX + 2, row_y + 5, 1, 1, mark_ink);
+        if st <> Ok then
+          return st;
+        st := syslib.fill_rect(x + UiMenuCheckX + 3, row_y + 6, 1, 1, mark_ink);
+        if st <> Ok then
+          return st;
+        st := syslib.fill_rect(x + UiMenuCheckX + 4, row_y + 7, 1, 1, mark_ink);
+        if st <> Ok then
+          return st;
+        st := syslib.fill_rect(x + UiMenuCheckX + 5, row_y + 6, 1, 1, mark_ink);
+        if st <> Ok then
+          return st;
+        st := syslib.fill_rect(x + UiMenuCheckX + 6, row_y + 5, 1, 1, mark_ink);
+        if st <> Ok then
+          return st;
+        st := syslib.fill_rect(x + UiMenuCheckX + 7, row_y + 4, 1, 1, mark_ink);
+        if st <> Ok then
+          return st;
+        st := syslib.fill_rect(x + UiMenuCheckX + 8, row_y + 3, 1, 1, mark_ink);
+        if st <> Ok then
+          return st;
+      end;
+
+      label_room := w - UiMenuTextX - 2 * UiMenuEdge;
+      shortcut_w := ui_text_width(shortcuts[i]);
+      if shortcut_w > 0 and shortcut_w <= label_room - UiMenuEdge then
+      begin
+        label_room := label_room - shortcut_w - UiMenuEdge;
+        shortcut_x := x + w - UiMenuEdge - shortcut_w;
+        st := syslib.draw_text(shortcut_x, text_y, shortcuts[i], ink);
+        if st <> Ok then
+          return st;
+      end;
+      if label_room < UiGlyphWidth then
+        label_room := UiGlyphWidth;
+      fits := label_room div UiGlyphWidth;
+      length := int(core.len(items[i]));
+      at := 0;
+      shown_chars := 0;
+      shown_bytes := 0;
+      while at < length and shown_chars < fits do
+      begin
+        st := utf8_decode(items[i], at, codepoint, next);
+        if st <> Ok then
+          at := length
+        else if next > UiTitleCapacity then
+          at := length
+        else
+        begin
+          at := next;
+          shown_chars := shown_chars + 1;
+          shown_bytes := at;
+        end;
+      end;
+      if shown_bytes > 0 then
+      begin
+        copied := core.substr_into(staged, items[i], 0, shown_bytes);
+        if copied <> shown_bytes then
+          return Invalid;
+        st := syslib.draw_text(x + UiMenuTextX, text_y, staged, ink);
+        if st <> Ok then
+          return st;
+      end;
+    end;
+    i := i + 1;
+  end;
+  return Ok;
+end;
+
+// The item row under `(px, py)` in a pull-down drawn by `ui_menu_dropdown`, or
+// -1 outside the menu, in the border, past the last item or on a separator. A
+// disabled row is returned; the caller checks `ui_menu_selectable` before it
+// highlights or activates the row.
+function ui_menu_hit(x: int; y: int; w: int; items: const array[string[64], 16]; count: int; px: int; py: int): int;
+var
+  total: int;
+  row: int;
+  height: int;
+begin
+  total := count;
+  if total < 0 then
+    total := 0;
+  if total > UiMenuItemCount then
+    total := UiMenuItemCount;
+  if w < 32 or total <= 0 then
+    return -1;
+  height := total * UiMenuRowHeight + 2;
+  if px < x or px >= x + w then
+    return -1;
+  if py < y + 1 or py >= y + height - 1 then
+    return -1;
+  row := (py - (y + 1)) div UiMenuRowHeight;
+  if row < 0 or row >= total then
+    return -1;
+  if ui_menu_is_separator(items[row]) then
+    return -1;
+  return row;
 end;

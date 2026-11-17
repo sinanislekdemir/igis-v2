@@ -1590,3 +1590,163 @@ end;
         ]
     );
 }
+
+#[test]
+fn ui_menus_compiles_and_reports_the_host_path() {
+    let path = format!("{}/../samples/apps/ui_menus", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "ui_menus").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"ui_menus: host ok\n".to_vec());
+}
+
+#[test]
+fn ui_menus_draw_the_documented_sequence() {
+    let source = br#"
+unit uimenu;
+
+uses core, stdlib, syslib;
+
+var
+  st: Status;
+  titles: array[string[32], 8];
+  items: array[string[64], 16];
+  keys: array[string[32], 16];
+  checked: uint;
+  disabled: uint;
+
+procedure main(args: const string[1024]);
+begin
+  titles[0] := "File";
+  titles[1] := "Edit";
+  titles[2] := "View";
+  items[0] := "New";
+  items[1] := "Open";
+  items[2] := "-";
+  items[3] := "Quit";
+  keys[0] := "Ctrl+N";
+  keys[1] := "Ctrl+O";
+  keys[2] := "";
+  keys[3] := "Ctrl+Q";
+  checked := stdlib.ui_menu_bit(0);
+  disabled := stdlib.ui_menu_bit(3);
+  st := stdlib.ui_menu_bar(0, 0, 200, titles, 3, 0);
+  st := stdlib.ui_menu_dropdown(
+    4, 22, 200, items, keys, 4, 1, checked, disabled, true);
+  if st = Ok
+    and stdlib.ui_menu_bit(3) = uint(8)
+    and stdlib.ui_menu_has(checked, 0)
+    and not stdlib.ui_menu_has(disabled, 0)
+    and stdlib.ui_menu_selectable(items[1], disabled, 1)
+    and not stdlib.ui_menu_selectable(items[3], disabled, 3)
+    and stdlib.ui_menu_first(4, items, disabled) = 0
+    and stdlib.ui_menu_move(1, 4, 1, items, disabled) = 1
+    and stdlib.ui_menu_hit(4, 22, 200, items, 4, 10, 28) = 0
+    and stdlib.ui_menu_hit(4, 22, 200, items, 4, 10, 60) = -1
+    and stdlib.ui_menu_bar_hit(0, 0, 200, titles, 3, 10, 10) = 0
+    and stdlib.ui_menu_key(uint(0x100 * 65536), false) = 6
+    and stdlib.ui_menu_key(uint(0x103 * 65536), true) = 5 then
+    core.write("ui menus sequence ok\n");
+end;
+"#;
+    let package = langhost::compile(source, "uimenu").expect("compiles");
+    let mut scratch = vec![0u8; package.code.len().div_ceil(32)];
+    let program = interpreter::Program::parse(&package.code, &mut scratch).expect("verifies");
+    let header = *program.header();
+    let mut state = vec![0u8; header.state_size as usize];
+    let mut stack = vec![0u8; header.stack_size as usize];
+    let args = vec![0u8; 8 + 1024];
+    let mut machine = interpreter::Machine::new();
+    let mut host = Painter {
+        fills: Vec::new(),
+        outlines: Vec::new(),
+        texts: Vec::new(),
+        output: Vec::new(),
+    };
+    let outcome = machine.run(
+        &program,
+        &mut host,
+        &mut state,
+        &mut stack,
+        &args,
+        langhost::DEFAULT_BUDGET,
+    );
+    assert_eq!(outcome, interpreter::Outcome::Exited(ExitReason::Ok));
+    assert_eq!(host.output, b"ui menus sequence ok\n");
+
+    const BLACK: u32 = 0x000000;
+    const WHITE: u32 = 0x00FF_FFFF;
+    const GRAY: u32 = 0x00CC_CCCC;
+    const ACCENT: u32 = 0x0000_80;
+
+    // The bar: white background, inverted File cell, the three labels and the
+    // bottom rule. Only the active cell paints a fill; the bar has no border.
+    assert!(
+        host.fills.contains(&(0, 0, 200, 22, WHITE)),
+        "bar: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(4, 2, 40, 18, BLACK)),
+        "active cell: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(0, 21, 200, 1, BLACK)),
+        "bar rule: {:?}",
+        host.fills
+    );
+
+    // The pull-down: white face, black frame, accent selection on row 1 and the
+    // separator row.
+    assert!(
+        host.fills.contains(&(5, 23, 198, 64, WHITE)),
+        "dropdown face: {:?}",
+        host.fills
+    );
+    assert_eq!(
+        host.outlines,
+        vec![(4, 22, 200, 66, BLACK)],
+        "the pull-down frame"
+    );
+    assert!(
+        host.fills.contains(&(5, 39, 198, 16, ACCENT)),
+        "selected row: {:?}",
+        host.fills
+    );
+    assert!(
+        host.fills.contains(&(12, 63, 184, 1, BLACK)),
+        "separator: {:?}",
+        host.fills
+    );
+
+    // The check mark on the checked item 0 (not selected, so black).
+    for (x, y) in [
+        (14, 28),
+        (15, 29),
+        (16, 30),
+        (17, 29),
+        (18, 28),
+        (19, 27),
+        (20, 26),
+    ] {
+        assert!(
+            host.fills.contains(&(x, y, 1, 1, BLACK)),
+            "check mark at ({x}, {y}): {:?}",
+            host.fills
+        );
+    }
+
+    // Labels and right-aligned shortcuts: black, white on the selection, gray
+    // on the disabled item.
+    assert!(host.texts.contains(&(26, 27, b"New".to_vec(), BLACK)));
+    assert!(host.texts.contains(&(148, 27, b"Ctrl+N".to_vec(), BLACK)));
+    assert!(host.texts.contains(&(26, 43, b"Open".to_vec(), WHITE)));
+    assert!(host.texts.contains(&(148, 43, b"Ctrl+O".to_vec(), WHITE)));
+    assert!(host.texts.contains(&(26, 75, b"Quit".to_vec(), GRAY)));
+    assert!(host.texts.contains(&(148, 75, b"Ctrl+Q".to_vec(), GRAY)));
+    assert!(host.texts.contains(&(8, 7, b"File".to_vec(), WHITE)));
+    assert!(host.texts.contains(&(56, 7, b"Edit".to_vec(), BLACK)));
+    assert!(host.texts.contains(&(104, 7, b"View".to_vec(), BLACK)));
+}
