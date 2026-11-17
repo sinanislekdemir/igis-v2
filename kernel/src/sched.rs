@@ -419,6 +419,17 @@ impl Host for KernelHost<'_> {
         crate::console::attach(self.current, window)
     }
 
+    // System control (spec 0017): the two primitives never return on a live
+    // kernel, because the requesting task's core is the one that halts/resets.
+    // A `Status` return type keeps the ABI uniform; it is unreachable here.
+    fn halt(&mut self) -> Status {
+        crate::sched::halt_system()
+    }
+
+    fn reboot(&mut self) -> Status {
+        crate::sched::reboot()
+    }
+
     // Application files (spec 0013, M2.5.1): the read-only ext2 mount the REPL
     // service already compiles from. The machine has validated the path syntax;
     // the host re-checks the M2.5.1 root subset defensively, converts the
@@ -974,6 +985,46 @@ fn try_shutdown() {
     );
     println!("halt: no console input");
     arch_x86_64::halt();
+}
+
+/// Requests a machine-wide halt and never returns (spec 0017).
+///
+/// This is the `core.halt` path. The calling core is inside an interpreter
+/// quantum; the shutdown flag is set and every other online core is woken on
+/// the existing vector, where [`crate::wake_ipi`] acknowledges and halts it even
+/// if it is mid-task. The wait is bounded by the clock and a spin ceiling (the
+/// boot core's timer can stop first when the caller is an AP), then the calling
+/// core halts too. Serial stops once the print below drains.
+pub fn halt_system() -> ! {
+    println!("system: halt requested");
+    arch_x86_64::enable_interrupts();
+    // Count the calling core as stopped before the broadcast: when it is an AP,
+    // the boot core (the clock source) halts in the same broadcast and the
+    // acknowledgement count would otherwise never include this core.
+    smp::note_stopped(smp::core_index());
+    let (stopped, expected, _) = smp::stop_all();
+    // Write the summary straight to serial: another core may have halted while
+    // holding the console lock, so the summary must not take it (the fault path
+    // does the same). The stop has already happened by here.
+    {
+        use core::fmt::Write as _;
+        let mut out = arch_x86_64::serial::Writer;
+        let _ = writeln!(out, "system: {stopped} of {expected} APs stopped");
+    }
+    arch_x86_64::halt();
+}
+
+/// Requests a system reset and never returns (spec 0017).
+///
+/// This is the `core.reboot` path. The shutdown request stops the other cores
+/// through the wake vector first (a reset would otherwise leave them in an
+/// unknown state), then the architecture layer drives the platform reset
+/// channels and halts if the firmware ignores them. QEMU exits or restarts on
+/// the reset (the probe harness distinguishes the two).
+pub fn reboot() -> ! {
+    println!("system: reboot requested");
+    smp::request_shutdown();
+    arch_x86_64::reboot();
 }
 
 /// One core's loop counters.

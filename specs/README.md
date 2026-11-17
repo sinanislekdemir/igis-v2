@@ -23,6 +23,7 @@ revised as understanding improves, and their history lives in git.
 | 0014 | [The terminal window](0014-terminal-window.md) | Accepted | abi, compiler, interpreter, kernel console/window/sched, langhost, samples/apps | 2026-11-17 |
 | 0015 | [The proportional font](0015-proportional-font.md) | Implemented | abi, compiler, interpreter, kernel font/gfx/window/console, langhost, samples/apps | 2026-11-17 |
 | 0016 | [Performance measurement](0016-performance.md) | Implemented | kernel window/console/gfx/clock, samples/apps/perf | 2026-11-17 |
+| 0017 | [The system menu and system control](0017-system-menu.md) | Implemented | kernel sched/smp/main, arch reboot, abi, compiler, interpreter, langhost, samples/apps | 2026-11-17 |
 
 ## Lifecycle
 

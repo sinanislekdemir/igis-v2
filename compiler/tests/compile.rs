@@ -6782,3 +6782,69 @@ end;
         assert!(error.message.contains(expected), "{}", error.message);
     }
 }
+
+#[test]
+fn halt_and_reboot_are_builtins_48_and_49_and_take_no_arguments() {
+    use abi::opcodes::{self, builtin};
+
+    let source = r#"
+unit t;
+uses core;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := core.halt();
+  status := core.reboot();
+end;
+"#;
+    let package = compile(source.as_bytes(), "t.ig").expect("system control compiles");
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+    let mut seen = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        if op == opcodes::BUILTIN {
+            seen.push(u32::from_le_bytes(
+                instructions[pc + 4..pc + 8].try_into().unwrap(),
+            ));
+        }
+        pc += words * 4;
+    }
+    assert_eq!(seen, vec![builtin::HALT, builtin::REBOOT]);
+    assert_eq!(builtin::HALT, 48);
+    assert_eq!(builtin::REBOOT, 49);
+
+    let cases = [
+        (
+            r#"
+unit t;
+uses core;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := core.halt(1);
+end;
+"#,
+            "`core.halt` expects 0 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := core.reboot(uint(1));
+end;
+"#,
+            "`core.reboot` expects 0 arguments",
+        ),
+    ];
+    for (source, expected) in cases {
+        let error = compile(source.as_bytes(), "t.ig").expect_err("must be a compile error");
+        assert!(error.message.contains(expected), "{}", error.message);
+    }
+}

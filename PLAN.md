@@ -14,9 +14,10 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `5ac7b56` (M2.6.3: the deterministic `visual` specimen, the
-  `scripts/visual_regression.py` golden-frame harness, spec 0009 G21, ADR 0032 and the
-  committed golden under `tests/golden/`) plus this docs/resume commit on top.
+- **Last commit:** `TBD` (M2.6.4: the System menu and About panel in `desktop_shell`,
+  `core.halt`/`core.reboot`, the focus-scoped shortcuts, spec 0017, ADR 0033, the two
+  QMP harnesses and the halt/reboot probe; the hash is this commit and the docs/resume
+  commit on top may follow).
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -39,30 +40,38 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   plus its check/shot modes, `langhost` test and screenshot harness, M2.5.5 the
   terminal window, M2.5.6 boot to the desktop, M2.6.1 the proportional font
   (`68d7ba1`), M2.6.2 the coalesced damage repair, batched console present and
-  the `perf` measurement (`2c0df71`), and M2.6.3 the deterministic specimen plus the
-  headless golden-frame harness (`tests/golden/visual.png`).
-- **Verified at that point (M2.6.3):** **376 host tests** (abi 18, compiler 155,
-  interpreter 131, langhost 72, including doctests); `cargo xtask build`/`image` and
+  the `perf` measurement (`2c0df71`), M2.6.3 the deterministic specimen plus the
+  headless golden-frame harness (`tests/golden/visual.png`), and M2.6.4 the System
+  menu, About panel, `core.halt`/`core.reboot` and the halt/reboot probes.
+- **Verified at that point (M2.6.4):** **382 host tests** (abi 18, compiler 156,
+  interpreter 134, langhost 74, including doctests); `cargo xtask build`/`image` and
   `cargo xtask image --shell` clean; boot self-checks unchanged (`font: glyphs ok`,
   `console: terminal/log/route ok`, `graphics: clip ok`, `window: rules/paint/route ok`,
-  `window: damage ok (present 4 -> 2 rects, 510874 -> 55348 px)`). The visual harness
-  reports `visual: ok (1024x768, sha256 37802052…e9e81c9f)` on both `-smp 4` and
-  `-smp 1` (the captured PNG is 9,439 bytes and the decoded RGB SHA-256 is identical);
-  `--tamper` reports one differing pixel and `tamper check ok`; a consistent alternate
-  golden produces a one-pixel diff, a bounding box, the differing tile and exit 1; a
-  golden PNG that disagrees with its manifest is refused before boot. The
-  event-injecting suite (`terminal`, `files`, `visual`, `text_edit`, `ui_layout`,
-  `ui_controls`, `ui_menus`, `ui_dialogs`, `ui_icons`, `widgets check`,
-  `clock_window check`, `editor check`, `browser check`, `desktop_shell check`, `windows`,
-  `windows_events`, `windows_demo`, `events`, `text 42 hi`, `frames`, `streams`, `deep`,
-  `utf8`, `realtime`, `cores`, `font`, `perf`) passes on `-smp 4` and `-smp 1` and
-  `windows_proof` in its own boot on both; `scripts/tablet_qmp.py` 7/7,
-  `--no-tablet` → `mouse: ok`, `scripts/mouse_burst_qmp.py --cores 1 --batch 300`
-  600/600. The desktop image root lists 60 entries (58 staged files plus the
-  `entrypoint` alias and `lost+found`); the shell image lists 59. `stdlib` stays at
-  125 functions and no cap changed.
-- **Next slice (not started):** **M2.6.4** — the system menu (About box, restart,
-  halt) with keyboard shortcuts.
+  `window: damage ok (present 4 -> 2 rects, 510874 -> 55348 px)`). `run desktop_shell
+  check` prints `desktop_shell: ok` on `-smp 4` and `-smp 1` (it opens the System menu,
+  checks the accent row/separator, traverses with Up/Down, closes with Escape, reopens
+  with F10, activates About with Enter, checks the panel pixels, closes with Escape and
+  a routed click, opens it with Ctrl+A, and verifies no system action fired). The boot
+  desktop still reaches `desktop_shell: ready` → Terminal click → `shell> ` →
+  `terminal: ok` on `-smp 4` (`scripts/boot_desktop_qmp.py`, PNG refreshed); the visual
+  harness still matches its golden on both core counts. The system-menu harness opens
+  About through pointer events and closes it with Escape; `scripts/system_control_qmp.py
+  --mode halt` shows `system: 3 of 3 APs stopped` on `-smp 4` and `0 of 0` on `-smp 1`
+  with no further serial output, and `--mode reboot` shows a second `igis-v2: long mode
+  entered` banner on both. The event-injecting suite (`terminal`, `files`, `visual`,
+  `text_edit`, `ui_layout`, `ui_controls`, `ui_menus`, `ui_dialogs`, `ui_icons`,
+  `widgets check`, `clock_window check`, `editor check`, `browser check`,
+  `desktop_shell check`, `windows`, `windows_events`, `windows_demo`, `events`,
+  `text 42 hi`, `frames`, `streams`, `deep`, `utf8`, `realtime`, `cores`, `font`,
+  `perf`) passes on `-smp 4` and `-smp 1` and `windows_proof` in its own boot on both;
+  `scripts/tablet_qmp.py` 7/7, `--no-tablet` → `mouse: ok`,
+  `scripts/mouse_burst_qmp.py --cores 1 --batch 300` 600/600. The desktop image root
+  lists 61 entries (59 staged files plus the `entrypoint` alias and `lost+found`); the
+  shell image lists 60. `stdlib` stays at 125 functions and no cap changed.
+- **Next slice:** **M2 is complete** (M2.6.4 was the last ticket). The remaining items
+  are the M2 limitations listed below and the deferred backlog; the next milestone is
+  not yet planned.
+
 - **M2.6.3 complete:** the headless visual-regression harness (spec 0009 "Visual proof",
   G21; ADR 0032) and the resolution of M2.1.2. `samples/apps/visual` opens a window whose
   frame is exactly the screen (content `screen_w - 2` × `screen_h - 17` at `(0, 0)`), so
@@ -219,15 +228,18 @@ Trust the repository, not a summary. On a fresh start:
 
 1. `git status --short` and `git log --oneline -8` — the tree should be clean and the top
    commit should match the "Last commit" line above; if not, stop and reconcile first.
-2. `cargo test -q -p abi -p compiler -p interpreter -p langhost` — expect **376** tests
+2. `cargo test -q -p abi -p compiler -p interpreter -p langhost` — expect **382** tests
    plus the doctests, all green.
 3. `cargo xtask build` — expect a clean kernel build.
 4. Read, in this order: this file, `AGENTS.md` (status paragraph + decisions table),
    `specs/0009-graphics-and-windows.md`, `specs/0010-input-and-events.md`,
    `specs/0011-windows.md`, `specs/0012-desktop-shell.md`,
-   `specs/0013-application-files.md`, `adr/0020`, `adr/0021`, `adr/0022`, `adr/0023`,
-   `adr/0024`, `adr/0025`, `adr/0026` (the `stdlib` UI layer) and `adr/0027` (the
-   stateless file API).
+   `specs/0013-application-files.md`, `specs/0014-terminal-window.md`,
+   `specs/0015-proportional-font.md`, `specs/0016-performance.md`,
+   `specs/0017-system-menu.md`, `adr/0020`, `adr/0021`, `adr/0022`, `adr/0023`,
+   `adr/0024`, `adr/0025`, `adr/0026` (the `stdlib` UI layer), `adr/0027` (the
+   stateless file API), `adr/0030`, `adr/0031`, `adr/0032` and `adr/0033` (system
+   control).
 5. Baseline kernel checks (headless, no chat needed):
    - Combined boot (no window-injecting proof app, so the shared event queue stays
      quiet between samples):
@@ -237,11 +249,16 @@ Trust the repository, not a summary. On a fresh start:
        printf 'run ui_dialogs\n'; sleep 10; printf 'run ui_icons\n'; sleep 12; \
        printf 'run widgets check\n'; sleep 20; \
        printf 'run clock_window check\n'; sleep 8; \
-       printf 'run editor check\n'; sleep 12; \
+       printf 'run editor check\n'; sleep 12; printf 'run browser check\n'; sleep 12; \
        printf 'run desktop_shell check\n'; sleep 20; printf 'run desktop\n'; sleep 4; \
        printf 'run events\n'; sleep 8; printf 'run windows\n'; sleep 6; \
        printf 'run windows_events\n'; sleep 6; printf 'run windows_demo\n'; sleep 22; \
-       printf 'exit\n' ) | timeout 360s \
+       printf 'run perf\n'; sleep 20; printf 'run font\n'; sleep 6; \
+       printf 'run text 42 hi\n'; sleep 5; \
+       printf 'run frames\n'; sleep 8; printf 'run streams\n'; sleep 8; \
+       printf 'run deep\n'; sleep 5; printf 'run utf8\n'; sleep 5; \
+       printf 'run realtime\n'; sleep 8; printf 'run cores\n'; sleep 8; \
+       printf 'exit\n' ) | timeout 500s \
        qemu-system-x86_64 -cdrom build/igis-shell.iso -m 256M -serial stdio -monitor none \
        -no-reboot -no-shutdown -accel tcg -vga std -display none -smp 4 -usb \
        -device usb-tablet`
@@ -249,7 +266,9 @@ Trust the repository, not a summary. On a fresh start:
      `graphics: clip ok`, `window: rules ok`, `window: paint ok`, `window: route ok`,
      `files: ok`, `text_edit: ok`, `ui_layout: ok`, `ui_controls: ok`, `ui_menus: ok`,
      `ui_dialogs: ok`, `ui_icons: open Document`, `ui_icons: ok`, `widgets: ok`,
-     `clock_window: ok`, `editor: ok`, `desktop_shell: ok`, `desktop: ok`,
+     `clock_window: ok`, `editor: ok`, `browser: ok`, `desktop_shell: ok`, `desktop: ok`,
+     `perf: ok`, `font: ok`, `text: ...`, `frames: done`, `streams: done`,
+     `deep: ...`, `utf8: ...`, `realtime: bye`, `cores: 6 workers done`,
      `keyboard: decoder ok`, `events: ok`,
      `windows: ok`, `windows_events: ok`, `windows_demo: checks ok`,
      `windows_demo: ready`, `windows_demo: ok`, `ioapic: version ...`,
@@ -299,6 +318,14 @@ Trust the repository, not a summary. On a fresh start:
    - `python3 scripts/terminal_screenshot_qmp.py build/igis-shell.iso` → a 1024×768 PNG at
      `/home/sinan/Desktop/igis-terminal.png` (the attached shell terminal and the
      desktop shell together).
+   - `python3 scripts/system_menu_qmp.py build/igis.iso` → `desktop_shell: about open`,
+     `desktop_shell: about closed` and a 1024×768 PNG at
+     `/home/sinan/Desktop/igis-system-menu.png` (the desktop entry, the System pull-down
+     and About panel). Use `build/igis.iso`, not the shell image.
+   - `python3 scripts/system_control_qmp.py build/igis-shell.iso --mode halt` →
+     `system: 3 of 3 APs stopped` on `-smp 4` (or `0 of 0` on `-smp 1`) and no serial
+     reply to a later command; `--mode reboot` → a second `igis-v2: long mode entered`
+     banner. These runs stop/reset the machine and are **not** in the normal suite.
    - `python3 scripts/tablet_qmp.py build/igis-shell.iso` → `7/7 absolute cases passed`.
    - `python3 scripts/tablet_qmp.py build/igis-shell.iso --no-tablet` → `mouse: ok` fallback.
    - `python3 scripts/mouse_burst_qmp.py build/igis-shell.iso` → `600/600` px with a
@@ -307,11 +334,15 @@ Trust the repository, not a summary. On a fresh start:
      (1024x768, sha256 3780…)` for the deterministic specimen; `--cores 1` must match
      the same golden, `--tamper` must report a mismatch and exit 0, and a wrong
      `--golden-dir` must exit 1 with a pixel/tile diff.
-6. The next slice is **M2.6.4** (the system menu: About box, restart, halt and keyboard
-   shortcuts). **M2.6.3 is complete**: the deterministic full-screen specimen
-   (`samples/apps/visual`) and `scripts/visual_regression.py` compare a headless QMP
-   `screendump` pixel-exactly with `tests/golden/visual.png` + `visual.json` on `-smp 4`
-   and `-smp 1`; `--tamper` proves the compare fails; M2.1.2 is resolved by this
+6. **M2 is complete.** M2.6.4 (spec 0017, ADR 0033) adds the desktop's System pull-down
+   (About igis-v2, Restart, Halt), a modal About window, `core.halt`/`core.reboot`
+   (builtins 48/49) with the wake-vector stop path, and the focus-scoped
+   `F10`/`Ctrl+A`/`Ctrl+R`/`Ctrl+H` shortcuts; `desktop_shell check`,
+   `scripts/system_menu_qmp.py` and the separate `scripts/system_control_qmp.py`
+   halt/reboot probes prove it. **M2.6.3 is complete**: the deterministic full-screen
+   specimen (`samples/apps/visual`) and `scripts/visual_regression.py` compare a headless
+   QMP `screendump` pixel-exactly with `tests/golden/visual.png` + `visual.json` on
+   `-smp 4` and `-smp 1`; `--tamper` proves the compare fails; M2.1.2 is resolved by this
    host-side dump (spec 0009 G21, ADR 0032). **M2.6.2 is complete**: damage is
    coalesced before repair and presented as a tight rectangle set (89 % less present area
    on the measured diagonal move), the console batches cells into one present per byte
@@ -330,8 +361,9 @@ Trust the repository, not a summary. On a fresh start:
    content, a full-screen `syslib.clear` erases the kernel windows' pixels, there is no
    per-task clip (a covered client must repaint only its visible part), there is no
    global work area (an app at `y = 0` covers the menu bar until the shell's next event),
-   and the boot desktop is a permanent consumer of the one event queue, so event-reading
-   apps run in the shell-entry image until per-task event delivery lands.
+   the boot desktop is a permanent consumer of the one event queue, so event-reading
+   apps run in the shell-entry image until per-task event delivery lands, and Restart/
+   Halt are direct actions with no capability check (ADR 0033).
 
 If anything in this file disagrees with the code or the specs, the code and specs win and
 this file must be corrected in the same commit.
@@ -574,7 +606,25 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
   `--tamper`/`--expect-mismatch` prove the compare fails; a mismatch prints the pixel
   count, bounding box, first pixel and tiles and exits 1. Resolves M2.1.2 as the
   host-side dump. Spec 0009 G21, ADR 0032.
-- [ ] **M2.6.4** System menu: About box, restart, halt; keyboard shortcuts.
+- [x] **M2.6.4** System menu: About box, restart, halt; keyboard shortcuts.
+  `desktop_shell` adds a `System` pull-down (About igis-v2 / Restart / Halt) built on
+  the M2.4.3 menu model and the M2.4.4 dialog helpers, a modal About window, and the
+  focus-scoped `F10`/`Ctrl+A`/`Ctrl+R`/`Ctrl+H` shortcuts. `core.halt`/`core.reboot`
+  (builtins 48/49) stop every core on the wake vector and halt or reset; a firmware
+  that ignores the reset channels ends in a halt. Proofs: the extended
+  `desktop_shell check`, `scripts/system_menu_qmp.py`, and the separate
+  `samples/apps/system_probe` + `scripts/system_control_qmp.py` runs for halt/reboot.
+  Spec 0017, ADR 0033. **M2 is complete.**
+
+### M2 completion
+
+All M2.1–M2.6 tickets are done. The accepted M2 limitations remain documented and are
+the next milestone's input: a client that ignores `Expose` keeps stale content, a
+full-screen `syslib.clear` erases the kernel windows' pixels, there is no per-task clip
+or global work area, the boot desktop is a permanent consumer of the one event queue
+so event-injecting regressions run on the shell-entry image (spec 0012, D19), and the
+system menu/About are application-drawn with direct Restart/Halt (ADRs 0032, 0033).
+
 
 ## Deferred (not UI; pick up when they matter)
 

@@ -686,6 +686,27 @@ pub mod builtin {
     /// an error. Operands: `[x][y][text reference][color]`.
     pub const DRAW_TEXT_PROP: u32 = 47;
 
+    // ---- system control (spec 0017) -------------------------------------
+    //
+    // `core.halt` and `core.reboot` are the desktop's system-control
+    // primitives. They have no application-visible capability check (spec
+    // 0001 R14): every task may stop or reset the machine. The kernel host
+    // owns the stop/reset path; a bare host (`langhost`) reports `Invalid`.
+
+    /// `core.halt() -> Status`: request a machine-wide halt (spec 0017). The
+    /// kernel host stops every other online core through the existing
+    /// shutdown path and halts the calling core, so it never returns on a
+    /// live kernel; `Invalid` is the disabled-service default of a bare host.
+    /// No operands.
+    pub const HALT: u32 = 48;
+
+    /// `core.reboot() -> Status`: request a system reset (spec 0017). The
+    /// kernel host requests the shutdown path (bounded AP stop), then resets
+    /// through the platform reset channels; if the firmware ignores them the
+    /// core halts instead of returning. `Invalid` is the bare-host default.
+    /// No operands.
+    pub const REBOOT: u32 = 49;
+
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
         match id {
@@ -736,6 +757,8 @@ pub mod builtin {
             TEXT_WIDTH_PROP => Some((1, 1)),
             TEXT_HEIGHT_PROP => Some((0, 1)),
             DRAW_TEXT_PROP => Some((4, 1)),
+            HALT => Some((0, 1)),
+            REBOOT => Some((0, 1)),
             _ => None,
         }
     }

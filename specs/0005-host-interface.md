@@ -73,6 +73,8 @@ The interface is split into two namespaces:
 | `fs_read` | `fn fs_read(path: &[u8], offset: u64, dst: &mut [u8]) -> Result<usize, Status>` | no; at most 256 bytes, 0 at EOF |
 | `fs_size` | `fn fs_size(path: &[u8]) -> Result<u64, Status>` | no; regular root files |
 | `terminal_attach` | `fn terminal_attach(window: u64) -> Status` | no; one machine-wide terminal, owner-checked by the kernel host |
+| `halt` | `fn halt() -> Status` | no; stops the machine (never returns on the kernel), `Invalid` on a bare host |
+| `reboot` | `fn reboot() -> Status` | no; resets the machine, `Invalid` on a bare host |
 
 - `realtime_on` promotes the calling task, one way, to the realtime class: it is claimed
   before normal tasks and is not released at quantum expiry. It returns `Status.Full` when
@@ -303,6 +305,25 @@ service compiles from.
   serial mirroring is unchanged. A terminal whose window disappears is detached and the
   stream becomes serial-only until the next attach.
 
+#### Implemented ABI: system control (M2.6.4)
+
+| Primitive | Implemented signature | Result |
+|-----------|-----------------------|--------|
+| `core.halt` | `() -> Status` | stops every other online core on the wake vector, prints `system: N of M APs stopped`, and halts the caller; never returns on a live kernel |
+| `core.reboot` | `() -> Status` | stops the other cores, drives `0xCF9` (`0x02`/`0x06`) and the 8042 pulse reset (`0x64 <- 0xFE`), and halts the caller if the firmware ignores them |
+
+- `Host::halt`/`Host::reboot` take no operands and return `Status`; both default to
+  `Invalid`, so a bare mock and `langhost` simply report that the host has no
+  system-control authority and the application keeps running.
+- The kernel host calls `sched::halt_system`/`sched::reboot`. The shutdown flag and the
+  existing `0x40` wake IPI are the stop path: `kernel::wake_ipi` acknowledges
+  (`smp::note_stopped`) and halts even a core that is mid-task, so a halt does not wait
+  for every core to reach its idle loop. The wait is bounded by the clock and a spin
+  ceiling because the boot core's timer can stop before the acknowledgements arrive.
+- There is no capability check and no confirmation (vision R14, ADR 0033): every task
+  may stop or reset the machine. The desktop shell is the only M2 caller. A reset that
+  the firmware ignores ends in a halt instead of returning to the interpreter.
+
 ### `syslib` primitives
 
 | Primitive | Signature (illustrative) | Notes |
@@ -517,3 +538,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-17 | Q44 narrows (M2.4.1): the language now has code-point-safe insert/delete/backspace/cursor/selection helpers (`stdlib.str_*`, spec 0003), so the reason the kernel kept a staged line discipline no longer holds at the language level. The staged `core.read_line` and its four-line ring stay for the shell until the terminal window can run the shell in a window with application-side editing (M2.5.5); the host interface itself is unchanged. |
 | 2026-11-17 | Application files (spec 0013, M2.5.1): `Host::fs_list` (`Result<FsEntry, Status>`), `Host::fs_read` (`Result<usize, Status>`) and `Host::fs_size` (`Result<u64, Status>`), all defaulting to `NotFound`, and builtins 41–43. The interpreter validates the shared `core.spawn` path syntax and the root-only M2.5.1 subset, stages a 64-byte name and a 256-byte chunk and publishes only on `Ok`; the kernel host uses the existing ext2 mount, `langhost` the sample directory. No opcode, no handle, no writable path. |
 | 2026-11-17 | Terminal window (spec 0014, M2.5.5): `Host::terminal_attach(window: u64) -> Status` (builtin 44, default `Invalid`) binds the one machine-wide console terminal to a window owned by the calling task. The kernel host passes its task id, checks ownership and geometry under `CONSOLE → WINDOW`, releases the owner-0 boot terminal on first attach and detaches when the owner's window disappears. `console_write`/`read_line` signatures and semantics are unchanged; the line discipline is not replaced. No opcode. |
+| 2026-11-17 | System control (spec 0017, M2.6.4): `Host::halt`/`Host::reboot` (0 → 1, builtins 48/49, default `Invalid`) drive `sched::halt_system`/`sched::reboot`. The shutdown flag plus the existing `0x40` wake IPI stop every other core in the handler (acknowledge then halt), the wait is bounded by the clock and a spin ceiling, and `reboot` resets through `0xCF9` and the 8042 pulse command, halting if the firmware ignores both. No opcode. |

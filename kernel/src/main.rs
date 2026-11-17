@@ -424,6 +424,14 @@ pub extern "C" fn timer_tick() {
 /// (`smp::flush_all`, spec 0002 H2).
 #[no_mangle]
 pub extern "C" fn wake_ipi() {
+    // A halt or reboot request stops every other core through this same
+    // vector (spec 0017). Acknowledging and halting here makes a request
+    // reliable even when a core is mid-task rather than idle; the boot core
+    // uses the same path, so a requester that is an AP also stops it.
+    if smp::shutdown_requested() {
+        smp::note_stopped(smp::core_index());
+        arch_x86_64::halt();
+    }
     smp::on_ipi();
     apic::eoi();
 }

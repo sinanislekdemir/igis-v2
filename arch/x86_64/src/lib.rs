@@ -57,3 +57,30 @@ pub fn halt() -> ! {
         unsafe { core::arch::asm!("cli", "hlt", options(nomem, nostack, preserves_flags)) }
     }
 }
+
+/// Requests a system reset and never returns (spec 0017).
+///
+/// Two platform channels are tried in order: the PIIX3/Q35 reset control port
+/// (`0xCF9`: write `0x02` for a full reset, then `0x06` to assert it) and the
+/// 8042 keyboard controller's pulse-reset command (`0x64 <- 0xFE`), which
+/// older boards honour. QEMU resets on `0xCF9`. If the firmware ignores both,
+/// this core halts instead of resuming the interpreter, so a caller never
+/// believes a reset happened when it did not. The scheduler marks the rest of
+/// the machine stopped before calling this.
+pub fn reboot() -> ! {
+    // SAFETY: the reset channels are fixed platform I/O ports; writing them
+    // has no memory side effects and no other core owns them.
+    unsafe {
+        port::outb(0xCF9, 0x02);
+        port::outb(0xCF9, 0x06);
+        // Wait, bounded, for the 8042 input buffer to drain before the pulse
+        // reset so the command is not dropped behind pending keyboard data.
+        let mut guard = 0u32;
+        while guard < 100_000 && port::inb(0x64) & 0x02 != 0 {
+            core::hint::spin_loop();
+            guard += 1;
+        }
+        port::outb(0x64, 0xFE);
+    }
+    halt()
+}

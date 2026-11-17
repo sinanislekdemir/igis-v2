@@ -395,6 +395,22 @@ pub trait Host {
         Status::Invalid
     }
 
+    /// Requests a machine-wide halt (`core.halt`, spec 0017). A live kernel
+    /// stops every other online core and halts the calling one, so this call
+    /// never returns there; the default `Invalid` is what a host without
+    /// system-control authority (a bare mock or `langhost`) reports.
+    fn halt(&mut self) -> Status {
+        Status::Invalid
+    }
+
+    /// Requests a system reset (`core.reboot`, spec 0017). The live kernel
+    /// stops the other cores and resets the machine, or halts if the platform
+    /// ignores the reset channels; the default `Invalid` is the bare-host
+    /// result.
+    fn reboot(&mut self) -> Status {
+        Status::Invalid
+    }
+
     // ---- application files (spec 0013) ----------------------------------
     //
     // The M2.5.1 view is the read-only image root. The machine validates the
@@ -1857,6 +1873,17 @@ impl Machine {
                     builtin::TERMINAL_ATTACH => {
                         let window = self.pop(stack)?;
                         let status = host.terminal_attach(window);
+                        self.push(stack, status as u64)?;
+                    }
+                    // System control (spec 0017). No operands: the host owns
+                    // the stop/reset path and the status is only observable on
+                    // a host that refuses (a live kernel does not return).
+                    builtin::HALT => {
+                        let status = host.halt();
+                        self.push(stack, status as u64)?;
+                    }
+                    builtin::REBOOT => {
+                        let status = host.reboot();
                         self.push(stack, status as u64)?;
                     }
                     // Read-only enumeration (spec 0011, W19; spec 0012, D15).

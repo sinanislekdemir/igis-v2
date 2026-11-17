@@ -2473,3 +2473,48 @@ fn the_visual_sample_reports_the_host_path() {
     assert_eq!(result.reason, ExitReason::Ok);
     assert_eq!(result.output, b"visual: host ok\n".to_vec());
 }
+
+/// The M2.6.4 desktop sample on `langhost`'s disabled screen: the menu bar and
+/// the System pull-down need a framebuffer, so the host path only reports the
+/// no-graphics contract (spec 0012, spec 0017).
+#[test]
+fn the_desktop_shell_reports_the_host_path() {
+    let path = format!(
+        "{}/../samples/apps/desktop_shell",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "desktop_shell").expect("the desktop sample compiles");
+    let result = langhost::run(&package.code, b"check", langhost::DEFAULT_BUDGET)
+        .expect("verifies and runs");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"desktop_shell: no graphics\n".to_vec());
+}
+
+/// `core.halt`/`core.reboot` have no authority on a bare host: both return
+/// `Invalid`, so the probe prints its return line and the host keeps running
+/// (spec 0017).
+#[test]
+fn the_system_probe_reports_no_kernel_authority() {
+    let path = format!(
+        "{}/../samples/apps/system_probe",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "system_probe").expect("the probe compiles");
+    let result =
+        langhost::run(&package.code, b"halt", langhost::DEFAULT_BUDGET).expect("verifies and runs");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(
+        result.output,
+        b"system_probe: halt requested\nsystem_probe: halt returned (no kernel authority)\n"
+            .to_vec()
+    );
+    let result = langhost::run(&package.code, b"reboot", langhost::DEFAULT_BUDGET)
+        .expect("verifies and runs");
+    assert_eq!(
+        result.output,
+        b"system_probe: reboot requested\nsystem_probe: reboot returned (no kernel authority)\n"
+            .to_vec()
+    );
+}

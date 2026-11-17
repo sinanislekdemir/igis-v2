@@ -1042,6 +1042,32 @@ and the staged echo are unchanged, and a detach (the owner's window disappears) 
 the stream serial-only until the next attach. The language has no task id and no
 window-content drawing primitive. Spec 0014 and ADR 0028 own the contract.
 
+### System control (M2.6.4)
+
+```text
+core.halt() -> Status
+core.reboot() -> Status
+```
+
+Host builtins 48 and 49, not opcodes, with no operands. They are the desktop's
+system-control primitives (spec 0017, ADR 0033) and have no capability check: every
+application may stop or reset the machine (vision R14, "no capability model").
+
+- `core.halt` requests a machine-wide halt. The kernel sets the shutdown flag, wakes
+  every other online core on the existing IPI vector (the handler acknowledges and
+  halts), waits bounded for the acknowledgements, prints `system: N of M APs stopped`
+  and halts the calling core. It never returns on a live kernel; the `Status` result is
+  unobservable there.
+- `core.reboot` requests the same stop, then drives the platform reset channels
+  (`0xCF9` write `0x02`/`0x06`, then the 8042 pulse reset `0x64 <- 0xFE`). QEMU
+  reboots. If the firmware ignores both channels the calling core halts instead of
+  resuming the interpreter; the other cores have already been stopped.
+- A bare host (`langhost`) has no system-control authority: `Host::halt`/`Host::reboot`
+  default to `Status.Invalid`, so the probe continues and prints its return line.
+- The desktop shell calls both from its `System` menu and from `Ctrl+R`/`Ctrl+H`
+  shortcuts; there is no confirmation in M2 (ADR 0033). Every other language and kernel
+  contract is unchanged, and the ABI opcode table stays at 75.
+
 ## Modules
 
 - **M1 (MUST):** One source file is one `unit`.
@@ -2028,3 +2054,4 @@ controls and input dialog for the QMP screenshot harness.
 | 2026-11-17 | M2.5.1 adds the application file surface (spec 0013, ADR 0027): `core.fs_list(path, index, var name, var kind, var size) -> Status`, `core.fs_read(path, offset, var dst: bytes[256], var read) -> Status` and `core.fs_size(path, var size) -> Status` as host builtins 41–43. The view is the image root only; paths use the shared `core.spawn` syntax (relative, no `..`, ≤256 bytes), a separator is `Invalid` (unsupported subdirectory), listing reports kind `0` file / `1` directory / `2` other, reads are 256-byte chunks with `Ok`/0 at EOF, and every failure leaves the out-parameters untouched. No allocation, no handle and no new opcode. |
 | 2026-11-17 | M2.5.5 adds `core.terminal_attach(window_id: int) -> Status` as host builtin 44 (spec 0014, ADR 0028): the one machine-wide terminal is bound to a window owned by the calling task, with the kernel supplying the task id. `Ok`/`NotFound`/`Invalid`/`Full`; a repeated attach by the owner is `Ok`, another live task is `Full`, and the kernel detaches when the owner's window disappears. `core.write`, the staged echo and `core.read_line` are unchanged, and `println!` keeps the System Log. No new opcode (ABI v1 stays at 75) and no language task id. |
 | 2026-11-17 | M2.5.3 records application buffers above the 256-byte `stdlib` editing capacity. The M2.4.1 mutators stay fixed at 256 bytes; `samples/apps/editor` holds one `string[8192]` and implements one app-local atomic mutator with the SE2/SE3/SE4 rules (boundary-checked, staged in a local `bytes[8192]`, one strict-UTF-8 publish, `CapacityExceeded` without a partial write), while `str_boundary`, `str_cursor_*` and `str_selection_normalize`/`all`/`collapse` run unchanged on the larger buffer. 8192 is an application constant, not a language limit; a larger file is refused by size before it is read, and saving stays disabled until a writable filesystem exists. |
+| 2026-11-17 | M2.6.4 adds system control (spec 0017, ADR 0033): `core.halt() -> Status` and `core.reboot() -> Status` as host builtins 48/49, no operands and no capability check (vision R14). The kernel sets the shutdown flag, wakes and stops every other core on the existing IPI vector, and halts the caller; `reboot` then drives the platform reset channels and halts if they are ignored. A bare host defaults both to `Invalid`. The desktop shell's `System` pull-down and the `Ctrl+A`/`Ctrl+R`/`Ctrl+H` shortcuts call the same surface. No new opcode; ABI v1 stays at 75. |

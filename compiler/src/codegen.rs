@@ -6736,6 +6736,26 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::enumeration(STATUS_ENUM)))
             }
+            // System control (spec 0017): both take no operands and return a
+            // `Status`. The kernel host owns the stop/reset path; a bare host
+            // reports `Invalid`.
+            "core.halt" | "core.reboot" => {
+                if !args.is_empty() {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`{target}` expects 0 arguments, got {}", args.len()),
+                    ));
+                }
+                let id = if target == "core.halt" {
+                    builtin::HALT
+                } else {
+                    builtin::REBOOT
+                };
+                self.one(opcodes::BUILTIN, id)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
             "core.wait" => {
                 if args.len() != 2 {
                     return Err(self.err(

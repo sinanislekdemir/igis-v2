@@ -11,7 +11,8 @@ unit desktop_shell;
 // booting the ISO lands on this menu bar. With no graphics the app spawns the
 // text `shell` instead, keeping a serial REPL on a machine that cannot draw.
 //
-// The menu bar has direct items and no dropdowns (M2.4.3 owns those):
+// The menu bar has direct items File/Apps/Windows/Terminal and one pull-down,
+// `System` (M2.6.4, spec 0017):
 //
 //   File      enumerate the live windows into the terminal window
 //   Apps      launch `clock` with core.spawn (non-blocking)
@@ -19,12 +20,19 @@ unit desktop_shell;
 //   Terminal  launch `shell` non-blocking; a later click raises the existing
 //             Terminal window instead of spawning a second shell
 //   Apple     raise the shell's own window
+//   System    pull-down: About igis-v2 (Ctrl+A), Restart (Ctrl+R), Halt (Ctrl+H)
+//
+// The System pull-down is drawn with the M2.4.3 menu model
+// (`stdlib.ui_menu_dropdown`/`ui_menu_hit`/`ui_menu_move`/`ui_menu_key`) and
+// the M2.4.4 dialog helpers (`ui_message`/`ui_dialog_button`). The About panel
+// is an ordinary desktop-owned window, so the window service restores what it
+// covered through the usual Expose protocol.
 //
 // The shell draws its own window content and presents it with
 // `syslib.window_present`; an `Expose` for its id repaints that content. Window
 // lifetime, z-order and chrome belong to the kernel service, so the shell never
-// draws outside its content rectangle except for the menu bar, which occupies
-// the top 22 rows where no window starts by convention.
+// draws outside its content rectangle except for the menu bar and its pull-down,
+// which occupy the top rows where no window starts by convention.
 //
 // The window list uses `syslib.window_info` (builtin 40), which returns the
 // topmost window first. `check` mode injects one pointer-down per item and
@@ -37,10 +45,14 @@ unit desktop_shell;
 // `core.write`. It never attaches the terminal itself: the launched `shell`
 // does (spec 0014, the one-terminal rule).
 
-uses core, syslib;
+uses core, stdlib, syslib;
 
 const
   MenuHeight = 22;
+  SysMenuWidth = 224;
+  SysMenuCount = 4;
+  AboutContentW = 420;
+  AboutContentH = 200;
 
 var
   white: uint;
@@ -88,6 +100,32 @@ var
   menu_windows_x: int;
   menu_terminal_x: int;
   menu_terminal_end: int;
+  menu_system_x: int;
+  menu_system_end: int;
+
+  // The System pull-down (M2.6.4, spec 0017). The app owns the open state, the
+  // highlight and the item tables; the helpers draw and hit-test only.
+  sys_items: array[string[64], 16];
+  sys_keys: array[string[32], 16];
+  sys_disabled: uint;
+  sys_checked: uint;
+  system_open: bool;
+  system_selected: int;
+  system_runs: int;
+
+  // The About window (M2.6.4): an ordinary desktop-owned window whose content
+  // is the alert panel. `about_runs` counts activations for the check.
+  about_open: bool;
+  about_id: int;
+  about_rect: Rect;
+  about_runs: int;
+
+  // The Restart/Halt actions (check mode never runs them).
+  restart_runs: int;
+  halt_runs: int;
+  action: int;
+  under_id: int;
+  hit_row: int;
 
   // Check-mode bookkeeping.
   failed: bool;
@@ -106,6 +144,9 @@ var
   top_id: int;
   focus: int;
   pos: int;
+  xx: int;
+  yy: int;
+  ink_found: bool;
 
 procedure say(text: const string[0]);
 begin
@@ -171,6 +212,8 @@ begin
   menu_windows_x := menu_apps_x + tw("Apps") + 14;
   menu_terminal_x := menu_windows_x + tw("Windows") + 14;
   menu_terminal_end := menu_terminal_x + tw("Terminal");
+  menu_system_x := menu_terminal_end + 14;
+  menu_system_end := menu_system_x + tw("System");
 end;
 
 // The menu bar is application-drawn (no global work area in M2.3.4). It stays
@@ -188,6 +231,13 @@ begin
   status := syslib.draw_text_prop(menu_apps_x, 7, "Apps", black);
   status := syslib.draw_text_prop(menu_windows_x, 7, "Windows", black);
   status := syslib.draw_text_prop(menu_terminal_x, 7, "Terminal", black);
+  if system_open then
+  begin
+    status := syslib.fill_rect(menu_system_x - 4, 2, tw("System") + 8, MenuHeight - 4, black);
+    status := syslib.draw_text_prop(menu_system_x, 7, "System", white);
+  end
+  else
+    status := syslib.draw_text_prop(menu_system_x, 7, "System", black);
   status := syslib.fill_rect(0, MenuHeight - 1, screen_w, 1, black);
   draw_clock(screen_w - 8);
   // The bar is application-drawn into the shadow; present its rows so the
@@ -290,6 +340,316 @@ begin
   end;
 end;
 
+// ---- the System menu and About panel (M2.6.4, spec 0017) -----------------
+//
+// Item order (0-based, the order drawn and the order Up/Down traverses):
+//
+//   0  About igis-v2   Ctrl+A
+//   1  -               (separator, never selectable)
+//   2  Restart         Ctrl+R
+//   3  Halt            Ctrl+H
+//
+// The labels and shortcuts live in the app's state; the library owns the
+// rendering and the state transitions. The pull-down's frame is
+// `(menu_system_x - 4, MenuHeight, SysMenuWidth, 4 * 16 + 2)`.
+
+procedure init_system_menu();
+begin
+  sys_items[0] := "About igis-v2";
+  sys_keys[0] := "Ctrl+A";
+  sys_items[1] := "-";
+  sys_keys[1] := "";
+  sys_items[2] := "Restart";
+  sys_keys[2] := "Ctrl+R";
+  sys_items[3] := "Halt";
+  sys_keys[3] := "Ctrl+H";
+  sys_disabled := uint(0);
+  sys_checked := uint(0);
+  system_open := false;
+  system_selected := -1;
+  system_runs := 0;
+end;
+
+procedure draw_system_menu();
+begin
+  status := stdlib.ui_menu_dropdown(
+    menu_system_x - 4, MenuHeight, SysMenuWidth,
+    sys_items, sys_keys, SysMenuCount, system_selected, sys_checked, sys_disabled, true);
+  status := syslib.present(
+    menu_system_x - 4, MenuHeight, SysMenuWidth, SysMenuCount * 16 + 2);
+end;
+
+procedure open_system_menu();
+begin
+  system_open := true;
+  system_selected := stdlib.ui_menu_first(SysMenuCount, sys_items, sys_disabled);
+  system_runs := system_runs + 1;
+  draw_menu_bar();
+  draw_system_menu();
+end;
+
+// Erases the pull-down pixels. The shared shadow has no window for the menu, so
+// the topmost window whose frame intersects the menu area is raised: the
+// service repaints its chrome and marks its `Expose`, and the owner (the
+// console pump for the terminal, the app otherwise) restores its content. The
+// desktop window is raised again afterwards so focus returns to the shell.
+procedure repair_menu_area();
+begin
+  under_id := 0;
+  pos := 0;
+  status := syslib.window_info(uint(pos), win_id, win_rect, win_title);
+  while status = Ok and pos < 32 and under_id = 0 do
+  begin
+    if not (win_rect.x + win_rect.w <= menu_system_x - 4) then
+      if not (win_rect.x >= menu_system_x - 4 + SysMenuWidth) then
+        if not (win_rect.y + win_rect.h <= MenuHeight) then
+          if not (win_rect.y >= MenuHeight + SysMenuCount * 16 + 2) then
+            under_id := win_id;
+    pos := pos + 1;
+    status := syslib.window_info(uint(pos), win_id, win_rect, win_title);
+  end;
+  if under_id > 0 and under_id <> own then
+    status := syslib.window_raise(under_id);
+  if own > 0 then
+    status := syslib.window_raise(own);
+end;
+
+procedure close_system_menu();
+begin
+  if not system_open then
+    return;
+  system_open := false;
+  system_selected := -1;
+  repair_menu_area();
+  draw_menu_bar();
+  draw_shell_window();
+end;
+
+procedure update_menu_highlight();
+begin
+  hit_row := stdlib.ui_menu_hit(
+    menu_system_x - 4, MenuHeight, SysMenuWidth,
+    sys_items, SysMenuCount, ev.x, ev.y);
+  if hit_row >= 0
+     and stdlib.ui_menu_selectable(sys_items[hit_row], sys_disabled, hit_row)
+     and hit_row <> system_selected then
+  begin
+    system_selected := hit_row;
+    draw_system_menu();
+  end;
+end;
+
+procedure request_restart();
+begin
+  say("desktop_shell: restart\n");
+  status := core.reboot();
+  say("desktop_shell: reboot returned\n");
+end;
+
+procedure request_halt();
+begin
+  say("desktop_shell: halt\n");
+  status := core.halt();
+  say("desktop_shell: halt returned\n");
+end;
+
+procedure activate_system_item();
+begin
+  if system_selected = 0 then
+  begin
+    close_system_menu();
+    open_about();
+  end
+  else if system_selected = 2 then
+  begin
+    restart_runs := restart_runs + 1;
+    close_system_menu();
+    request_restart();
+  end
+  else if system_selected = 3 then
+  begin
+    halt_runs := halt_runs + 1;
+    close_system_menu();
+    request_halt();
+  end;
+end;
+
+procedure handle_system_key(code: uint);
+begin
+  action := stdlib.ui_menu_key(code, system_open);
+  if action = 6 then
+    close_system_menu()
+  else if action = 1 then
+  begin
+    system_selected := stdlib.ui_menu_move(
+      system_selected, SysMenuCount, -1, sys_items, sys_disabled);
+    draw_system_menu();
+  end
+  else if action = 2 then
+  begin
+    system_selected := stdlib.ui_menu_move(
+      system_selected, SysMenuCount, 1, sys_items, sys_disabled);
+    draw_system_menu();
+  end
+  else if action = 5 then
+    activate_system_item();
+end;
+
+// Global shortcuts, only while the desktop's own window has focus and no menu
+// or About panel is open: F10 opens/toggles the System menu, Ctrl+A the About
+// panel, Ctrl+R Restart and Ctrl+H Halt. Keeping them focus-scoped means a key
+// typed into another window (the editor's Ctrl+A, for example) never triggers
+// a system action by accident.
+procedure handle_shortcut(code: uint);
+var
+  key: int;
+  mods: int;
+begin
+  key := stdlib.ui_key_code(code);
+  mods := stdlib.ui_key_modifiers(code);
+  if key = 0x129 then
+    open_system_menu()
+  else if (mods div 2) mod 2 = 1 then
+  begin
+    if key = 65 then
+      open_about()
+    else if key = 82 then
+    begin
+      restart_runs := restart_runs + 1;
+      request_restart();
+    end
+    else if key = 72 then
+    begin
+      halt_runs := halt_runs + 1;
+      request_halt();
+    end;
+  end;
+end;
+
+// The About panel is a desktop-owned window: the service's own chrome is the
+// panel frame, and the content is the alert body. Using a real window means the
+// service restores whatever the panel covered through the ordinary damage and
+// `Expose` protocol, with no app-managed screen save.
+procedure open_about();
+var
+  aw: int;
+  ah: int;
+begin
+  if about_open then
+    return;
+  aw := AboutContentW;
+  ah := AboutContentH;
+  if aw > screen_w - 16 then aw := screen_w - 16;
+  if ah > screen_h - MenuHeight - 16 then ah := screen_h - MenuHeight - 16;
+  status := syslib.window_open(
+    (screen_w - aw) div 2,
+    MenuHeight + ((screen_h - MenuHeight - ah) div 2),
+    aw, ah, "About igis-v2", about_id);
+  if status = Ok then
+  begin
+    about_runs := about_runs + 1;
+    about_open := true;
+    say("desktop_shell: about open\n");
+    draw_about();
+  end
+  else
+  begin
+    about_id := 0;
+    say("desktop_shell: about failed\n");
+  end;
+end;
+
+procedure draw_about();
+var
+  row_top: int;
+begin
+  if about_id = 0 then
+    return;
+  status := syslib.window_content_rect(about_id, about_rect);
+  if status = Ok then
+  begin
+    status := syslib.fill_rect(
+      about_rect.x, about_rect.y, about_rect.w, about_rect.h, white);
+    status := syslib.draw_text_prop(
+      about_rect.x + 14, about_rect.y + 10, "igis-v2", black);
+    status := stdlib.ui_message(
+      about_rect.x + 14, about_rect.y + 32, about_rect.w - 28,
+      about_rect.h - 32 - 44,
+      "Interpreted desktop at ring 0.\nWindows, terminal, text and files.\nFonts, menus and a golden frame.\nM2, 2026.");
+    row_top := about_rect.y + about_rect.h - 34;
+    status := stdlib.ui_dialog_button(
+      about_rect.x + (about_rect.w - 80) div 2, row_top, 80, 24,
+      "OK", true, true);
+    status := syslib.window_present(about_id);
+  end;
+end;
+
+procedure close_about();
+begin
+  if not about_open then
+    return;
+  if about_id > 0 then
+    status := syslib.window_close(about_id);
+  about_id := 0;
+  about_open := false;
+  say("desktop_shell: about closed\n");
+  draw_menu_bar();
+  draw_shell_window();
+end;
+
+procedure handle_about_key(code: uint);
+begin
+  action := stdlib.ui_dialog_key(code, true);
+  if action = 1 or action = 2 then
+    close_about();
+end;
+
+// A modal event while the About panel is open: an owner expose repaints it, a
+// key applies the dialog mapping (Enter is the default, Escape cancels; both
+// close), and a pointer-down routed to the panel closes it (the OK button, the
+// title bar or any click inside).
+procedure handle_about_event();
+begin
+  if ev.kind = Expose then
+  begin
+    if ev.window = about_id then
+      draw_about();
+  end
+  else if ev.kind = KeyDown then
+    handle_about_key(ev.code)
+  else if ev.kind = PointerDown then
+  begin
+    if ev.window = about_id then
+      close_about();
+  end;
+end;
+
+// A pointer-down while the System pull-down is open. The kernel routes the
+// click to whichever window is under the point and may raise it; the menu
+// itself is app-drawn and has no window, so its own rectangle is handled here
+// by coordinate before the routed target matters.
+procedure handle_open_menu_click();
+begin
+  if ev.y < MenuHeight then
+    handle_menu(ev.x, ev.y)
+  else
+  begin
+    hit_row := stdlib.ui_menu_hit(
+      menu_system_x - 4, MenuHeight, SysMenuWidth,
+      sys_items, SysMenuCount, ev.x, ev.y);
+    if hit_row >= 0 then
+    begin
+      if stdlib.ui_menu_selectable(sys_items[hit_row], sys_disabled, hit_row) then
+      begin
+        system_selected := hit_row;
+        activate_system_item();
+      end;
+    end
+    else
+      close_system_menu();
+  end;
+end;
+
 // Non-blocking launch: the shell must keep serving its menu and events.
 procedure launch_clock();
 begin
@@ -372,32 +732,45 @@ begin
   begin
     if x >= 2 and x < 20 then
     begin
+      if system_open then close_system_menu();
       status := syslib.window_raise(own);
       draw_shell_window();
       handled := true;
     end
     else if x >= 20 and x < menu_apps_x - 4 then
     begin
+      if system_open then close_system_menu();
       list_windows();
       file_runs := file_runs + 1;
       handled := true;
     end
     else if x >= menu_apps_x - 4 and x < menu_windows_x - 4 then
     begin
+      if system_open then close_system_menu();
       launch_clock();
       app_runs := app_runs + 1;
       handled := true;
     end
     else if x >= menu_windows_x - 4 and x < menu_terminal_x - 4 then
     begin
+      if system_open then close_system_menu();
       raise_terminal();
       window_runs := window_runs + 1;
       handled := true;
     end
     else if x >= menu_terminal_x - 4 and x < menu_terminal_end + 4 then
     begin
+      if system_open then close_system_menu();
       launch_shell();
       terminal_runs := terminal_runs + 1;
+      handled := true;
+    end
+    else if x >= menu_system_x - 4 and x < menu_system_end + 4 then
+    begin
+      if system_open then
+        close_system_menu()
+      else
+        open_system_menu();
       handled := true;
     end;
   end;
@@ -490,6 +863,110 @@ begin
     status := syslib.window_present(own);
     verify("window_present", status = Ok);
 
+    // ---- System pull-down and About panel (M2.6.4, spec 0017) ----------
+    // Item order, labels and shortcut labels are the app's contract.
+    verify(
+      "system about item",
+      sys_items[0] = "About igis-v2" and sys_keys[0] = "Ctrl+A");
+    verify("system separator", stdlib.ui_menu_is_separator(sys_items[1]));
+    verify(
+      "system restart item",
+      sys_items[2] = "Restart" and sys_keys[2] = "Ctrl+R");
+    verify(
+      "system halt item",
+      sys_items[3] = "Halt" and sys_keys[3] = "Ctrl+H");
+    verify(
+      "system selectability",
+      stdlib.ui_menu_selectable(sys_items[0], sys_disabled, 0)
+        and not stdlib.ui_menu_selectable(sys_items[1], sys_disabled, 1)
+        and stdlib.ui_menu_selectable(sys_items[2], sys_disabled, 2)
+        and stdlib.ui_menu_selectable(sys_items[3], sys_disabled, 3));
+
+    // Open through the bar handler: the same path a real click takes.
+    handle_menu(menu_system_x + 4, 10);
+    verify("system opened", handled and system_open and system_selected = 0);
+    verify(
+      "system accent row",
+      syslib.get_pixel(menu_system_x + 56, MenuHeight + 13) = uint(0x000080));
+    verify(
+      "system separator rule",
+      syslib.get_pixel(menu_system_x + 20, MenuHeight + 25) = black);
+    // Down skips the separator; Up walks back to the first item.
+    handle_system_key(uint(0x1130000));
+    verify("system down skips separator", system_selected = 2);
+    handle_system_key(uint(0x1130000));
+    verify("system down reaches halt", system_selected = 3);
+    handle_system_key(uint(0x1120000));
+    verify("system up reaches restart", system_selected = 2);
+    handle_system_key(uint(0x1120000));
+    verify("system up reaches about", system_selected = 0);
+    // Escape closes with no action; F10 opens it again.
+    handle_system_key(uint(0x1000000));
+    verify("system escape closes", not system_open and about_runs = 0);
+    handle_shortcut(uint(0x1290000));
+    verify("F10 opens system", system_open);
+    // Enter activates the highlighted About item.
+    handle_system_key(uint(0x1030000));
+    verify("about activated", about_runs = 1 and about_open and about_id > 0);
+    verify("system closed by action", not system_open);
+    status := syslib.window_info(uint(0), win_id, win_rect, win_title);
+    verify(
+      "about is topmost",
+      status = Ok and win_id = about_id and win_title = "About igis-v2");
+    status := syslib.window_content_rect(about_id, about_rect);
+    verify(
+      "about content white",
+      status = Ok
+        and syslib.get_pixel(about_rect.x + 2, about_rect.y + about_rect.h - 2)
+          = white);
+    verify(
+      "about button border",
+      syslib.get_pixel(
+        about_rect.x + (about_rect.w - 80) div 2,
+        about_rect.y + about_rect.h - 34) = black);
+    // The prop face's exact ink pixels are not a contract; any ink in the
+    // title band proves the panel text was drawn.
+    ink_found := false;
+    yy := about_rect.y + 8;
+    while yy < about_rect.y + 24 and not ink_found do
+    begin
+      xx := about_rect.x + 12;
+      while xx < about_rect.x + 140 and not ink_found do
+      begin
+        if syslib.get_pixel(xx, yy) = black then ink_found := true;
+        xx := xx + 1;
+      end;
+      yy := yy + 1;
+    end;
+    verify("about title ink", ink_found);
+    // Escape closes the modal panel.
+    handle_about_key(uint(0x1000000));
+    verify("about escape closes", not about_open and about_id = 0);
+    status := syslib.window_info(uint(0), win_id, win_rect, win_title);
+    verify("about gone from enumeration", status = Ok and win_title <> "About igis-v2");
+    // A pointer-down routed to the panel closes it as well.
+    open_about();
+    verify("about reopened", about_open and about_runs = 2);
+    ev.kind := PointerDown;
+    ev.window := about_id;
+    handle_about_event();
+    verify("about click closes", not about_open and about_id = 0);
+    // Ctrl+A opens the panel through the shortcut path.
+    handle_shortcut(uint(0x410200));
+    verify("ctrl+a opens about", about_open and about_runs = 3);
+    handle_about_key(uint(0x1000000));
+    verify("shortcut about closed", not about_open);
+    // The checks never fired a system action.
+    verify("no system action fired", restart_runs = 0 and halt_runs = 0);
+    // The desktop window still redraws after the panels.
+    draw_shell_window();
+    status := syslib.window_content_rect(own, about_rect);
+    verify(
+      "desktop marker restored",
+      status = Ok
+        and syslib.get_pixel(about_rect.x + about_rect.w - 4, about_rect.y + about_rect.h - 4)
+          = black);
+
     // Leave the bar and the window composed for the final screen.
     draw_menu_bar();
     draw_shell_window();
@@ -526,16 +1003,33 @@ begin
     if status = Ok then
     begin
       core.heartbeat();
-      if ev.kind = Expose then
+      // The About panel is modal: every event goes to it until it closes.
+      if about_open then
+        handle_about_event()
+      else if ev.kind = Expose then
       begin
         if ev.window = own then draw_shell_window();
       end
+      else if ev.kind = KeyDown then
+      begin
+        if system_open then
+          handle_system_key(ev.code)
+        else if ev.window = own or ev.window = 0 then
+          handle_shortcut(ev.code);
+      end
       else if ev.kind = PointerDown then
       begin
-        if ev.window = 0 then
+        if system_open then
+          handle_open_menu_click()
+        else if ev.window = 0 then
           handle_menu(ev.x, ev.y)
         else if ev.window = own then
           draw_shell_window();
+      end
+      else if ev.kind = PointerMove then
+      begin
+        if system_open then
+          update_menu_highlight();
       end;
       // Keep the bar visible after every event; no window starts above it.
       draw_menu_bar();
@@ -551,6 +1045,12 @@ begin
   screen_h := int(syslib.screen_height());
   shell_launched := false;
   terminal_runs := 0;
+  init_system_menu();
+  about_open := false;
+  about_id := 0;
+  about_runs := 0;
+  restart_runs := 0;
+  halt_runs := 0;
   if args = "check" then
   begin
     if screen_w = 0 or screen_h = 0 then

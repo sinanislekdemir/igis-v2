@@ -28,6 +28,10 @@ const ONLINE_WAIT_NS: u64 = 100_000_000;
 /// How long the boot core waits for stop acknowledgements.
 const STOP_WAIT_NS: u64 = 1_000_000_000;
 
+/// Hard spin ceiling for the same wait, used when a halt request stops the
+/// boot core's timer (spec 0017).
+const STOP_SPIN_BOUND: u64 = 10_000_000;
+
 /// How long a guard PTE change waits for the other online cores to flush
 /// (ADR 0006, spec 0002 H2).
 ///
@@ -270,6 +274,12 @@ pub fn all_idle_except(except: usize) -> bool {
 
 /// Tells every online core to stop and waits, bounded, for the acknowledgements
 /// (spec 0007, "Termination" of the system: the boot core prints one summary).
+///
+/// The wait is bounded by both the clock and a spin count: when the caller is
+/// an AP, a halt request can stop the boot core (the only core whose APIC timer
+/// advances the global clock) before every acknowledgement arrives, and the
+/// time bound alone would then never expire. The spin bound turns that into a
+/// reported partial stop instead of a hang (spec 0017).
 pub fn stop_all() -> (usize, usize, [bool; MAX_CORES]) {
     SHUTDOWN.store(true, Ordering::SeqCst);
     apic::broadcast_wake();
@@ -278,6 +288,7 @@ pub fn stop_all() -> (usize, usize, [bool; MAX_CORES]) {
     // every other online core.
     let expected = online_count().saturating_sub(1);
     let deadline = clock::now_ns().saturating_add(STOP_WAIT_NS);
+    let mut spins = 0u64;
     loop {
         let mut stopped = [false; MAX_CORES];
         let mut count = 0;
@@ -289,11 +300,20 @@ pub fn stop_all() -> (usize, usize, [bool; MAX_CORES]) {
             stopped[index] = ack;
             count += usize::from(ack);
         }
-        if count >= expected || clock::now_ns() >= deadline {
+        if count >= expected || clock::now_ns() >= deadline || spins >= STOP_SPIN_BOUND {
             return (count, expected, stopped);
         }
+        spins += 1;
         core::hint::spin_loop();
     }
+}
+
+/// Sets the machine-wide shutdown flag and wakes every other core. The wake
+/// IPI handler halts a core that observes the flag, so this is the prompt half
+/// of a halt or reboot request (spec 0017); [`stop_all`] adds the bounded wait.
+pub fn request_shutdown() {
+    SHUTDOWN.store(true, Ordering::SeqCst);
+    apic::broadcast_wake();
 }
 
 pub fn shutdown_requested() -> bool {
