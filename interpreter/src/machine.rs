@@ -366,6 +366,15 @@ pub trait Host {
         None
     }
 
+    /// Attaches the console's terminal grid to a window owned by the calling
+    /// task (`core.terminal_attach`, spec 0014). The host supplies the caller's
+    /// task id and validates the window ownership itself. The default is
+    /// `Invalid`: a host without a console service (a bare mock or `langhost`)
+    /// has no terminal window.
+    fn terminal_attach(&mut self, _window: u64) -> Status {
+        Status::Invalid
+    }
+
     // ---- application files (spec 0013) ----------------------------------
     //
     // The M2.5.1 view is the read-only image root. The machine validates the
@@ -1803,6 +1812,14 @@ impl Machine {
                     builtin::WINDOW_PRESENT => {
                         let window = self.pop(stack)?;
                         let status = host.window_present(window);
+                        self.push(stack, status as u64)?;
+                    }
+                    // Terminal attach (spec 0014): the kernel host supplies the
+                    // caller's task id, so the machine only stages the window
+                    // id and the status. No opcode is added.
+                    builtin::TERMINAL_ATTACH => {
+                        let window = self.pop(stack)?;
+                        let status = host.terminal_attach(window);
                         self.push(stack, status as u64)?;
                     }
                     // Read-only enumeration (spec 0011, W19; spec 0012, D15).

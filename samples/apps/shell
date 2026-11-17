@@ -1,6 +1,6 @@
 unit shell;
 
-uses core;
+uses core, syslib;
 
 var
   banner: string[32];
@@ -17,6 +17,13 @@ var
   done: bool;
   diag: Diagnostic;
   reason: ExitReason;
+  term: int;
+  term_status: Status;
+  term_rect: Rect;
+  found_white: bool;
+  found_ink: bool;
+  px: int;
+  py: int;
 
 procedure say(text: const string[0]);
 begin
@@ -56,6 +63,22 @@ end;
 
 procedure main(args: const string[1024]);
 begin
+  // The REPL's terminal is an ordinary task-owned window (spec 0014). Open it
+  // and attach the console's terminal grid before the first banner byte; when
+  // graphics are disabled or the attach is refused the shell keeps the serial
+  // path and prints one line explaining it.
+  term := 0;
+  term_status := Status.Invalid;
+  st := syslib.window_open(24, 64, 560, 360, "Terminal", term);
+  if st = Ok then
+    term_status := core.terminal_attach(term);
+  if term_status <> Ok then
+  begin
+    if term <> 0 then
+      st := syslib.window_close(term);
+    say("shell: no terminal window\n");
+  end;
+
   banner := "igis-v2 shell\n";
   say(banner);
   say("shell: spawning child\n");
@@ -153,6 +176,62 @@ begin
           say("\n");
         end;
       end;
+    end
+    else if cmd = "terminal" then
+    begin
+      // Terminal-window proof (spec 0014): report the attached id, check a
+      // refused unknown id, verify a foreground and a background pixel in the
+      // window's content rectangle, then spawn a probe that must be refused
+      // with Full while this shell holds the one terminal.
+      if term_status = Ok then
+      begin
+        say("terminal: window ");
+        split := core.format_int_into(rest, term, uint(10), uint(0));
+        say(rest);
+        say("\n");
+
+        st := core.terminal_attach(999999);
+        if st = NotFound then
+          say("terminal: unknown refused\n")
+        else
+          say("terminal: unknown BAD\n");
+
+        st := syslib.window_content_rect(term, term_rect);
+        if st = Ok then
+        begin
+          found_white := false;
+          found_ink := false;
+          py := 0;
+          while py < 16 do
+          begin
+            px := 0;
+            while px < 128 do
+            begin
+              if syslib.get_pixel(term_rect.x + px, term_rect.y + py) = uint(0) then
+                found_ink := true
+              else
+                found_white := true;
+              px := px + 1;
+            end;
+            py := py + 1;
+          end;
+          if found_ink and found_white then
+            say("terminal: pixels ok\n")
+          else
+            say("terminal: pixels BAD\n");
+        end
+        else
+          say("terminal: no rect\n");
+
+        st := core.run("terminal_probe", "", diag, reason);
+        if st = Ok then
+          report(reason)
+        else
+          say("terminal: probe failed\n");
+        say("terminal: ok\n");
+      end
+      else
+        say("terminal: not attached\n");
     end
     else if cmd = "exit" then
       done := true

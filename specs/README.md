@@ -20,6 +20,7 @@ revised as understanding improves, and their history lives in git.
 | 0011 | [Windows](0011-windows.md) | Accepted | abi, compiler, interpreter, kernel window/gfx/task/sched, syslib | 2026-11-16 |
 | 0012 | [The desktop shell and kernel text windows](0012-desktop-shell.md) | Accepted | kernel console/gfx/window/sched, compiler, interpreter, abi, samples/apps | 2026-11-16 |
 | 0013 | [The application file API](0013-application-files.md) | Accepted | abi, compiler, interpreter, kernel ext2/sched/repl, langhost, samples/apps | 2026-11-17 |
+| 0014 | [The terminal window](0014-terminal-window.md) | Accepted | abi, compiler, interpreter, kernel console/window/sched, langhost, samples/apps | 2026-11-17 |
 
 ## Lifecycle
 

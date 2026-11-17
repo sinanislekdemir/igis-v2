@@ -1025,6 +1025,23 @@ inode byte size the kernel's loader uses. Every failure leaves all out-parameter
 untouched; there is no allocation and no handle. The exact error table is spec 0013,
 F14.
 
+### Terminal window (M2.5.5)
+
+```text
+core.terminal_attach(window_id: int) -> Status
+```
+
+Builtin 44, not an opcode. It binds the machine-wide console terminal grid (the
+`core.write` byte stream and the line-discipline echo) to a window owned by the calling
+task, with the kernel supplying the task id. `Ok` on success; `NotFound` for an unknown
+window; `Invalid` for a foreign window, disabled graphics or a content rectangle too
+small for one 8×8 cell; `Full` when another live task holds the one terminal. A repeated
+attach by the current owner is `Ok`; the same owner may rebind to another of its
+windows. `println!`/`print!` stay in the kernel's System Log window, `core.read_line`
+and the staged echo are unchanged, and a detach (the owner's window disappears) leaves
+the stream serial-only until the next attach. The language has no task id and no
+window-content drawing primitive. Spec 0014 and ADR 0028 own the contract.
+
 ## Modules
 
 - **M1 (MUST):** One source file is one `unit`.
@@ -1994,4 +2011,5 @@ controls and input dialog for the QMP screenshot harness.
 | 2026-11-17 | M2.4.4 adds the `stdlib` dialogs layer (10 helpers, 109 total): `ui_message` (word-wrapped text in a fixed box), the dialog button geometry (`ui_dialog_button_width`, `ui_dialog_button_left`, `ui_dialog_button_top`), `ui_dialog_button` (a button with the default action's double border), `ui_alert`/`ui_alert_hit` (frame, focused title bar, wrapped message, default/cancel pair; alert slots 0 default, 1 cancel, the close box cancels), `ui_input_dialog`/`ui_input_dialog_hit` (prompt, `ui_text_field`, OK/Cancel; slots 0 field, 1 default, 2 cancel, the close box cancels) and `ui_dialog_key` (Enter = result 1 default, Escape = result 2 cancel when `has_cancel`, Tab/Shift+Tab = actions 3/4 focus next/previous, everything else 0). The app owns the modal loop, the focus slot, the result and the text buffer; the input dialog only draws and never mutates the buffer, and editing stays exclusively the M2.4.1 helpers. No record/sum/generic/`state`, no new opcode or builtin. Too-small geometry is `Invalid` (80 px alert, 106 px input dialog, buttons fitting the width); disabled graphics draw nothing while the pure helpers work. Proof `samples/apps/ui_dialogs` (injected key/pointer events, `get_pixel`), the `langhost` sequence test and `/home/sinan/Desktop/igis-dialogs.png`. |
 | 2026-11-17 | M2.4.5 adds the `stdlib` icons and desktop interaction layer (16 helpers, 125 total): `ui_icon` draws a 32×32 monochrome bitmap supplied as `array[uint, 32]` row masks (row 0 the top, bit 0 the left pixel) with one `fill_rect` per maximal set-bit run, and `ui_icon_size`/`ui_icon_row_bit`/`ui_icon_label` complete the asset surface; `ui_icon_cell_x`/`_y`, `ui_icon_label_y` and `ui_icon_grid_hit` are the grid geometry (row-major, `count` valid cells, -1 outside or for non-positive geometry); `ui_double_click` is a pure 400 ms inclusive same-target test with no state; `ui_icon_grab`/`ui_icon_follow` carry the drag offset (inside the bitmap only) and position; `ui_selection_normalize` returns an inclusive band, `ui_selection_rect` the dotted outline and `ui_rect_intersects` the cell overlap (touching edges excluded); `ui_icon_drop` returns -2 inside the trash, else the cell or -1, and `ui_trash_hit` names the rectangle rule. The four bitmaps live in the sample and the app owns the cells, live/selected flags, click time/target and drag clamp; a drag cancels the pending double-click. No record/sum/generic/`state`, no new opcode or builtin. Proof `samples/apps/ui_icons` (injected pointer events, double-click marker, drag to a cell and to the trash, rubber-band selection, `get_pixel`), the `langhost` sequence/pure test and `/home/sinan/Desktop/igis-icons.png`. The compile arena cap rises to 8 MiB (spec 0008). |
 | 2026-11-17 | M2.5.1 adds the application file surface (spec 0013, ADR 0027): `core.fs_list(path, index, var name, var kind, var size) -> Status`, `core.fs_read(path, offset, var dst: bytes[256], var read) -> Status` and `core.fs_size(path, var size) -> Status` as host builtins 41–43. The view is the image root only; paths use the shared `core.spawn` syntax (relative, no `..`, ≤256 bytes), a separator is `Invalid` (unsupported subdirectory), listing reports kind `0` file / `1` directory / `2` other, reads are 256-byte chunks with `Ok`/0 at EOF, and every failure leaves the out-parameters untouched. No allocation, no handle and no new opcode. |
+| 2026-11-17 | M2.5.5 adds `core.terminal_attach(window_id: int) -> Status` as host builtin 44 (spec 0014, ADR 0028): the one machine-wide terminal is bound to a window owned by the calling task, with the kernel supplying the task id. `Ok`/`NotFound`/`Invalid`/`Full`; a repeated attach by the owner is `Ok`, another live task is `Full`, and the kernel detaches when the owner's window disappears. `core.write`, the staged echo and `core.read_line` are unchanged, and `println!` keeps the System Log. No new opcode (ABI v1 stays at 75) and no language task id. |
 | 2026-11-17 | M2.5.3 records application buffers above the 256-byte `stdlib` editing capacity. The M2.4.1 mutators stay fixed at 256 bytes; `samples/apps/editor` holds one `string[8192]` and implements one app-local atomic mutator with the SE2/SE3/SE4 rules (boundary-checked, staged in a local `bytes[8192]`, one strict-UTF-8 publish, `CapacityExceeded` without a partial write), while `str_boundary`, `str_cursor_*` and `str_selection_normalize`/`all`/`collapse` run unchanged on the larger buffer. 8192 is an application constant, not a language limit; a larger file is refused by size before it is read, and saving stays disabled until a writable filesystem exists. |

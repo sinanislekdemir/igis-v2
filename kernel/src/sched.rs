@@ -397,6 +397,12 @@ impl Host for KernelHost<'_> {
         })
     }
 
+    // Terminal attach (spec 0014): the host knows the executing task id, so the
+    // language needs no task id and the console verifies window ownership.
+    fn terminal_attach(&mut self, window: u64) -> Status {
+        crate::console::attach(self.current, window)
+    }
+
     // Application files (spec 0013, M2.5.1): the read-only ext2 mount the REPL
     // service already compiles from. The machine has validated the path syntax;
     // the host re-checks the M2.5.1 root subset defensively, converts the

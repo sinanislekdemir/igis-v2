@@ -52,3 +52,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0025 | [Kernel text windows and an application-owned desktop shell](0025-kernel-text-windows-desktop-shell.md) | Accepted | 2026-11-16 |
 | 0026 | [The standard library may import `syslib` for the UI layout layer](0026-stdlib-may-use-syslib.md) | Accepted | 2026-11-17 |
 | 0027 | [File access for applications is stateless, root-only host builtins](0027-stateless-root-only-file-api.md) | Accepted | 2026-11-17 |
+| 0028 | [One machine-wide terminal attached to a task-owned window](0028-one-terminal-attached-window.md) | Accepted | 2026-11-17 |

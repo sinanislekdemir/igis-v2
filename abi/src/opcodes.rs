@@ -642,6 +642,23 @@ pub mod builtin {
     /// `[path reference][size reference]`.
     pub const FS_SIZE: u32 = 43;
 
+    // ---- terminal window (spec 0014) ------------------------------------
+    //
+    // `core.terminal_attach` binds the machine-wide console terminal grid to a
+    // window owned by the calling task. The kernel host supplies the caller's
+    // task id; there is no application-visible task id or window-content
+    // primitive. No opcode is added: the machine only stages the window id and
+    // the kernel performs the ownership check and the geometry derivation.
+
+    /// `core.terminal_attach(window_id) -> Status`: attach the console's
+    /// machine-wide terminal grid to a window owned by the calling task
+    /// (spec 0014). `Ok` on success; `NotFound` for an unknown window;
+    /// `Invalid` for a foreign window, disabled graphics or a content rectangle
+    /// too small for one 8×8 cell; `Full` when another task already holds the
+    /// one terminal. A repeated attach by the current owner is `Ok`.
+    /// Operands: `[window id]`.
+    pub const TERMINAL_ATTACH: u32 = 44;
+
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
         match id {
@@ -688,6 +705,7 @@ pub mod builtin {
             FS_LIST => Some((5, 1)),
             FS_READ => Some((4, 1)),
             FS_SIZE => Some((2, 1)),
+            TERMINAL_ATTACH => Some((1, 1)),
             _ => None,
         }
     }

@@ -451,7 +451,10 @@ begin
       verify("A repainted the uncovered content", ok);
       wait_pixel(700, 350, b_base, uint(WaitMs));
       verify("B content repainted", ok);
-      wait_pixel(400, 500, white, uint(WaitMs));
+      // M2.5.5: the boot Terminal is now the shell's attached window at
+      // (24, 64), so the restoration probe stays inside its content; the old
+      // (400, 500) point is desktop dither after the kernel Terminal closed.
+      wait_pixel(400, 435, white, uint(WaitMs));
       verify("B old area restored to the terminal", ok);
       verify("focus stayed on B", syslib.window_focus() = b);
 

@@ -139,6 +139,14 @@ resize. Those are M2.4/M2.5.
   `CONSOLE`, then `WINDOW` (to read visible parts), then `SCREEN` (to paint); the window
   service's repair takes `WINDOW`, then `SCREEN`; no path takes `WINDOW` and then
   `CONSOLE`. Producers never take the window lock.
+- **D18 (MUST):** M2.5.5 extends D1/D4: the **terminal** half may be attached to an
+  ordinary task-owned window through `core.terminal_attach` (spec 0014, ADR 0028). The
+  first successful task attach releases the owner-`0` boot Terminal; the System Log
+  stays owner `0`. The console then pulls the terminal's `Expose` by id and the log's by
+  owner `0`, keeps D3's explicit-clip/generation rules and D17's lock order, and
+  detaches to serial-only when the terminal's window disappears. A terminal repaint
+  asserts the attached task's output, including children it spawns, as D5 already
+  requires; it does not add a second terminal or per-task routing.
 
 ## Design
 
@@ -287,3 +295,4 @@ while that id is its own; otherwise it presents what the service last left.
 | 2026-11-16 | Initial accepted version: kernel-owned terminal and system-log windows, per-window grids with pull-based expose repair, the owner-0 rule, the desktop shell and its direct menu items, read-only `window_info` (builtin 40), the lock order and the proof plan. |
 | 2026-11-16 | M2.3.4 implemented: `console::init` opens `Terminal` and `System Log` (owner `0`) after the desktop fill; grids and per-window scroll; `console::route_self_check` (`console: terminal ok`, `console: log ok`, `console: route ok`); `console::pump` pulls owner-0 exposes in `poll_input`; explicit-clip `gfx::draw_cell`/`present_within` (the console never narrows the global clip); `window::open` admits owner `0`, `window::info`/`visible_content_parts`; builtin 40 with compiler capacity and interpreter destination checks; `samples/apps/desktop_shell` check/normal modes; the bar is presented after it is drawn; `events`/`windows`/`windows_events` record the boot focus baseline; `scripts/desktop_screenshot_qmp.py` captures `/home/sinan/Desktop/igis-desktop.png` (1024×768). M2.3.5 remains the two-app/focus/drag/expose proof. |
 | 2026-11-17 | D3 made race-free: `window::generation()` (kernel-internal) is bumped by every visible mutation and read by `paint_cell`/`repaint` before computing visible parts and after painting; a changed generation retries the cell/part with fresh parts (bounded `PAINT_RETRIES`). M2.3.5's two-application proof deterministically reproduced the old stale-parts overwrite (a log-grid repaint computed before a window moved above it painted that window's area afterwards); the retry keeps the covered window's pixels. `samples/apps/windows_proof` and `scripts/windows_proof_screenshot_qmp.py` added. |
+| 2026-11-17 | D18 added by M2.5.5 (spec 0014, ADR 0028): the terminal half of the console can be attached to a task-owned window; the first attach releases the owner-0 boot Terminal, exposes are pulled by id (terminal) and owner 0 (log), and a vanished window detaches to serial-only. The System Log, D3's explicit clip/generation retry and D17's lock order are unchanged. |

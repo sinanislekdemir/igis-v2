@@ -89,11 +89,28 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   bytes), `igis-menus.png` (1024×768, 27590 bytes), `igis-dialogs.png`
   (1024×768, 29544 bytes), `igis-icons.png` (1024×768, 33991 bytes),
   `igis-widgets.png` (1024×768, 25894 bytes), `igis-clock.png` (1024×768,
-  31443 bytes), `igis-editor.png` (1024×768, 30492 bytes) and
-  `igis-browser.png` (1024×768, 32847 bytes).
-- **Next slice (not started):** **M2.5.5** — the terminal window: the existing shell
-  running in a window (`core.write`/`core.read_line` routed) so the REPL and the
-  desktop coexist.
+  31443 bytes), `igis-editor.png` (1024×768, 30492 bytes),
+  `igis-browser.png` (1024×768, 32847 bytes) and `igis-terminal.png`
+  (1024×768, 32228 bytes).
+- **Next slice (not started):** **M2.5.6** — boot to the desktop: `entrypoint`
+  becomes the desktop and the shell is launched from a menu item.
+- **M2.5.5 complete:** `core.terminal_attach(window_id) -> Status` (host builtin 44,
+  spec 0014, ADR 0028) binds the one machine-wide console terminal grid to a window
+  owned by the calling task; the kernel host passes the task id and checks ownership,
+  the first attach releases the owner-0 boot Terminal, a second live task is `Full`, a
+  repeated attach by the owner is `Ok`, and a disappeared window detaches to serial-only.
+  `console::pump` pulls the attached terminal's expose by id and the System Log's by
+  owner `0`, follows a moved window by generation, and keeps `CONSOLE → WINDOW →
+  SCREEN`. `samples/apps/shell` opens a 560×360 `Terminal` window at `(24, 64)`, attaches
+  before its banner and keeps the `core.write`/`core.read_line` loop unchanged; its
+  `terminal` command reports the id, refuses an unknown id, checks ink and background
+  pixels, and proves `Full` with `samples/apps/terminal_probe`. `run terminal` and
+  `run desktop_shell check` coexist (the terminal, menu bar and Desktop window are
+  visible together). 368 host tests; `terminal: ok` and the whole regression set pass on
+  `-smp 4` and `-smp 1`; `scripts/terminal_screenshot_qmp.py` writes
+  `igis-terminal.png`. The image root grows to 56 entries (55 staged sources plus
+  `lost+found`); the shell package is 6432 B of code (2 frames), 1504 B of state and
+  336 B of stack. `stdlib` stays at 125 functions and no cap changes.
 - **M2.5.4 complete:** `samples/apps/browser` is one 680×480 window with a path/count
   line, a 26-row app-drawn root listing (folder/file/other marker, name, size, accent
   selection), a `ui_scrollbar`, a 2048-byte preview pane with line clipping and a status
@@ -223,16 +240,22 @@ Trust the repository, not a summary. On a fresh start:
      `/home/sinan/Desktop/igis-editor.png`.
    - `python3 scripts/browser_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
      `/home/sinan/Desktop/igis-browser.png`.
+   - `python3 scripts/terminal_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
+     `/home/sinan/Desktop/igis-terminal.png` (the attached shell terminal and the
+     desktop shell together).
    - `python3 scripts/tablet_qmp.py build/igis.iso` → `7/7 absolute cases passed`.
    - `python3 scripts/tablet_qmp.py build/igis.iso --no-tablet` → `mouse: ok` fallback.
    - `python3 scripts/mouse_burst_qmp.py build/igis.iso` → `600/600` px with a
      `mouse: aux IRQ12 delivered ...` line; `--cores 1` is the single-core variant.
-6. The next slice is **M2.5.5** (the terminal window: the existing shell running in a
-   window, `core.write`/`core.read_line` routed, so the REPL and the desktop coexist).
-   M2.5.4 landed the file browser with its check/shot modes and screenshot harness;
-   M2.5.3 landed the text editor with its check/shot modes and screenshot harness;
-   M2.5.2 landed the clock window; M2.5.1 landed `core.fs_list`,
-   `core.fs_read` and `core.fs_size` over the image root, no handle or writable path.
+6. The next slice is **M2.5.6** (boot to the desktop: `entrypoint` becomes the desktop
+   and the shell is launched from a menu item). M2.5.5 landed the terminal window:
+   `core.terminal_attach` (builtin 44) binds the one console terminal to the shell's
+   own window, the first attach releases the kernel boot Terminal, a second live task is
+   `Full`, a disappeared owner detaches to serial-only, exposes are pulled by id and a
+   moved window is followed by generation. M2.5.4 landed the file browser with its
+   check/shot modes and screenshot harness; M2.5.3 landed the text editor; M2.5.2 the
+   clock window; M2.5.1 `core.fs_list`, `core.fs_read` and `core.fs_size` over the image
+   root, no handle or writable path.
    The M2 limitations still in force: an app that ignores an `Expose` keeps stale
    content, a full-screen `syslib.clear` erases the kernel windows' pixels, there is no
    per-task clip (a covered client must repaint only its visible part), and there is no
@@ -446,7 +469,7 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
   same listing/preview/selection logic (`browser: host ok`);
   `scripts/browser_screenshot_qmp.py` writes `igis-browser.png`. No new helper, opcode
   or builtin (125 `stdlib` functions).
-- [ ] **M2.5.5** Terminal window: the existing shell running in a window (`core.write` /
+- [x] **M2.5.5** Terminal window: the existing shell running in a window (`core.write` /
   `core.read_line` routed), so the REPL and the desktop coexist.
 - [ ] **M2.5.6** Boot to desktop: `entrypoint` becomes the desktop; the shell is launched
   from a menu item.

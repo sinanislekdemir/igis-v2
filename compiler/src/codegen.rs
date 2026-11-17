@@ -6630,6 +6630,27 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::enumeration(STATUS_ENUM)))
             }
+            // Terminal attach (spec 0014): bind the console's machine-wide
+            // terminal grid to a window owned by the caller. The kernel host
+            // supplies the task id; the compiler only checks the staged
+            // signature and the status result.
+            "core.terminal_attach" => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`core.terminal_attach` expects 1 argument, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                self.window_id(target, args[0])?;
+                self.one(opcodes::BUILTIN, builtin::TERMINAL_ATTACH)?;
+                self.pop(1)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
             "core.wait" => {
                 if args.len() != 2 {
                     return Err(self.err(

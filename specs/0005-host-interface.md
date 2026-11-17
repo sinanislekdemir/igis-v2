@@ -72,6 +72,7 @@ The interface is split into two namespaces:
 | `fs_list` | `fn fs_list(path: &[u8], index: u64, name: &mut [u8]) -> Result<FsEntry, Status>` | no; root-only, directory order |
 | `fs_read` | `fn fs_read(path: &[u8], offset: u64, dst: &mut [u8]) -> Result<usize, Status>` | no; at most 256 bytes, 0 at EOF |
 | `fs_size` | `fn fs_size(path: &[u8]) -> Result<u64, Status>` | no; regular root files |
+| `terminal_attach` | `fn terminal_attach(window: u64) -> Status` | no; one machine-wide terminal, owner-checked by the kernel host |
 
 - `realtime_on` promotes the calling task, one way, to the realtime class: it is claimed
   before normal tasks and is not released at quantum expiry. It returns `Status.Full` when
@@ -257,8 +258,9 @@ layer:
   wakes the task.
 - The host mock has no line ring: `langhost` returns one fixed line (`host`) per call so
   host-side programs exercise the same code path without blocking.
-- This is temporary. Replace it with application-side editing when the terminal window
-  lands (Q44; M2.5.5); the `stdlib` editing primitives it needs are already in place.
+- This is temporary. M2.5.5 routes the same discipline into the shell's attached
+  terminal window (spec 0014) but does not replace it; application-side editing remains
+  M2.5.3/M2.6 (Q44), and the `stdlib` editing primitives it needs are already in place.
 
 #### Implemented ABI: application files (M2.5.1)
 
@@ -283,6 +285,23 @@ service compiles from.
 - The kernel host uses `Ext2::list_entry`/`read_at`/`file_size`. `langhost` implements the
   same root-only view over `samples/apps` (sorted names, the same 256-byte chunk).
   M2.5.1 is root-only by design: a separator is `Invalid`, not a traversal.
+
+#### Implemented ABI: terminal window (M2.5.5)
+
+| Primitive | Implemented signature | Result |
+|-----------|-----------------------|--------|
+| `core.terminal_attach` | `(window_id: int) -> Status` | `Ok` binds the one console terminal grid to the caller's window; `NotFound` for an unknown id; `Invalid` for a foreign window, disabled graphics or a content rectangle below one cell; `Full` when another live task holds the terminal |
+
+- The kernel host supplies the caller's task id (`KernelHost::terminal_attach`), so the
+  language has no task id and no window-content primitive. The kernel checks ownership
+  and reads the content rectangle in one table lock (`CONSOLE → WINDOW`), releases the
+  owner-0 boot terminal on the first task attach, and repaints the new grid.
+- `Host::terminal_attach(window: u64) -> Status` defaults to `Invalid`: `langhost` and a
+  bare mock have no terminal window, so the shell falls back to serial there.
+- `console_write` and `read_line` keep their signatures and semantics. The attached
+  terminal receives `core.write` and the line echo; `println!` stays in the System Log;
+  serial mirroring is unchanged. A terminal whose window disappears is detached and the
+  stream becomes serial-only until the next attach.
 
 ### `syslib` primitives
 
@@ -497,3 +516,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-16 | M2.3.4 (spec 0012): console output routing is unchanged at this interface (`console_write` bytes, `read_line` lines), but the kernel now paints the terminal into a kernel-owned window and kernel diagnostics into a system-log window; the serial mirror continues for both. A new read-only `window_info` host method is the disabled-service `None` default. |
 | 2026-11-17 | Q44 narrows (M2.4.1): the language now has code-point-safe insert/delete/backspace/cursor/selection helpers (`stdlib.str_*`, spec 0003), so the reason the kernel kept a staged line discipline no longer holds at the language level. The staged `core.read_line` and its four-line ring stay for the shell until the terminal window can run the shell in a window with application-side editing (M2.5.5); the host interface itself is unchanged. |
 | 2026-11-17 | Application files (spec 0013, M2.5.1): `Host::fs_list` (`Result<FsEntry, Status>`), `Host::fs_read` (`Result<usize, Status>`) and `Host::fs_size` (`Result<u64, Status>`), all defaulting to `NotFound`, and builtins 41–43. The interpreter validates the shared `core.spawn` path syntax and the root-only M2.5.1 subset, stages a 64-byte name and a 256-byte chunk and publishes only on `Ok`; the kernel host uses the existing ext2 mount, `langhost` the sample directory. No opcode, no handle, no writable path. |
+| 2026-11-17 | Terminal window (spec 0014, M2.5.5): `Host::terminal_attach(window: u64) -> Status` (builtin 44, default `Invalid`) binds the one machine-wide console terminal to a window owned by the calling task. The kernel host passes its task id, checks ownership and geometry under `CONSOLE → WINDOW`, releases the owner-0 boot terminal on first attach and detaches when the owner's window disappears. `console_write`/`read_line` signatures and semantics are unchanged; the line discipline is not replaced. No opcode. |

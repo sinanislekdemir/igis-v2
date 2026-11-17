@@ -39,7 +39,7 @@
 
 use core::fmt::{self, Write};
 
-use abi::Rect;
+use abi::{Rect, Status};
 use arch_x86_64::{keyboard, serial};
 
 use crate::font8x8::FONT8X8_BASIC;
@@ -89,10 +89,13 @@ const TERM_BG: u32 = 0x00FF_FFFF;
 const LOG_FG: u32 = 0x0000_0000;
 const LOG_BG: u32 = 0x00F0_F0F0;
 
-/// One kernel-owned text window.
+/// One text window grid: the kernel terminal, an application's attached
+/// terminal, or the system log.
 struct Terminal {
     /// Window id, or 0 while unattached.
     id: u64,
+    /// Owning task (`0` for the kernel).
+    owner: u64,
     attached: bool,
     cols: usize,
     rows: usize,
@@ -103,11 +106,15 @@ struct Terminal {
     y: i64,
     fg: u32,
     bg: u32,
+    /// The window-service generation the cached geometry was read at, so a
+    /// moved terminal is followed without a table query per byte.
+    generation: u64,
     grid: [[u8; MAX_COLS]; MAX_ROWS],
 }
 
 const EMPTY_TERMINAL: Terminal = Terminal {
     id: 0,
+    owner: 0,
     attached: false,
     cols: 0,
     rows: 0,
@@ -117,6 +124,7 @@ const EMPTY_TERMINAL: Terminal = Terminal {
     y: 0,
     fg: 0,
     bg: 0,
+    generation: 0,
     grid: [[0; MAX_COLS]; MAX_ROWS],
 };
 
@@ -124,6 +132,7 @@ impl Terminal {
     /// Resets every field in place (the grid is 16 KiB, so no stack temporary).
     fn reset(&mut self, fg: u32, bg: u32) {
         self.id = 0;
+        self.owner = 0;
         self.attached = false;
         self.cols = 0;
         self.rows = 0;
@@ -133,18 +142,55 @@ impl Terminal {
         self.y = 0;
         self.fg = fg;
         self.bg = bg;
+        self.generation = 0;
         for line in self.grid.iter_mut() {
             line.fill(0);
         }
     }
 
-    fn attach(&mut self, id: u64, x: i64, y: i64, cols: usize, rows: usize) {
+    fn attach(&mut self, owner: u64, id: u64, x: i64, y: i64, cols: usize, rows: usize) {
         self.id = id;
+        self.owner = owner;
         self.attached = true;
         self.x = x;
         self.y = y;
         self.cols = cols;
         self.rows = rows;
+    }
+
+    /// Drops the attachment; text then reaches serial only until the next
+    /// attach (spec 0014).
+    fn detach(&mut self) {
+        self.id = 0;
+        self.owner = 0;
+        self.attached = false;
+        self.generation = 0;
+    }
+
+    /// Re-reads the window's content rectangle and follows a move (spec 0014).
+    /// Returns whether the geometry changed; a missing window reports `false`
+    /// and is detached by [`pump`] instead.
+    fn sync(&mut self) -> bool {
+        if !self.attached {
+            return false;
+        }
+        let Ok(rect) = window::content_rect(self.id) else {
+            return false;
+        };
+        self.generation = window::generation();
+        let cols = (rect.w / CELL).clamp(0, MAX_COLS as i64) as usize;
+        let rows = (rect.h / CELL).clamp(0, MAX_ROWS as i64) as usize;
+        let changed =
+            self.x != rect.x || self.y != rect.y || self.cols != cols || self.rows != rows;
+        if changed {
+            self.x = rect.x;
+            self.y = rect.y;
+            self.cols = cols;
+            self.rows = rows;
+            self.col = self.col.min(self.cols.saturating_sub(1));
+            self.row = self.row.min(self.rows.saturating_sub(1));
+        }
+        changed
     }
 
     /// Clears the character grid and puts the cursor at the home cell, then
@@ -277,6 +323,11 @@ impl Terminal {
         if !self.attached {
             return;
         }
+        // A window move bumps the service generation; follow the content
+        // rectangle before painting into the old origin.
+        if window::generation() != self.generation {
+            self.sync();
+        }
         match byte {
             b'\n' => self.newline(),
             b'\r' => self.col = 0,
@@ -369,10 +420,10 @@ impl Console {
         let cols = cols as usize;
         let rows = rows as usize;
         if let Ok(id) = window::open(0, MARGIN, TOP, content_w, content_h, b"Terminal") {
-            self.term.attach(id, MARGIN + 1, TOP + 16, cols, rows);
+            self.term.attach(0, id, MARGIN + 1, TOP + 16, cols, rows);
         }
         if let Ok(id) = window::open(0, second_x, TOP, content_w, content_h, b"System Log") {
-            self.log.attach(id, second_x + 1, TOP + 16, cols, rows);
+            self.log.attach(0, id, second_x + 1, TOP + 16, cols, rows);
         }
     }
 }
@@ -425,21 +476,91 @@ pub fn write_bytes(bytes: &[u8]) {
     }
 }
 
-/// Pulls pending owner-0 `Expose` flags and repaints the matching grid
-/// (spec 0012 D4). Called at the end of [`poll_input`], so every service
-/// opportunity and idle-poll cycle repairs the kernel windows.
-pub fn pump() {
-    loop {
-        let Some(id) = window::take_expose(0) else {
-            break;
-        };
-        let mut console = CONSOLE.lock();
-        if !console.enabled {
-            continue;
+/// Attaches the console's machine-wide terminal grid to a window owned by
+/// `owner` (`core.terminal_attach`, spec 0014).
+///
+/// The kernel host supplies the caller's task id. The check and the geometry
+/// read happen under the console lock and the window lock in that order
+/// (`CONSOLE → WINDOW`); closing the kernel's boot Terminal runs the ordinary
+/// repair (`WINDOW → SCREEN`) and never calls back into the console.
+///
+/// Only one task may hold the terminal. The kernel's boot Terminal is released
+/// by the first successful attach; a later attach by a different live task is
+/// `Full` until the holder's window is closed (task termination). The same
+/// owner may rebind to another of its windows.
+pub fn attach(owner: u64, id: u64) -> Status {
+    let mut console = CONSOLE.lock();
+    if !console.enabled {
+        return Status::Invalid;
+    }
+    let rect = match window::owned_content_rect(owner, id) {
+        Ok(rect) => rect,
+        Err(status) => return status,
+    };
+    let cols = (rect.w / CELL).clamp(0, MAX_COLS as i64) as usize;
+    let rows = (rect.h / CELL).clamp(0, MAX_ROWS as i64) as usize;
+    if cols < 1 || rows < 1 {
+        return Status::Invalid;
+    }
+    // A prior owner whose task already terminated is detached even if the
+    // service opportunity has not run [`pump`] yet.
+    if console.term.attached && console.term.owner != 0 && !window::exists(console.term.id) {
+        console.term.detach();
+    }
+    if console.term.attached {
+        if console.term.owner == owner {
+            if console.term.id == id {
+                return Status::Ok;
+            }
+            // The same task may move its terminal to another window it owns.
+        } else if console.term.owner != 0 {
+            return Status::Full;
+        } else {
+            // The kernel's boot terminal steps aside for the first task. Its
+            // record and grid are dropped; the window itself is closed through
+            // the ordinary owner-0 path.
+            let old = console.term.id;
+            console.term.detach();
+            if old != 0 {
+                let _ = window::close(0, old);
+            }
         }
-        if console.term.attached && console.term.id == id {
+    }
+    console.term.reset(TERM_FG, TERM_BG);
+    console.term.attach(owner, id, rect.x, rect.y, cols, rows);
+    console.term.generation = window::generation();
+    console.term.repaint();
+    Status::Ok
+}
+
+/// Pulls pending `Expose` flags and repaints the matching grid (spec 0012 D4,
+/// spec 0014): the attached terminal by **id** (which may be any task's window)
+/// and the System Log by owner `0`. Taking the terminal's own expose by id
+/// leaves the owner's other windows' exposes in the service queue.
+///
+/// A terminal whose window disappeared (its task terminated) is detached here;
+/// output then reaches serial only until the next attach. Called at the end of
+/// [`poll_input`], so every service opportunity and idle-poll cycle repairs the
+/// console windows.
+pub fn pump() {
+    let mut console = CONSOLE.lock();
+    if !console.enabled {
+        return;
+    }
+    if console.term.attached && console.term.owner != 0 && !window::exists(console.term.id) {
+        console.term.detach();
+    }
+    if console.term.attached {
+        let id = console.term.id;
+        if window::take_expose_id(id) {
+            console.term.sync();
             console.term.repaint();
-        } else if console.log.attached && console.log.id == id {
+        } else if window::generation() != console.term.generation && console.term.sync() {
+            console.term.repaint();
+        }
+    }
+    while let Some(id) = window::take_expose(0) {
+        if console.log.attached && console.log.id == id {
             console.log.repaint();
         }
     }
