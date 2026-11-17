@@ -42,22 +42,24 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   the `perf` measurement (`2c0df71`), M2.6.3 the deterministic specimen plus the
   headless golden-frame harness (`tests/golden/visual.png`), and M2.6.4 the System
   menu, About panel, `core.halt`/`core.reboot` and the halt/reboot probes.
-- **Verified at that point (M3.2, independently by the parent):** **438 host tests**
-  (abi 23, compiler 184, interpreter 150, langhost 80, 1 doctest); `cargo xtask
-  build`/`image`/`image --shell` clean; boot still prints `ext2: tree ok` (step 6
-  now requires `lib/math.ig`) and the arena change shows as `frames: 57903 free`
-  (`.bss` +8 MiB). A hand-written source with `uses lib.math;` calling
-  `math.clamp`/`abs_int`/`max_int`/`min_int`/`sign` runs on `langhost` and prints
-  `mod_demo: ok`, proving dotted resolution, the unit-name qualifier and the host
-  reader end to end. The typed shell transcript and the 26-command regression
-  batch pass on `-smp 4` and `-smp 1`; `boot_desktop_qmp.py` reaches `terminal: ok`
-  on both; the visual golden still matches on both
-  (`37802052…e9e81c9f`). The in-kernel module path is deliberately not wired yet.
-- **Next slice:** **M3.3 — kernel-side modules and the `/lib` proof** (spec 0018).
-  A fresh subagent implements `compiler::SourceReader` over the mounted `Ext2`,
-  switches `repl::compile` to `compile_with_imports`, adds
-  `samples/apps/base/module_demo` importing `lib.math`, and proves `run
-  module_demo` on `-smp 4` and `-smp 1` plus `langhost`.
+- **Verified at that point (M3.3, independently by the parent):** **439 host tests**
+  (abi 23, compiler 184, interpreter 150, langhost 81, 1 doctest); `cargo xtask
+  build`/`image`/`image --shell` clean; boot still prints `ext2: tree ok`
+  (`frames: 57899 free`; the kernel image grew ~17 KiB of newly linked compiler
+  code, `.bss` unchanged). `cargo run -p langhost -- samples/apps/base/module_demo`
+  prints `module_demo: ok`, and `run module_demo` prints it in the kernel on
+  `-smp 4` and `-smp 1`. The 27-command regression batch passes on both core
+  counts; `boot_desktop_qmp.py` reaches `terminal: ok` on both; the visual golden
+  still matches on both (`37802052…e9e81c9f`). Error paths stay clean: a missing
+  app reports `No such application: base/...`, and `run lib/math.ig` reports the
+  compiler's `missing main` diagnostic, then `child: faulted IoError`, and
+  returns the prompt. No panic.
+- **Next slice:** **M3.4 — browser subdirectory navigation (Q51 partial)** (spec
+  0013 "The file browser", spec 0018 A4). A fresh subagent teaches
+  `samples/apps/base/browser` to enter a directory (`Enter`/double-click), go up
+  with a parent-path rule (paths forbid `..`, so truncate the current path),
+  preview a file at any depth, and launch the selected file by its full path;
+  amend spec 0013 accordingly and prove it on `-smp 4`/`-smp 1` plus `langhost`.
 
 - **M2.6.3 complete:** the headless visual-regression harness (spec 0009 "Visual proof",
   G21; ADR 0032) and the resolution of M2.1.2. `samples/apps/visual` opens a window whose
@@ -747,14 +749,22 @@ application's package. One ticket per session; the parent verifies each.
   `langhost` (`mod_demo: ok`); boot `ext2: tree ok`, the 26-command batch on both
   core counts, `boot_desktop_qmp.py` and the visual golden still pass.
 
-- [ ] **M3.3 Kernel-side modules and the `/lib` proof.**
-  `repl::compile` uses `compile_with_imports` over the mounted `Ext2` (a reader
+- [x] **M3.3 Kernel-side modules and the `/lib` proof.**
+  `repl::load` uses `compile_with_imports` over the mounted `Ext2` (a reader
   that copies each module source into the compiler's arena, so the kernel
   application-source buffer stays 128 KiB); the arena is the M3.2 16 MiB; add
   `samples/apps/base/module_demo` (imports `lib.math`, prints
   `module_demo: ok`); `run module_demo` proves the whole path on `-smp 4` and
   `-smp 1`; `langhost` prints the host path. Update image entry counts and the
   regression set.
+  **Done (`039b861`):** 439 host tests; `ImageReader` over `Ext2`; `repl::load`
+  now calls `compile_with_imports` (lock order unchanged, `SOURCE` 128 KiB, arena
+  16 MiB); `base/module_demo` exercises all five `math` helpers and prints
+  `module_demo: ok` on `langhost`, `-smp 4` and `-smp 1`; a missing app and a
+  module file used as an app both fail with a clean `Diagnostic` and return the
+  prompt; the 27-command batch, visual golden and `boot_desktop_qmp.py` pass on
+  both; the kernel image grew ~17 KiB of linked code (`.bss` unchanged, free
+  frames 57899).
 
 - [ ] **M3.4 Browser subdirectory navigation (Q51 partial).**
   `samples/apps/base/browser` descends into directories (`Enter` opens a

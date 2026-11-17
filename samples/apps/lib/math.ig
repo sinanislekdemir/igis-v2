@@ -7,7 +7,9 @@ unit math;
 //
 // Ordinary language code only: no new syntax, opcode or builtin.
 
-// Returns `value` limited to `low..=high`. `low` above `high` returns `low`.
+// Returns `value` limited to `low..=high`. A `low` above `high` is not rejected:
+// the checks run in order, so a value below `low` returns `low` and one above
+// `high` returns `high`.
 function clamp(value: int; low: int; high: int): int;
 begin
   if value < low then
