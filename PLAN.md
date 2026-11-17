@@ -14,10 +14,10 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `TBD` (M2.6.4: the System menu and About panel in `desktop_shell`,
-  `core.halt`/`core.reboot`, the focus-scoped shortcuts, spec 0017, ADR 0033, the two
-  QMP harnesses and the halt/reboot probe; the hash is this commit and the docs/resume
-  commit on top may follow).
+- **Last commit:** `5918ec4` (M2.6.4: the System menu and About panel in
+  `desktop_shell`, `core.halt`/`core.reboot`, the focus-scoped shortcuts, spec 0017,
+  ADR 0033, the two QMP harnesses and the halt/reboot probe) plus this docs/resume
+  commit on top.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
