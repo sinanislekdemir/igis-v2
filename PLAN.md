@@ -14,8 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `03064f2` (the M2.5.1 read-only application file API, the `files`
-  proof, spec 0013 and ADR 0027) plus this docs/resume commit on top.
+- **Last commit:** `65f4875` (the M2.5.2 clock window, its `langhost` test and the QMP
+  screenshot harness) plus this docs/resume commit on top.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -31,10 +31,11 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   plus the `ui_menus` proof (`9fa9fd0`), M2.4.4 the `stdlib` dialogs layer plus the
   `ui_dialogs` proof (`f03559b`), M2.4.5 the `stdlib` icons and desktop layer plus
   the `ui_icons` proof (`fb452bd`), M2.4.6 the widgets demo window plus the
-  `widgets` proof (`9d9b0f1`), and M2.5.1 the root-only read-only file API plus the
-  `files` proof (`03064f2`).
-- **Verified at that point:** **362 host tests** (abi 18, compiler 152, interpreter 127,
-  langhost 65, including doctests); `cargo xtask build`/`image` clean; the boot prints
+  `widgets` proof (`9d9b0f1`), M2.5.1 the root-only read-only file API plus the
+  `files` proof (`03064f2`), and M2.5.2 the windowed clock plus its check/shot modes
+  and screenshot harness (`65f4875`).
+- **Verified at that point:** **363 host tests** (abi 18, compiler 152, interpreter 127,
+  langhost 66, including doctests); `cargo xtask build`/`image` clean; the boot prints
   `console: terminal ok`, `console: log ok`, `console: route ok`, `graphics: clip ok`,
   `window: rules ok`, `window: paint ok` and `window: route ok` on `-smp 4` and
   `-smp 1`; `run files` → `files: root listing ok`, `files: root dot ok`,
@@ -45,6 +46,9 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `ui_menus: ok` on both; `run ui_dialogs` → `ui_dialogs: ok` on both; `run ui_icons` →
   `ui_icons: open Document` then `ui_icons: ok` on both; `run widgets` (or
   `run widgets check`) → `widgets: ok` on both, and `widgets: host ok` on `langhost`;
+  `run clock_window check` → `clock_window: ok` on both, and
+  `clock_window: host ok` on `langhost`; `run clock_window shot` →
+  `clock_window: ready`, then `clock_window: done` after the five-second live hold;
   `run windows_proof` → `windows_proof: ok` in its own boot;
   `run desktop_shell check` →
   `desktop_shell: ok`; `run windows` → `windows: ok`; `run windows_events` →
@@ -60,15 +64,27 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   with a 57,388 B application; the source cap is 128 KiB and the arena cap 8 MiB). The
   `widgets` task package is 165,424 B of code (41 frames), 9,608 B of state and a
   25,360 B stack; the `files` package is 6,936 B of code (2 frames), 520 B of state and
-  664 B of stack, and the image root lists 52 entries (51 staged source files plus the
-  `mke2fs` `lost+found` directory). Screenshots `/home/sinan/Desktop/igis-desktop.png`
+  664 B of stack, the `clock_window` source is 17,744 B and its task package is
+  103,696 B of code (26 frames), 1,304 B of state and a 20,896 B stack, and the image
+  root lists 53 entries (52 staged source files plus the `mke2fs` `lost+found`
+  directory). Screenshots `/home/sinan/Desktop/igis-desktop.png`
   (1024×768, 31555 bytes), `igis-windows.png` (1024×768, 28169 bytes),
   `igis-m23-proof.png` (1024×768, 30901 bytes), `igis-controls.png` (1024×768, 32967
   bytes), `igis-menus.png` (1024×768, 27590 bytes), `igis-dialogs.png`
-  (1024×768, 29544 bytes), `igis-icons.png` (1024×768, 33991 bytes) and
-  `igis-widgets.png` (1024×768, 25894 bytes).
-- **Next slice (not started):** **M2.5.2** — the clock window: a digital and an analog
-  face ticking from `core.clock()`, as an ordinary application over the window service.
+  (1024×768, 29544 bytes), `igis-icons.png` (1024×768, 33991 bytes),
+  `igis-widgets.png` (1024×768, 25894 bytes) and `igis-clock.png` (1024×768,
+  31443 bytes).
+- **Next slice (not started):** **M2.5.3** — the text editor: an in-memory buffer over
+  the M2.4.1 string helpers with a cursor and scrolling, opened through the M2.5.1 file
+  API; saving stays disabled until a writable filesystem exists.
+- **M2.5.2 complete:** `samples/apps/clock_window` is an ordinary windowed app with an
+  integer midpoint-circle analog face (60 ticks, hour/minute/second hands via a built-once
+  fixed-point 6-degree direction table), a framed `HH:MM:SS` readout, a deterministic
+  `10:08:30` check (`get_pixel` over the rim, marks, hands, centre, readout and bezel),
+  and a `shot` mode that ticks from `core.clock()` in a bounded poll/redraw loop
+  (no `next_event`, no `syslib.clear`), repaints the whole content on an owner `Expose`
+  and presents once per frame. No new helper, opcode or builtin (stdlib stays at 125
+  functions); `scripts/clock_window_screenshot_qmp.py` writes `igis-clock.png`.
 - **M2.5.1 complete:** applications can read the image through `core.fs_list`,
   `core.fs_read` and `core.fs_size` (builtins 41–43, no opcode), root-only, with the
   shared `core.spawn` path syntax, a 64-byte name, 256-byte chunks and `Status` errors.
@@ -91,7 +107,7 @@ Trust the repository, not a summary. On a fresh start:
 
 1. `git status --short` and `git log --oneline -8` — the tree should be clean and the top
    commit should match the "Last commit" line above; if not, stop and reconcile first.
-2. `cargo test -q -p abi -p compiler -p interpreter -p langhost` — expect **362** tests
+2. `cargo test -q -p abi -p compiler -p interpreter -p langhost` — expect **363** tests
    plus the doctests, all green.
 3. `cargo xtask build` — expect a clean kernel build.
 4. Read, in this order: this file, `AGENTS.md` (status paragraph + decisions table),
@@ -108,6 +124,7 @@ Trust the repository, not a summary. On a fresh start:
        printf 'run ui_controls\n'; sleep 10; printf 'run ui_menus\n'; sleep 10; \
        printf 'run ui_dialogs\n'; sleep 10; printf 'run ui_icons\n'; sleep 12; \
        printf 'run widgets check\n'; sleep 20; \
+       printf 'run clock_window check\n'; sleep 8; \
        printf 'run desktop_shell check\n'; sleep 20; printf 'run desktop\n'; sleep 4; \
        printf 'run events\n'; sleep 8; printf 'run windows\n'; sleep 6; \
        printf 'run windows_events\n'; sleep 6; printf 'run windows_demo\n'; sleep 22; \
@@ -119,7 +136,8 @@ Trust the repository, not a summary. On a fresh start:
      `graphics: clip ok`, `window: rules ok`, `window: paint ok`, `window: route ok`,
      `files: ok`, `text_edit: ok`, `ui_layout: ok`, `ui_controls: ok`, `ui_menus: ok`,
      `ui_dialogs: ok`, `ui_icons: open Document`, `ui_icons: ok`, `widgets: ok`,
-     `desktop_shell: ok`, `desktop: ok`, `keyboard: decoder ok`, `events: ok`,
+     `clock_window: ok`, `desktop_shell: ok`, `desktop: ok`, `keyboard: decoder ok`,
+     `events: ok`,
      `windows: ok`, `windows_events: ok`, `windows_demo: checks ok`,
      `windows_demo: ready`, `windows_demo: ok`, `ioapic: version ...`,
      `mouse: aux IRQ12 enabled ...`, `usb: tablet ...` when the device is present.
@@ -132,7 +150,7 @@ Trust the repository, not a summary. On a fresh start:
      concurrent console repaint can overwrite the background pixels the sample checks.
    - Repeat the UI samples with `-smp 1`: `text_edit: ok`, `ui_layout: ok`,
      `ui_controls: ok`, `ui_menus: ok`, `ui_dialogs: ok`, `ui_icons: ok`,
-     `widgets: ok` and `windows_proof: ok` must hold there too.
+     `widgets: ok`, `clock_window: ok` and `windows_proof: ok` must hold there too.
    - `python3 scripts/desktop_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
      `/home/sinan/Desktop/igis-desktop.png`.
    - `python3 scripts/windows_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
@@ -149,14 +167,17 @@ Trust the repository, not a summary. On a fresh start:
      `/home/sinan/Desktop/igis-icons.png`.
    - `python3 scripts/widgets_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
      `/home/sinan/Desktop/igis-widgets.png`.
+   - `python3 scripts/clock_window_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG
+     at `/home/sinan/Desktop/igis-clock.png`.
    - `python3 scripts/tablet_qmp.py build/igis.iso` → `7/7 absolute cases passed`.
    - `python3 scripts/tablet_qmp.py build/igis.iso --no-tablet` → `mouse: ok` fallback.
    - `python3 scripts/mouse_burst_qmp.py build/igis.iso` → `600/600` px with a
      `mouse: aux IRQ12 delivered ...` line; `--cores 1` is the single-core variant.
-6. The next slice is **M2.5.2** (the clock window: a digital and an analog face ticking
-   from `core.clock()`, as an ordinary application over the window service). M2.5.1
-   landed the read-only file API the editor and browser need: `core.fs_list`,
-   `core.fs_read` and `core.fs_size` over the image root, no handle or writable path.
+6. The next slice is **M2.5.3** (the text editor: an in-memory buffer over the M2.4.1
+   string helpers with a cursor and scrolling, opened through the M2.5.1 file API;
+   saving stays disabled until a writable filesystem exists). M2.5.2 landed the clock
+   window and its check/shot modes; M2.5.1 landed `core.fs_list`, `core.fs_read` and
+   `core.fs_size` over the image root, no handle or writable path.
    The M2 limitations still in force: an app that ignores an `Expose` keeps stale
    content, a full-screen `syslib.clear` erases the kernel windows' pixels, there is no
    per-task clip (a covered client must repaint only its visible part), and there is no
@@ -327,7 +348,15 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
 - [x] **M2.5.1** Read-only file API for applications (`core.fs_list`/`core.fs_read`,
   bounded buffers, `Status` errors); today only the kernel reads ext2. Prerequisite for
   the browser and the editor.
-- [ ] **M2.5.2** Clock window (digital + analog face), ticking from `core.clock()`.
+- [x] **M2.5.2** Clock window (digital + analog face), ticking from `core.clock()`.
+  `samples/apps/clock_window` draws an integer midpoint-circle face (60 ticks,
+  hour/minute/second hands from a built-once fixed-point 6-degree direction table) and
+  a framed `HH:MM:SS` readout inside a 260×280 window; `check` verifies a fixed
+  `10:08:30` frame with `get_pixel` and `shot` ticks live in a bounded poll/redraw loop
+  (no `next_event`, no `syslib.clear`) and presents once per frame; an owner `Expose`
+  repaints the whole content. `langhost` covers the pure decomposition/formatting/
+  direction logic (`clock_window: host ok`); `scripts/clock_window_screenshot_qmp.py`
+  writes `igis-clock.png` (`65f4875`). No new helper, opcode or builtin.
 - [ ] **M2.5.3** Text editor: in-memory buffer with the M2.4.1 helpers, cursor, scrolling,
   open via the file API; save disabled until a writable filesystem exists.
 - [ ] **M2.5.4** File browser: directory list from the read-only ext2 app API, open/launch.
