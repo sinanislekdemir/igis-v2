@@ -5,7 +5,7 @@ Parked decisions for igis-v2. This is the working register; each spec's own
 resolved, record the answer in the relevant spec or in a new ADR, then remove it here.
 
 **Status:** implementation phase. Last updated: 2026-11-17.
-**Snapshot:** specs 0001–0013, ADRs 0001–0027.
+**Snapshot:** specs 0001–0017, ADRs 0001–0035.
 
 ## How to use
 
@@ -43,7 +43,6 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | # | Question | Options / recommendation | Trigger |
 |---|----------|--------------------------|---------|
 | Q40 | `f32` support | not in M1; additive later, but it needs its own opcode and conversion rules | when single precision is needed |
-| Q41 | Float text beyond fixed decimal | **Narrowed 2026-11-16.** Fixed-point formatting, shortest round-trip formatting and decimal parsing are implemented: `core.format_f64_into` (0–9 fraction digits, half away from zero, `nan`/`inf`/`-inf`, `-4` for a wider field or `\|value\| >= 2^63`, `-6` when the destination is short), `core.format_f64_short_into` (the fewest significant digits that parse back to the same bits, positional while `-6 < e10 + 1 <= 21` and scientific otherwise, no width and no magnitude bound, `-6` when the destination is short) and `stdlib.parse_f64_into` (decimal grammar with an optional exponent, `Invalid` for anything else, `±Inf`/`±0` on overflow/underflow with `Ok`). What remains is **correctly rounded decimal → binary64 parsing** (the parser accumulates the mantissa as an `f64` and scales by repeated ×/÷10, so very long mantissas can differ from the IEEE result by an ulp) and its **subnormal edge cases** | when parsed text must match a correctly rounded reader bit for bit |
 | Q46 | Moving the checked slice into `stdlib` | **Blocked, not pending.** `core.substr_into` cannot move: the destination capacity must be a *call-site immediate* (the `SUBSTR` `capacity` field), while a `stdlib` helper declares concrete capacities and the language has no generics, so one helper could serve only one destination size (it would lose `split_once`'s `string[128]` head and every smaller destination). The future option is a buffer parameter that carries its **runtime capacity**, which would need a language change. Until then the checked slice stays in `core` and there is one slicing primitive, not two (spec 0003, "Slicing and search") | only if runtime-capacity buffer parameters are added |
 
 | Q49 | Pointer motion loss and host scale | **Measured 2026-11-16; M2.2.6 implemented.** QMP `rel` injection moves the guest exactly 1:1, so the decoder is correct; the visible "cursor stops before the window edge" came from two host-side effects: (a) QEMU's PS/2 queue overflows in bursts because the kernel drains it once per millisecond (300×(+2) px injected yielded +346 px), and (b) relative motion is in host pixels, so a display shown at a different scale never reaches the guest edges. **Resolution:** a USB `usb-tablet` absolute pointer (PCI + UHCI + HID, M2.2.6) is now the primary source. A QMP absolute injection lands on exact guest pixels: (16384,16384)→(512,384), (32767,32767)→(1023,767), (0,0)→(0,0), (0,32767)→(0,767), (32767,0)→(1023,0), and (8192,16384) with the left button→(256,384,1), 7/7 on `--cores 4` and `--cores 1`. An absolute report carries the current position, so dropped reports are harmless and host scaling cannot keep the guest away from an edge. **Relative fallback (M2.2.7, 2026-11-16):** IRQ12 is routed through the I/O APIC to the boot core (level-triggered vector `0x2C`), the handler drains the controller into a 1024-byte lock-free ring and `mouse::poll` decodes it, so the 1 ms drain latency and the multi-core status/data race are gone; polling remains the backstop when the route is unavailable. `scripts/mouse_burst_qmp.py` (300×(+2) after clamping at x=0, `build/igis.iso --no-tablet`) moves exactly 600/600 px on `-smp 4` and `-smp 1`, with the transcript showing `mouse: aux IRQ12 delivered ...`. The same harness on the polled HEAD is also 600/600: QEMU 10.2.2 accumulates PS/2 deltas in `mouse_dx` and defers packet delivery instead of dropping them, so the historical 346/600 from the 2026-11-16 host-window measurement is **not reproducible headlessly** and is kept as a host-path record, not as a headless regression. Relative motion is still in host pixels; the absolute tablet stays primary. | Closed (relative fallback covered; M2.3 is the next slice) |
@@ -233,8 +232,8 @@ hook, not an affinity.
 - Q5, Q6, Q7, Q11–Q13, Q15–Q38 and Q42 are resolved and removed from the table; Q1, Q2 and
   Q4 are now closed provisionally, so only the handler budget (Q3), the deferred
   debug/DMA items, explicit stream close (Q10), console-stream wiring (Q14), the staged
-  port handles (Q45), the float-text refinements (Q40/Q41, narrowed on 2026-11-16) and the
-  blocked `substr_into` move (Q46) remain.
+  port handles (Q45), `f32` (Q40) and the blocked `substr_into` move (Q46) remain. Q41
+  (correctly rounded float parsing) was resolved on 2026-11-17.
 
 ## Decided in the 2026-11-15 realtime session
 
@@ -472,6 +471,36 @@ iterations across the console, stream and input waits on `-smp 4` (300 killed) a
 (300 killed). The same application hangs on its first iteration against the pre-fix kernel,
 so the stress test really exercises the bug. The accepted cooperative hole is unchanged: a
 task that never reaches a safe point cannot be killed.
+
+## Decided in the 2026-11-17 float-parsing session
+
+**Q41 — correctly rounded decimal → binary64 parsing.** Resolved by a new `core`
+primitive rather than more language code. `core.parse_f64_into(src, var value: f64) ->
+Status` (builtin 50, spec 0008; spec 0003 "Floating-point text") checks spec 0003's
+grammar over the source bytes and converts with `core`'s `f64: FromStr`
+(`interpreter/src/f64parse.rs`). That reader is allocation-free and correctly rounded:
+it keeps 19 significant digits plus a sticky bit, applies the decimal exponent exactly and
+rounds once, half to even, so long mantissas, ties and the subnormal and
+overflow/underflow boundaries all match the IEEE-754 result. The old `stdlib` helper
+accumulated the mantissa as an `f64` and applied the exponent by repeated ×/÷10, which is
+one or more ulps off (`1e-7` came out two ulps high, and the subnormal boundary text
+`2.2250738585072012e-308` landed three ulps above the smallest normal). `stdlib.parse_f64_into` keeps
+its signature and only delegates, so the `stdlib` function count, every caller and the
+format→parse round trip are unchanged.
+
+The strict grammar stays the language's: `FromStr` also accepts `infinity` and
+case-insensitive `nan`/`inf`, which the primitive rejects as `Invalid`. `nan` writes one
+canonical quiet NaN (`0x7ff8000000000000`); its sign and payload are not observable, so the
+choice only makes the result deterministic. Overflow is `±Inf` and underflow `±0`, both
+with `Ok`; `-0.0` and `-inf` keep their sign; a malformed or non-UTF-8 string is `Invalid`
+and leaves `value` untouched. No opcode was added (ABI v1 stays at 75) and there is no
+`Host` method: the primitive is pure interpreter code.
+
+Evidence: exact bit tables for the hard cases plus an exact shortest-text round trip in
+`interpreter/src/f64parse.rs`; builtin operand/`Status`/untouched-out-parameter tests in
+`interpreter/tests/f64parse.rs`; compiler signature and encoding tests; a `langhost`
+boundary test; and `samples/apps/f64parse`, which prints `f64parse: ok 52 cases` on
+`-smp 4` and `-smp 1`.
 
 ## Suggested next step
 

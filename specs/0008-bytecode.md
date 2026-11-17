@@ -406,15 +406,16 @@ on the same table; the machine, not the compiler, owns the runtime checks.
 | 47 | `draw_text_prop` | 4 → 1 | x, y, text reference, colour; proportional glyphs with the 8×8 fallback |
 | 48 | `halt` | 0 → 1 | request a machine-wide halt; never returns on a live kernel |
 | 49 | `reboot` | 0 → 1 | request a system reset; never returns on a live kernel |
+| 50 | `parse_f64` | 2 → 1 | src ref, `var f64` ref; correctly rounded decimal reader; writes on `Ok` |
 
 Graphics builtins add no opcode, so ABI v1 stays at **75** opcodes (spec 0009). The input
 builtins (spec 0010), the window builtins (spec 0011), the application file builtins
 (spec 0013), `terminal_attach` (spec 0014), the proportional-font builtins (spec
-0015) and the system-control builtins (spec 0017) add none either; the interpreter owns the
-button-mask rule, the path validation and the operand decoding, the host owns the pointer
-state, the event queue, the window table, poll-time routing, the per-window exposes, the
-read-only ext2 view, the terminal attachment, the font's glyph cache and the stop/reset
-path.
+0015), the system-control builtins (spec 0017) and the float parser (spec 0003, builtin 50)
+add none either; the interpreter owns the button-mask rule, the path validation, the float
+grammar and the operand decoding, the host owns the pointer state, the event queue, the
+window table, poll-time routing, the per-window exposes, the read-only ext2 view, the
+terminal attachment, the font's glyph cache and the stop/reset path.
 
 ### Compiler / runtime split
 
@@ -592,3 +593,4 @@ pub fn run(task: &mut Task);
 | 2026-11-17 | M2.5.5 adds builtin 44 `terminal_attach` (1 → 1, spec 0014): the machine pops the window id, calls `Host::terminal_attach` and pushes the `Status`. The kernel host supplies the caller's task id, checks ownership and geometry and binds the one machine-wide console terminal. No opcode; ABI v1 stays at **75**. |
 | 2026-11-17 | M2.6.1 adds builtins 45–47 (spec 0015): `text_width_prop` (1 → 1), `text_height_prop` (0 → 1) and `draw_text_prop` (4 → 1). The machine resolves the text reference with the same bounds checks as `draw_text` and pushes the measured width, the 12-pixel line height or the drawing status; the host defaults are 0/0/`Invalid` for a disabled screen. The proportional font itself is kernel data with a lazy glyph cache, so no opcode is added and ABI v1 stays at **75**. |
 | 2026-11-17 | M2.6.4 adds builtins 48/49 (spec 0017): `halt` (0 → 1) and `reboot` (0 → 1). The machine stages no operands, calls `Host::halt`/`Host::reboot` and pushes the `Status`; the kernel host owns the stop/reset path and a bare host defaults to `Invalid`. No opcode; ABI v1 stays at **75**. |
+| 2026-11-17 | Correctly rounded float parsing adds builtin 50 `parse_f64` (2 → 1, spec 0003 "Floating-point text"; Q41): a source buffer reference and a `var f64` reference. The machine copies nothing: it takes the source bytes, runs the spec grammar and `core`'s `f64: FromStr` (both in `interpreter/src/f64parse.rs`) and writes the bit pattern through the out-parameter only on `Ok`, otherwise pushing `Invalid`. There is no `Host` method and no opcode; ABI v1 stays at **75**. |

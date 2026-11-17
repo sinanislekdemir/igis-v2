@@ -150,10 +150,12 @@ f64(x)   int(x)   uint(x)   byte(x)
   `core.format_f64_into(dst, value, frac_digits)` writes fixed-point decimal text with a
   chosen fraction width, `core.format_f64_short_into(dst, value)` writes the shortest
   significant-digit string that parses back to exactly the same bits (positional or
-  scientific), and `stdlib.parse_f64_into(text, var value)` parses decimal text and returns
-  `Status`. See "Floating-point text (implemented)" below for the shape rules, error codes
-  and parse grammar. Correctly rounded decimal-to-binary parsing and its subnormal edges
-  are deferred (Q41).
+  scientific), `core.parse_f64_into(text, var value)` is the correctly rounded decimal
+  reader, and `stdlib.parse_f64_into(text, var value)` is the application-facing wrapper
+  over it and returns `Status`. See "Floating-point text (implemented)" below for the shape
+  rules, error codes and parse grammar. Parsing is correctly rounded (round half to even)
+  over the whole mantissa, including the subnormal range and the overflow/underflow
+  boundaries (Q41).
 - Transcendental and other math helpers (`sqrt`, `sin`, ...) live in `stdlib` and are
   written in the language; a helper moves to `core` only when measurement justifies it.
 - `f64` may appear in records, sum types, arrays, rings and map values. It is not a map
@@ -365,26 +367,42 @@ signatures and results are in "Standard library" below.
   same staging discipline applies: the exact decimal expansion and the round-trip interval
   are integers, the shortest digits are found by integer comparison, and the text is
   published with one copy. No allocation and no host call.
-- **`stdlib.parse_f64_into(src: const string[0]; value: var f64) -> Status`** parses
-  decimal text. The grammar is
+- **`core.parse_f64_into(src: const string[0]; value: var f64) -> Status`** is the
+  correctly rounded decimal reader (builtin 50, spec 0008; Q41). The grammar is
   `[+-]? ( digits [ '.' digits? ] | '.' digits ) ( [eE] [+-]? digits )?` with at least one
   mantissa digit, plus the exact strings `inf`, `+inf`, `-inf` and `nan` (the formatter's
-  own output), so a format→parse round trip works. Everything else — empty text, a bare
-  sign, `.`, `1e`, `1e+`, `1.2.3`, an embedded or trailing space, `+nan`, `INF` — is
-  `Invalid`, writes nothing and never faults.
-- **Precision.** The mantissa is accumulated as an `f64`: the fraction as an integer
-  numerator over a power of ten (so `0.375` is exact, and only 18 significant digits are
-  kept), then the decimal exponent is applied by repeated multiplication or division by
-  10. Shortest round-trip formatting is `core.format_f64_short_into` above; correctly
-  rounded decimal-to-binary parsing and its subnormal edges stay deferred (Q41): parsing
-  lands on the `f64` value of the text, not on a correctly rounded one.
+  own output), so a format→parse round trip works. `1.` and `.5` are legal; everything
+  else — empty text, a bare sign, `.`, `1e`, `1e+`, `1.2.3`, an embedded or trailing space,
+  an embedded NUL, `+nan`, `-nan`, `INF`, `infinity`, `NaN` — is `Invalid`, writes nothing
+  and never faults. Bytes that are not valid UTF-8 are `Invalid` too.
+- **Correct rounding (MUST).** The result is the nearest binary64 value to the decimal
+  text, with ties to even, for every accepted form. There is no 18-digit mantissa cap and
+  no repeated ×/÷10 scaling: the whole mantissa takes part (with a sticky bit beyond the
+  digits that can affect the result), the decimal exponent is applied exactly, and the
+  rounding happens once. This holds across the subnormal range and at the boundaries:
+  `1e-7` is the same value as the literal (the old repeated ×/÷10 reader landed two ulps high), the text
+  `2.2250738585072012e-308` is the smallest normal while `2.2250738585072011e-308` is the
+  largest subnormal, `2.4703282292062328e-324` is the smallest subnormal while
+  `2.4703282292062327e-324` is zero, `1.7976931348623158e308` rounds down to the largest
+  finite value and `1.7976931348623159e308` is `Inf`, and the halfway text
+  `1.00000000000000011102230246251565404236316680908203125` rounds to `1.0`.
 - **Saturation, not errors.** A magnitude that overflows `f64` (e.g. `1e400`) becomes
   `±Inf` with `Ok`; an underflow (e.g. `1e-400`) becomes `±0` with `Ok`. The sign of
-  `-0.0` is preserved, including from `-0.0`, `-0e5` and the formatter's `-0.000`. The
-  exponent loop stops once the value has saturated, so the cost does not grow with the
-  exponent the text names, and a mantissa with hundreds of integer digits saturates to
-  `±Inf` rather than being renormalised.
-- Parsing is ordinary language code (`stdlib`), not a new opcode or builtin.
+  `-0.0` and `-inf` is preserved, including from `-0.0` and `-0e5`. The exponent saturates
+  rather than wrapping, so the cost does not grow with the exponent the text names, and a
+  mantissa with hundreds of integer digits saturates to `±Inf` rather than being
+  renormalised.
+- `nan` is a quiet NaN; its sign and payload are not observable through the language (the
+  formatters print `nan` and comparisons follow IEEE), so the primitive writes one
+  canonical positive quiet NaN (`0x7ff8000000000000`) on every core.
+- The conversion is a pure interpreter operation (`parse_f64` over `core`'s
+  `f64: FromStr`, which is allocation-free and already used by the compiler's literal
+  reader); the grammar check in front of it is the only thing the language adds, because
+  `FromStr` also accepts `infinity` and case variants. No new opcode, no host call.
+- **`stdlib.parse_f64_into(src: const string[0]; value: var f64) -> Status`** is the
+  application-facing name and only delegates to `core.parse_f64_into`. The signature and
+  the `stdlib` function table are unchanged, so existing callers and the format→parse
+  round trip keep working.
 
 ### Compound and parametric types
 
@@ -1408,7 +1426,7 @@ declared capacities and the at-least-N rule applies to callers.
 | `function stdlib.trim_into(dst: var string[256]; src: const string[0]): int` | Copies `src` without leading or trailing space, tab, CR or LF. Returns the copied length, or `-6` (`Status.CapacityExceeded`) without writing when the trimmed result exceeds the destination capacity. |
 | `function stdlib.split_once(dst_head: var string[128]; dst_tail: var string[256]; src: const string[0]; sep: byte): int` | Splits at the first `sep`: returns `1` with both parts, or `0` with the whole source in `dst_head` and an empty `dst_tail`. A part that does not fit returns `-6` without a partial tail write. Uses `core.find` and `core.substr_into`. |
 | `function stdlib.parse_int_into(src: const string[0]; value: var int): Status` | Optional leading `-`, then decimal digits only. `Invalid` for empty text, a bare `-`, a `+` sign or any non-digit; `CapacityExceeded` when the magnitude does not fit an `int`; `-9223372036854775808` is accepted. Writes nothing on failure and never faults. |
-| `function stdlib.parse_f64_into(src: const string[0]; value: var f64): Status` | Decimal text in `[+-]? ( digits [ '.' digits? ] \| '.' digits ) ( [eE] [+-]? digits )?` form, or the exact strings `inf`, `+inf`, `-inf`, `nan`. `Invalid` (nothing written) for anything else; overflowing magnitudes become `±Inf` and underflows `±0`, both with `Ok`; `-0.0` keeps its sign. Fixed-point precision, repeated ×/÷10 scaling; correctly rounded parsing stays open (Q41). |
+| `function stdlib.parse_f64_into(src: const string[0]; value: var f64): Status` | Correctly rounded decimal reader; delegates to `core.parse_f64_into`. Decimal text in `[+-]? ( digits [ '.' digits? ] \| '.' digits ) ( [eE] [+-]? digits )?` form, or the exact strings `inf`, `+inf`, `-inf`, `nan`. `Invalid` (nothing written) for anything else; overflowing magnitudes become `±Inf` and underflows `±0`, both with `Ok`; `-0.0`/`-inf` keep their sign; round half to even over the whole mantissa, including subnormals. |
 | `function stdlib.starts_with(src: const string[0]; prefix: const string[0]): bool` | Byte-wise prefix test (not a code-point test). |
 | `function stdlib.contains_byte(src: const string[0]; value: byte): bool` | True when `core.find` finds the byte. |
 | `function stdlib.drain_into(dst: var array[int, 8]; count: var int; src: var ring[int, 8]): Status` | Moves up to eight integers out of `src`, oldest first, and writes the moved count. `NotFound` (nothing written) when `src` is empty. The first helper whose signature carries a `ring`. |
@@ -1856,10 +1874,10 @@ presents and closes the window, and prints `ui_icons: ok` on `-smp 4` and `-smp 
 terminal selected and `scripts/ui_icons_screenshot_qmp.py` captures
 `/home/sinan/Desktop/igis-icons.png` (1024×768).
 
-Still missing for a complete standard library: `f32` (Q40) and the remaining float-text
-work (Q41: correctly rounded decimal-to-binary parsing and its subnormal edges); the
-fixed-point `core.format_f64_into`, the shortest round-trip
-`core.format_f64_short_into` and `stdlib.parse_f64_into` have landed. The typed stream
+Still missing for a complete standard library: `f32` (Q40). Float text is complete:
+the fixed-point `core.format_f64_into`, the shortest round-trip
+`core.format_f64_short_into`, the correctly rounded `core.parse_f64_into` (builtin 50) and
+its `stdlib.parse_f64_into` wrapper have landed (Q41). The typed stream
 views landed with the framing layer (`recv_exact`, `send_frame`, `recv_frame_into`,
 `send_line`, `recv_line_into`, `send_u64`, `recv_u64`, `send_bytes`). The `substr_into`
 move is withdrawn: the checked slice stays in `core` because the destination capacity must
@@ -1930,8 +1948,9 @@ controls and input dialog for the QMP screenshot harness.
 | `core.format_f64_into` result wider than the destination | `-6` (`Status.CapacityExceeded`); destination length untouched |
 | `core.format_f64_short_into` of `NaN`/`±Inf` | `nan`/`inf`/`-inf`; no fraction width applies |
 | `core.format_f64_short_into` result wider than the destination | `-6` (`Status.CapacityExceeded`); destination length untouched |
-| `stdlib.parse_f64_into` of malformed text | `Invalid`; `value` untouched; never faults |
-| `stdlib.parse_f64_into` of an overflowing or underflowing magnitude | `±Inf` or `±0` with `Ok`; not an error |
+| `core.parse_f64_into`/`stdlib.parse_f64_into` of malformed text (including non-UTF-8) | `Invalid`; `value` untouched; never faults |
+| `core.parse_f64_into`/`stdlib.parse_f64_into` of an overflowing or underflowing magnitude | `±Inf` or `±0` with `Ok`; not an error |
+| `core.parse_f64_into` of `nan` | canonical quiet NaN `0x7ff8000000000000`; sign and payload are not observable |
 | A map key that is not `int`, `string[M]` or `bytes[M]` (including `f64`) | Compile error |
 | Shift count outside `0..63` | `fault(IllegalOperation)` |
 | Duplicate or malformed stream name | Compile error |
@@ -2055,3 +2074,4 @@ controls and input dialog for the QMP screenshot harness.
 | 2026-11-17 | M2.5.5 adds `core.terminal_attach(window_id: int) -> Status` as host builtin 44 (spec 0014, ADR 0028): the one machine-wide terminal is bound to a window owned by the calling task, with the kernel supplying the task id. `Ok`/`NotFound`/`Invalid`/`Full`; a repeated attach by the owner is `Ok`, another live task is `Full`, and the kernel detaches when the owner's window disappears. `core.write`, the staged echo and `core.read_line` are unchanged, and `println!` keeps the System Log. No new opcode (ABI v1 stays at 75) and no language task id. |
 | 2026-11-17 | M2.5.3 records application buffers above the 256-byte `stdlib` editing capacity. The M2.4.1 mutators stay fixed at 256 bytes; `samples/apps/editor` holds one `string[8192]` and implements one app-local atomic mutator with the SE2/SE3/SE4 rules (boundary-checked, staged in a local `bytes[8192]`, one strict-UTF-8 publish, `CapacityExceeded` without a partial write), while `str_boundary`, `str_cursor_*` and `str_selection_normalize`/`all`/`collapse` run unchanged on the larger buffer. 8192 is an application constant, not a language limit; a larger file is refused by size before it is read, and saving stays disabled until a writable filesystem exists. |
 | 2026-11-17 | M2.6.4 adds system control (spec 0017, ADR 0033): `core.halt() -> Status` and `core.reboot() -> Status` as host builtins 48/49, no operands and no capability check (vision R14). The kernel sets the shutdown flag, wakes and stops every other core on the existing IPI vector, and halts the caller; `reboot` then drives the platform reset channels and halts if they are ignored. A bare host defaults both to `Invalid`. The desktop shell's `System` pull-down and the `Ctrl+A`/`Ctrl+R`/`Ctrl+H` shortcuts call the same surface. No new opcode; ABI v1 stays at 75. |
+| 2026-11-17 | Correctly rounded decimal → binary64 parsing (Q41). `core.parse_f64_into(src, var value: f64) -> Status` is builtin 50 and pure interpreter code: it checks the spec grammar over the source bytes and converts with `core`'s `f64: FromStr`, which is allocation-free and correctly rounded (round half to even) over the whole mantissa, including subnormals and the overflow/underflow boundaries. `nan` writes one canonical quiet NaN, `-0.0`/`-inf` keep their sign, malformed text (including non-UTF-8) is `Invalid` with `value` untouched, and the cost does not grow with the exponent. `stdlib.parse_f64_into` keeps its signature and `stdlib` function count and now only delegates, so existing callers and the format→parse round trip are unchanged. `samples/apps/f64parse` proves 52 cases in the kernel (hard ties, `1e-7`, the smallest normal, both sides of the smallest-subnormal half ulp, max finite and overflow, underflow to `-0`, a 38-digit mantissa and every rejected form); the reader is pinned by exact bit tables and an exact shortest-text round trip in `interpreter/src/f64parse.rs`, builtin tests in `interpreter/tests/f64parse.rs`, compiler signature/encoding tests and a `langhost` boundary test. No new opcode; ABI v1 stays at 75. |

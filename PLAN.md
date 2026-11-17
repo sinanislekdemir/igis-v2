@@ -14,10 +14,10 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `5918ec4` (M2.6.4: the System menu and About panel in
-  `desktop_shell`, `core.halt`/`core.reboot`, the focus-scoped shortcuts, spec 0017,
-  ADR 0033, the two QMP harnesses and the halt/reboot probe) plus this docs/resume
-  commit on top.
+- **Last commit:** `50b957f` (Q41: correctly rounded decimal → binary64 parsing as
+  `core.parse_f64_into`, builtin 50, with the `stdlib` wrapper, the exact-bit and
+  round-trip tests, the builtin/compiler/langhost tests and `samples/apps/f64parse`)
+  plus this docs/resume commit on top.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -68,9 +68,11 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `scripts/mouse_burst_qmp.py --cores 1 --batch 300` 600/600. The desktop image root
   lists 61 entries (59 staged files plus the `entrypoint` alias and `lost+found`); the
   shell image lists 60. `stdlib` stays at 125 functions and no cap changed.
-- **Next slice:** **M2 is complete** (M2.6.4 was the last ticket). The remaining items
-  are the M2 limitations listed below and the deferred backlog; the next milestone is
-  not yet planned.
+- **Next slice:** **M2 is complete** (M2.6.4 was the last ticket) and Q41 is complete
+  (`f64parse: ok 52 cases` on `-smp 4` and `-smp 1`, 390 host tests). The remaining
+  items are the M2 limitations listed below and the deferred backlog (`f32`/Q40, the
+  blocked `substr_into` move/Q46, Q43, Q45, Q47, Q51); the next milestone is not yet
+  planned.
 
 - **M2.6.3 complete:** the headless visual-regression harness (spec 0009 "Visual proof",
   G21; ADR 0032) and the resolution of M2.1.2. `samples/apps/visual` opens a window whose
@@ -631,6 +633,18 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
 
 ### Post-M2 hardening
 
+- [x] **Q41 correctly rounded decimal → binary64 parsing.** `core.parse_f64_into(src,
+  var value: f64) -> Status` is builtin 50 and pure interpreter code
+  (`interpreter/src/f64parse.rs`): it checks spec 0003's grammar and converts with `core`'s
+  allocation-free, correctly rounded `f64: FromStr`, writing the bits only on `Ok`.
+  `stdlib.parse_f64_into` keeps its signature and delegates, so the function count, every
+  caller and the format→parse round trip are unchanged. The old repeated ×/÷10 reader was
+  1 ulp off (`1e-7`, the smallest-normal boundary text); the new one is pinned by exact bit
+  tables, an exact `f64short` round trip, builtin tests, compiler signature/encoding tests,
+  a `langhost` boundary test, and `samples/apps/f64parse` (`f64parse: ok 52 cases` on
+  `-smp 4` and `-smp 1`). No opcode (ABI v1 stays at 75), no `Host` method, no cap change.
+  Spec 0003 ("Floating-point text"), spec 0008, ADR 0035.
+
 - [x] **C6 guarded-stack placement invariant.** `Region::allocate_guarded` now validates
   its constructed fields with the pure `Region::layout_ok` rule before returning: `frames
   >= 1`, `len >= 1`, `span == frames + 1`, `start == base + FRAME_SIZE`,
@@ -660,7 +674,6 @@ system menu/About are application-drawn with direct Restart/Halt (ADRs 0032, 003
 
 | Item | Where | Trigger |
 |---|---|---|
-| Correctly rounded decimal→binary64 parsing (Q41 remainder) | OPEN-QUESTIONS Q41 | when parsed text must round-trip exactly |
 | `f32` (Q40) | OPEN-QUESTIONS Q40 | when single precision is needed |
 | Recovery from a hardware guard hit (Q47) | OPEN-QUESTIONS Q47 | when a task must survive a kernel-bug guard hit |
 | MMIO/DMA/block handles (Q45/Q9) | OPEN-QUESTIONS | first real block device or MMIO peripheral |
