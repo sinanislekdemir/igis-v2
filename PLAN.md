@@ -15,7 +15,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 ## Resume point (update this when a session ends)
 
 - **Last commit:** `648e1de` (the M2.5.3 text editor, its `langhost` test, the QMP
-  screenshot harness and the spec 0003 note) plus this docs/resume commit on top.
+  screenshot harness and the spec 0003 note) plus the M2.5.4 browser commit and this
+  docs/resume commit on top.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -33,13 +34,19 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   the `ui_icons` proof (`fb452bd`), M2.4.6 the widgets demo window plus the
   `widgets` proof (`9d9b0f1`), M2.5.1 the root-only read-only file API plus the
   `files` proof (`03064f2`), M2.5.2 the windowed clock plus its check/shot modes
-  and screenshot harness (`65f4875`), and M2.5.3 the text editor plus its
-  check/shot modes and screenshot harness (`648e1de`).
-- **Verified at that point:** **364 host tests** (abi 18, compiler 152, interpreter 127,
-  langhost 67, including doctests); `cargo xtask build`/`image` clean; the boot prints
+  and screenshot harness (`65f4875`), M2.5.3 the text editor plus its
+  check/shot modes and screenshot harness (`648e1de`), and M2.5.4 the file browser
+  plus its check/shot modes, `langhost` test and screenshot harness.
+- **Verified at that point:** **365 host tests** (abi 18, compiler 152, interpreter 127,
+  langhost 68, including doctests); `cargo xtask build`/`image` clean; the boot prints
   `console: terminal ok`, `console: log ok`, `console: route ok`, `graphics: clip ok`,
   `window: rules ok`, `window: paint ok` and `window: route ok` on `-smp 4` and
-  `-smp 1`; `run files` → `files: root listing ok`, `files: root dot ok`,
+  `-smp 1`; `run browser check` → `browser: ok` on `-smp 4` and `-smp 1` (it lists the
+  root, previews `child` and `text`, exercises the error classes, scrolling, a real
+  double-click and an Enter, checks pixels, then launches `editor check` and sees it
+  exit `Ok`); `run browser` without arguments is the interactive browser and
+  `run browser shot` → `browser: ready` then `browser: done` after the five-second
+  hold; `run files` → `files: root listing ok`, `files: root dot ok`,
   `files: size agrees ok`, `files: chunked read ok`, `files: read 559/559`,
   `files: offset rules ok`, `files: error paths ok`, `files: ok` on both; `run text_edit`
   → `text_edit: ok` on both; `run ui_layout` → `ui_layout: ok`
@@ -57,9 +64,11 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `desktop_shell: ok`; `run windows` → `windows: ok`; `run windows_events` →
   `windows_events: ok`; `run windows_demo` → `windows_demo: checks ok`,
   `windows_demo: ready`, `windows_demo: ok`; `run mouse` → `mouse: ok` in its own boot
-  (and through both QMP harnesses); regressions `events`, `desktop`, `text 42 hi`,
-  `frames`, `streams`, `deep`, `utf8`, `realtime`, `cores` pass on `-smp 4` (the UI
-  samples also on `-smp 1`);
+  (and through both QMP harnesses); regressions `editor check`, `clock_window check`,
+  `files`, `widgets check`, `ui_icons`, `ui_dialogs`, `ui_menus`, `ui_controls`,
+  `text_edit`, `ui_layout`, `desktop_shell check`, `windows`, `windows_events`,
+  `windows_demo`, `events`, `text 42 hi`, `frames`, `streams`, `deep`, `utf8`,
+  `realtime` and `cores` pass on `-smp 4` and `-smp 1`;
   `scripts/tablet_qmp.py` 7/7, `--no-tablet` → `mouse: ok`,
   `scripts/mouse_burst_qmp.py --cores 1` → 600/600; the embedded `stdlib` is 114,823 B
   of source, 84,920 B of code and 4,134,600 B of compile scratch with a minimal
@@ -70,17 +79,39 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   664 B of stack, the `clock_window` source is 17,744 B and its task package is
   103,696 B of code (26 frames), 1,304 B of state and a 20,896 B stack, the `editor`
   source is 43,834 B and its package is 134,176 B of code (33 frames), 19,856 B of state
-  and a 33,416 B stack, and the image root lists 54 entries (53 staged source files plus
-  the `mke2fs` `lost+found` directory). Screenshots
+  and a 33,416 B stack, the `browser` source is 33,970 B and its package is 121,688 B
+  of code (30 frames), 10,832 B of state and a 22,608 B stack, and the image root lists
+  55 entries (54 staged source files plus the `mke2fs` `lost+found` directory).
+  Screenshots
   `/home/sinan/Desktop/igis-desktop.png`
   (1024×768, 31555 bytes), `igis-windows.png` (1024×768, 28169 bytes),
   `igis-m23-proof.png` (1024×768, 30901 bytes), `igis-controls.png` (1024×768, 32967
   bytes), `igis-menus.png` (1024×768, 27590 bytes), `igis-dialogs.png`
   (1024×768, 29544 bytes), `igis-icons.png` (1024×768, 33991 bytes),
   `igis-widgets.png` (1024×768, 25894 bytes), `igis-clock.png` (1024×768,
-  31443 bytes) and `igis-editor.png` (1024×768, 30492 bytes).
-- **Next slice (not started):** **M2.5.4** — the file browser: a directory list from the
-  read-only ext2 app API, open/launch.
+  31443 bytes), `igis-editor.png` (1024×768, 30492 bytes) and
+  `igis-browser.png` (1024×768, 32847 bytes).
+- **Next slice (not started):** **M2.5.5** — the terminal window: the existing shell
+  running in a window (`core.write`/`core.read_line` routed) so the REPL and the
+  desktop coexist.
+- **M2.5.4 complete:** `samples/apps/browser` is one 680×480 window with a path/count
+  line, a 26-row app-drawn root listing (folder/file/other marker, name, size, accent
+  selection), a `ui_scrollbar`, a 2048-byte preview pane with line clipping and a status
+  line. `core.fs_list` is read from index 0 until `NotFound` into 64 fixed entries;
+  `.`/`..` are excluded by the API. `lost+found` is shown as a folder and opening or
+  launching it is refused with a clear status (M2.5.1 has no subdirectory traversal); a
+  kind-2 entry is shown but not openable. A regular file preview is `core.fs_size` +
+  256-byte `core.fs_read` chunks into a staged `bytes[2048]` and one strict-UTF-8
+  `core.substr_into`, so missing, directory, unsupported path, over-cap and invalid
+  UTF-8 all set the status and leave the old preview untouched. Keys are
+  Up/Down/PageUp/PageDown/Home/End, Enter and Ctrl+L (launch), with double-click
+  preview; drawing is client content only (no `syslib.clear`). Launch is a blocking
+  launcher: `core.spawn` then `core.wait`, regular source apps only; the proof launches
+  `editor check` and sees it exit `Ok`, so no child is left running.
+  `run browser check` prints `browser: ok` on `-smp 4` and `-smp 1`; `langhost` runs the
+  same listing/preview/selection logic (`browser: host ok`);
+  `scripts/browser_screenshot_qmp.py` writes `igis-browser.png`. No new helper, opcode
+  or builtin (the library stays at 125 functions).
 - **M2.5.3 complete:** `samples/apps/editor` is a 640×480 window with an app-drawn File
   menu (Open, a disabled Save, Quit), a path/`read-only` line, a 26-row text view, a
   scrollbar and a status/`Ln`/`Col` line. The document is one `string[8192]` loaded with
@@ -124,7 +155,7 @@ Trust the repository, not a summary. On a fresh start:
 
 1. `git status --short` and `git log --oneline -8` — the tree should be clean and the top
    commit should match the "Last commit" line above; if not, stop and reconcile first.
-2. `cargo test -q -p abi -p compiler -p interpreter -p langhost` — expect **364** tests
+2. `cargo test -q -p abi -p compiler -p interpreter -p langhost` — expect **365** tests
    plus the doctests, all green.
 3. `cargo xtask build` — expect a clean kernel build.
 4. Read, in this order: this file, `AGENTS.md` (status paragraph + decisions table),
@@ -190,13 +221,17 @@ Trust the repository, not a summary. On a fresh start:
      at `/home/sinan/Desktop/igis-clock.png`.
    - `python3 scripts/editor_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
      `/home/sinan/Desktop/igis-editor.png`.
+   - `python3 scripts/browser_screenshot_qmp.py build/igis.iso` → a 1024×768 PNG at
+     `/home/sinan/Desktop/igis-browser.png`.
    - `python3 scripts/tablet_qmp.py build/igis.iso` → `7/7 absolute cases passed`.
    - `python3 scripts/tablet_qmp.py build/igis.iso --no-tablet` → `mouse: ok` fallback.
    - `python3 scripts/mouse_burst_qmp.py build/igis.iso` → `600/600` px with a
      `mouse: aux IRQ12 delivered ...` line; `--cores 1` is the single-core variant.
-6. The next slice is **M2.5.4** (the file browser: a directory list from the read-only
-   ext2 app API, open/launch). M2.5.3 landed the text editor with its check/shot modes
-   and screenshot harness; M2.5.2 landed the clock window; M2.5.1 landed `core.fs_list`,
+6. The next slice is **M2.5.5** (the terminal window: the existing shell running in a
+   window, `core.write`/`core.read_line` routed, so the REPL and the desktop coexist).
+   M2.5.4 landed the file browser with its check/shot modes and screenshot harness;
+   M2.5.3 landed the text editor with its check/shot modes and screenshot harness;
+   M2.5.2 landed the clock window; M2.5.1 landed `core.fs_list`,
    `core.fs_read` and `core.fs_size` over the image root, no handle or writable path.
    The M2 limitations still in force: an app that ignores an `Expose` keeps stale
    content, a full-screen `syslib.clear` erases the kernel windows' pixels, there is no
@@ -392,7 +427,25 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
   `run editor shot` holds a frame for `scripts/editor_screenshot_qmp.py`
   (`igis-editor.png`). No new helper, opcode or builtin; spec 0003 records the
   above-256-byte-buffer contract. `648e1de`.
-- [ ] **M2.5.4** File browser: directory list from the read-only ext2 app API, open/launch.
+- [x] **M2.5.4** File browser: directory list from the read-only ext2 app API, open/launch.
+  `samples/apps/browser` is one 680×480 window with a path/count line, a 26-row
+  app-drawn root listing (folder/file/other marker, name, size, accent selection), a
+  `ui_scrollbar`, a 2048-byte preview pane with line clipping and a status line.
+  `core.fs_list` is read from index 0 until `NotFound` into 64 fixed entries;
+  `.`/`..` are excluded by the API. `lost+found` is shown as a folder and opening or
+  launching it is refused with a clear status (M2.5.1 has no subdirectory traversal); a
+  kind-2 entry is shown but not openable. A regular file preview is `core.fs_size` +
+  256-byte `core.fs_read` chunks into a staged `bytes[2048]` and one strict-UTF-8
+  `core.substr_into`, so missing, directory, unsupported path, over-cap and invalid
+  UTF-8 all set the status and leave the old preview untouched. Keys are
+  Up/Down/PageUp/PageDown/Home/End, Enter and Ctrl+L (launch), with double-click
+  preview; drawing is client content only (no `syslib.clear`). Launch is a blocking
+  launcher: `core.spawn` then `core.wait`, regular source apps only; the proof launches
+  `editor check` and sees it exit `Ok`, so no child is left running.
+  `run browser check` prints `browser: ok` on `-smp 4` and `-smp 1`; `langhost` runs the
+  same listing/preview/selection logic (`browser: host ok`);
+  `scripts/browser_screenshot_qmp.py` writes `igis-browser.png`. No new helper, opcode
+  or builtin (125 `stdlib` functions).
 - [ ] **M2.5.5** Terminal window: the existing shell running in a window (`core.write` /
   `core.read_line` routed), so the REPL and the desktop coexist.
 - [ ] **M2.5.6** Boot to desktop: `entrypoint` becomes the desktop; the shell is launched

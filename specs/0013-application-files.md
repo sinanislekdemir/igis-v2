@@ -191,6 +191,25 @@ not depend on the order), reads use the same 256-byte chunk, and directories or
 symlinks are refused exactly as the kernel subset does. A bare test host keeps
 the `NotFound` defaults.
 
+### The file browser (M2.5.4)
+
+`samples/apps/browser` consumes the root view exactly as this spec defines it and
+records the application-level contract:
+
+- the root is listed with `fs_list` from index 0 until `NotFound`, into 64 fixed
+  entries; `.`/`..` never appear and no sorting is assumed;
+- a kind-1 entry (`lost+found`) is shown as a folder, but opening, reading or
+  launching it is refused with a clear status: M2.5.1 has no traversal, and the
+  browser does not invent one;
+- a kind-2 entry is shown but cannot be opened;
+- a preview reads at most 2048 bytes of a regular file with `fs_size` and
+  256-byte `fs_read` chunks, publishes through one strict-UTF-8 `substr_into` and
+  leaves the previous preview untouched on every failure class in F14;
+- launching is application-level `core.spawn` + `core.wait` (no new API) and is
+  limited to regular root entries;
+- no browser action writes a file, opens a subdirectory or adds a handle; open
+  questions 1–3 remain open.
+
 ## Interfaces
 
 | Layer | Contract |
@@ -225,7 +244,7 @@ the `NotFound` defaults.
 
 | # | Question | Trigger / owner |
 |---|----------|-----------------|
-| 1 | Subdirectory listing and traversal | M2.5.4, if the browser must show a tree; add a new spec or amend this one |
+| 1 | Subdirectory listing and traversal | M2.5.4 chose a flat root list and refuses kind-1 entries, so this is not required yet; add a new spec or amend this one when a tree view is actually needed |
 | 2 | A writable save path for the editor | when a writable filesystem exists (spec 0002, deferred) |
 | 3 | A file handle / open-once model | only if per-read root lookup becomes a measured problem |
 
@@ -234,3 +253,4 @@ the `NotFound` defaults.
 | Date | Change |
 |------|--------|
 | 2026-11-17 | Initial spec (M2.5.1): three root-only `core` builtins, 256-byte reads, `Status` errors, atomic out-parameters, the `abi::fs` path rules, `Ext2::list_entry`/`read_at`, kernel and `langhost` hosts. |
+| 2026-11-17 | M2.5.4 note: the file browser consumes the root view and records the application contract — 64-entry listing until `NotFound`, kind-1 and kind-2 entries shown but refused, a 2048-byte preview with atomic failure, and a `core.spawn` + `core.wait` launch for regular entries. No API change. |
