@@ -5558,6 +5558,47 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::scalar(Kind::Int)))
             }
+            // `core.parse_f64_into(src, var value: f64) -> Status`
+            // (spec 0003, "Floating-point text"; Q41). The correctly rounded
+            // reader lives in the interpreter, so this stages a buffer
+            // reference and a scalar `var f64` reference and returns a
+            // `Status`; no new opcode.
+            "core.parse_f64_into" => {
+                if args.len() != 2 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`core.parse_f64_into` expects 2 arguments, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                let source = self.emit_ref(args[0], None)?;
+                if source.kind != Kind::String {
+                    let found = self.type_name(source);
+                    return Err(self.err_at(
+                        args[0],
+                        format_args!(
+                            "`core.parse_f64_into` expects a `string` source, found `{found}`"
+                        ),
+                    ));
+                }
+                let value = self.emit_scalar_ref(args[1])?;
+                if value.kind != Kind::Float {
+                    let found = self.type_name(value);
+                    return Err(self.err_at(
+                        args[1],
+                        format_args!(
+                            "`core.parse_f64_into` expects `var value: f64`, found `{found}`"
+                        ),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::PARSE_F64)?;
+                self.pop(2)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
             // First `syslib` primitives: x86 port I/O (spec 0003, "Hardware
             // access"). `Port` is staged as a plain `uint` (Q45); the namespace
             // is still separate from `core`, so a hardware access stays

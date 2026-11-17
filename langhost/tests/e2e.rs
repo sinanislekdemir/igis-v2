@@ -890,6 +890,82 @@ end;
 }
 
 #[test]
+fn parse_f64_into_is_correctly_rounded_at_the_hard_boundaries() {
+    // The expected text is produced by `core.format_f64_short_into`, the exact
+    // integer implementation, so this pins the *bits* of the parsed value
+    // without needing a bit-cast in the language. The repeated ×/÷10 reader
+    // that Q41 replaced was 1 ulp off on `1e-7` and on subnormal boundaries.
+    let source = br#"
+unit f64round;
+
+uses core, stdlib;
+
+var
+  text: string[40];
+  value: f64;
+  st: Status;
+  n: int;
+
+procedure show(label: const string[0]; src: const string[0]);
+begin
+  st := stdlib.parse_f64_into(src, value);
+  core.write(label);
+  core.write("=");
+  if st <> Ok then
+    core.write("Invalid")
+  else
+  begin
+    n := core.format_f64_short_into(text, value);
+    if n < 0 then
+      core.write("failed")
+    else
+      core.write(text);
+  end;
+  core.write("\n");
+end;
+
+procedure main(args: const string[1024]);
+begin
+  show("tenth", "0.1");
+  show("tenth-long", "0.1000000000000000055511151231257827021181583404541015625");
+  show("1e-7", "1e-7");
+  show("half-ulp-1", "1.00000000000000011102230246251565404236316680908203125");
+  show("minnormal", "2.2250738585072012e-308");
+  show("maxsubnormal", "2.2250738585072011e-308");
+  show("minsub-1", "4.9406564584124654e-324");
+  show("halfsub-up", "2.4703282292062328e-324");
+  show("halfsub-down", "2.4703282292062327e-324");
+  show("max", "1.7976931348623158e308");
+  show("overflow", "1e309");
+  show("underflow", "-1e-400");
+  show("long", "1234567890123456789012345678901234567890e-40");
+  show("tie", "9007199254740995");
+end;
+"#;
+    let package = langhost::compile(source, "f64round").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(
+        result.output,
+        b"tenth=0.1\n\
+          tenth-long=0.1\n\
+          1e-7=1e-7\n\
+          half-ulp-1=1\n\
+          minnormal=2.2250738585072014e-308\n\
+          maxsubnormal=2.225073858507201e-308\n\
+          minsub-1=5e-324\n\
+          halfsub-up=5e-324\n\
+          halfsub-down=0\n\
+          max=1.7976931348623157e308\n\
+          overflow=inf\n\
+          underflow=-0\n\
+          long=0.12345678901234568\n\
+          tie=9007199254740996\n"
+            .to_vec()
+    );
+}
+
+#[test]
 fn format_f64_short_into_prints_the_shortest_round_trip() {
     let source = br#"
 unit f64short;
@@ -930,8 +1006,9 @@ end;
     let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
     assert_eq!(result.reason, ExitReason::Ok);
     // Round-tripping is proven against the host formatter and parser in
-    // `interpreter/tests/f64short.rs`; `stdlib.parse_f64_into` is still not
-    // correctly rounded (Q41), so it is not the oracle here.
+    // `interpreter/tests/f64short.rs`; the reader itself is pinned by
+    // `parse_f64_into_is_correctly_rounded_at_the_hard_boundaries` above and
+    // `interpreter/src/f64parse.rs`.
     assert_eq!(
         result.output,
         b"zero=0\nnegzero=-0\ntenth=0.1\nthird=0.3333333333333333\n\
@@ -2457,7 +2534,10 @@ fn the_perf_sample_reports_the_host_path() {
     let result =
         langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies and runs");
     assert_eq!(result.reason, ExitReason::Ok);
-    assert_eq!(result.output, b"perf: no graphics\nperf: host ok\n".to_vec());
+    assert_eq!(
+        result.output,
+        b"perf: no graphics\nperf: host ok\n".to_vec()
+    );
 }
 
 /// The M2.6.3 visual-regression specimen against `langhost`'s disabled screen:

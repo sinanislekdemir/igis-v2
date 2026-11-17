@@ -707,6 +707,27 @@ pub mod builtin {
     /// No operands.
     pub const REBOOT: u32 = 49;
 
+    // ---- correctly rounded float parsing (spec 0003, Q41) ----------------
+    //
+    // The decimal reader lives in the interpreter, not in `stdlib` language
+    // code: a correctly rounded conversion needs exact integer arithmetic over
+    // the whole mantissa, which `core`'s `f64: FromStr` already implements
+    // allocation-free. The machine checks the spec grammar and publishes the
+    // bits, so there is no host call and no `Host` method.
+
+    /// `core.parse_f64_into(src, var value) -> Status`: parse decimal text
+    /// into a binary64 `f64` with correct rounding (round half to even),
+    /// including long mantissas, subnormals and the overflow/underflow
+    /// boundaries (spec 0003, "Floating-point text"). The grammar is
+    /// `[+-]? ( digits [ '.' digits? ] | '.' digits ) ( [eE] [+-]? digits )?`
+    /// plus the exact strings `inf`, `+inf`, `-inf` and `nan`. `Ok` writes the
+    /// 8-byte bit pattern through `value` and pushes `Ok`; a malformed string
+    /// (including one that is not UTF-8) pushes `Invalid` and leaves `value`
+    /// untouched. An overflowing magnitude is `±Inf` and an underflow `±0`,
+    /// both with `Ok`; `-0.0` and `-inf` keep their sign. Operands:
+    /// `[src reference][value reference]`.
+    pub const PARSE_F64: u32 = 50;
+
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
         match id {
@@ -759,6 +780,7 @@ pub mod builtin {
             DRAW_TEXT_PROP => Some((4, 1)),
             HALT => Some((0, 1)),
             REBOOT => Some((0, 1)),
+            PARSE_F64 => Some((2, 1)),
             _ => None,
         }
     }

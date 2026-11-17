@@ -1522,6 +1522,142 @@ end;
     );
 }
 
+/// Counts the `BUILTIN` instructions carrying `id`, in order.
+fn builtin_count(package: &Owned, id: u32) -> usize {
+    use abi::opcodes;
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+    let mut seen = 0;
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        if op == opcodes::BUILTIN {
+            let immediate = u32::from_le_bytes(instructions[pc + 4..pc + 8].try_into().unwrap());
+            if immediate == id {
+                seen += 1;
+            }
+        }
+        pc += words * 4;
+    }
+    seen
+}
+
+#[test]
+fn parse_f64_into_checks_types_and_emits_the_builtin() {
+    let source = br#"
+unit t;
+
+uses core;
+
+var
+  text: string[32];
+  value: f64;
+  st: Status;
+
+procedure main(args: const string[1024]);
+begin
+  st := core.parse_f64_into(text, value);
+  st := core.parse_f64_into("1.5", value);
+end;
+"#;
+    let package = compile(source, "t.ig").expect("compiles");
+    assert_eq!(
+        builtin_count(&package, abi::opcodes::builtin::PARSE_F64),
+        2,
+        "one builtin per call, two words each"
+    );
+
+    let wrong_arity = br#"
+unit t;
+
+uses core;
+
+var
+  value: f64;
+  st: Status;
+
+procedure main(args: const string[1024]);
+begin
+  st := core.parse_f64_into("1", value, value);
+end;
+"#;
+    let error = compile(wrong_arity, "t.ig").expect_err("two arguments are required");
+    assert!(
+        error.message.contains("expects 2 arguments, got 3"),
+        "{}",
+        error.message
+    );
+
+    let wrong_source = br#"
+unit t;
+
+uses core;
+
+var
+  raw: bytes[16];
+  value: f64;
+  st: Status;
+
+procedure main(args: const string[1024]);
+begin
+  st := core.parse_f64_into(raw, value);
+end;
+"#;
+    let error = compile(wrong_source, "t.ig").expect_err("the source must be a string");
+    assert!(
+        error.message.contains("expects a `string` source"),
+        "{}",
+        error.message
+    );
+
+    let wrong_value = br#"
+unit t;
+
+uses core;
+
+var
+  n: int;
+  st: Status;
+
+procedure main(args: const string[1024]);
+begin
+  st := core.parse_f64_into("1", n);
+end;
+"#;
+    let error = compile(wrong_value, "t.ig").expect_err("the value must be an f64");
+    assert!(
+        error.message.contains("`var value: f64`"),
+        "{}",
+        error.message
+    );
+
+    let const_value = br#"
+unit t;
+
+uses core;
+
+function f(x: const f64): Status;
+var
+  st: Status;
+begin
+  st := core.parse_f64_into("1", x);
+  return st;
+end;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile(const_value, "t.ig").expect_err("a const value is not writable");
+    assert!(
+        error.message.contains("cannot pass `const` parameter"),
+        "{}",
+        error.message
+    );
+}
+
 #[test]
 fn syslib_ports_are_accepted_and_emit_their_builtins() {
     use abi::opcodes::{self, builtin};

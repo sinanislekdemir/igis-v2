@@ -1886,6 +1886,40 @@ impl Machine {
                         let status = host.reboot();
                         self.push(stack, status as u64)?;
                     }
+                    // Correctly rounded float parsing (spec 0003, Q41). The
+                    // whole conversion is pure interpreter code over the
+                    // source bytes, so there is no host call: the grammar
+                    // check and `core`'s `f64: FromStr` live in
+                    // `crate::f64parse`. `value` is written only on `Ok`.
+                    builtin::PARSE_F64 => {
+                        let value_bits = self.pop(stack)?;
+                        let src_bits = self.pop(stack)?;
+                        let parsed = {
+                            let (src_region, src_offset) =
+                                self.resolve(src_bits, state, stack, constants, args)?;
+                            let src_len = self.buffer_len(
+                                src_region, src_offset, state, stack, constants, args,
+                            )?;
+                            let src = buffer_slice(
+                                src_region, src_offset, src_len, state, stack, constants, args,
+                            )?;
+                            crate::f64parse::parse(src)
+                        };
+                        match parsed {
+                            Some(value) => {
+                                self.write_ref(
+                                    value_bits,
+                                    value.to_bits(),
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.push(stack, Status::Ok as u64)?;
+                            }
+                            None => self.push(stack, Status::Invalid as u64)?,
+                        }
+                    }
                     // Read-only enumeration (spec 0011, W19; spec 0012, D15).
                     // The title destination is a `var string[64]` data
                     // reference: its length word sits 8 bytes before the data.
