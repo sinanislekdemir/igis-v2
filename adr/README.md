@@ -65,3 +65,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0038 | [A hierarchical read-only image and compile-time `/lib` modules](0038-hierarchical-image-and-modules.md) | Accepted | 2026-11-17 |
 | 0039 | [Nominal type identity is package-wide; `/lib` types are unit-qualified](0039-package-wide-nominal-types.md) | Accepted | 2026-11-18 |
 | 0040 | [A real ext2 writer on a dedicated ATA home disk behind a path router](0040-real-ext2-writer-home-disk.md) | Accepted | 2026-11-18 |
+| 0041 | [Add a truncate primitive to the home file API](0041-home-truncate.md) | Accepted | 2026-11-18 |

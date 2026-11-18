@@ -21,9 +21,9 @@ across a power cycle, which means it cannot live in the RAM module: it needs a r
 block device and an on-disk image that QEMU keeps between boots.
 
 **Non-goals.** No journal and no crash-consistency guarantee beyond ext2's own
-ordering (a power loss during a write may need `e2fsck` on the host). No truncate
-primitive (the owner's decision); a shorter replacement is `remove` + create, or
-write-then-rename. No writable application image, no write outside `/home`, no
+ordering (a power loss during a write may need `e2fsck` on the host). Truncate is
+part of the API (`core.fs_truncate`, A7, ADR 0041); a shorter replacement can also
+be `remove` + create or write-then-rename. No writable application image, no write outside `/home`, no
 permissions, no users, no sparse-file policy, no quotas, no atime/ctime updates
 beyond what ext2 requires for a consistent tree.
 
@@ -76,22 +76,23 @@ beyond what ext2 requires for a consistent tree.
   the `..` entry of the moved directory.
 - **W7 (MUST):** File data is written block by block; a partial block preserves the
   bytes outside the written range. A write past the end extends the size and
-  zero-fills the gap. There is no truncate: writing inside a file does not shrink
-  it.
+  zero-fills the gap. A write inside a file does not shrink it; `core.fs_truncate`
+  (A7) is the only shrinking operation.
 
 ### API
 
-- **A1 (MUST):** Four new `core` host builtins (no opcode; ABI v1 stays at 75):
+- **A1 (MUST):** Five new `core` host builtins (no opcode; ABI v1 stays at 75):
   ```text
   core.fs_write(path: const string[0]; offset: uint;
                 data: const bytes[0]; var written: int) -> Status
   core.fs_remove(path: const string[0]) -> Status
   core.fs_mkdir(path: const string[0]) -> Status
   core.fs_rename(from: const string[0]; to: const string[0]) -> Status
+  core.fs_truncate(path: const string[0]; size: uint) -> Status
   ```
-  They are builtins 53–56, available only on a writable mount.
+  They are builtins 53–57, available only on a writable mount.
 - **A2 (MUST):** Only paths whose first component is `home` are writable. A
-  `create`/`write`/`remove`/`mkdir`/`rename` on any other path is
+  `create`/`write`/`remove`/`mkdir`/`rename`/`truncate` on any other path is
   `Status.Invalid`; reads elsewhere are unchanged. Without a home disk the same
   calls are `Invalid` (the mount is read-only).
 - **A3 (MUST):** `fs_write` writes `min(data.len, …)` bytes, returns the count in
@@ -106,14 +107,24 @@ beyond what ext2 requires for a consistent tree.
 - **A6 (MUST):** `langhost` implements the home mount over a temporary directory
   (not the repository), so the write primitives and the editor save are testable
   on the host; a bare host keeps `Invalid`.
+- **A7 (MUST):** `core.fs_truncate(path, size)` sets a regular file's length:
+  shrinking frees every data block at or past `size` (direct/single/double
+  indirect, including empty pointer blocks), clears the inode's pointers, zeroes
+  the tail of the last partial block, and only then releases the bitmaps and
+  counters; extending allocates and zero-fills up to `size` with capacity planned
+  before any mutation (a full disk is `CapacityExceeded` with no change). A
+  directory is `Invalid`, a missing path `NotFound`, and the current size is an
+  `Ok` no-op. Only `home/*` (A2).
 
 ### Editor and browser
 
-- **E1 (MUST):** The editor's `Ctrl+S` and its File-menu Save row (currently
-  disabled) write the document through `fs_write` after a
-  `remove`/`rename` replacement (write a sibling temporary file, then rename it
-  over the original), report `saved` or the failure status, and keep the document
-  unchanged on failure.
+- **E1 (MUST):** The editor's `Ctrl+S` and its File-menu Save row write the
+  document through `fs_write` after a `remove`/`rename` replacement (write a
+  sibling temporary file, then rename it over the original), report `saved` or the
+  failure status, and keep the document unchanged on failure. The temporary-file
+  + rename path is kept even though `fs_truncate` exists: it is the closest thing
+  to an atomic save without a journal, and a write+truncate save would leave a
+  mixed document if a power loss hit between the two calls.
 - **E2 (MUST):** The browser can create a directory and remove an empty directory
   or a file in the home tree, with the same confirmation-free status line it uses
   today; operations outside `home` are refused.
@@ -181,3 +192,4 @@ corrupt structure; it refuses the mount or returns `IoError`.
 |------|--------|
 | 2026-11-18 | Initial draft and acceptance: dedicated 8 MiB ext2 home image, ATA PIO, `ext2w`, the router, four write builtins (53–56), no truncate, no journal, `e2fsck` as the consistency proof. |
 | 2026-11-18 | Implemented in M6.1–M6.4: read mount and router, the writer and `fs_write`, `remove`/`mkdir`/`rename` with the editor save and browser actions, and the reboot persistence harness. ABI v1 stays at 75 opcodes; the kernel's application image remains read-only. |
+| 2026-11-18 | M7.1 adds `core.fs_truncate(path, size)` (builtin 57, ADR 0041): shrink frees blocks/pointers and zeroes the partial tail, extend zero-fills, only `home/*`; the editor keeps its temporary-file + rename save. ABI v1 stays at 75. |

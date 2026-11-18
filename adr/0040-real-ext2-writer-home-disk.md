@@ -105,3 +105,9 @@ We will:
 | Journaling ext3/ext4 | Out of scope for the first writable slice; ext2 + fsck is the accepted risk. |
 | General mount table | One writable filesystem and one read-only image; a first-component rule is simpler and testable. |
 | Truncate in the first API | The owner excluded it; remove+rename covers replacement. |
+
+## Addendum (2026-11-18, M7.1)
+
+The owner later added a truncate primitive; see ADR 0041. It does not change the
+storage model, the router, the lock order or the no-journal stance; it only adds
+`core.fs_truncate` (builtin 57) and the block-freeing/zero-filling it needs.
