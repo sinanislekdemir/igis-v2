@@ -7916,6 +7916,16 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             // debug build, and one more inline arm would push the host tests'
             // nested-expression compilation over their stack budget.
             "core.fs_write" => self.fs_write_call(args, line, column),
+            // Removal, directories and rename on the same writable tree
+            // (spec 0019, A1/W3–W6). No opcode; the interpreter stages the
+            // status and the host owns the operation.
+            "core.fs_remove" => {
+                self.fs_path_call(args, line, column, "core.fs_remove", builtin::FS_REMOVE)
+            }
+            "core.fs_mkdir" => {
+                self.fs_path_call(args, line, column, "core.fs_mkdir", builtin::FS_MKDIR)
+            }
+            "core.fs_rename" => self.fs_rename_call(args, line, column),
             // Terminal attach (spec 0014): bind the console's machine-wide
             // terminal grid to a window owned by the caller. The kernel host
             // supplies the task id; the compiler only checks the staged
@@ -8209,6 +8219,69 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         }
         self.one(opcodes::BUILTIN, builtin::FS_WRITE)?;
         self.pop(4)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// A one-path write builtin (`core.fs_remove`, `core.fs_mkdir`, spec 0019).
+    fn fs_path_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+        name: &str,
+        builtin_id: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 1 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`{name}` expects 1 argument, got {}", args.len()),
+            ));
+        }
+        let path = self.emit_ref(args[0], None)?;
+        if path.kind != Kind::String {
+            let found = self.type_name(path);
+            return Err(self.err_at(
+                args[0],
+                format_args!("`{name}` expects a `string` path, found `{found}`"),
+            ));
+        }
+        self.one(opcodes::BUILTIN, builtin_id)?;
+        self.pop(1)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// `core.fs_rename(from, to) -> Status` (spec 0019, A1/W6).
+    fn fs_rename_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 2 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`core.fs_rename` expects 2 arguments, got {}", args.len()),
+            ));
+        }
+        for (position, arg) in args.iter().enumerate() {
+            let path = self.emit_ref(arg, None)?;
+            if path.kind != Kind::String {
+                let found = self.type_name(path);
+                let label = if position == 0 { "from" } else { "to" };
+                return Err(self.err_at(
+                    arg,
+                    format_args!(
+                        "`core.fs_rename` expects a `string` {label} path, found `{found}`"
+                    ),
+                ));
+            }
+        }
+        self.one(opcodes::BUILTIN, builtin::FS_RENAME)?;
+        self.pop(2)?;
         self.push();
         Ok(Some(Type::enumeration(STATUS_ENUM)))
     }

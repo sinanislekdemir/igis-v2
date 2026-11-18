@@ -426,6 +426,9 @@ fn a_read_only_mount_refuses_every_write() {
 
     assert_eq!(fs.create("new.txt"), Err(Status::Invalid));
     assert_eq!(fs.write_at("readme.txt", 0, b"x"), Err(Status::Invalid));
+    assert_eq!(fs.remove("readme.txt"), Err(Status::Invalid));
+    assert_eq!(fs.mkdir("newdir"), Err(Status::Invalid));
+    assert_eq!(fs.rename("readme.txt", "moved.txt"), Err(Status::Invalid));
     // Nothing was written, not even the superblock.
     assert_eq!(device.bytes(), bytes);
 }
@@ -443,4 +446,181 @@ fn an_inconsistent_free_count_is_refused() {
         Err(other) => panic!("inconsistent free count should be Invalid, got {other:?}"),
         Ok(_) => panic!("inconsistent free count mounted"),
     }
+}
+
+#[test]
+fn mkdir_creates_an_empty_directory_with_dot_and_dotdot() {
+    let Some(bytes) = make_image() else {
+        return;
+    };
+    let device = MemoryDevice::new(bytes);
+    let mut fs = mount_write(device.clone()).expect("image mounts writable");
+    let free_blocks = fs.free_blocks();
+    let free_inodes = fs.free_inodes();
+
+    let number = fs.mkdir("newdir").expect("mkdir");
+    assert!(number > 0);
+    let entries = list_names(&fs, "");
+    let created = entries
+        .iter()
+        .find(|(name, _)| name == "newdir")
+        .expect("newdir in root");
+    assert_eq!(created.1.kind, abi::fs::KIND_DIR);
+    // A fresh directory has one block and no live entry beyond `.`/`..`.
+    assert_eq!(fs.list("newdir", 0, &mut [0u8; 64]), Err(Status::NotFound));
+    assert_eq!(fs.free_inodes(), free_inodes - 1);
+    assert_eq!(fs.free_blocks(), free_blocks - 1);
+
+    // A file inside the new directory is created and read normally.
+    fs.create("newdir/file.txt").expect("create in newdir");
+    fs.write_at("newdir/file.txt", 0, b"inside\n").expect("write");
+    assert_eq!(read_whole(&fs, "newdir/file.txt", 7), b"inside\n");
+
+    // A duplicate name and a file parent are refused without changing counts.
+    assert_eq!(fs.mkdir("newdir"), Err(Status::Invalid));
+    assert_eq!(fs.mkdir("readme.txt/child"), Err(Status::Invalid));
+    assert_eq!(fs.mkdir("missing/child"), Err(Status::NotFound));
+    assert_eq!(fs.free_inodes(), free_inodes - 2);
+    drop(fs);
+    assert_e2fsck_clean(&device.bytes(), "mkdir");
+}
+
+#[test]
+fn remove_frees_files_and_empty_directories_and_restores_the_counts() {
+    let Some(bytes) = make_image() else {
+        return;
+    };
+    let device = MemoryDevice::new(bytes);
+    let mut fs = mount_write(device.clone()).expect("image mounts writable");
+    let free_blocks = fs.free_blocks();
+    let free_inodes = fs.free_inodes();
+
+    // A file with data in a direct block.
+    fs.create("gone.txt").expect("create");
+    fs.write_at("gone.txt", 0, b"bye\n").expect("write");
+    assert_eq!(fs.free_inodes(), free_inodes - 1);
+    assert_eq!(fs.free_blocks(), free_blocks - 1);
+    assert_eq!(fs.remove("gone.txt"), Ok(()));
+    assert_eq!(fs.free_inodes(), free_inodes);
+    assert_eq!(fs.free_blocks(), free_blocks);
+    assert_eq!(fs.remove("gone.txt"), Err(Status::NotFound));
+    assert!(list_names(&fs, "").iter().all(|(name, _)| name != "gone.txt"));
+
+    // An empty directory goes; a non-empty one is refused until it is emptied.
+    fs.mkdir("empty").expect("mkdir empty");
+    assert_eq!(fs.remove("empty"), Ok(()));
+    fs.mkdir("full").expect("mkdir full");
+    fs.create("full/file").expect("create full/file");
+    fs.write_at("full/file", 0, b"x").expect("write full/file");
+    assert_eq!(fs.remove("full"), Err(Status::Invalid));
+    assert_eq!(read_whole(&fs, "full/file", 1), b"x");
+    assert_eq!(fs.remove("full/file"), Ok(()));
+    assert_eq!(fs.remove("full"), Ok(()));
+    assert_eq!(fs.free_blocks(), free_blocks);
+    assert_eq!(fs.free_inodes(), free_inodes);
+
+    // The root, `.` and `..` are never removable.
+    assert_eq!(fs.remove(""), Err(Status::Invalid));
+    assert_eq!(fs.remove("."), Err(Status::Invalid));
+    assert_eq!(fs.remove(".."), Err(Status::Invalid));
+
+    // Removing a fixture file also merges its record into the predecessor.
+    assert_eq!(fs.remove("readme.txt"), Ok(()));
+    assert!(list_names(&fs, "").iter().all(|(name, _)| name != "readme.txt"));
+    drop(fs);
+    assert_e2fsck_clean(&device.bytes(), "remove");
+}
+
+#[test]
+fn rename_moves_files_replaces_regular_targets_and_refuses_directories() {
+    let Some(bytes) = make_image() else {
+        return;
+    };
+    let device = MemoryDevice::new(bytes);
+    let mut fs = mount_write(device.clone()).expect("image mounts writable");
+
+    fs.create("a.txt").expect("create a");
+    fs.write_at("a.txt", 0, b"first\n").expect("write a");
+    assert_eq!(fs.rename("a.txt", "b.txt"), Ok(()));
+    assert_eq!(fs.file_size("a.txt"), Err(Status::NotFound));
+    assert_eq!(read_whole(&fs, "b.txt", 6), b"first\n");
+    assert_eq!(fs.rename("b.txt", "b.txt"), Ok(()), "same path is a no-op");
+
+    // Cross-directory move keeps the inode and its data.
+    assert_eq!(fs.rename("b.txt", "sub/c.txt"), Ok(()));
+    assert_eq!(read_whole(&fs, "sub/c.txt", 6), b"first\n");
+
+    // Replacing an existing regular file unlinks the target first.
+    fs.create("d.txt").expect("create d");
+    fs.write_at("d.txt", 0, b"old target\n").expect("write d");
+    assert_eq!(fs.rename("sub/c.txt", "d.txt"), Ok(()));
+    assert_eq!(read_whole(&fs, "d.txt", 6), b"first\n");
+    assert_eq!(fs.file_size("d.txt"), Ok(6));
+    assert_eq!(fs.file_size("sub/c.txt"), Err(Status::NotFound));
+
+    // A replacement whose source and target share one directory: the target
+    // unlink may compact that directory, so the source lookup must re-read it.
+    fs.create("same_target").expect("create same_target");
+    fs.write_at("same_target", 0, b"old\n").expect("write target");
+    fs.create("same_source").expect("create same_source");
+    fs.write_at("same_source", 0, b"new\n").expect("write source");
+    assert_eq!(fs.rename("same_source", "same_target"), Ok(()));
+    assert_eq!(read_whole(&fs, "same_target", 4), b"new\n");
+    assert_eq!(fs.file_size("same_source"), Err(Status::NotFound));
+
+    // Error paths: missing source, missing parent and a directory target.
+    assert_eq!(fs.rename("missing.txt", "x.txt"), Err(Status::NotFound));
+    assert_eq!(fs.rename("d.txt", "nope/x.txt"), Err(Status::NotFound));
+    fs.mkdir("dir").expect("mkdir dir");
+    assert_eq!(fs.rename("d.txt", "dir"), Err(Status::Invalid));
+    assert_eq!(fs.rename("d.txt", ""), Err(Status::Invalid));
+    assert_eq!(read_whole(&fs, "d.txt", 6), b"first\n");
+    drop(fs);
+    assert_e2fsck_clean(&device.bytes(), "rename files");
+}
+
+#[test]
+fn rename_moves_directories_updates_dotdot_and_link_counts() {
+    let Some(bytes) = make_image() else {
+        return;
+    };
+    let device = MemoryDevice::new(bytes);
+    let mut fs = mount_write(device.clone()).expect("image mounts writable");
+
+    // Same-directory directory rename.
+    fs.mkdir("first").expect("mkdir first");
+    fs.create("first/file.txt").expect("create inside");
+    fs.write_at("first/file.txt", 0, b"kept\n").expect("write inside");
+    assert_eq!(fs.rename("first", "second"), Ok(()));
+    assert_eq!(read_whole(&fs, "second/file.txt", 5), b"kept\n");
+    assert_eq!(fs.file_size("first/file.txt"), Err(Status::NotFound));
+
+    // Cross-directory move: the moved directory's `..` and both parents' link
+    // counts must stay consistent, which `e2fsck` checks.
+    fs.mkdir("left").expect("mkdir left");
+    fs.mkdir("right").expect("mkdir right");
+    fs.mkdir("left/child").expect("mkdir left/child");
+    fs.create("left/child/marker").expect("create marker");
+    fs.write_at("left/child/marker", 0, b"m\n").expect("write marker");
+    assert_eq!(fs.rename("left/child", "right/child"), Ok(()));
+    assert_eq!(read_whole(&fs, "right/child/marker", 2), b"m\n");
+    assert_eq!(fs.file_size("left/child/marker"), Err(Status::NotFound));
+    // `..` of the moved directory now names `right`: creating in it works and
+    // removing the moved tree leaves both parents consistent.
+    assert_eq!(fs.remove("right/child"), Err(Status::Invalid));
+    assert_eq!(fs.remove("right/child/marker"), Ok(()));
+    assert_eq!(fs.remove("right/child"), Ok(()));
+    assert_eq!(fs.remove("right"), Ok(()));
+    assert_eq!(fs.remove("left"), Ok(()));
+
+    // A directory cannot move into its own subtree, and a non-empty directory
+    // cannot replace anything.
+    fs.mkdir("outer").expect("mkdir outer");
+    fs.mkdir("outer/inner").expect("mkdir outer/inner");
+    assert_eq!(fs.rename("outer", "outer/inner/self"), Err(Status::Invalid));
+    assert_eq!(fs.rename("second", "outer/inner"), Err(Status::Invalid));
+    assert_eq!(fs.remove("outer/inner"), Ok(()));
+    assert_eq!(fs.remove("outer"), Ok(()));
+    drop(fs);
+    assert_e2fsck_clean(&device.bytes(), "rename directories");
 }

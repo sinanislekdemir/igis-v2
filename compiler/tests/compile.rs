@@ -7139,6 +7139,118 @@ end;
 }
 
 #[test]
+fn fs_remove_mkdir_and_rename_are_builtins_54_to_56() {
+    use abi::opcodes::{self, builtin};
+
+    let source = r#"
+unit t;
+uses core;
+var
+  status: Status;
+  data: bytes[64];
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_remove("home/gone.txt");
+  status := core.fs_mkdir("home/newdir");
+  status := core.fs_rename("home/a.txt", "home/b.txt");
+end;
+"#;
+    let package = compile(source.as_bytes(), "t.ig").expect("the write builtins compile");
+    assert_eq!(builtin_count(&package, builtin::FS_REMOVE), 1);
+    assert_eq!(builtin_count(&package, builtin::FS_MKDIR), 1);
+    assert_eq!(builtin_count(&package, builtin::FS_RENAME), 1);
+    assert_eq!(builtin::FS_REMOVE, 54);
+    assert_eq!(builtin::FS_MKDIR, 55);
+    assert_eq!(builtin::FS_RENAME, 56);
+    assert_eq!(opcodes::builtin::effect(builtin::FS_REMOVE), Some((1, 1)));
+    assert_eq!(opcodes::builtin::effect(builtin::FS_MKDIR), Some((1, 1)));
+    assert_eq!(opcodes::builtin::effect(builtin::FS_RENAME), Some((2, 1)));
+
+    let cases = [
+        (
+            r#"
+unit t;
+uses core;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_remove();
+end;
+"#,
+            "`core.fs_remove` expects 1 argument",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; raw: bytes[16];
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_remove(raw);
+end;
+"#,
+            "`core.fs_remove` expects a `string` path",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_mkdir("home/x", "home/y");
+end;
+"#,
+            "`core.fs_mkdir` expects 1 argument",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_rename("home/a");
+end;
+"#,
+            "`core.fs_rename` expects 2 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; raw: bytes[16];
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_rename(raw, "home/b");
+end;
+"#,
+            "`core.fs_rename` expects a `string` from path",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; raw: bytes[16];
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_rename("home/a", raw);
+end;
+"#,
+            "`core.fs_rename` expects a `string` to path",
+        ),
+    ];
+    for (source, expected) in cases {
+        let error = compile(source.as_bytes(), "t.ig").expect_err("must be a compile error");
+        assert!(
+            error.message.contains(expected),
+            "expected `{expected}`, got `{}`",
+            error.message
+        );
+    }
+}
+
+#[test]
 fn terminal_attach_is_builtin_forty_four_and_checks_its_signature() {
     use abi::opcodes::{self, builtin};
 

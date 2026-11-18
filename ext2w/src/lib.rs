@@ -3,10 +3,9 @@
 //!
 //! It talks to a [`SectorDevice`] instead of an identity-mapped byte range, so
 //! the same validation and lookup code runs over the kernel's ATA PIO driver
-//! and over an in-memory device in the host tests. M6.2 implements the first
-//! writable slice — create a regular file and write at an offset — with
-//! synchronous, write-through block updates (H4). Removal, directories and
-//! rename follow in M6.3.
+//! and over an in-memory device in the host tests. The writer covers create and
+//! write (M6.2) plus remove, mkdir and rename (M6.3), with synchronous,
+//! write-through block updates (H4).
 //!
 //! The supported subset is deliberately the same one the read-only application
 //! image uses: 1 KiB blocks, revision 1, no journal and no extents, direct plus
@@ -63,6 +62,8 @@ const S_IFREG: u16 = 0x8000;
 const S_IFDIR: u16 = 0x4000;
 /// `S_IFREG | 0644`: the mode a created regular file gets (spec 0019, W3).
 const REGULAR_FILE_MODE: u16 = S_IFREG | 0o644;
+/// `S_IFDIR | 0755`: the mode a created directory gets (spec 0019, W5).
+const DIRECTORY_MODE: u16 = S_IFDIR | 0o755;
 /// The mandatory inode area every ext2 revision shares.
 const INODE_BYTES: usize = 128;
 /// `i_links_count` offset inside an inode.
@@ -75,6 +76,8 @@ const INODE_BLOCK_WORDS: usize = 40;
 const INODE_SIZE_HIGH: usize = 108;
 /// `EXT2_FT_REG_FILE`: the directory-entry type of a regular file.
 const EXT2_FT_REG_FILE: u8 = 1;
+/// `EXT2_FT_DIR`: the directory-entry type of a directory.
+const EXT2_FT_DIR: u8 = 2;
 /// `s_state` value for a cleanly mounted filesystem (`EXT2_VALID_FS`).
 const SUPERBLOCK_VALID_FS: u16 = 1;
 /// Superblock offsets the writer touches.
@@ -85,6 +88,8 @@ const SB_ERRORS: usize = 60;
 /// Group-descriptor offsets of the two free counts.
 const GD_FREE_BLOCKS: usize = 12;
 const GD_FREE_INODES: usize = 14;
+/// Group-descriptor offset of the used-directory count (`bg_used_dirs_count`).
+const GD_USED_DIRS: usize = 16;
 /// Words in `i_block`: 12 direct, 1 single, 1 double, 1 triple indirect.
 const INODE_WORDS: usize = 15;
 /// Fixed filesystem block size in bytes (spec 0019, W2: 1 KiB blocks).
@@ -182,6 +187,9 @@ pub struct Inode {
     /// blocks). The reader ignores it; the writer keeps it current because
     /// `e2fsck` checks it.
     blocks512: u32,
+    /// `i_links_count`. Regular files keep one link; a directory has two (its
+    /// own `.` plus its parent's entry) and one more per subdirectory.
+    links: u16,
 }
 
 impl Inode {
@@ -227,6 +235,7 @@ struct GroupDescriptor {
     inode_table: u32,
     free_blocks: u32,
     free_inodes: u32,
+    used_dirs: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -739,6 +748,7 @@ impl<D: SectorDevice> Fs<D> {
             size: size_lo | (size_hi << 32),
             blocks,
             blocks512: read_u32(inode, INODE_BLOCKS512)?,
+            links: read_u16(inode, INODE_LINKS)?,
         })
     }
 
@@ -784,6 +794,7 @@ impl<D: SectorDevice> Fs<D> {
             inode_table: read_u32(descriptor, 8)?,
             free_blocks: read_u16(descriptor, GD_FREE_BLOCKS)? as u32,
             free_inodes: read_u16(descriptor, GD_FREE_INODES)? as u32,
+            used_dirs: read_u16(descriptor, GD_USED_DIRS)? as u32,
         })
     }
 
@@ -918,6 +929,17 @@ impl<D: SectorDevice> Fs<D> {
         self.write_block(block_number, &block)
     }
 
+    /// Adjusts a group's used-directory count (`bg_used_dirs_count`).
+    fn adjust_used_dirs(&mut self, group: u32, add: bool) -> Result<(), Status> {
+        let descriptor = self.group_descriptor(group)?;
+        let value = if add {
+            descriptor.used_dirs.saturating_add(1)
+        } else {
+            descriptor.used_dirs.saturating_sub(1)
+        };
+        self.write_group_free(group, GD_USED_DIRS, value)
+    }
+
     /// Allocates one data block: sets its bitmap bit, then the group free
     /// count, then the superblock free count (W4).
     fn alloc_block(&mut self) -> Result<u32, Status> {
@@ -1024,6 +1046,7 @@ impl<D: SectorDevice> Fs<D> {
         let bytes = block.get_mut(start..end).ok_or(Status::Invalid)?;
         put_u32(bytes, 4, inode.size as u32)?;
         put_u32(bytes, INODE_SIZE_HIGH, (inode.size >> 32) as u32)?;
+        put_u16(bytes, INODE_LINKS, inode.links)?;
         put_u32(bytes, INODE_BLOCKS512, inode.blocks512)?;
         for (index, pointer) in inode.blocks.iter().enumerate() {
             put_u32(bytes, INODE_BLOCK_WORDS + index * 4, *pointer)?;
@@ -1224,7 +1247,7 @@ impl<D: SectorDevice> Fs<D> {
         let number = self.alloc_inode()?;
         self.init_regular_inode(number)?;
         let mut parent = parent;
-        self.add_entry(parent_number, &mut parent, name, number)?;
+        self.add_entry(parent_number, &mut parent, name, number, EXT2_FT_REG_FILE)?;
         Ok(number)
     }
 
@@ -1385,6 +1408,7 @@ impl<D: SectorDevice> Fs<D> {
         dir: &mut Inode,
         name: &[u8],
         inode_number: u32,
+        file_type: u8,
     ) -> Result<(), Status> {
         let needed = align4(8 + name.len());
         if let Some(slot) = self.find_dir_slot(dir, needed)? {
@@ -1397,6 +1421,7 @@ impl<D: SectorDevice> Fs<D> {
                     slot.record,
                     inode_number,
                     name,
+                    file_type,
                     self.has_filetype,
                 )?;
             } else {
@@ -1407,6 +1432,7 @@ impl<D: SectorDevice> Fs<D> {
                     slot.record - slot.used,
                     inode_number,
                     name,
+                    file_type,
                     self.has_filetype,
                 )?;
             }
@@ -1427,11 +1453,521 @@ impl<D: SectorDevice> Fs<D> {
             BLOCK_SIZE,
             inode_number,
             name,
+            file_type,
             self.has_filetype,
         )?;
         self.write_block(block_number, &block)?;
         dir.size = u64::from(logical + 1) * BLOCK_SIZE as u64;
         self.store_inode(dir_number, dir)
+    }
+
+    // ---- removal, directories and rename (spec 0019, W3–W6) ----------
+
+    /// Frees one data block: clears its bitmap bit, then raises the group and
+    /// superblock free counts (the reverse of [`Self::alloc_block`]).
+    ///
+    /// A block that the bitmap already marks free is `IoError`: a double free
+    /// means the tree and the bitmap disagree, and the writer must not invent a
+    /// count for it.
+    fn free_block(&mut self, number: u32) -> Result<(), Status> {
+        if number <= self.first_data_block || number >= self.blocks_count {
+            return Err(Status::IoError);
+        }
+        let relative = number - self.first_data_block;
+        let group = relative / self.blocks_per_group;
+        let bit = relative % self.blocks_per_group;
+        let descriptor = self.group_descriptor(group)?;
+        let mut bitmap = [0u8; BLOCK_SIZE];
+        self.block(descriptor.block_bitmap, &mut bitmap)?;
+        let index = (bit / 8) as usize;
+        let mask = 1u8 << (bit % 8);
+        if bitmap[index] & mask == 0 {
+            return Err(Status::IoError);
+        }
+        bitmap[index] &= !mask;
+        self.write_block(descriptor.block_bitmap, &bitmap)?;
+        self.write_group_free(group, GD_FREE_BLOCKS, descriptor.free_blocks + 1)?;
+        self.set_superblock_free_blocks(self.free_blocks() + 1)
+    }
+
+    /// Frees one inode: clears its bitmap bit, then raises the group and
+    /// superblock free counts (the reverse of [`Self::alloc_inode`]).
+    ///
+    /// The inode-table entry is zeroed so a scan of the table cannot count a
+    /// freed inode as live, and a directory also lowers the group's used-count.
+    fn free_inode(&mut self, number: u32, is_dir: bool) -> Result<(), Status> {
+        if number == 0 || number > self.inodes_count {
+            return Err(Status::IoError);
+        }
+        let relative = number - 1;
+        let group = relative / self.inodes_per_group;
+        let bit = relative % self.inodes_per_group;
+        let descriptor = self.group_descriptor(group)?;
+        let mut bitmap = [0u8; BLOCK_SIZE];
+        self.block(descriptor.inode_bitmap, &mut bitmap)?;
+        let index = (bit / 8) as usize;
+        let mask = 1u8 << (bit % 8);
+        if bitmap[index] & mask == 0 {
+            return Err(Status::IoError);
+        }
+        bitmap[index] &= !mask;
+        self.write_block(descriptor.inode_bitmap, &bitmap)?;
+        self.write_group_free(group, GD_FREE_INODES, descriptor.free_inodes + 1)?;
+        self.set_superblock_free_inodes(self.free_inodes() + 1)?;
+
+        let (block_number, start) = self.inode_location(number)?;
+        let mut block = [0u8; BLOCK_SIZE];
+        self.block(block_number, &mut block)?;
+        let end = start.checked_add(self.inode_size).ok_or(Status::Invalid)?;
+        block.get_mut(start..end).ok_or(Status::Invalid)?.fill(0);
+        self.write_block(block_number, &block)?;
+        if is_dir {
+            self.adjust_used_dirs(group, false)?;
+        }
+        Ok(())
+    }
+
+    /// Releases every data and indirect block an inode still points at.
+    ///
+    /// The triple-indirect pointer is outside the subset and is refused rather
+    /// than leaked. The caller has already removed the directory entry, so a
+    /// block cannot stay reachable once this runs (W5 ordering).
+    fn free_inode_blocks(&mut self, inode: &Inode) -> Result<(), Status> {
+        if inode.blocks[14] != 0 {
+            return Err(Status::IoError);
+        }
+        for index in 0..12 {
+            let pointer = inode.blocks[index];
+            if pointer != 0 {
+                self.free_block(pointer)?;
+            }
+        }
+        if inode.blocks[12] != 0 {
+            let mut pointers = [0u8; BLOCK_SIZE];
+            self.block(inode.blocks[12], &mut pointers)?;
+            for chunk in pointers.chunks_exact(4) {
+                let pointer = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                if pointer != 0 {
+                    self.free_block(pointer)?;
+                }
+            }
+            self.free_block(inode.blocks[12])?;
+        }
+        if inode.blocks[13] != 0 {
+            let mut outer = [0u8; BLOCK_SIZE];
+            self.block(inode.blocks[13], &mut outer)?;
+            for chunk in outer.chunks_exact(4) {
+                let inner = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                if inner == 0 {
+                    continue;
+                }
+                let mut pointers = [0u8; BLOCK_SIZE];
+                self.block(inner, &mut pointers)?;
+                for entry in pointers.chunks_exact(4) {
+                    let pointer = u32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]);
+                    if pointer != 0 {
+                        self.free_block(pointer)?;
+                    }
+                }
+                self.free_block(inner)?;
+            }
+            self.free_block(inode.blocks[13])?;
+        }
+        Ok(())
+    }
+
+    /// Finds one record of `name` inside a directory, with the offset of the
+    /// record before it (if any) so a removal can merge the two.
+    fn entry_record(
+        &self,
+        directory: &Inode,
+        name: &[u8],
+    ) -> Result<Option<(u32, DirEntryRef, Option<usize>)>, Status> {
+        let mut found = None;
+        let mut error = None;
+        self.each_data_block(directory, &mut |index, _| {
+            let mut block = [0u8; BLOCK_SIZE];
+            self.block(index, &mut block)?;
+            let mut previous: Option<usize> = None;
+            let mut hit: Option<(DirEntryRef, Option<usize>)> = None;
+            let result = walk_dir_block(&block, self.has_filetype, &mut |entry| {
+                if entry.inode != 0 {
+                    let end = entry.name_start + entry.name_len;
+                    if entry.name_len == name.len() && block.get(entry.name_start..end) == Some(name)
+                    {
+                        hit = Some((entry, previous));
+                        return Ok(false);
+                    }
+                }
+                previous = Some(entry.offset);
+                Ok(true)
+            });
+            if let Err(status) = result {
+                error = Some(status);
+                return Err(status);
+            }
+            if let Some((entry, previous)) = hit {
+                found = Some((index, entry, previous));
+                return Ok(false);
+            }
+            Ok(true)
+        })?;
+        match error {
+            Some(status) => Err(status),
+            None => Ok(found),
+        }
+    }
+
+    /// Removes one entry from a directory, merging its record into the
+    /// predecessor or leaving it as the block's free record (W5).
+    ///
+    /// A trailing directory block that becomes entirely free is released and
+    /// the directory shrinks by one block; an interior free block stays (holes
+    /// are not allowed). The directory inode is stored here when the tail is
+    /// compacted.
+    fn unlink_entry(
+        &mut self,
+        dir_number: u32,
+        dir: &mut Inode,
+        name: &[u8],
+    ) -> Result<(), Status> {
+        let Some((block_number, entry, previous)) = self.entry_record(dir, name)? else {
+            return Err(Status::NotFound);
+        };
+        let mut block = [0u8; BLOCK_SIZE];
+        self.block(block_number, &mut block)?;
+        let record = u16::try_from(entry.rec_len).map_err(|_| Status::IoError)?;
+        match previous {
+            Some(offset) => {
+                let prior = read_u16(&block, offset + 4)? as usize;
+                let merged = prior.checked_add(entry.rec_len).ok_or(Status::IoError)?;
+                put_u16(
+                    &mut block,
+                    offset + 4,
+                    u16::try_from(merged).map_err(|_| Status::IoError)?,
+                )?;
+            }
+            None => {
+                put_u32(&mut block, entry.offset, 0)?;
+                put_u16(&mut block, entry.offset + 4, record)?;
+                if self.has_filetype {
+                    *block.get_mut(entry.offset + 6).ok_or(Status::Invalid)? = 0;
+                    *block.get_mut(entry.offset + 7).ok_or(Status::Invalid)? = 0;
+                } else {
+                    put_u16(&mut block, entry.offset + 6, 0)?;
+                }
+                let start = entry.offset + 8;
+                let end = entry.offset + entry.rec_len;
+                block.get_mut(start..end).ok_or(Status::Invalid)?.fill(0);
+            }
+        }
+        self.write_block(block_number, &block)?;
+        self.compact_directory_tail(dir_number, dir)
+    }
+
+    /// Releases trailing directory blocks that no longer hold a live entry.
+    ///
+    /// Only direct and single-indirect blocks are compacted; a deeper directory
+    /// keeps its free blocks (still a legal ext2 directory) rather than risking
+    /// a double-indirect update in this slice.
+    fn compact_directory_tail(
+        &mut self,
+        dir_number: u32,
+        dir: &mut Inode,
+    ) -> Result<(), Status> {
+        while self.shrink_last_directory_block(dir_number, dir)? {}
+        Ok(())
+    }
+
+    fn shrink_last_directory_block(
+        &mut self,
+        dir_number: u32,
+        dir: &mut Inode,
+    ) -> Result<bool, Status> {
+        let total = (dir.size / BLOCK_SIZE as u64) as u32;
+        if total <= 1 {
+            return Ok(false);
+        }
+        let logical = total - 1;
+        let Some(block_number) = self.pointer(dir, logical)? else {
+            return Ok(false);
+        };
+        let mut block = [0u8; BLOCK_SIZE];
+        self.block(block_number, &mut block)?;
+        if !block_all_free(&block, self.has_filetype)? {
+            return Ok(false);
+        }
+
+        let per_block = (BLOCK_SIZE / 4) as u32;
+        if logical < 12 {
+            dir.blocks[logical as usize] = 0;
+        } else if logical < 12 + per_block {
+            let indirect = nonzero(dir.blocks[12])?;
+            let mut pointers = [0u8; BLOCK_SIZE];
+            self.block(indirect, &mut pointers)?;
+            put_u32(&mut pointers, (logical - 12) as usize * 4, 0)?;
+            self.write_block(indirect, &pointers)?;
+            let empty = pointers.chunks_exact(4).all(|chunk| {
+                u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) == 0
+            });
+            if empty {
+                self.free_block(indirect)?;
+                dir.blocks[12] = 0;
+                dir.blocks512 = dir.blocks512.saturating_sub(2);
+            }
+        } else {
+            return Ok(false);
+        }
+
+        self.free_block(block_number)?;
+        dir.blocks512 = dir.blocks512.saturating_sub(2);
+        dir.size -= BLOCK_SIZE as u64;
+        self.store_inode(dir_number, dir)?;
+        Ok(true)
+    }
+
+    /// True for a directory whose only entries are `.` and `..`.
+    fn directory_is_empty(&self, directory: &Inode) -> Result<bool, Status> {
+        let mut live = false;
+        self.each_dir_entry(directory, &mut |_, _, name| {
+            if name == b"." || name == b".." {
+                Ok(true)
+            } else {
+                live = true;
+                Ok(false)
+            }
+        })?;
+        Ok(!live)
+    }
+
+    /// Initializes a fresh directory inode: mode `S_IFDIR | 0755`, two links,
+    /// one 1 KiB block holding `.` and `..`.
+    fn init_directory_inode(&mut self, number: u32, block_number: u32, parent: u32)
+        -> Result<(), Status>
+    {
+        let data = self.new_directory_block(number, parent);
+        let (inode_block, start) = self.inode_location(number)?;
+        // The block's contents land before the inode points at it.
+        self.write_block(block_number, &data)?;
+        let mut block = [0u8; BLOCK_SIZE];
+        self.block(inode_block, &mut block)?;
+        let end = start.checked_add(self.inode_size).ok_or(Status::Invalid)?;
+        let bytes = block.get_mut(start..end).ok_or(Status::Invalid)?;
+        bytes.fill(0);
+        put_u16(bytes, 0, DIRECTORY_MODE)?;
+        put_u32(bytes, 4, BLOCK_SIZE as u32)?;
+        put_u16(bytes, INODE_LINKS, 2)?;
+        put_u32(bytes, INODE_BLOCKS512, 2)?;
+        put_u32(bytes, INODE_BLOCK_WORDS, block_number)?;
+        self.write_block(inode_block, &block)
+    }
+
+    fn new_directory_block(&self, number: u32, parent: u32) -> [u8; BLOCK_SIZE] {
+        let mut block = [0u8; BLOCK_SIZE];
+        // The two mandatory entries always fit: 12 bytes for `.` and the rest
+        // for `..`. The writes cannot fail, so the result is ignored.
+        let _ = write_dir_entry(
+            &mut block,
+            0,
+            12,
+            number,
+            b".",
+            EXT2_FT_DIR,
+            self.has_filetype,
+        );
+        let _ = write_dir_entry(
+            &mut block,
+            12,
+            BLOCK_SIZE - 12,
+            parent,
+            b"..",
+            EXT2_FT_DIR,
+            self.has_filetype,
+        );
+        block
+    }
+
+    /// Removes a regular file or an empty directory (spec 0019, W3/W5).
+    ///
+    /// The parent entry goes first, then the file's data and indirect blocks,
+    /// then the inode and the free counts; a directory also drops its parent's
+    /// link count. A non-empty directory, the root and a missing name are
+    /// refused without changing anything.
+    pub fn remove(&mut self, path: &str) -> Result<(), Status> {
+        if !self.writable {
+            return Err(Status::Invalid);
+        }
+        let (parent_path, name) = split_parent(path)?;
+        let (parent_number, mut parent) = self.directory(parent_path)?;
+        let Some(number) = self.entry_inode(&parent, name.as_bytes())? else {
+            return Err(Status::NotFound);
+        };
+        let target = self.inode(number)?;
+        if !target.is_file() && !target.is_dir() {
+            return Err(Status::Invalid);
+        }
+        if target.is_dir() && !self.directory_is_empty(&target)? {
+            return Err(Status::Invalid);
+        }
+
+        self.unlink_entry(parent_number, &mut parent, name.as_bytes())?;
+        self.free_inode_blocks(&target)?;
+        self.free_inode(number, target.is_dir())?;
+        if target.is_dir() {
+            parent.links = parent.links.saturating_sub(1);
+            self.store_inode(parent_number, &parent)?;
+        }
+        Ok(())
+    }
+
+    /// Creates an empty directory (spec 0019, W5).
+    ///
+    /// The inode and its one block are written before the parent entry that
+    /// names it; the parent's link count rises by one. A duplicate name, a
+    /// missing or non-directory parent and a full filesystem are refused before
+    /// the first allocation.
+    pub fn mkdir(&mut self, path: &str) -> Result<u32, Status> {
+        if !self.writable {
+            return Err(Status::Invalid);
+        }
+        let (parent_path, name) = split_parent(path)?;
+        let (parent_number, mut parent) = self.directory(parent_path)?;
+        let name = name.as_bytes();
+        if self.entry_inode(&parent, name)?.is_some() {
+            return Err(Status::Invalid);
+        }
+        if self.free_inodes() == 0 || self.free_blocks() == 0 {
+            return Err(Status::CapacityExceeded);
+        }
+
+        let needed = align4(8 + name.len());
+        let slot = self.find_dir_slot(&parent, needed)?;
+        let mut blocks_needed = 1u32;
+        if slot.is_none() {
+            let logical = (parent.size.div_ceil(BLOCK_SIZE as u64)) as u32;
+            blocks_needed =
+                blocks_needed.saturating_add(self.plan_blocks(&parent, logical, logical)?);
+        }
+        if blocks_needed > self.free_blocks() {
+            return Err(Status::CapacityExceeded);
+        }
+
+        let number = self.alloc_inode()?;
+        let block = self.alloc_block()?;
+        self.init_directory_inode(number, block, parent_number)?;
+        let group = (number - 1) / self.inodes_per_group;
+        self.adjust_used_dirs(group, true)?;
+        parent.links = parent.links.saturating_add(1);
+        self.store_inode(parent_number, &parent)?;
+        self.add_entry(parent_number, &mut parent, name, number, EXT2_FT_DIR)?;
+        Ok(number)
+    }
+
+    /// Moves a file or directory, replacing an existing regular-file target
+    /// (spec 0019, W3/W6).
+    ///
+    /// `to` may be in the same or another directory. An existing regular file
+    /// at `to` is unlinked and freed first; an existing directory target, the
+    /// root and a missing source are refused. A cross-directory directory move
+    /// rewrites the moved directory's `..` and adjusts both parents' link
+    /// counts. The same path is an `Ok` no-op.
+    pub fn rename(&mut self, from: &str, to: &str) -> Result<(), Status> {
+        if !self.writable {
+            return Err(Status::Invalid);
+        }
+        if check_path(from)? == 0 || check_path(to)? == 0 {
+            return Err(Status::Invalid);
+        }
+        if from == to {
+            return Ok(());
+        }
+
+        let (from_parent_path, from_name) = split_parent(from)?;
+        let (to_parent_path, to_name) = split_parent(to)?;
+        let (from_parent_number, from_parent) = self.directory(from_parent_path)?;
+        let Some(source_number) = self.entry_inode(&from_parent, from_name.as_bytes())? else {
+            return Err(Status::NotFound);
+        };
+        let source = self.inode(source_number)?;
+        if source.is_dir() && is_within(to, from) {
+            // Moving a directory into its own subtree would make a cycle.
+            return Err(Status::Invalid);
+        }
+
+        let (to_parent_number, mut to_parent) = self.directory(to_parent_path)?;
+        let same_parent = from_parent_number == to_parent_number;
+
+        let target = self.entry_inode(&to_parent, to_name.as_bytes())?;
+        if let Some(number) = target {
+            if number == source_number {
+                // The two names already address the same inode (the same path
+                // was handled above; this is a no-op the tree cannot express
+                // without hard links, so it is refused).
+                return Ok(());
+            }
+            if self.inode(number)?.is_dir() {
+                return Err(Status::Invalid);
+            }
+        }
+
+        // Plan the target directory growth before the first mutation. A
+        // replacement's freed data blocks are not assumed to fund it.
+        let needed = align4(8 + to_name.len());
+        if self.find_dir_slot(&to_parent, needed)?.is_none() {
+            let logical = (to_parent.size.div_ceil(BLOCK_SIZE as u64)) as u32;
+            if self.plan_blocks(&to_parent, logical, logical)? > self.free_blocks() {
+                return Err(Status::CapacityExceeded);
+            }
+        }
+
+        if let Some(number) = target {
+            let replaced = self.inode(number)?;
+            self.unlink_entry(to_parent_number, &mut to_parent, to_name.as_bytes())?;
+            self.free_inode_blocks(&replaced)?;
+            self.free_inode(number, false)?;
+        }
+
+        let file_type = if source.is_dir() {
+            EXT2_FT_DIR
+        } else {
+            EXT2_FT_REG_FILE
+        };
+        // Removing the target may have changed the source directory too (the
+        // two can be the same inode), so read it back before removing the
+        // source entry.
+        let (_, mut from_parent) = self.directory(from_parent_path)?;
+        self.unlink_entry(from_parent_number, &mut from_parent, from_name.as_bytes())?;
+
+        // The removals above may have changed either directory, and the two may
+        // be the same inode; re-read the target parent before adding the entry.
+        let (_, mut target_parent) = self.directory(to_parent_path)?;
+        self.add_entry(to_parent_number, &mut target_parent, to_name.as_bytes(), source_number,
+            file_type)?;
+
+        if source.is_dir() && !same_parent {
+            let mut moved = self.inode(source_number)?;
+            self.set_dotdot(source_number, &mut moved, to_parent_number)?;
+            let (_, mut old_parent) = self.directory(from_parent_path)?;
+            old_parent.links = old_parent.links.saturating_sub(1);
+            self.store_inode(from_parent_number, &old_parent)?;
+            let (_, mut new_parent) = self.directory(to_parent_path)?;
+            new_parent.links = new_parent.links.saturating_add(1);
+            self.store_inode(to_parent_number, &new_parent)?;
+        }
+        Ok(())
+    }
+
+    /// Rewrites the `..` entry of a moved directory to name its new parent.
+    fn set_dotdot(&mut self, _number: u32, directory: &mut Inode, parent: u32)
+        -> Result<(), Status>
+    {
+        let Some((block_number, entry, _)) = self.entry_record(directory, b"..")? else {
+            return Err(Status::IoError);
+        };
+        let mut block = [0u8; BLOCK_SIZE];
+        self.block(block_number, &mut block)?;
+        put_u32(&mut block, entry.offset, parent)?;
+        self.write_block(block_number, &block)
     }
 
     /// Visits the file's data blocks in order, for exactly `size` bytes.
@@ -1664,6 +2200,7 @@ fn write_dir_entry(
     record: usize,
     inode: u32,
     name: &[u8],
+    file_type: u8,
     has_filetype: bool,
 ) -> Result<(), Status> {
     let needed = align4(8 + name.len());
@@ -1677,7 +2214,7 @@ fn write_dir_entry(
     put_u16(record, 4, record_len)?;
     if has_filetype {
         *record.get_mut(6).ok_or(Status::Invalid)? = name.len() as u8;
-        *record.get_mut(7).ok_or(Status::Invalid)? = EXT2_FT_REG_FILE;
+        *record.get_mut(7).ok_or(Status::Invalid)? = file_type;
     } else {
         put_u16(record, 6, name.len() as u16)?;
     }
@@ -1688,6 +2225,29 @@ fn write_dir_entry(
         .copy_from_slice(name);
     record.get_mut(name_end..).ok_or(Status::Invalid)?.fill(0);
     Ok(())
+}
+
+/// True when `path` is `ancestor` itself or lies below it.
+fn is_within(path: &str, ancestor: &str) -> bool {
+    if path == ancestor {
+        return true;
+    }
+    path.len() > ancestor.len()
+        && path.starts_with(ancestor)
+        && path.as_bytes().get(ancestor.len()) == Some(&b'/')
+}
+
+/// True when no record of a directory data block names a live inode.
+fn block_all_free(block: &[u8; BLOCK_SIZE], has_filetype: bool) -> Result<bool, Status> {
+    let mut live = false;
+    walk_dir_block(block, has_filetype, &mut |entry| {
+        if entry.inode != 0 {
+            live = true;
+            return Ok(false);
+        }
+        Ok(true)
+    })?;
+    Ok(!live)
 }
 
 /// Validates the syntax of a non-root path and returns its component count

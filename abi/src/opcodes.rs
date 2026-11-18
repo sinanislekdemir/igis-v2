@@ -651,8 +651,8 @@ pub mod builtin {
     // component is `home` is writable, and only when the home disk is mounted
     // (otherwise the mount is read-only). No opcode is added: the machine
     // validates the path and the data buffer, and the host writes through the
-    // ext2 writer. The remaining write primitives (remove/mkdir/rename) are
-    // builtins 54–56 in M6.3.
+    // ext2 writer. `remove`, `mkdir` and `rename` are builtins 54–56 on the
+    // same rule.
 
     /// `core.fs_write(path, offset, data, var written) -> Status`: write
     /// `data` at byte `offset` of the regular file at `path` (spec 0019, A1/A3).
@@ -665,6 +665,26 @@ pub mod builtin {
     /// than are free, is `CapacityExceeded`. The data buffer is read-only.
     /// Operands: `[path reference][offset][data reference][written reference]`.
     pub const FS_WRITE: u32 = 53;
+
+    /// `core.fs_remove(path) -> Status`: remove the regular file or empty
+    /// directory at `path` (spec 0019, A1/W3/W5). Only a `home/...` path on a
+    /// writable mount is accepted; anything else, the root, `.`/`..`, a
+    /// non-empty directory or a kind-2 entry is `Invalid`, and a missing name
+    /// is `NotFound`.
+    pub const FS_REMOVE: u32 = 54;
+
+    /// `core.fs_mkdir(path) -> Status`: create an empty directory with mode
+    /// `S_IFDIR | 0755` (spec 0019, A1/W5). Only a `home/...` path on a
+    /// writable mount is accepted; a duplicate name or a file parent is
+    /// `Invalid`, a missing parent is `NotFound`, and a full filesystem is
+    /// `CapacityExceeded`.
+    pub const FS_MKDIR: u32 = 55;
+
+    /// `core.fs_rename(from, to) -> Status`: move a file or directory, replacing
+    /// an existing regular-file target (spec 0019, A1/W3/W6). Both paths must be
+    /// writable `home/...`; a directory target, the root and a missing source
+    /// are `Invalid`/`NotFound`. Operands: `[from reference][to reference]`.
+    pub const FS_RENAME: u32 = 56;
 
     // ---- terminal window (spec 0014) ------------------------------------
     //
@@ -832,6 +852,9 @@ pub mod builtin {
             FS_READ => Some((4, 1)),
             FS_SIZE => Some((2, 1)),
             FS_WRITE => Some((4, 1)),
+            FS_REMOVE => Some((1, 1)),
+            FS_MKDIR => Some((1, 1)),
+            FS_RENAME => Some((2, 1)),
             TERMINAL_ATTACH => Some((1, 1)),
             TEXT_WIDTH_PROP => Some((1, 1)),
             TEXT_HEIGHT_PROP => Some((0, 1)),

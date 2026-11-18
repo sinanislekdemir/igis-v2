@@ -2526,6 +2526,26 @@ fn the_home_write_sample_writes_and_reads_back_on_the_host() {
     assert_eq!(result.reason, ExitReason::Ok);
 }
 
+/// The M6.3 home-operations proof (spec 0019, A6/W3–W6): mkdir, write, rename,
+/// listing, remove and the error paths all run over `langhost`'s temporary home
+/// directory, so the new builtins and the router are host-tested end to end.
+#[test]
+fn the_home_ops_sample_creates_renames_and_removes_on_the_host() {
+    let path = app_path("home_ops");
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "home_ops").expect("the sample compiles");
+    let result =
+        langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies and runs");
+    let output = String::from_utf8(result.output).expect("UTF-8 output");
+    assert!(output.contains("home_ops: mkdir ok\n"), "{output}");
+    assert!(output.contains("home_ops: rename ok\n"), "{output}");
+    assert!(output.contains("home_ops: listing after rename ok\n"), "{output}");
+    assert!(output.contains("home_ops: remove directory ok\n"), "{output}");
+    assert!(output.contains("home_ops: error paths ok\n"), "{output}");
+    assert!(output.ends_with("home_ops: ok\n"), "{output}");
+    assert_eq!(result.reason, ExitReason::Ok);
+}
+
 /// A host with a screen that implements the proportional font's metrics and
 /// records the drawing call (spec 0015). The widths are a small stand-in table:
 /// `i` 3, `M` 11, other printable bytes 6, non-ASCII 8.

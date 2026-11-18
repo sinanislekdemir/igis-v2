@@ -495,6 +495,35 @@ impl Host for KernelHost {
         }
     }
 
+    /// `core.fs_remove`, `core.fs_mkdir` and `core.fs_rename` (spec 0019,
+    /// A1/A2): all three require a `home/...` path and take the same router
+    /// lock as a write.
+    fn fs_remove(&mut self, path: &[u8]) -> Result<(), Status> {
+        let path = core::str::from_utf8(path).map_err(|_| Status::Invalid)?;
+        match abi::fs::validate_writable(path) {
+            Status::Ok => crate::fs::remove(path),
+            status => Err(status),
+        }
+    }
+
+    fn fs_mkdir(&mut self, path: &[u8]) -> Result<(), Status> {
+        let path = core::str::from_utf8(path).map_err(|_| Status::Invalid)?;
+        match abi::fs::validate_writable(path) {
+            Status::Ok => crate::fs::mkdir(path),
+            status => Err(status),
+        }
+    }
+
+    fn fs_rename(&mut self, from: &[u8], to: &[u8]) -> Result<(), Status> {
+        let from = core::str::from_utf8(from).map_err(|_| Status::Invalid)?;
+        let to = core::str::from_utf8(to).map_err(|_| Status::Invalid)?;
+        match (abi::fs::validate_writable(from), abi::fs::validate_writable(to)) {
+            (Status::Ok, Status::Ok) => crate::fs::rename(from, to),
+            (status, _) if status != Status::Ok => Err(status),
+            (_, status) => Err(status),
+        }
+    }
+
     // Streams (spec 0006): the kernel table owns the buffer and the generation
     // check. The machine turns `WouldBlock` into a block for the blocking
     // opcodes and into a staged status for `try_*`; the host is always

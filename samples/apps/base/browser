@@ -164,6 +164,8 @@ var
   auto_draw: bool;
   dirty: bool;
   failed: bool;
+  no_home: bool;
+  last_op: Status;
   step: int;
   step_text: string[16];
   st: Status;
@@ -617,6 +619,105 @@ begin
   return at;
 end;
 
+// ---- home operations (spec 0019, E2) --------------------------------------
+
+function under_home(): bool;
+begin
+  return dir = "home" or stdlib.starts_with(dir, "home/");
+end;
+
+// `N`: create `newdir` in the current home directory, or `home/newdir` from
+// anywhere else. A duplicate name and a missing home mount both report a
+// status; the check path probes writability separately so the messages differ.
+procedure create_directory();
+var
+  target: string[PathCapacity];
+  err: Status;
+begin
+  last_op := Ok;
+  if under_home() then
+    err := join_path(dir, "newdir", target)
+  else
+    err := join_path("", "home/newdir", target);
+  if err <> Ok then
+  begin
+    last_op := err;
+    status_line := "path too long";
+    return;
+  end;
+  err := core.fs_mkdir(target);
+  last_op := err;
+  if err = Ok then
+  begin
+    load_dir();
+    status_line := "created newdir";
+  end
+  else if err = Invalid then
+  begin
+    if no_home then
+      status_line := "no writable home"
+    else
+      status_line := "already exists or read-only";
+  end
+  else if err = NotFound then
+    status_line := "no such directory"
+  else if err = CapacityExceeded then
+    status_line := "no space left"
+  else
+    status_line := "create failed";
+end;
+
+// `Delete` or `D`: remove the selected regular file or empty directory, only
+// when it lies under `home`. The listing refreshes and keeps the row position.
+procedure remove_selected();
+var
+  full: string[PathCapacity];
+  err: Status;
+  keep: int;
+begin
+  last_op := Ok;
+  if selected < 0 or selected >= entry_count then
+  begin
+    status_line := "nothing selected";
+    return;
+  end;
+  err := join_path(dir, names[selected], full);
+  if err <> Ok then
+  begin
+    last_op := err;
+    status_line := "path too long";
+    return;
+  end;
+  if not stdlib.starts_with(full, "home/") then
+  begin
+    last_op := Invalid;
+    status_line := "read-only: outside home";
+    return;
+  end;
+  keep := selected;
+  err := core.fs_remove(full);
+  last_op := err;
+  if err = Ok then
+  begin
+    load_dir();
+    if keep >= entry_count then
+      keep := entry_count - 1;
+    if keep < 0 then
+      keep := 0;
+    selected := keep;
+    ensure_visible();
+    status_line := "removed";
+  end
+  else if err = Invalid then
+    status_line := "not removable"
+  else if err = NotFound then
+    status_line := "no such file"
+  else if err = CapacityExceeded then
+    status_line := "no space left"
+  else
+    status_line := "remove failed";
+end;
+
 // ---- key and pointer handling ---------------------------------------------
 
 procedure handle_key();
@@ -652,6 +753,12 @@ begin
     move_selection(-1)
   else if stdlib.ui_key_is_down(ev.code) then
     move_selection(1)
+  else if stdlib.ui_key_is_delete(ev.code) then
+    remove_selected()
+  else if key = 0x4E or key = 0x6E then
+    create_directory()
+  else if key = 0x44 or key = 0x64 then
+    remove_selected()
   else if stdlib.ui_key_is_backspace(ev.code) then
     go_up()
   else if key = 0x116 then
@@ -819,9 +926,9 @@ begin
   used := core.format_int_into(digits, entry_count, uint(10), uint(0));
   st := syslib.draw_text(count_x, rect.y + 4, digits, black);
   st := syslib.draw_text(count_x + used * 8, rect.y + 4, " entries", gray);
-  width := stdlib.ui_text_width("read-only");
+  width := stdlib.ui_text_width("home writable");
   st := syslib.draw_text(
-    rect.x + ContentW - 8 - width, rect.y + 4, "read-only", gray);
+    rect.x + ContentW - 8 - width, rect.y + 4, "home writable", gray);
   st := stdlib.ui_separator(rect.x, rect.y + PathH - 1, ContentW);
 end;
 
@@ -964,10 +1071,10 @@ var
 begin
   st := stdlib.ui_separator(rect.x, status_y - 6, ContentW);
   st := syslib.draw_text(rect.x + 8, status_y, status_line, black);
-  width := stdlib.ui_text_width("Enter open  Ctrl+L launch");
+  width := stdlib.ui_text_width("Enter open  Ctrl+L launch  N new  Del delete");
   st := syslib.draw_text(
     rect.x + ContentW - 8 - width, status_y,
-    "Enter open  Ctrl+L launch", gray);
+    "Enter open  Ctrl+L launch  N new  Del delete", gray);
 end;
 
 // One complete frame; the caller presents once afterwards.
@@ -1309,6 +1416,69 @@ begin
     stdlib.ui_list_move(keep_count - 1, keep_count, 1) = keep_count - 1);
 end;
 
+// Home operations (spec 0019, E2): create `home/newdir` from the root, list it,
+// then remove it from inside `home`; a document outside `home` is refused. The
+// probe remove is non-destructive: `NotFound` means a writable mount exists and
+// `Invalid` means there is none, without creating anything.
+procedure writable_checks(via_keys: bool);
+var
+  err: Status;
+  at: int;
+begin
+  last_op := core.fs_remove("home/igis_probe_none");
+  no_home := last_op = Invalid;
+  // Clean up a leftover from an interrupted run before creating.
+  err := core.fs_remove("home/newdir");
+  dir := "";
+  load_dir();
+  if via_keys then
+  begin
+    auto_draw := false;
+    inject_key(0x4E, 0);
+    auto_draw := true;
+  end
+  else
+    create_directory();
+
+  if no_home then
+  begin
+    verify("create no home", last_op = Invalid and status_line = "no writable home");
+    verify("no home keeps root", int(core.len(dir)) = 0);
+  end
+  else
+  begin
+    verify("create ok", last_op = Ok and status_line = "created newdir");
+    err := enter_dir("home");
+    verify("enter home after create", err = Ok and dir = "home");
+    at := find_name("newdir");
+    verify("created listed", at >= 0 and kinds[at] = uint(1));
+    if at >= 0 then
+    begin
+      selected := at;
+      ensure_visible();
+      if via_keys then
+      begin
+        auto_draw := false;
+        inject_key(0x44, 0);
+        auto_draw := true;
+      end
+      else
+        remove_selected();
+      verify("remove ok", last_op = Ok and status_line = "removed");
+      verify("removed gone", find_name("newdir") < 0);
+    end;
+    // A path outside home is refused before the filesystem is touched.
+    value := core.fs_remove("base/child");
+    verify("outside home refused", value = Invalid);
+    go_up();
+    verify("writable back at root", int(core.len(dir)) = 0);
+  end;
+
+  // Leave the view where the drawing and launch checks expect it.
+  err := enter_dir("base");
+  verify("writable back in base", err = Ok and dir = "base");
+end;
+
 // ---- modes ---------------------------------------------------------------
 
 procedure host_path();
@@ -1319,6 +1489,7 @@ begin
   navigation_checks(false, true);
   long_path_check();
   selection_checks();
+  writable_checks(false);
   verify("host no window", syslib.screen_width() = uint(0));
   if failed then
     out.say("browser: host failed\n")
@@ -1354,6 +1525,7 @@ begin
   navigation_checks(true, false);
   long_path_check();
   selection_checks();
+  writable_checks(true);
 
   // Double-click: first show `text`, then open `child` with two real clicks on
   // its visible row. Injected events take the normal routing path.
@@ -1399,7 +1571,8 @@ begin
   if row = 0 then
     other_row := 1;
   preview_text_y := preview_y + 26;
-  hint_x := rect.x + ContentW - 8 - stdlib.ui_text_width("Enter open  Ctrl+L launch");
+  hint_x := rect.x + ContentW - 8 - stdlib.ui_text_width(
+    "Enter open  Ctrl+L launch  N new  Del delete");
   verify("path rule", syslib.get_pixel(rect.x + 300, rect.y + PathH - 1) = black);
   verify("list border", syslib.get_pixel(list_x, list_y) = black);
   verify("selected row", syslib.get_pixel(list_x + 2, row_y + 3) = accent);
@@ -1608,6 +1781,12 @@ begin
   white := stdlib.ui_white();
   gray := stdlib.ui_gray();
   accent := stdlib.ui_accent();
+
+  // A non-destructive writability probe: a missing name on a writable mount is
+  // `NotFound`, while an absent disk refuses the remove with `Invalid`. This
+  // lets `N` distinguish "already exists" from "no writable home".
+  last_op := core.fs_remove("home/igis_probe_none");
+  no_home := last_op = Invalid;
 
   mode := 0;
   if stdlib.starts_with(args, "check") then

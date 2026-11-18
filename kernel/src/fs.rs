@@ -227,6 +227,45 @@ pub fn write_at(path: &str, offset: u64, data: &[u8]) -> Result<usize, Status> {
     }
 }
 
+/// Removes a regular file or empty directory through the router (spec 0019,
+/// A2/W3/W5). Only a mounted `home/...` path is accepted.
+pub fn remove(path: &str) -> Result<(), Status> {
+    let Some(local) = home_local(path) else {
+        return Err(Status::Invalid);
+    };
+    let mut home = HOME.lock();
+    let Some(home) = home.as_mut() else {
+        return Err(Status::Invalid);
+    };
+    home.remove(local)
+}
+
+/// Creates a directory through the router (spec 0019, A2/W5). Only a mounted
+/// `home/...` path is accepted.
+pub fn mkdir(path: &str) -> Result<(), Status> {
+    let Some(local) = home_local(path) else {
+        return Err(Status::Invalid);
+    };
+    let mut home = HOME.lock();
+    let Some(home) = home.as_mut() else {
+        return Err(Status::Invalid);
+    };
+    home.mkdir(local).map(|_| ())
+}
+
+/// Renames a file or directory through the router (spec 0019, A2/W3/W6). Both
+/// paths must name the mounted home filesystem.
+pub fn rename(from: &str, to: &str) -> Result<(), Status> {
+    let (Some(from_local), Some(to_local)) = (home_local(from), home_local(to)) else {
+        return Err(Status::Invalid);
+    };
+    let mut home = HOME.lock();
+    let Some(home) = home.as_mut() else {
+        return Err(Status::Invalid);
+    };
+    home.rename(from_local, to_local)
+}
+
 /// Returns one directory entry through the router (spec 0013, `core.fs_list`).
 pub fn list(path: &str, index: u32, name: &mut [u8]) -> Result<Entry, Status> {
     if let Some(local) = home_local(path) {

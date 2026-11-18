@@ -79,8 +79,12 @@ struct FileHost {
     read_bytes: Vec<u8>,
     size: Result<u64, Status>,
     write: Result<usize, Status>,
+    remove: Result<(), Status>,
+    mkdir: Result<(), Status>,
+    rename: Result<(), Status>,
     calls: usize,
     last_path: Vec<u8>,
+    last_to: Vec<u8>,
     last_index: u64,
     last_offset: u64,
     last_dst_len: usize,
@@ -100,8 +104,12 @@ impl FileHost {
             read_bytes: Vec::new(),
             size: Ok(1234),
             write: Ok(0),
+            remove: Ok(()),
+            mkdir: Ok(()),
+            rename: Ok(()),
             calls: 0,
             last_path: Vec::new(),
+            last_to: Vec::new(),
             last_index: 0,
             last_offset: 0,
             last_dst_len: 0,
@@ -162,6 +170,25 @@ impl Host for FileHost {
         self.last_offset = offset;
         self.last_data = data.to_vec();
         self.write
+    }
+
+    fn fs_remove(&mut self, path: &[u8]) -> Result<(), Status> {
+        self.calls += 1;
+        self.last_path = path.to_vec();
+        self.remove
+    }
+
+    fn fs_mkdir(&mut self, path: &[u8]) -> Result<(), Status> {
+        self.calls += 1;
+        self.last_path = path.to_vec();
+        self.mkdir
+    }
+
+    fn fs_rename(&mut self, from: &[u8], to: &[u8]) -> Result<(), Status> {
+        self.calls += 1;
+        self.last_path = from.to_vec();
+        self.last_to = to.to_vec();
+        self.rename
     }
 }
 
@@ -569,4 +596,142 @@ fn the_default_fs_write_is_invalid() {
     );
     assert_eq!(state_word(&state, 56), Status::Invalid as u64);
     assert_eq!(state_word(&state, 48), 77);
+}
+
+// ---- remove, mkdir and rename (spec 0019, A1/W3–W6) ---------------------
+
+/// `[path len][path data 8..40][status 40]`.
+fn path_state(path: &[u8]) -> Vec<u8> {
+    let mut state = vec![0u8; 48];
+    set_word(&mut state, 0, path.len() as u64);
+    state[8..8 + path.len()].copy_from_slice(path);
+    state
+}
+
+fn path_program(builtin: u32) -> Vec<u8> {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 8);
+    op_imm(&mut instructions, opcodes::BUILTIN, builtin);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 40);
+    op(&mut instructions, opcodes::RET);
+    build(&instructions, &[], 48)
+}
+
+/// `[from len][from 8..40][to len 40][to 48..80][status 80]`.
+fn rename_state(from: &[u8], to: &[u8]) -> Vec<u8> {
+    let mut state = vec![0u8; 88];
+    set_word(&mut state, 0, from.len() as u64);
+    state[8..8 + from.len()].copy_from_slice(from);
+    set_word(&mut state, 40, to.len() as u64);
+    state[48..48 + to.len()].copy_from_slice(to);
+    state
+}
+
+fn rename_program() -> Vec<u8> {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 8);
+    op_imm(&mut instructions, opcodes::REF_STATE, 48);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::FS_RENAME,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 80);
+    op(&mut instructions, opcodes::RET);
+    build(&instructions, &[], 88)
+}
+
+#[test]
+fn fs_remove_and_mkdir_pass_the_path_and_return_the_status() {
+    for builtin in [opcodes::builtin::FS_REMOVE, opcodes::builtin::FS_MKDIR] {
+        let mut state = path_state(b"home/x");
+        let mut host = FileHost::new();
+        assert_eq!(
+            run(&path_program(builtin), &mut state, &mut host),
+            Outcome::Exited(ExitReason::Ok)
+        );
+        assert_eq!(host.last_path, b"home/x");
+        assert_eq!(state_word(&state, 40), Status::Ok as u64);
+
+        host.remove = Err(Status::NotFound);
+        host.mkdir = Err(Status::NotFound);
+        let mut state = path_state(b"home/missing");
+        assert_eq!(
+            run(&path_program(builtin), &mut state, &mut host),
+            Outcome::Exited(ExitReason::Ok)
+        );
+        assert_eq!(state_word(&state, 40), Status::NotFound as u64);
+    }
+}
+
+#[test]
+fn fs_rename_passes_both_paths_and_returns_the_status() {
+    let mut state = rename_state(b"home/a.txt", b"home/b.txt");
+    let mut host = FileHost::new();
+    assert_eq!(
+        run(&rename_program(), &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(host.last_path, b"home/a.txt");
+    assert_eq!(host.last_to, b"home/b.txt");
+    assert_eq!(state_word(&state, 80), Status::Ok as u64);
+
+    host.rename = Err(Status::Invalid);
+    let mut state = rename_state(b"home/a", b"home");
+    assert_eq!(
+        run(&rename_program(), &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(state_word(&state, 80), Status::Invalid as u64);
+}
+
+#[test]
+fn remove_mkdir_and_rename_reject_paths_outside_home_before_the_host() {
+    let mut host = FileHost::new();
+    for builtin in [opcodes::builtin::FS_REMOVE, opcodes::builtin::FS_MKDIR] {
+        for path in [&b"base/child"[..], b"homex/x", b"home//x"] {
+            let mut state = path_state(path);
+            host.calls = 0;
+            assert_eq!(
+                run(&path_program(builtin), &mut state, &mut host),
+                Outcome::Exited(ExitReason::Ok)
+            );
+            assert_eq!(state_word(&state, 40), Status::Invalid as u64, "{path:?}");
+            assert_eq!(host.calls, 0, "{path:?}");
+        }
+    }
+    // Rename validates both ends: either one outside `home` refuses the call.
+    for (from, to) in [
+        (&b"home/a"[..], &b"base/b"[..]),
+        (b"base/a", b"home/b"),
+        (b"lib/home/a", b"home/b"),
+    ] {
+        let mut state = rename_state(from, to);
+        host.calls = 0;
+        assert_eq!(
+            run(&rename_program(), &mut state, &mut host),
+            Outcome::Exited(ExitReason::Ok)
+        );
+        assert_eq!(state_word(&state, 80), Status::Invalid as u64);
+        assert_eq!(host.calls, 0);
+    }
+}
+
+#[test]
+fn the_default_remove_mkdir_and_rename_are_invalid() {
+    let mut host = DisabledHost;
+    for builtin in [opcodes::builtin::FS_REMOVE, opcodes::builtin::FS_MKDIR] {
+        let mut state = path_state(b"home/x");
+        assert_eq!(
+            run(&path_program(builtin), &mut state, &mut host),
+            Outcome::Exited(ExitReason::Ok)
+        );
+        assert_eq!(state_word(&state, 40), Status::Invalid as u64);
+    }
+    let mut state = rename_state(b"home/a", b"home/b");
+    assert_eq!(
+        run(&rename_program(), &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(state_word(&state, 80), Status::Invalid as u64);
 }

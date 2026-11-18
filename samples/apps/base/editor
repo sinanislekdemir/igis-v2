@@ -28,9 +28,13 @@ unit editor;
 // `bytes[8192]`, converts with `core.substr_into` and publishes with one copy,
 // so a rejected edit changes nothing and the document stays valid UTF-8.
 //
-// There is no writable filesystem yet, so saving is disabled: the File menu's
-// Save row is disabled and Ctrl+S only reports "read-only" in the status line.
-// Nothing in this app calls a write primitive (there is none).
+// Saving is enabled by the M6.3 writable home filesystem (spec 0019, E1). The
+// whole document is written to a sibling temporary file (`<target>.tmp`), which
+// is then renamed over the target; the temporary is removed first, so a leftover
+// from a failed save never leaves a longer tail. A document opened from the
+// read-only image is saved as a copy under `home/<basename>` and the editor's
+// path switches to it. Without a home disk the save reports that and leaves the
+// document and path unchanged.
 //
 // The File menu's Open re-reads the current path (there is no file picker
 // until M2.5.4), Ctrl+O does the same, Ctrl+Q quits and Ctrl+A selects all.
@@ -59,6 +63,8 @@ const
   // far below this; `widgets` (57 KiB) is the documented too-large case.
   BufferCapacity = 8192;
   PathCapacity = 64;
+  // A save path is `<target>.tmp`, so it can be four bytes longer than a path.
+  TempCapacity = 96;
 
   // Client layout inside the content rectangle.
   MenuBarH = 22;
@@ -84,8 +90,12 @@ var
   // Document and loading.
   text: string[BufferCapacity];
   load_stage: bytes[BufferCapacity];
+  save_stage: bytes[BufferCapacity];
   path: string[PathCapacity];
-  status_line: string[64];
+  save_target: string[PathCapacity];
+  save_temp: string[TempCapacity];
+  status_line: string[128];
+  no_home: bool;
 
   // View state: caret and selection anchor are byte offsets (code-point
   // boundaries); the selection is the ordered pair, normalized on use.
@@ -489,10 +499,237 @@ begin
   return Ok;
 end;
 
-// Saving is disabled until a writable filesystem exists (M2.5.3 scope).
-procedure try_save();
+// Builds `save_target` (the document, or `home/<basename>` for a read-only
+// source) and `save_temp` (`save_target` plus `.tmp`) from `path`.
+function build_save_paths(): Status;
+var
+  length: int;
+  start: int;
+  name_len: int;
+  total: int;
+  i: int;
+  got: int;
+  stage: bytes[TempCapacity];
 begin
-  status_line := "read-only: no writable filesystem";
+  length := int(core.len(path));
+  if length = 0 then
+    return Invalid;
+  if stdlib.starts_with(path, "home/") then
+  begin
+    got := core.substr_into(save_target, path, 0, length);
+    if got <> length then
+      return CapacityExceeded;
+  end
+  else
+  begin
+    // The basename of the image path becomes `home/<basename>`.
+    start := length;
+    while start > 0 and path[start - 1] <> byte(47) do
+      start := start - 1;
+    name_len := length - start;
+    total := 5 + name_len;
+    if total > PathCapacity then
+      return CapacityExceeded;
+    stage[0] := byte(104);  // h
+    stage[1] := byte(111);  // o
+    stage[2] := byte(109);  // m
+    stage[3] := byte(101);  // e
+    stage[4] := byte(47);   // /
+    i := 0;
+    while i < name_len do
+    begin
+      stage[5 + i] := path[start + i];
+      i := i + 1;
+    end;
+    got := core.substr_into(save_target, stage, 0, total);
+    if got <> total then
+      return CapacityExceeded;
+  end;
+
+  // The temporary sits beside the target so the rename stays in one directory.
+  length := int(core.len(save_target));
+  total := length + 4;
+  if total > TempCapacity then
+    return CapacityExceeded;
+  i := 0;
+  while i < length do
+  begin
+    stage[i] := save_target[i];
+    i := i + 1;
+  end;
+  stage[length] := byte(46);      // .
+  stage[length + 1] := byte(116); // t
+  stage[length + 2] := byte(109); // m
+  stage[length + 3] := byte(112); // p
+  got := core.substr_into(save_temp, stage, 0, total);
+  if got <> total then
+    return CapacityExceeded;
+  return Ok;
+end;
+
+// The failure status line; an absent mount is the `Invalid` the first remove
+// call reports.
+procedure set_save_error(value: Status);
+begin
+  if value = Invalid then
+  begin
+    no_home := true;
+    status_line := "no writable home";
+  end
+  else if value = NotFound then
+    status_line := "no such directory"
+  else if value = CapacityExceeded then
+    status_line := "no space left"
+  else
+    status_line := "save failed";
+end;
+
+// Compares the saved target with the document, byte for byte.
+function saved_matches(): bool;
+var
+  length: int;
+  offset: int;
+  read: int;
+  i: int;
+  size: uint;
+  same: bool;
+  value: Status;
+  chunk: bytes[256];
+begin
+  length := int(core.len(text));
+  value := core.fs_size(save_target, size);
+  if value <> Ok or int(size) <> length then
+    return false;
+  offset := 0;
+  same := true;
+  while offset < length and same do
+  begin
+    value := core.fs_read(save_target, uint(offset), chunk, read);
+    if value <> Ok or read <= 0 then
+      same := false
+    else
+    begin
+      i := 0;
+      while i < read do
+      begin
+        if chunk[i] <> text[offset + i] then
+          same := false;
+        i := i + 1;
+      end;
+      offset := offset + read;
+    end;
+  end;
+  return same and offset = length;
+end;
+
+// Sets `saved` or `saved <target>` in the status line.
+procedure set_saved_status(copied: bool);
+var
+  total: int;
+  i: int;
+  got: int;
+  stage: bytes[128];
+begin
+  if not copied then
+    status_line := "saved"
+  else
+  begin
+    total := 6 + int(core.len(save_target));
+    if total > 128 then
+      total := 128;
+    stage[0] := byte(115); // s
+    stage[1] := byte(97);  // a
+    stage[2] := byte(118); // v
+    stage[3] := byte(101); // e
+    stage[4] := byte(100); // d
+    stage[5] := byte(32);  // space
+    i := 0;
+    while i < total - 6 do
+    begin
+      stage[6 + i] := save_target[i];
+      i := i + 1;
+    end;
+    got := core.substr_into(status_line, stage, 0, total);
+    if got <> total then
+      status_line := "saved";
+  end;
+end;
+
+procedure try_save();
+var
+  length: int;
+  staged: int;
+  written: int;
+  value: Status;
+  source_is_home: bool;
+begin
+  no_home := false;
+  if int(core.len(path)) = 0 then
+  begin
+    status_line := "no file";
+    return;
+  end;
+  value := build_save_paths();
+  if value <> Ok then
+  begin
+    status_line := "path too long";
+    return;
+  end;
+  source_is_home := stdlib.starts_with(path, "home/");
+
+  length := int(core.len(text));
+  staged := core.substr_into(save_stage, text, 0, length);
+  if staged <> length then
+  begin
+    status_line := "save failed";
+    return;
+  end;
+
+  // Remove a leftover temporary first: without truncate, a stale, longer file
+  // would keep its tail after the shorter write.
+  value := core.fs_remove(save_temp);
+  if value = Invalid then
+  begin
+    no_home := true;
+    status_line := "no writable home";
+    return;
+  end
+  else if value <> Ok and value <> NotFound then
+  begin
+    set_save_error(value);
+    return;
+  end;
+
+  written := -1;
+  value := core.fs_write(save_temp, uint(0), save_stage, written);
+  if value <> Ok or written <> length then
+  begin
+    if value = Ok then
+      status_line := "save failed"
+    else
+      set_save_error(value);
+    return;
+  end;
+  value := core.fs_rename(save_temp, save_target);
+  if value <> Ok then
+  begin
+    set_save_error(value);
+    return;
+  end;
+
+  if not source_is_home then
+  begin
+    // The copy is the document now.
+    copied := core.substr_into(path, save_target, 0, int(core.len(save_target)));
+    if copied <> int(core.len(save_target)) then
+    begin
+      status_line := "path too long";
+      return;
+    end;
+    set_saved_status(true);
+  end
+  else
+    set_saved_status(false);
 end;
 
 // ---- selection and cursor movement ---------------------------------------
@@ -760,11 +997,11 @@ begin
   file_items[2] := "-";
   file_items[3] := "Quit";
   file_keys[0] := "Ctrl+O";
-  file_keys[1] := "";
+  file_keys[1] := "Ctrl+S";
   file_keys[2] := "";
   file_keys[3] := "Ctrl+Q";
-  // Save is disabled: there is no writable filesystem in M2.
-  file_disabled := stdlib.ui_menu_set(uint(0), 1, true);
+  // Every row is enabled now that the home filesystem is writable.
+  file_disabled := uint(0);
 end;
 
 procedure close_menu();
@@ -972,9 +1209,7 @@ begin
       if row >= 0 then
       begin
         if stdlib.ui_menu_selectable(file_items[row], file_disabled, row) then
-          selected := row
-        else if row = 1 then
-          status_line := "read-only: no writable filesystem";
+          selected := row;
       end
       else
         close_menu();
@@ -1146,9 +1381,9 @@ begin
     st := syslib.draw_text(rect.x + 8, rect.y + PathTop + 4, "(no file)", gray)
   else
     st := syslib.draw_text(rect.x + 8, rect.y + PathTop + 4, path, black);
-  width := stdlib.ui_text_width("read-only");
+  width := stdlib.ui_text_width("Ctrl+S save");
   st := syslib.draw_text(
-    rect.x + ContentW - 8 - width, rect.y + PathTop + 4, "read-only", gray);
+    rect.x + ContentW - 8 - width, rect.y + PathTop + 4, "Ctrl+S save", gray);
   st := stdlib.ui_separator(rect.x, rect.y + PathTop + PathH - 1, ContentW);
 end;
 
@@ -1240,7 +1475,7 @@ begin
 end;
 
 // Line geometry, app-local editing (insert, delete, backspace, Enter, a 2-byte
-// code point), the capacity boundary, invalid UTF-8 and the read-only rule.
+// code point), the capacity boundary and invalid UTF-8.
 procedure buffer_checks();
 var
   i: int;
@@ -1326,11 +1561,46 @@ begin
   value := publish_staged(2);
   verify("invalid utf8", value = Invalid);
   verify("invalid kept", text = "keep");
+end;
+
+// The M6.3 save proof (spec 0019, E1): edit `base/child` and save it as the
+// home copy, read it back and compare, then save again over the same path. A
+// missing home disk reports the error and leaves the document and path alone.
+procedure save_checks();
+var
+  value: Status;
+  length: int;
+begin
+  value := open_path("base/child");
+  verify("save open", value = Ok and path = "base/child");
+  line_end_move(false, true);
+  replace_selection("\n// saved by the M6.3 check\n");
+  length := int(core.len(text));
 
   try_save();
-  verify("save read-only",
-    status_line = "read-only: no writable filesystem");
-  verify("save kept", text = "keep");
+  if no_home then
+  begin
+    verify("save no home", status_line = "no writable home");
+    verify("save keeps document",
+      int(core.len(text)) = length and path = "base/child");
+  end
+  else
+  begin
+    verify("save copied",
+      status_line = "saved home/child" and path = "home/child");
+    verify("saved contents", saved_matches());
+
+    // The second save takes the sibling temporary path over the same target.
+    length := int(core.len(text));
+    try_save();
+    verify("replace saved", status_line = "saved" and path = "home/child");
+    verify("replace contents", saved_matches());
+    verify("replace kept size", int(core.len(text)) = length);
+  end;
+
+  // Leave a normal document for the drawing probes.
+  value := open_path("base/child");
+  verify("save restore", value = Ok and path = "base/child");
 end;
 
 // Vertical scrolling on `base/child` (28 lines in 26 rows) and horizontal scrolling
@@ -1398,6 +1668,7 @@ begin
   file_checks();
   scroll_checks();
   buffer_checks();
+  save_checks();
   if failed then
     out.say("editor: host failed\n")
   else
@@ -1414,6 +1685,7 @@ begin
   file_checks();
   scroll_checks();
   buffer_checks();
+  save_checks();
 
   // A deterministic document for the drawing probes.
   text := "IGIS editor\nline two\nline three";

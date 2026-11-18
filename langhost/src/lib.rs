@@ -706,6 +706,105 @@ impl Host for ConsoleHost {
         file.write_all(data).map_err(|_| Status::IoError)?;
         Ok(data.len())
     }
+
+    fn fs_remove(&mut self, path: &[u8]) -> Result<(), Status> {
+        let path = std::str::from_utf8(path).map_err(|_| Status::Invalid)?;
+        let status = abi::fs::validate_writable(path);
+        if status != Status::Ok {
+            return Err(status);
+        }
+        let local = home_local(path).ok_or(Status::Invalid)?;
+        let target = resolve_in(&self.home_dir, local)?;
+        let metadata = std::fs::symlink_metadata(&target).map_err(|error| io_status(&error))?;
+        if metadata.is_dir() {
+            let mut entries = std::fs::read_dir(&target).map_err(|_| Status::IoError)?;
+            if entries.next().is_some() {
+                return Err(Status::Invalid);
+            }
+            std::fs::remove_dir(&target).map_err(|error| io_status(&error))
+        } else if metadata.is_file() {
+            std::fs::remove_file(&target).map_err(|error| io_status(&error))
+        } else {
+            Err(Status::Invalid)
+        }
+    }
+
+    fn fs_mkdir(&mut self, path: &[u8]) -> Result<(), Status> {
+        let path = std::str::from_utf8(path).map_err(|_| Status::Invalid)?;
+        let status = abi::fs::validate_writable(path);
+        if status != Status::Ok {
+            return Err(status);
+        }
+        let local = home_local(path).ok_or(Status::Invalid)?;
+        let (parent, name) = match local.rfind('/') {
+            Some(index) => (&local[..index], &local[index + 1..]),
+            None => ("", local),
+        };
+        if name.is_empty() {
+            return Err(Status::Invalid);
+        }
+        let directory = resolve_in(&self.home_dir, parent)?;
+        let metadata = std::fs::symlink_metadata(&directory).map_err(|error| io_status(&error))?;
+        if !metadata.is_dir() {
+            return Err(Status::Invalid);
+        }
+        let target = directory.join(name);
+        match std::fs::symlink_metadata(&target) {
+            Ok(_) => return Err(Status::Invalid),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(Status::IoError),
+        }
+        std::fs::create_dir(&target).map_err(|error| match error.kind() {
+            std::io::ErrorKind::AlreadyExists => Status::Invalid,
+            _ => io_status(&error),
+        })
+    }
+
+    fn fs_rename(&mut self, from: &[u8], to: &[u8]) -> Result<(), Status> {
+        let from = std::str::from_utf8(from).map_err(|_| Status::Invalid)?;
+        let to = std::str::from_utf8(to).map_err(|_| Status::Invalid)?;
+        if abi::fs::validate_writable(from) != Status::Ok
+            || abi::fs::validate_writable(to) != Status::Ok
+        {
+            return Err(Status::Invalid);
+        }
+        if from == to {
+            return Ok(());
+        }
+        let from_local = home_local(from).ok_or(Status::Invalid)?;
+        let to_local = home_local(to).ok_or(Status::Invalid)?;
+        let source = resolve_in(&self.home_dir, from_local)?;
+        let source_metadata =
+            std::fs::symlink_metadata(&source).map_err(|error| io_status(&error))?;
+        if !source_metadata.is_file() && !source_metadata.is_dir() {
+            return Err(Status::Invalid);
+        }
+        let (parent, name) = match to_local.rfind('/') {
+            Some(index) => (&to_local[..index], &to_local[index + 1..]),
+            None => ("", to_local),
+        };
+        if name.is_empty() {
+            return Err(Status::Invalid);
+        }
+        let directory = resolve_in(&self.home_dir, parent)?;
+        let metadata = std::fs::symlink_metadata(&directory).map_err(|error| io_status(&error))?;
+        if !metadata.is_dir() {
+            return Err(Status::Invalid);
+        }
+        let target = directory.join(name);
+        if let Ok(metadata) = std::fs::symlink_metadata(&target) {
+            if metadata.is_dir() {
+                return Err(Status::Invalid);
+            }
+        }
+        std::fs::rename(&source, &target).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => Status::NotFound,
+            std::io::ErrorKind::AlreadyExists
+            | std::io::ErrorKind::IsADirectory
+            | std::io::ErrorKind::DirectoryNotEmpty => Status::Invalid,
+            _ => io_status(&error),
+        })
+    }
 }
 
 /// Host-side path validation, matching the kernel's relative-path rule.

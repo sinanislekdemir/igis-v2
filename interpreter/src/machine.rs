@@ -484,6 +484,26 @@ pub trait Host {
         Err(Status::Invalid)
     }
 
+    /// Removes a regular file or empty directory (`core.fs_remove`, spec 0019).
+    /// Only `home/...` on a writable mount is accepted; the machine enforces
+    /// the path rule before the call. The default is `Invalid`.
+    fn fs_remove(&mut self, _path: &[u8]) -> Result<(), Status> {
+        Err(Status::Invalid)
+    }
+
+    /// Creates an empty directory (`core.fs_mkdir`, spec 0019). Only
+    /// `home/...` on a writable mount is accepted. The default is `Invalid`.
+    fn fs_mkdir(&mut self, _path: &[u8]) -> Result<(), Status> {
+        Err(Status::Invalid)
+    }
+
+    /// Moves a file or directory (`core.fs_rename`, spec 0019). Both paths must
+    /// be `home/...` on a writable mount; the machine enforces the rule before
+    /// the call. The default is `Invalid`.
+    fn fs_rename(&mut self, _from: &[u8], _to: &[u8]) -> Result<(), Status> {
+        Err(Status::Invalid)
+    }
+
     /// Requests a new application instance (`core.spawn`).
     ///
     /// `path` and `args` are the bytes of the two `string` buffers. `diag` is a
@@ -2331,6 +2351,154 @@ impl Machine {
                             }
                             Err(status) => self.push(stack, status as u64)?,
                         }
+                    }
+                    // Removing, creating directories and renaming on the home
+                    // filesystem (spec 0019, A1/W3–W6). No out-parameters: the
+                    // result is the `Status`, and the machine applies the same
+                    // `home`-only rule before the host call.
+                    builtin::FS_REMOVE => {
+                        let path_bits = self.pop(stack)?;
+                        let result = {
+                            let (region, offset) =
+                                self.resolve(path_bits, state, stack, constants, args)?;
+                            let length = self.buffer_len(
+                                region,
+                                offset,
+                                state,
+                                stack,
+                                constants,
+                                args,
+                            )?;
+                            let path = buffer_slice(
+                                region,
+                                offset,
+                                length,
+                                state,
+                                stack,
+                                constants,
+                                args,
+                            )?;
+                            match core::str::from_utf8(path) {
+                                Err(_) => Err(Status::Invalid),
+                                Ok(text) => match abi::fs::validate_writable(text) {
+                                    Status::Ok => host.fs_remove(text.as_bytes()),
+                                    status => Err(status),
+                                },
+                            }
+                        };
+                        self.push(
+                            stack,
+                            match result {
+                                Ok(()) => Status::Ok as u64,
+                                Err(status) => status as u64,
+                            },
+                        )?;
+                    }
+                    builtin::FS_MKDIR => {
+                        let path_bits = self.pop(stack)?;
+                        let result = {
+                            let (region, offset) =
+                                self.resolve(path_bits, state, stack, constants, args)?;
+                            let length = self.buffer_len(
+                                region,
+                                offset,
+                                state,
+                                stack,
+                                constants,
+                                args,
+                            )?;
+                            let path = buffer_slice(
+                                region,
+                                offset,
+                                length,
+                                state,
+                                stack,
+                                constants,
+                                args,
+                            )?;
+                            match core::str::from_utf8(path) {
+                                Err(_) => Err(Status::Invalid),
+                                Ok(text) => match abi::fs::validate_writable(text) {
+                                    Status::Ok => host.fs_mkdir(text.as_bytes()),
+                                    status => Err(status),
+                                },
+                            }
+                        };
+                        self.push(
+                            stack,
+                            match result {
+                                Ok(()) => Status::Ok as u64,
+                                Err(status) => status as u64,
+                            },
+                        )?;
+                    }
+                    builtin::FS_RENAME => {
+                        let to_bits = self.pop(stack)?;
+                        let from_bits = self.pop(stack)?;
+                        let result = {
+                            let (from_region, from_offset) =
+                                self.resolve(from_bits, state, stack, constants, args)?;
+                            let from_length = self.buffer_len(
+                                from_region,
+                                from_offset,
+                                state,
+                                stack,
+                                constants,
+                                args,
+                            )?;
+                            let from = buffer_slice(
+                                from_region,
+                                from_offset,
+                                from_length,
+                                state,
+                                stack,
+                                constants,
+                                args,
+                            )?;
+                            let (to_region, to_offset) =
+                                self.resolve(to_bits, state, stack, constants, args)?;
+                            let to_length = self.buffer_len(
+                                to_region,
+                                to_offset,
+                                state,
+                                stack,
+                                constants,
+                                args,
+                            )?;
+                            let to = buffer_slice(
+                                to_region,
+                                to_offset,
+                                to_length,
+                                state,
+                                stack,
+                                constants,
+                                args,
+                            )?;
+                            let from = core::str::from_utf8(from).map_err(|_| Status::Invalid);
+                            let to = core::str::from_utf8(to).map_err(|_| Status::Invalid);
+                            match (from, to) {
+                                (Ok(from), Ok(to)) => {
+                                    let from_status = abi::fs::validate_writable(from);
+                                    let to_status = abi::fs::validate_writable(to);
+                                    if from_status != Status::Ok {
+                                        Err(from_status)
+                                    } else if to_status != Status::Ok {
+                                        Err(to_status)
+                                    } else {
+                                        host.fs_rename(from.as_bytes(), to.as_bytes())
+                                    }
+                                }
+                                (Err(status), _) => Err(status),
+                                (_, Err(status)) => Err(status),
+                            }
+                        };
+                        self.push(
+                            stack,
+                            match result {
+                                Ok(()) => Status::Ok as u64,
+                                Err(status) => status as u64,
+                            },
+                        )?;
                     }
                     _ => return Err(FaultCode::IllegalOperation),
                 }
