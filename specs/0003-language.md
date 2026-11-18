@@ -903,10 +903,12 @@ the variant — so `Ok`/`Faulted(code)` work with an imported `ExitReason`.
 
 The application's own types are application-local: no module may name `app.Something`.
 A unit may hold a value of any type in the package, but a *call* still requires a
-`uses` import of the callee's unit. Two modules may both declare `Point`; the unit
-qualifier distinguishes them. A by-value cycle (a record or sum whose layout contains
-itself) is a compile error, and forward references to a type declared later in the same
-unit are allowed now that ids are assigned before layout.
+`uses` import of the callee's unit. The embedded `stdlib` may also qualify a type
+(`stdlib.<Type>`) when it is in the package, although it declares none today. Two
+modules may both declare `Point`; the unit qualifier distinguishes them. A by-value
+cycle (a record or sum whose layout contains itself) is a compile error, and forward
+references to a type declared later in the same unit are allowed now that ids are
+assigned before layout.
 
 ### Capacity compatibility
 

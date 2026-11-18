@@ -14,8 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `6a37202` (M4.1: predeclared nominal types cross unit
-  boundaries, plus the `EventKind` follow-up) plus this docs commit. The tree is clean.
+- **Last commit:** `3ac1725` (M4.2: package-global user types, `<unit>.<Type>` and
+  `<unit>.<Type>.<Variant>`) plus this docs commit. The tree is clean.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -52,23 +52,21 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `terminal: ok` on both; the visual golden matches on both
   (`37802052…e9e81c9f`); the browser screenshot harness writes a 1024×768
   `/home/sinan/Desktop/igis-browser.png`.
-- **Verified at that point (M4.1, independently by the parent):** **441 host tests**
-  (abi 23, compiler 186, interpreter 150, langhost 81, 1 doctest); the gate admits
-  the predeclared `Rect`/`Event`/`Diagnostic`/`ExitReason`/`Status`/`FaultCode`/
-  `EventKind` (and arrays of them) across units, user aggregates still fail with
-  a precise diagnostic. `lib/probe.ig` + `module_demo` print
-  `module_demo: lib types ok` then `module_demo: ok` on `langhost` and in the
-  kernel on both core counts; the 27-command batch, visual golden
-  (`37802052…e9e81c9f`) and `boot_desktop_qmp.py` pass on both; boot still prints
-  `ext2: tree ok`.
-- **Next slice:** **M4.2 — package-global user types and unit-qualified names
-  (C2)** (ADR 0039, spec 0003 "Cross-unit types", spec 0008 "Types"). A fresh
-  subagent assigns package-global enum/record/sum ids, allows `<unit>.<Type>` in
-  every type position and `<unit>.<Type>.<Variant>` for enum constants, permits
-  forward references and rejects by-value cycles; the application's types stay
-  application-local, and sum construction/`case` arms stay unqualified. Runtime
-  proof through `langhost` and the kernel. Then M4.3 extracts the shared helpers
-  into `/lib`.
+- **Verified at that point (M4.2, independently by the parent):** **450 host tests**
+  (abi 23, compiler 195, interpreter 151 incl. doctest, langhost 81); one
+  package-wide type pool with the fixed predeclared prefix and per-unit scopes;
+  `lib/probe.ig` exposes `Point`/`Shape`/`Color`, and `module_demo` prints
+  `module_demo: types ok`, `module_demo: lib types ok`, `module_demo: ok` on
+  `langhost`, `-smp 4` and `-smp 1`; the 27-command batch, visual golden
+  (`37802052…e9e81c9f`) and `boot_desktop_qmp.py` pass on both; boot
+  `ext2: tree ok` with `frames: 57890 free` (`.bss` unchanged, ~36 KiB of linked
+  compiler code). The agent also compared `code`/`manifest` digests of five
+  samples against `e46f21e`: byte-identical.
+- **Next slice:** **M4.3 — extract the shared helpers into `/lib` and migrate the
+  apps** (the payoff ticket). A fresh subagent moves the duplicated writers
+  (`say`/`say_int`), the event/pointer inject wrappers and the `ExitReason`
+  classifier into `/lib` modules, migrates a named set of applications, and
+  reports before/after source and arena sizes.
 
 - **M2.6.3 complete:** the headless visual-regression harness (spec 0009 "Visual proof",
   G21; ADR 0032) and the resolution of M2.1.2. `samples/apps/visual` opens a window whose
@@ -817,7 +815,7 @@ session; the parent verifies each.
   `-smp 1`; the 27-command batch, visual golden and `boot_desktop_qmp.py` pass on
   both; user aggregates still rejected with a precise diagnostic.
 
-- [ ] **M4.2 Package-global user types and unit-qualified names (C2).**
+- [x] **M4.2 Package-global user types and unit-qualified names (C2).**
   Assign package-global enum/record/sum ids (predeclared fixed, then `stdlib`,
   modules in discovery order, application, declaration order inside a unit);
   allow forward references; reject by-value cycles. Parse and resolve
@@ -827,6 +825,16 @@ session; the parent verifies each.
   crossing both ways, nested and array element types, qualified enum constants,
   duplicate names across units, application-type leakage, and cycles. Runtime
   proof through `langhost` and the kernel.
+  **Done (`3ac1725`):** 450 host tests; one package-wide type pool (predeclared
+  prefix, then `stdlib` → modules → application) with per-unit scopes,
+  two-phase declare/layout, on-demand layout and cycle detection; `TypeRef.owner`
+  and three-part enum constants; the M4.1 gate deleted. `lib/probe.ig` gains
+  `Point`/`Shape`/`Color` and `module_demo` prints
+  `module_demo: types ok` + `lib types ok` + `ok` on `langhost`, `-smp 4` and
+  `-smp 1`. The 27-command batch, visual golden and `boot_desktop_qmp.py` pass on
+  both; five samples' code/manifest digests are byte-identical to `e46f21e`
+  (no artifact change). Known polish: a foreign sum-variant `case` error names
+  the owning sum without its unit qualifier.
 
 - [ ] **M4.3 Extract the shared helpers into `/lib` and migrate the apps.**
   Move the duplicated application helpers into modules (event/pointer loop
