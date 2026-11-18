@@ -162,6 +162,20 @@ struct Drag {
     offset_y: i64,
 }
 
+/// The one machine-wide modal popup input grab (spec 0011, W26; ADR 0044).
+///
+/// An application-drawn popup (a pull-down menu) has no window, so without a
+/// grab a click in it would be routed to the window underneath. While a grab is
+/// held the window service ignores pointer presses and only the owner receives
+/// queued input events; every other task's input readiness is false. The
+/// rectangle is advisory: the owner decides inside/outside itself, and routing
+/// is modal.
+#[derive(Clone, Copy)]
+struct Grab {
+    owner: u64,
+    rect: Rect,
+}
+
 /// What a left-button press did to the service (spec 0011, W22/W23). Only
 /// `None` leaves the click to the client; the other outcomes consume the
 /// queued `PointerDown`.
@@ -634,6 +648,8 @@ struct Table {
     next_id: u64,
     /// The pointer drag in progress, if any (W22).
     drag: Option<Drag>,
+    /// The modal popup grab, if any (W26).
+    grab: Option<Grab>,
     /// Pending desktop restore and chrome damage for the next repair pass.
     erases: EraseList,
     chrome: ChromeList,
@@ -654,6 +670,7 @@ impl Table {
             focus: 0,
             next_id: 1,
             drag: None,
+            grab: None,
             erases: EraseList::new(),
             chrome: ChromeList::new(),
             generation: 0,
@@ -960,6 +977,50 @@ impl Table {
         self.drag = None;
     }
 
+    /// Takes or updates the one machine-wide modal popup grab for `owner`
+    /// (W26). `Full` when another task holds it, `Invalid` for a non-positive
+    /// extent. A repeat by the owner updates the advisory rectangle.
+    fn grab(&mut self, owner: u64, x: i64, y: i64, w: i64, h: i64) -> Status {
+        if w <= 0 || h <= 0 {
+            return Status::Invalid;
+        }
+        if self.grab.is_some_and(|grab| grab.owner != owner) {
+            return Status::Full;
+        }
+        // Starting or updating a popup ends any pointer drag: while a grab is
+        // held the service performs no window interaction (W26).
+        self.drag = None;
+        self.grab = Some(Grab {
+            owner,
+            rect: Rect { x, y, w, h },
+        });
+        Status::Ok
+    }
+
+    /// Releases the caller's grab (W26): `Ok` for the owner, `NotFound` when
+    /// none is held, `Invalid` for another task's grab.
+    fn release_grab(&mut self, owner: u64) -> Status {
+        match self.grab {
+            None => Status::NotFound,
+            Some(grab) if grab.owner != owner => Status::Invalid,
+            Some(_) => {
+                self.grab = None;
+                Status::Ok
+            }
+        }
+    }
+
+    /// Whether queued input events may be delivered to `owner` (W26): always
+    /// without a grab, and only to the owner with one.
+    fn grab_allows(&self, owner: u64) -> bool {
+        self.grab.is_none_or(|grab| grab.owner == owner)
+    }
+
+    /// Whether any task holds the modal grab.
+    fn grab_active(&self) -> bool {
+        self.grab.is_some()
+    }
+
     fn frame_rect(&self, id: u64) -> Result<Rect, Status> {
         self.position(id)
             .map(|pos| self.windows[self.order[pos]].frame())
@@ -994,7 +1055,14 @@ impl Table {
     /// Removes every window owned by `owner`, applying the focus fallback after
     /// each removal (W8). The damage accumulates and one repair pass covers all
     /// removed frames, so a terminated task's windows disappear together.
-    fn close_task(&mut self, owner: u64) {
+    ///
+    /// A terminating task's modal popup grab is released here too (W26); the
+    /// caller wakes input waiters because queued events flow again.
+    fn close_task(&mut self, owner: u64) -> bool {
+        let released_grab = self.grab.is_some_and(|grab| grab.owner == owner);
+        if released_grab {
+            self.grab = None;
+        }
         let mut removed = false;
         let mut pos = 0;
         while pos < self.count {
@@ -1016,6 +1084,7 @@ impl Table {
                 self.chrome.add(title_rect(&self.windows[self.order[pos]]));
             }
         }
+        released_grab
     }
 
     /// The parts of `rect` not covered by live windows at z-order indices
@@ -1397,6 +1466,15 @@ pub fn pointer_event(
     let mut close_requested = false;
     let mut dirty = false;
 
+    // While a modal popup grab is held the service performs no window
+    // interaction at all (W26): no drag starts, no close box posts. The owner
+    // decides inside/outside from its advisory rectangle; the click still
+    // reaches it through the queue as an ordinary event.
+    if table.grab_active() {
+        drop(table);
+        return false;
+    }
+
     if pressed {
         match table.press(x, y) {
             PressAction::Consumed => {
@@ -1509,15 +1587,52 @@ pub fn focus() -> u64 {
 
 /// Closes every window owned by a terminating task and repairs the screen once.
 /// Called from `Task::reclaim`, so it covers normal exit, kill, fault, a failed
-/// spawn and a stale-slot eviction (W8).
+/// spawn and a stale-slot eviction (W8). A terminating task's modal popup grab
+/// is released here too (W26), and input waiters are woken so queued events flow
+/// again.
 pub fn close_task(owner: u64) {
     let mut table = TABLE.lock();
-    table.close_task(owner);
+    let released_grab = table.close_task(owner);
     let wake = table.repair();
     drop(table);
-    if wake {
+    if wake || released_grab {
         crate::task::wake_input();
     }
+}
+
+/// Takes or updates the modal popup input grab for `owner` (spec 0011, W26;
+/// ADR 0044). `Full` for another owner, `Invalid` for a non-positive extent; a
+/// repeat by the owner updates the advisory rectangle and is `Ok`.
+pub fn popup_grab(owner: u64, x: i64, y: i64, w: i64, h: i64) -> Status {
+    if gfx::size().0 == 0 {
+        return Status::Invalid;
+    }
+    TABLE.lock().grab(owner, x, y, w, h)
+}
+
+/// Releases the caller's modal popup grab (W26). `Ok` for the owner (`NotFound`
+/// when none is held, `Invalid` for another task); the release wakes every
+/// input waiter after the table unlock so queued events are deliverable again.
+pub fn popup_release(owner: u64) -> Status {
+    let status = TABLE.lock().release_grab(owner);
+    if status == Status::Ok {
+        crate::task::wake_input();
+    }
+    status
+}
+
+/// Whether queued input events may be delivered to `owner` (W26): true without
+/// a grab, and only for the grab owner with one. Every input-readiness probe
+/// uses this one rule (`poll_event`, `input_ready`, the scheduler's post-block
+/// re-check and `next_any` source `1`).
+pub fn grab_allows(owner: u64) -> bool {
+    TABLE.lock().grab_allows(owner)
+}
+
+/// Whether any task holds the modal popup grab (W26). The poll-time router
+/// skips hit-testing and raising while a grab is active.
+pub fn grab_active() -> bool {
+    TABLE.lock().grab_active()
 }
 
 /// Takes the topmost pending whole-content `Expose` owned by `owner`, if any
@@ -2624,6 +2739,108 @@ pub fn close_self_check() -> Result<(), u32> {
     table.close_task(7);
     if table.has_close(7) {
         return Err(26);
+    }
+
+    Ok(())
+}
+
+/// Boot self-check: the modal popup grab rules on a scratch table (spec 0011,
+/// W26; ADR 0044). Pure: it neither allocates nor touches the global table or
+/// the screen, so it cannot perturb a later application.
+pub fn grab_self_check() -> Result<(), u32> {
+    const SCREEN_W: i64 = 1024;
+    const SCREEN_H: i64 = 768;
+    let mut table = Table::new();
+    let id = table
+        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"menu")
+        .map_err(|_| 1u32)?;
+    if table.frame_rect(id).is_err() {
+        return Err(2);
+    }
+
+    // 0. No grab: everyone may read input and a second release finds nothing.
+    if !table.grab_allows(7) || !table.grab_allows(8) || table.grab_active() {
+        return Err(3);
+    }
+    if table.release_grab(7) != Status::NotFound {
+        return Err(4);
+    }
+
+    // 1. Task 7 takes the grab; only it may receive queued input.
+    let rect = Rect {
+        x: 50,
+        y: 22,
+        w: 176,
+        h: 98,
+    };
+    if table.grab(7, rect.x, rect.y, rect.w, rect.h) != Status::Ok {
+        return Err(5);
+    }
+    if !table.grab_active() || !table.grab_allows(7) || table.grab_allows(8) {
+        return Err(6);
+    }
+    let Some(grab) = table.grab else {
+        return Err(7);
+    };
+    if grab.owner != 7 || grab.rect.x != rect.x || grab.rect.y != rect.y {
+        return Err(8);
+    }
+
+    // 2. Another task is `Full` and changes nothing.
+    if table.grab(8, 0, 0, 10, 10) != Status::Full {
+        return Err(9);
+    }
+    if !table.grab_allows(7) || table.grab_allows(8) {
+        return Err(10);
+    }
+
+    // 3. The owner's repeat updates the rectangle and stays `Ok`.
+    if table.grab(7, 60, 30, 120, 60) != Status::Ok {
+        return Err(11);
+    }
+    match table.grab {
+        Some(grab) if grab.owner == 7 && grab.rect.x == 60 && grab.rect.w == 120 => {}
+        _ => return Err(12),
+    }
+
+    // 4. A non-positive extent is `Invalid` and leaves the grab unchanged.
+    if table.grab(7, 60, 30, 0, 60) != Status::Invalid
+        || table.grab(7, 60, 30, 120, -1) != Status::Invalid
+    {
+        return Err(13);
+    }
+    match table.grab {
+        Some(grab) if grab.rect.h == 60 => {}
+        _ => return Err(14),
+    }
+
+    // 5. Only the owner releases; another task is `Invalid` and the grab stays.
+    if table.release_grab(8) != Status::Invalid || !table.grab_active() {
+        return Err(15);
+    }
+    if table.release_grab(7) != Status::Ok || table.grab_active() {
+        return Err(16);
+    }
+    if !table.grab_allows(8) {
+        return Err(17);
+    }
+    if table.release_grab(7) != Status::NotFound {
+        return Err(18);
+    }
+
+    // 6. Task termination releases its grab and reports it, so its caller can
+    //    wake the waiters. Another task's grab is untouched.
+    if table.grab(7, 0, 0, 10, 10) != Status::Ok {
+        return Err(19);
+    }
+    if !table.close_task(7) || table.grab_active() {
+        return Err(20);
+    }
+    if table.grab(8, 0, 0, 10, 10) != Status::Ok {
+        return Err(21);
+    }
+    if table.close_task(7) || !table.grab_allows(8) {
+        return Err(22);
     }
 
     Ok(())

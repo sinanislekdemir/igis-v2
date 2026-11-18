@@ -231,7 +231,11 @@ events", "The event queue") record how they were implemented.
   a pointer-down is hit-tested and raises/focuses the topmost window, other pointer and
   key events go to the focused window, and an `Expose` (kind 5) and a `Close` (kind 6) are
   per-window, owner-only pending notifications returned before the queue (a `Close` before
-  an `Expose`; spec 0011, W25).
+  an `Expose`; spec 0011, W25). While a task holds the modal popup input grab (spec 0011,
+  W26; ADR 0044) the queue is delivered **only to that task**, unchanged and still
+  `window = 0`, with no hit-test or raise; every other task reads `WouldBlock` and sees no
+  input readiness. The grab owner's own `Close`/`Expose` are still served first, and a
+  release wakes every input waiter.
 - **I29 (MUST):** `syslib.inject_event(ev: Event) -> Status` appends a caller-built
   record to the queue, and `syslib.event_drops() -> uint` / `syslib.event_flush() -> uint`
   expose the drop counter and discard the queue (returning the count). Injection is
@@ -247,7 +251,11 @@ events", "The event queue") record how they were implemented.
   routing is applied to the record when it is polled (never to a shared queue entry), and
   an `Expose` or `Close` is not a queue entry at all: each is a per-window pending flag,
   readable only by that window's owner (`Close` added by spec 0011 W25). A non-zero
-  `window` on a queued event (an injection) is passed through unchanged.
+  `window` on a queued event (an injection) is passed through unchanged. The one exception
+  is the modal popup input grab (spec 0011, W26): while a task holds it, only that task
+  dequeues; every other task's poll returns `WouldBlock` and consumes nothing, and its
+  input readiness is false (its own `Expose`/`Close` still count). The queued events are
+  not lost or filtered — they wait for the owner or for the release.
 
 ### Absolute pointer (M2.2.6)
 
@@ -672,6 +680,7 @@ drains the ring (and, only while IRQ12 is inactive, the controller) and decodes 
 | `inject_event` with an unknown `kind` ordinal | `Status.Invalid`; nothing is queued |
 | `event_flush` with an empty queue | Returns 0; the drop counter is unchanged |
 | Two tasks call `next_event` | They compete for one machine-wide FIFO; each event is delivered once |
+| A task holds the popup grab (spec 0011, W26) | Only that task dequeues events (unchanged, `window = 0`); every other task gets `WouldBlock` with the queue untouched and reports no input readiness until the grab is released |
 | A keyboard byte arrives | It produces its console byte and its key event, or only one of them; neither path consumes the other's |
 | A Pause (`0xE1`) sequence | The whole five-byte tail is skipped, so it cannot fake Ctrl/NumLock events |
 | Pressing a key with no console meaning | No console byte; the key event is still delivered |
@@ -717,3 +726,4 @@ drains the ring (and, only while IRQ12 is inactive, the controller) and decodes 
 | 2026-11-16 | M2.2.3–M2.2.5 key events and the event queue: `arch/x86_64::keyboard` decodes set 1 into a console byte and a `KeyEvent` (stable key code, text, Shift/Ctrl/Alt/Caps state, arrows, F1–F12, E1 Pause skipped) with a boot self-check. Predeclared `EventKind` (`PointerMove`/`PointerDown`/`PointerUp`/`KeyDown`/`KeyUp`) and `Event` (`kind,x,y,code,window`, 40 bytes at `abi::layout::event`); key events pack text/modifiers/key code into `code` (`abi::key`). `kernel/src/event.rs` owns a 64-event queue that drops the newest on overflow with a monotonic counter, and pointer transitions enqueue move/down/up. `syslib.next_event` (blocks on `WaitFor::Input`, SMP-safe wake), `poll_event`, `inject_event` (debug-only), `event_drops` and `event_flush` are builtins 27–31 with no new opcode. `samples/apps/events` + `events_poke` prove the API, the overflow policy and a genuinely blocked wake; `keyboard: decoder ok` and `events: ok` run on `-smp 4` and `-smp 1`. |
 | 2026-11-16 | M2.3.3 routing and `Expose` (spec 0011, W12/W16/W17): `EventKind` gains `Expose` (ordinal 5). Producers still enqueue `window = 0`; the kernel host routes on poll — a pending owner-only `Expose` first, then a queued event, with a pointer-down hit-tested against the topmost frame and raising/focusing it before delivery and other pointer/key events naming the focused window. An injected non-zero `window` is passed through. Exposes are per-window coalesced flags marked by a repair and are not queue entries, so a foreign task cannot steal them; the scheduler's input-block re-check includes pending exposes. |
 | 2026-11-18 | `EventKind.Close` (ordinal 6, spec 0011 W25/M8.2): a close-box press posts an owner-only close request instead of killing the task. The kernel host serves a pending `Close` before a pending `Expose` and before the queue (`window::take_close`/`has_close`, topmost-first), writes `window = id` with `x = y = code = 0`, counts it as input readiness (`input_ready`, the post-block `Input` re-check and `next_any` source 1), and the event layout is unchanged. An injected non-zero `window` still passes through; a queued `Close` with `window = 0` is not re-addressed. |
+| 2026-11-18 | M8.3 routing exception (spec 0011 W26, ADR 0044): while a task holds the modal popup input grab, `next_event`/`poll_event` return queued events only to that task, unchanged (`window = 0`, no hit-test or raise). A non-owner returns `WouldBlock` without consuming the queue, and `input_ready`/the scheduler's post-block re-check/`next_any` source 1 report the queue only for the owner (`window::grab_allows`). The owner's own `Close`/`Expose` are still served first, and a release or the owner's termination wakes every input waiter. No `Event` layout, opcode or builtin change beyond the two `syslib.popup_*` calls. |

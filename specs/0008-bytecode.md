@@ -420,15 +420,25 @@ on the same table; the machine, not the compiler, owns the runtime checks.
 | 48 | `halt` | 0 → 1 | request a machine-wide halt; never returns on a live kernel |
 | 49 | `reboot` | 0 → 1 | request a system reset; never returns on a live kernel |
 | 50 | `parse_f64` | 2 → 1 | src ref, `var f64` ref; correctly rounded decimal reader; writes on `Ok` |
+| 51 | `poll_any` | 3 → 1 | sources ref, count, `ready` ref; non-blocking multi-source probe |
+| 52 | `next_any` | 3 → 1 | sources ref, count, `ready` ref; blocks on the same set |
+| 53 | `fs_write` | 4 → 1 | path ref, offset, data ref, written ref; `home/` only |
+| 54 | `fs_remove` | 1 → 1 | path ref; `home/` only |
+| 55 | `fs_mkdir` | 1 → 1 | path ref; `home/` only |
+| 56 | `fs_rename` | 2 → 1 | from ref, to ref; `home/` only |
+| 57 | `fs_truncate` | 2 → 1 | path ref, size; `home/` only |
+| 58 | `popup_grab` | 4 → 1 | x, y, w, h; one machine-wide modal popup input grab for the caller |
+| 59 | `popup_release` | 0 → 1 | releases the caller's grab and wakes input waiters |
 
 Graphics builtins add no opcode, so ABI v1 stays at **75** opcodes (spec 0009). The input
 builtins (spec 0010), the window builtins (spec 0011), the application file builtins
 (spec 0013), `terminal_attach` (spec 0014), the proportional-font builtins (spec
-0015), the system-control builtins (spec 0017) and the float parser (spec 0003, builtin 50)
-add none either; the interpreter owns the button-mask rule, the path validation, the float
-grammar and the operand decoding, the host owns the pointer state, the event queue, the
-window table, poll-time routing, the per-window exposes, the read-only ext2 view, the
-terminal attachment, the font's glyph cache and the stop/reset path.
+0015), the system-control builtins (spec 0017), the float parser (spec 0003, builtin 50)
+and the modal popup grab (spec 0011, W26, builtins 58/59) add none either; the interpreter
+owns the button-mask rule, the path validation, the float grammar, the grab extent check
+and the operand decoding, the host owns the pointer state, the event queue, the window
+table, poll-time routing, the per-window exposes, the read-only ext2 view, the terminal
+attachment, the font's glyph cache, the stop/reset path and the one grab.
 
 ### Compiler / runtime split
 
@@ -614,3 +624,4 @@ pub fn run(task: &mut Task);
 | 2026-11-17 | M2.6.4 adds builtins 48/49 (spec 0017): `halt` (0 → 1) and `reboot` (0 → 1). The machine stages no operands, calls `Host::halt`/`Host::reboot` and pushes the `Status`; the kernel host owns the stop/reset path and a bare host defaults to `Invalid`. No opcode; ABI v1 stays at **75**. |
 | 2026-11-17 | Correctly rounded float parsing adds builtin 50 `parse_f64` (2 → 1, spec 0003 "Floating-point text"; Q41): a source buffer reference and a `var f64` reference. The machine copies nothing: it takes the source bytes, runs the spec grammar and `core`'s `f64: FromStr` (both in `interpreter/src/f64parse.rs`) and writes the bit pattern through the out-parameter only on `Ok`, otherwise pushing `Invalid`. There is no `Host` method and no opcode; ABI v1 stays at **75**. |
 | 2026-11-17 | Q44 resolved (ADR 0037): the `read_line` opcode (`0x42`) becomes `read_input` in the same slot — capacity immediate, a `var bytes` destination reference on the stack, a raw non-blocking console read that pushes the copied count (`0` when empty) and always publishes the destination length. The kind field stays zero (the compiler requires `bytes`). This is a semantic change inside ABI v1, not a new opcode: the table stays at **75**. |
+| 2026-11-18 | M8.3 adds builtins 58 `popup_grab` (4 → 1) and 59 `popup_release` (0 → 1) (spec 0011 W26, ADR 0044). The machine rejects a non-positive extent before the host call and otherwise calls `Host::popup_grab`/`Host::popup_release`, pushing the `Status`; the kernel host owns the one machine-wide grab, the owner rule and the release wake, and the defaults are `Invalid`. The table also backfills rows 51–57 that the earlier file-writing entries added without updating this table. No opcode; ABI v1 stays at **75**. |

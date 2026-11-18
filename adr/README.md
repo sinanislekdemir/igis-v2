@@ -68,3 +68,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0041 | [Add a truncate primitive to the home file API](0041-home-truncate.md) | Accepted | 2026-11-18 |
 | 0042 | [Window drag and close are service-owned pointer interactions](0042-service-owned-window-drag-and-close.md) | Accepted (close semantics amended by 0043) | 2026-11-18 |
 | 0043 | [A close-box press is a close request, never a task kill](0043-close-is-a-request.md) | Accepted | 2026-11-18 |
+| 0044 | [A modal popup input grab makes an app-drawn menu reachable over windows](0044-modal-popup-input-grab.md) | Accepted | 2026-11-18 |

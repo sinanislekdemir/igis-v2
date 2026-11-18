@@ -11,22 +11,27 @@ unit desktop_shell;
 // booting the ISO lands on this menu bar. With no graphics the app spawns the
 // text `shell` instead, keeping a serial REPL on a machine that cannot draw.
 //
-// The menu bar has direct items File/Apps/Windows/Terminal and one pull-down,
-// `System` (M2.6.4, spec 0017):
+// The menu bar has direct items File/Windows/Terminal and two pull-downs,
+// `Apps` (M8.3) and `System` (M2.6.4, spec 0017):
 //
 //   File      enumerate the live windows into the terminal window
-//   Apps      launch `clock` with core.spawn (non-blocking)
+//   Apps      pull-down: Calculator, Minesweeper, Text Editor, File Browser,
+//             Clock (clock_window), Widgets; each is a non-blocking core.spawn
 //   Windows   raise the terminal window (the existing "bring forward" item)
 //   Terminal  launch `shell` non-blocking; a later click raises the existing
 //             Terminal window instead of spawning a second shell
 //   Apple     raise the shell's own window
 //   System    pull-down: About igis-v2 (Ctrl+A), Restart (Ctrl+R), Halt (Ctrl+H)
 //
-// The System pull-down is drawn with the M2.4.3 menu model
+// Both pull-downs are drawn with the M2.4.3 menu model
 // (`stdlib.ui_menu_dropdown`/`ui_menu_hit`/`ui_menu_move`/`ui_menu_key`) and
-// the M2.4.4 dialog helpers (`ui_message`/`ui_dialog_button`). The About panel
-// is an ordinary desktop-owned window, so the window service restores what it
-// covered through the usual Expose protocol.
+// the M2.4.4 dialog helpers (`ui_message`/`ui_dialog_button`). They are
+// app-drawn and have no window, so opening one takes the machine-wide modal
+// popup input grab (spec 0011, W26; ADR 0044): every queued pointer and key
+// event goes to this task while the menu is open, which is what makes a row
+// that lies over another window reachable. The About panel is an ordinary
+// desktop-owned window, so the window service restores what it covered through
+// the usual Expose protocol.
 //
 // The shell draws its own window content and presents it with
 // `syslib.window_present`; an `Expose` for its id repaints that content. Window
@@ -51,6 +56,8 @@ const
   MenuHeight = 22;
   SysMenuWidth = 224;
   SysMenuCount = 4;
+  AppMenuWidth = 176;
+  AppMenuCount = 6;
   AboutContentW = 420;
   AboutContentH = 200;
 
@@ -104,6 +111,16 @@ var
   menu_system_x: int;
   menu_system_end: int;
 
+  // The Apps pull-down (M8.3, spec 0012 D20). Items launch an application with a
+  // non-blocking `core.spawn`; the app owns the open state and the highlight.
+  app_items: array[string[64], 16];
+  app_keys: array[string[32], 16];
+  app_open: bool;
+  app_selected: int;
+  apps_opened: int;
+  apps_closed: int;
+  grab_status: Status;
+
   // The System pull-down (M2.6.4, spec 0017). The app owns the open state, the
   // highlight and the item tables; the helpers draw and hit-test only.
   sys_items: array[string[64], 16];
@@ -133,6 +150,8 @@ var
   step: int;
   fail_step: int;
   fail_label: string[64];
+  reason: ExitReason;
+  wait_status: Status;
 
   // Scratch.
   digits: string[16];
@@ -222,7 +241,13 @@ begin
   status := syslib.fill_rect(8, 9, 8, 8, black);
   layout_menu();
   status := syslib.draw_text_prop(menu_file_x, 7, "File", black);
-  status := syslib.draw_text_prop(menu_apps_x, 7, "Apps", black);
+  if app_open then
+  begin
+    status := syslib.fill_rect(menu_apps_x - 4, 2, tw("Apps") + 8, MenuHeight - 4, black);
+    status := syslib.draw_text_prop(menu_apps_x, 7, "Apps", white);
+  end
+  else
+    status := syslib.draw_text_prop(menu_apps_x, 7, "Apps", black);
   status := syslib.draw_text_prop(menu_windows_x, 7, "Windows", black);
   status := syslib.draw_text_prop(menu_terminal_x, 7, "Terminal", black);
   if system_open then
@@ -259,7 +284,7 @@ begin
         status := syslib.draw_text(rect.x + 12, rect.y + 12, "igis-v2", black);
         status := syslib.draw_text(rect.x + 12, rect.y + 28, "M2.3.4 desktop shell", black);
         status := syslib.draw_text(rect.x + 12, rect.y + 52, "File: list windows", black);
-        status := syslib.draw_text(rect.x + 12, rect.y + 68, "Apps: launch clock", black);
+        status := syslib.draw_text(rect.x + 12, rect.y + 68, "Apps: application menu", black);
         status := syslib.draw_text(rect.x + 12, rect.y + 84, "Windows: raise terminal", black);
         status := syslib.draw_text(rect.x + 12, rect.y + 100, "Terminal: launch shell", black);
         status := syslib.draw_text(rect.x + 12, rect.y + 116, "focus:", black);
@@ -375,11 +400,91 @@ end;
 
 procedure open_system_menu();
 begin
+  if app_open then
+    close_apps_menu();
   system_open := true;
   system_selected := stdlib.ui_menu_first(SysMenuCount, sys_items, sys_disabled);
   system_runs := system_runs + 1;
+  grab_status := syslib.popup_grab(
+    menu_system_x - 4, MenuHeight, SysMenuWidth, SysMenuCount * 16 + 2);
   draw_menu_bar();
   draw_system_menu();
+end;
+
+// ---- the Apps pull-down (M8.3, spec 0012 D20) ----------------------------
+//
+// Item order (0-based, the order drawn and the order Up/Down traverses):
+//
+//   0  Calculator       (calculator)
+//   1  Minesweeper      (minesweeper)
+//   2  Text Editor      (editor)
+//   3  File Browser     (browser)
+//   4  Clock            (clock_window)
+//   5  Widgets          (widgets)
+//
+// Every item is a non-blocking `core.spawn`; the shell never waits. The menu
+// frame is `(menu_apps_x - 4, MenuHeight, AppMenuWidth, 6 * 16 + 2)`.
+
+procedure init_apps_menu();
+begin
+  app_items[0] := "Calculator";
+  app_items[1] := "Minesweeper";
+  app_items[2] := "Text Editor";
+  app_items[3] := "File Browser";
+  app_items[4] := "Clock";
+  app_items[5] := "Widgets";
+  pos := 0;
+  while pos < AppMenuCount do
+  begin
+    app_keys[pos] := "";
+    pos := pos + 1;
+  end;
+  app_open := false;
+  app_selected := -1;
+  app_runs := 0;
+  apps_opened := 0;
+  apps_closed := 0;
+end;
+
+procedure draw_apps_menu();
+begin
+  status := stdlib.ui_menu_dropdown(
+    menu_apps_x - 4, MenuHeight, AppMenuWidth,
+    app_items, app_keys, AppMenuCount, app_selected, uint(0), uint(0), true);
+  status := syslib.present(
+    menu_apps_x - 4, MenuHeight, AppMenuWidth, AppMenuCount * 16 + 2);
+end;
+
+procedure open_apps_menu();
+begin
+  if system_open then
+    close_system_menu();
+  app_open := true;
+  app_selected := stdlib.ui_menu_first(AppMenuCount, app_items, uint(0));
+  apps_opened := apps_opened + 1;
+  // The menu is app-drawn and has no window: the grab makes this task the only
+  // recipient of queued input while it is open (spec 0011, W26). The rectangle
+  // is advisory; the click handler below decides inside/outside.
+  grab_status := syslib.popup_grab(
+    menu_apps_x - 4, MenuHeight, AppMenuWidth, AppMenuCount * 16 + 2);
+  out.say("desktop_shell: apps menu open\n");
+  draw_menu_bar();
+  draw_apps_menu();
+end;
+
+procedure close_apps_menu();
+begin
+  if not app_open then
+    return;
+  app_open := false;
+  app_selected := -1;
+  status := syslib.popup_release();
+  repair_menu_area(
+    menu_apps_x - 4, MenuHeight, AppMenuWidth, AppMenuCount * 16 + 2);
+  draw_menu_bar();
+  draw_shell_window();
+  apps_closed := apps_closed + 1;
+  out.say("desktop_shell: apps menu closed\n");
 end;
 
 // Erases the pull-down pixels. The shared shadow has no window for the menu, so
@@ -387,17 +492,17 @@ end;
 // service repaints its chrome and marks its `Expose`, and the owner (the
 // console pump for the terminal, the app otherwise) restores its content. The
 // desktop window is raised again afterwards so focus returns to the shell.
-procedure repair_menu_area();
+procedure repair_menu_area(mx: int; my: int; mw: int; mh: int);
 begin
   under_id := 0;
   pos := 0;
   status := syslib.window_info(uint(pos), win_id, win_rect, win_title);
   while status = Ok and pos < 32 and under_id = 0 do
   begin
-    if not (win_rect.x + win_rect.w <= menu_system_x - 4) then
-      if not (win_rect.x >= menu_system_x - 4 + SysMenuWidth) then
-        if not (win_rect.y + win_rect.h <= MenuHeight) then
-          if not (win_rect.y >= MenuHeight + SysMenuCount * 16 + 2) then
+    if not (win_rect.x + win_rect.w <= mx) then
+      if not (win_rect.x >= mx + mw) then
+        if not (win_rect.y + win_rect.h <= my) then
+          if not (win_rect.y >= my + mh) then
             under_id := win_id;
     pos := pos + 1;
     status := syslib.window_info(uint(pos), win_id, win_rect, win_title);
@@ -414,7 +519,9 @@ begin
     return;
   system_open := false;
   system_selected := -1;
-  repair_menu_area();
+  status := syslib.popup_release();
+  repair_menu_area(
+    menu_system_x - 4, MenuHeight, SysMenuWidth, SysMenuCount * 16 + 2);
   draw_menu_bar();
   draw_shell_window();
 end;
@@ -430,6 +537,103 @@ begin
   begin
     system_selected := hit_row;
     draw_system_menu();
+  end;
+end;
+
+procedure update_apps_highlight();
+begin
+  hit_row := stdlib.ui_menu_hit(
+    menu_apps_x - 4, MenuHeight, AppMenuWidth,
+    app_items, AppMenuCount, ev.x, ev.y);
+  if hit_row >= 0 and hit_row <> app_selected then
+  begin
+    app_selected := hit_row;
+    draw_apps_menu();
+  end;
+end;
+
+// Non-blocking launch of one application-choice item. The label is the menu's
+// own text; the path is the image name resolved under `base/`.
+procedure launch_app(name: const string[0]; label: const string[0]);
+begin
+  launch_status := core.spawn(name, "", diag, last_task);
+  launches := launches + 1;
+  if launch_status = Ok then
+  begin
+    out.say("desktop_shell: launched ");
+    out.say(label);
+    out.say(" task ");
+    out.say_int(last_task);
+    out.say("\n");
+  end
+  else
+  begin
+    out.say("desktop_shell: launch failed: ");
+    out.say(diag.message);
+    out.say("\n");
+  end;
+end;
+
+procedure activate_app_item();
+begin
+  action := app_selected;
+  if action < 0 or action >= AppMenuCount then
+    return;
+  app_runs := app_runs + 1;
+  close_apps_menu();
+  if action = 0 then
+    launch_app("calculator", "Calculator")
+  else if action = 1 then
+    launch_app("minesweeper", "Minesweeper")
+  else if action = 2 then
+    launch_app("editor", "Text Editor")
+  else if action = 3 then
+    launch_app("browser", "File Browser")
+  else if action = 4 then
+    launch_app("clock_window", "Clock")
+  else if action = 5 then
+    launch_app("widgets", "Widgets");
+end;
+
+procedure handle_apps_key(code: uint);
+var
+  key: int;
+begin
+  key := stdlib.ui_key_code(code);
+  // F10 switches to System; F9 closes. Left/Right also switch, because the two
+  // pull-downs are the only two menus.
+  if key = 0x129 then
+  begin
+    close_apps_menu();
+    open_system_menu();
+    return;
+  end;
+  if key = 0x128 then
+  begin
+    close_apps_menu();
+    return;
+  end;
+  action := stdlib.ui_menu_key(code, app_open);
+  if action = 6 then
+    close_apps_menu()
+  else if action = 1 then
+  begin
+    app_selected := stdlib.ui_menu_move(
+      app_selected, AppMenuCount, -1, app_items, uint(0));
+    draw_apps_menu();
+  end
+  else if action = 2 then
+  begin
+    app_selected := stdlib.ui_menu_move(
+      app_selected, AppMenuCount, 1, app_items, uint(0));
+    draw_apps_menu();
+  end
+  else if action = 5 then
+    activate_app_item()
+  else if action = 3 or action = 4 then
+  begin
+    close_apps_menu();
+    open_system_menu();
   end;
 end;
 
@@ -469,7 +673,23 @@ begin
 end;
 
 procedure handle_system_key(code: uint);
+var
+  key: int;
 begin
+  key := stdlib.ui_key_code(code);
+  // F9 switches to Apps; F10 closes. Left/Right also switch, because the two
+  // pull-downs are the only two menus.
+  if key = 0x128 then
+  begin
+    close_system_menu();
+    open_apps_menu();
+    return;
+  end;
+  if key = 0x129 then
+  begin
+    close_system_menu();
+    return;
+  end;
   action := stdlib.ui_menu_key(code, system_open);
   if action = 6 then
     close_system_menu()
@@ -486,14 +706,19 @@ begin
     draw_system_menu();
   end
   else if action = 5 then
-    activate_system_item();
+    activate_system_item()
+  else if action = 3 or action = 4 then
+  begin
+    close_system_menu();
+    open_apps_menu();
+  end;
 end;
 
 // Global shortcuts, only while the desktop's own window has focus and no menu
-// or About panel is open: F10 opens/toggles the System menu, Ctrl+A the About
-// panel, Ctrl+R Restart and Ctrl+H Halt. Keeping them focus-scoped means a key
-// typed into another window (the editor's Ctrl+A, for example) never triggers
-// a system action by accident.
+// or About panel is open: F9 opens/toggles Apps, F10 opens/toggles System,
+// Ctrl+A the About panel, Ctrl+R Restart and Ctrl+H Halt. Keeping them
+// focus-scoped means a key typed into another window (the editor's Ctrl+A, for
+// example) never triggers a system action by accident.
 procedure handle_shortcut(code: uint);
 var
   key: int;
@@ -501,8 +726,14 @@ var
 begin
   key := stdlib.ui_key_code(code);
   mods := stdlib.ui_key_modifiers(code);
-  if key = 0x129 then
-    open_system_menu()
+  if key = 0x128 then
+  begin
+    if app_open then close_apps_menu() else open_apps_menu();
+  end
+  else if key = 0x129 then
+  begin
+    if system_open then close_system_menu() else open_system_menu();
+  end
   else if (mods div 2) mod 2 = 1 then
   begin
     if key = 65 then
@@ -626,11 +857,12 @@ begin
   end;
 end;
 
-// A pointer-down while the System pull-down is open. The kernel routes the
-// click to whichever window is under the point and may raise it; the menu
-// itself is app-drawn and has no window, so its own rectangle is handled here
-// by coordinate before the routed target matters.
-procedure handle_open_menu_click();
+// A pointer-down while a pull-down is open. With the modal grab the shell is
+// the only recipient, so the event is still `window = 0` and the menu's own
+// rectangle is handled here by coordinate: a row activates, anything else
+// dismisses the menu. A click on the menu bar goes back through `handle_menu`,
+// which can switch or close the other menu.
+procedure handle_system_menu_click();
 begin
   if ev.y < MenuHeight then
     handle_menu(ev.x, ev.y)
@@ -652,22 +884,22 @@ begin
   end;
 end;
 
-// Non-blocking launch: the shell must keep serving its menu and events.
-procedure launch_clock();
+procedure handle_apps_menu_click();
 begin
-  launch_status := core.spawn("clock", "", diag, last_task);
-  launches := launches + 1;
-  if launch_status = Ok then
-  begin
-    out.say("desktop_shell: launched clock task ");
-    out.say_int(last_task);
-    out.say("\n");
-  end
+  if ev.y < MenuHeight then
+    handle_menu(ev.x, ev.y)
   else
   begin
-    out.say("desktop_shell: launch failed: ");
-    out.say(diag.message);
-    out.say("\n");
+    hit_row := stdlib.ui_menu_hit(
+      menu_apps_x - 4, MenuHeight, AppMenuWidth,
+      app_items, AppMenuCount, ev.x, ev.y);
+    if hit_row >= 0 then
+    begin
+      app_selected := hit_row;
+      activate_app_item();
+    end
+    else
+      close_apps_menu();
   end;
 end;
 
@@ -725,7 +957,9 @@ begin
   end;
 end;
 
-// A direct menu item: the row is the menu bar, the x ranges are the item pads.
+// A direct menu item or a pull-down label: the row is the menu bar, the x
+// ranges are the item pads. A click on another item dismisses an open menu
+// first; the two pull-downs toggle and exclude each other.
 procedure handle_menu(x: int; y: int);
 begin
   layout_menu();
@@ -735,6 +969,7 @@ begin
     if x >= 2 and x < 20 then
     begin
       if system_open then close_system_menu();
+      if app_open then close_apps_menu();
       status := syslib.window_raise(own);
       draw_shell_window();
       handled := true;
@@ -742,20 +977,23 @@ begin
     else if x >= 20 and x < menu_apps_x - 4 then
     begin
       if system_open then close_system_menu();
+      if app_open then close_apps_menu();
       list_windows();
       file_runs := file_runs + 1;
       handled := true;
     end
     else if x >= menu_apps_x - 4 and x < menu_windows_x - 4 then
     begin
-      if system_open then close_system_menu();
-      launch_clock();
-      app_runs := app_runs + 1;
+      if app_open then
+        close_apps_menu()
+      else
+        open_apps_menu();
       handled := true;
     end
     else if x >= menu_windows_x - 4 and x < menu_terminal_x - 4 then
     begin
       if system_open then close_system_menu();
+      if app_open then close_apps_menu();
       raise_terminal();
       window_runs := window_runs + 1;
       handled := true;
@@ -763,6 +1001,7 @@ begin
     else if x >= menu_terminal_x - 4 and x < menu_terminal_end + 4 then
     begin
       if system_open then close_system_menu();
+      if app_open then close_apps_menu();
       launch_shell();
       terminal_runs := terminal_runs + 1;
       handled := true;
@@ -831,10 +1070,96 @@ begin
     verify("desktop listed", saw_desktop);
     verify("at least three windows", count >= 3);
 
-    // Apps: a non-blocking spawn of `clock`.
+    // ---- Apps pull-down (M8.3, spec 0012 D20) -------------------------
+    // The labels and order are the app's contract; every item launches a
+    // different source application with `core.spawn`.
+    verify(
+      "apps item labels",
+      app_items[0] = "Calculator" and app_items[1] = "Minesweeper"
+        and app_items[2] = "Text Editor" and app_items[3] = "File Browser"
+        and app_items[4] = "Clock" and app_items[5] = "Widgets");
+    verify(
+      "apps menu has no separators",
+      not stdlib.ui_menu_is_separator(app_items[0])
+        and not stdlib.ui_menu_is_separator(app_items[5]));
+    verify(
+      "apps items are selectable",
+      stdlib.ui_menu_selectable(app_items[0], uint(0), 0)
+        and stdlib.ui_menu_selectable(app_items[5], uint(0), 5));
+    // Opening the menu takes the modal grab and launches nothing.
     handle_menu(menu_apps_x + 4, 10);
-    verify("apps item handled", handled and app_runs = 1);
-    verify("clock spawned", launch_status = Ok and last_task > 0 and launches = 1);
+    verify("apps menu open", handled and app_open and not system_open);
+    verify("apps menu first item", app_selected = 0);
+    verify("apps menu grab", grab_status = Ok and apps_opened = 1);
+    verify("apps menu opens no app", launches = 0);
+    verify(
+      "apps accent row",
+      syslib.get_pixel(menu_apps_x + 56, MenuHeight + 13) = uint(0x000080));
+    verify("apps frame", syslib.get_pixel(menu_apps_x - 4, MenuHeight) = black);
+    // Row 1 (Minesweeper) is not selected: its label is black ink on white.
+    ink_found := false;
+    yy := MenuHeight + 1 + 16;
+    while yy < MenuHeight + 1 + 32 and not ink_found do
+    begin
+      xx := menu_apps_x + 16;
+      while xx < menu_apps_x + AppMenuWidth - 8 and not ink_found do
+      begin
+        if syslib.get_pixel(xx, yy) = black then ink_found := true;
+        xx := xx + 1;
+      end;
+      yy := yy + 1;
+    end;
+    verify("apps item ink", ink_found);
+    // Down/Up move the highlight without wrapping or launching.
+    handle_apps_key(uint(0x1130000));
+    verify("apps down", app_selected = 1 and launches = 0);
+    handle_apps_key(uint(0x1120000));
+    verify("apps up", app_selected = 0 and launches = 0);
+    // Enter on Clock: one non-blocking spawn, the menu closes and the grab is
+    // released. `clock_window` runs its deterministic check and exits, so the
+    // shell reaps it with `core.wait` and no child is left behind (a kill right
+    // after `spawn` can race the compile window, spec 0007).
+    handle_apps_key(uint(0x1130000));
+    handle_apps_key(uint(0x1130000));
+    handle_apps_key(uint(0x1130000));
+    handle_apps_key(uint(0x1130000));
+    verify("apps clock selected", app_selected = 4);
+    handle_apps_key(uint(0x1030000));
+    verify(
+      "apps launch",
+      launch_status = Ok and last_task > 0 and launches = 1 and app_runs = 1);
+    verify("apps menu closed by launch", not app_open and not system_open);
+    verify("apps grab released", syslib.popup_release() = NotFound);
+    wait_status := core.wait(last_task, reason);
+    verify("apps child exited", wait_status = Ok);
+    // An outside click dismisses the menu. The grab is modal, so the click is
+    // consumed by the owner and never reaches the window it lies over.
+    handle_menu(menu_apps_x + 4, 10);
+    verify("apps menu reopened", app_open and apps_opened = 2);
+    ev.kind := PointerDown;
+    ev.window := 0;
+    ev.x := 900;
+    ev.y := 400;
+    handle_apps_menu_click();
+    verify("outside click closes apps", not app_open);
+    verify("outside click releases the grab", syslib.popup_release() = NotFound);
+    // F9/F10 toggle their own menu and switch between them; Left/Right switch
+    // too. Every close path releases the grab.
+    handle_shortcut(uint(0x1280000));
+    verify("F9 opens apps", app_open and not system_open and grab_status = Ok);
+    handle_shortcut(uint(0x1290000));
+    verify("F10 switches to system", system_open and not app_open and grab_status = Ok);
+    handle_shortcut(uint(0x1290000));
+    verify("F10 closes system", not system_open);
+    handle_shortcut(uint(0x1280000));
+    verify("F9 reopens apps", app_open);
+    handle_apps_key(uint(0x1110000));
+    verify("right switches to system", system_open and not app_open);
+    handle_system_key(uint(0x1100000));
+    verify("left switches to apps", app_open and not system_open);
+    handle_apps_key(uint(0x1000000));
+    verify("escape closes apps", not app_open);
+    verify("apps grab released after switching", syslib.popup_release() = NotFound);
 
     // Windows: raise the terminal; focus and the top of the z-order follow.
     handle_menu(menu_windows_x + 4, 10);
@@ -904,9 +1229,12 @@ begin
     verify("system up reaches about", system_selected = 0);
     // Escape closes with no action; F10 opens it again.
     handle_system_key(uint(0x1000000));
-    verify("system escape closes", not system_open and about_runs = 0);
+    verify(
+      "system escape closes",
+      not system_open and about_runs = 0
+        and syslib.popup_release() = NotFound);
     handle_shortcut(uint(0x1290000));
-    verify("F10 opens system", system_open);
+    verify("F10 opens system", system_open and grab_status = Ok);
     // Enter activates the highlighted About item.
     handle_system_key(uint(0x1030000));
     verify("about activated", about_runs = 1 and about_open and about_id > 0);
@@ -1075,13 +1403,17 @@ begin
       begin
         if system_open then
           handle_system_key(ev.code)
+        else if app_open then
+          handle_apps_key(ev.code)
         else if ev.window = own or ev.window = 0 then
           handle_shortcut(ev.code);
       end
       else if ev.kind = PointerDown then
       begin
         if system_open then
-          handle_open_menu_click()
+          handle_system_menu_click()
+        else if app_open then
+          handle_apps_menu_click()
         else if ev.window = 0 then
           handle_menu(ev.x, ev.y)
         else if ev.window = own then
@@ -1090,7 +1422,9 @@ begin
       else if ev.kind = PointerMove then
       begin
         if system_open then
-          update_menu_highlight();
+          update_menu_highlight()
+        else if app_open then
+          update_apps_highlight();
       end;
       // Keep the bar visible after every event; no window starts above it.
       draw_menu_bar();
@@ -1110,6 +1444,7 @@ begin
   screen_h := int(syslib.screen_height());
   shell_launched := false;
   terminal_runs := 0;
+  init_apps_menu();
   init_system_menu();
   about_open := false;
   about_id := 0;

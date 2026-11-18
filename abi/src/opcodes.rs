@@ -814,6 +814,33 @@ pub mod builtin {
     /// block, so the retry re-reads the caller's array and `count`.
     pub const NEXT_ANY: u32 = 52;
 
+    // ---- modal popup input grab (spec 0011, W26; ADR 0044) -------------
+    //
+    // An application-drawn popup (the desktop's pull-down menus) has no
+    // window, so a click in it would be routed to the window underneath. The
+    // grab makes the owner task the only recipient of queued input events
+    // until it releases. It is a UI focus mechanism, not an authority
+    // boundary: every task may take the one machine-wide grab, and the
+    // rectangle is advisory for the owner's inside/outside policy.
+
+    /// `syslib.popup_grab(x, y, w, h) -> Status`: take the one machine-wide
+    /// modal popup input grab for the calling task (spec 0011, W26). While it
+    /// is held the window service ignores pointer presses and only the owner
+    /// receives queued input events (`window = 0`, no hit-test or raise); every
+    /// other task's input queue reads report `WouldBlock` and its input
+    /// readiness is false. The rectangle is advisory for the owner's own
+    /// inside/outside handling. `Ok` when the grab is free or already the
+    /// caller's (the rectangle is then updated); `Full` when another task holds
+    /// it; `Invalid` for a non-positive `w`/`h` or disabled graphics. Operands:
+    /// `[x][y][w][h]`.
+    pub const POPUP_GRAB: u32 = 58;
+
+    /// `syslib.popup_release() -> Status`: release the caller's popup grab,
+    /// waking every input waiter so queued events flow again (spec 0011, W26).
+    /// `Ok` for the owner; `NotFound` when no grab is held; `Invalid` for
+    /// another task's grab. No operands.
+    pub const POPUP_RELEASE: u32 = 59;
+
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
         match id {
@@ -874,6 +901,8 @@ pub mod builtin {
             PARSE_F64 => Some((2, 1)),
             POLL_ANY => Some((3, 1)),
             NEXT_ANY => Some((3, 1)),
+            POPUP_GRAB => Some((4, 1)),
+            POPUP_RELEASE => Some((0, 1)),
             _ => None,
         }
     }

@@ -92,6 +92,9 @@ struct WindowHost {
     raised: Vec<u64>,
     presented: Vec<u64>,
     attached: Vec<u64>,
+    grab: Option<(i64, i64, i64, i64)>,
+    last_grab: Option<(i64, i64, i64, i64)>,
+    released: u32,
 }
 
 impl WindowHost {
@@ -112,6 +115,9 @@ impl WindowHost {
             raised: Vec::new(),
             presented: Vec::new(),
             attached: Vec::new(),
+            grab: None,
+            last_grab: None,
+            released: 0,
         }
     }
 }
@@ -178,6 +184,21 @@ impl Host for WindowHost {
             Status::NotFound
         } else {
             Status::Ok
+        }
+    }
+
+    fn popup_grab(&mut self, x: i64, y: i64, w: i64, h: i64) -> Status {
+        self.grab = Some((x, y, w, h));
+        self.last_grab = Some((x, y, w, h));
+        Status::Ok
+    }
+
+    fn popup_release(&mut self) -> Status {
+        self.released += 1;
+        if self.grab.take().is_some() {
+            Status::Ok
+        } else {
+            Status::NotFound
         }
     }
 }
@@ -632,4 +653,97 @@ fn the_default_terminal_attach_is_the_disabled_service() {
         Outcome::Exited(interpreter::ExitReason::Ok)
     );
     assert_eq!(state_word(&state, 0), Status::Invalid as u64);
+}
+
+#[test]
+fn popup_grab_passes_the_rect_and_release_returns_the_host_status() {
+    let mut instructions = Vec::new();
+    for value in [10, 22, 176, 98] {
+        op_const(&mut instructions, value);
+    }
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::POPUP_GRAB,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::POPUP_RELEASE,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 8);
+    op(&mut instructions, opcodes::RET);
+
+    let code = build(&instructions, &[], 64);
+    let mut state = vec![0u8; 64];
+    let mut host = WindowHost::new();
+    assert_eq!(
+        run(&code, &mut state, &mut host),
+        Outcome::Exited(interpreter::ExitReason::Ok)
+    );
+    assert_eq!(
+        host.last_grab,
+        Some((10, 22, 176, 98)),
+        "the four coordinates arrive in declaration order"
+    );
+    assert_eq!(host.released, 1);
+    assert_eq!(state_word(&state, 0), Status::Ok as u64);
+    assert_eq!(state_word(&state, 8), Status::Ok as u64);
+}
+
+#[test]
+fn popup_grab_rejects_a_non_positive_extent_before_the_host_call() {
+    let mut instructions = Vec::new();
+    for value in [10, 22, 0, 98] {
+        op_const(&mut instructions, value);
+    }
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::POPUP_GRAB,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op(&mut instructions, opcodes::RET);
+
+    let code = build(&instructions, &[], 64);
+    let mut state = vec![0u8; 64];
+    let mut host = WindowHost::new();
+    assert_eq!(
+        run(&code, &mut state, &mut host),
+        Outcome::Exited(interpreter::ExitReason::Ok)
+    );
+    assert_eq!(host.grab, None, "the host is never called");
+    assert_eq!(state_word(&state, 0), Status::Invalid as u64);
+}
+
+#[test]
+fn the_default_popup_grab_and_release_are_the_disabled_service() {
+    let mut instructions = Vec::new();
+    for value in [0, 0, 10, 10] {
+        op_const(&mut instructions, value);
+    }
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::POPUP_GRAB,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::POPUP_RELEASE,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 8);
+    op(&mut instructions, opcodes::RET);
+
+    let code = build(&instructions, &[], 64);
+    let mut state = vec![0u8; 64];
+    let mut host = DisabledHost;
+    assert_eq!(
+        run(&code, &mut state, &mut host),
+        Outcome::Exited(interpreter::ExitReason::Ok)
+    );
+    assert_eq!(state_word(&state, 0), Status::Invalid as u64);
+    assert_eq!(state_word(&state, 8), Status::Invalid as u64);
 }

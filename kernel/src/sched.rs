@@ -341,6 +341,14 @@ impl Host for KernelHost {
             abi::layout::event::write(event, expose);
             return Status::Ok;
         }
+        // The modal popup grab owns queued input (spec 0011, W26): a non-owner
+        // sees `WouldBlock` without consuming anything, so the events are kept
+        // for the owner; the owner receives them unchanged (no hit-test, no
+        // raise), because a producer always writes `window = 0` and the owner
+        // applies its own inside/outside policy.
+        if !crate::window::grab_allows(self.current) {
+            return Status::WouldBlock;
+        }
         let status = crate::event::poll(event);
         if status != Status::Ok {
             return status;
@@ -348,7 +356,7 @@ impl Host for KernelHost {
         let Some(mut routed) = abi::layout::event::read(event) else {
             return Status::Invalid;
         };
-        if routed.window == 0 {
+        if routed.window == 0 && !crate::window::grab_active() {
             match routed.kind {
                 abi::EventKind::PointerDown => {
                     if let Some(id) = crate::window::route_click(routed.x, routed.y) {
@@ -384,7 +392,9 @@ impl Host for KernelHost {
     }
 
     fn input_ready(&mut self) -> bool {
-        crate::event::has_event()
+        // The modal popup grab (W26) hides the shared queue from every
+        // non-owner; the caller's own expose/close still count.
+        (crate::event::has_event() && crate::window::grab_allows(self.current))
             || crate::window::has_expose(self.current)
             || crate::window::has_close(self.current)
     }
@@ -443,6 +453,17 @@ impl Host for KernelHost {
             title_len: info.title_len,
             title: info.title,
         })
+    }
+
+    /// The one machine-wide modal popup input grab (spec 0011, W26; ADR 0044).
+    /// The host supplies the caller as the owner; `popup_release` wakes input
+    /// waiters after the window unlock so queued events are deliverable again.
+    fn popup_grab(&mut self, x: i64, y: i64, w: i64, h: i64) -> Status {
+        crate::window::popup_grab(self.current, x, y, w, h)
+    }
+
+    fn popup_release(&mut self) -> Status {
+        crate::window::popup_release(self.current)
     }
 
     // Terminal attach (spec 0014): the host knows the executing task id, so the
@@ -763,7 +784,8 @@ fn loop_body(core: usize) -> ! {
                                     // expose/close marked for this task,
                                     // between the empty read and the block
                                     // above.
-                                    if crate::event::has_event()
+                                    if (crate::event::has_event()
+                                        && crate::window::grab_allows(id))
                                         || crate::window::has_expose(id)
                                         || crate::window::has_close(id)
                                     {

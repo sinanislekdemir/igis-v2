@@ -216,6 +216,16 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
             arch_x86_64::halt();
         }
     }
+    // The one machine-wide modal popup grab (spec 0011, W26; ADR 0044): owner,
+    // `Full`, update, invalid extent, owner-only release and termination
+    // release, all on scratch state.
+    match window::grab_self_check() {
+        Ok(()) => println!("window: grab ok"),
+        Err(step) => {
+            println!("window: grab FAIL at step {step}");
+            arch_x86_64::halt();
+        }
+    }
 
     // The pointer device and the software cursor (spec 0010). This needs the
     // shadow (screen size, cursor compositing) and the console (boot log), and

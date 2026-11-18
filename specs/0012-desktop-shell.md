@@ -103,13 +103,17 @@ resize. Those are M2.4/M2.5.
   a white bar 22 pixels high, a black 8×8 Apple square, the labels `File`, `Apps`,
   `Windows` and `Terminal`, a black baseline on row 21, and the `core.clock()` `HH:MM`
   right-aligned. The bar is application-drawn and is presented after it is drawn and
-  redrawn after every event. There are no dropdown menus in M2.3.4: each label is a
-  direct item; `Terminal` is the M2.5.6 addition.
-- **D11 (MUST):** A pointer-down with `window = 0` at a menu item runs it:
+  redrawn after every event. `File`, `Windows` and `Terminal` are direct items;
+  `Apps` (M8.3, D20) and `System` (M2.6.4) are pull-down menus. A pull-down's label is
+  inverted while its menu is open. Both pull-downs are app-drawn and have no window, so
+  opening one takes the machine-wide modal popup input grab (spec 0011, W26; ADR 0044)
+  and closing it releases the grab; a bar click on the other pull-down switches menus.
+  `F9` toggles Apps and `F10` toggles System.
+- **D11 (MUST):** A pointer-down with `window = 0` at a direct menu item runs it:
   - `File` enumerates the live windows and writes their id, title and frame into the
     terminal window;
-  - `Apps` launches `clock` with `core.spawn` (non-blocking), records the task id, and
-    reports the outcome;
+  - `Apps` toggles the application pull-down (D20). It does not launch anything when it
+    opens; a row activates, and an outside click dismisses the menu;
   - `Windows` raises the existing window titled `Terminal` (the "bring the terminal
     forward" affordance without a dropdown; it sits left of the shell's window, so the
     raise cannot uncover the shell);
@@ -121,7 +125,9 @@ resize. Those are M2.4/M2.5.
   - the Apple square raises the shell's own window.
 
   A launched application is never waited for: the shell uses `core.spawn`, not
-  `core.run`.
+  `core.run`. While a pull-down is open every pointer and key event goes to the shell
+  (the grab); a pointer-down inside a row activates it, a bar click switches or closes,
+  and a click outside the menu frame dismisses it.
 - **D12 (MUST):** The shell may own one window of its own ("Desktop"). It draws the
   window content on open and on every `Expose` for that id, calls `window_present`, and
   ignores exposes for windows it does not own. It repaints the content only while it is
@@ -133,7 +139,9 @@ resize. Those are M2.4/M2.5.
   directly (the boot desktop is itself an event consumer from M2.5.6, so an injected
   click from a second instance could be taken by it; the real pointer path is proved by
   the boot harness and the routing proofs), verify the listing (Terminal and System Log
-  titles present), the spawn result and the focus change, verify that the `Terminal`
+  titles present), the Apps pull-down's item table, grab, highlight movement and one real
+  non-blocking launch (reaped with `core.wait`, so no child is left), the System menu and
+  its About panel, the focus change, verify that the `Terminal`
   item raises the already-live terminal (check mode runs from a shell that holds it, so
   it never spawns a second shell), verify enumeration ends in `NotFound` and
   `window_present` succeeds, and print `desktop_shell: ok`. Normal mode draws the same
@@ -187,6 +195,23 @@ resize. Those are M2.4/M2.5.
   exactly the pre-M2.5.6 boot. The shell's terminal (`core.write` and its own
   `core.read_input` echo) is independent of the queue, though the shell's input loop
   also consumes key events when it is waiting at the prompt.
+- **D20 (MUST):** The `Apps` item is the application-selection pull-down (M8.3). It has
+  one 16-pixel row per item, in this order: `Calculator` → `calculator`, `Minesweeper` →
+  `minesweeper`, `Text Editor` → `editor`, `File Browser` → `browser`, `Clock` →
+  `clock_window`, `Widgets` → `widgets`. The frame is
+  `(menu_apps_x - 4, MenuHeight, 176, 6 * 16 + 2)`; it is drawn with the M2.4.3 menu
+  helpers and the labels are the app's own strings. Opening the menu takes the modal
+  popup input grab (spec 0011, W26) with the frame as the advisory rectangle and launches
+  nothing; closing it (an item, Escape, a bar switch, an outside click) releases the
+  grab. A row activation is a **non-blocking** `core.spawn(name, "", diag, id)` and logs
+  `desktop_shell: launched <label> task <id>` (or the diagnostic on failure); the desktop
+  never waits in normal mode. `F9` toggles Apps, `F10` toggles System, Up/Down move the
+  highlight, Enter activates and Left/Right switch between the two pull-downs. The check
+  mode verifies the item table, both menus' grab/open/close, one real launch (the
+  `clock_window` deterministic check exits on its own and is reaped with `core.wait`),
+  the outside-click dismissal, the key switching and the pixels; `scripts/apps_menu_qmp.py`
+  proves a real `Clock` click at row 4 (over the kernel Terminal) on the boot desktop.
+  Submenus, filesystem app discovery and a task switcher are out of scope.
 
 ## Design
 
@@ -335,6 +360,11 @@ while that id is its own; otherwise it presents what the service last left.
 | `window_info` title destination smaller than 64 | Compile error (`var string` capacity) |
 | Shell normal mode cannot promote to realtime | It keeps pumping under the normal budget (the stand-in for a screenshot window) |
 | Full-screen `clear` during the shell | Out of policy: the shell does not clear; apps that do erase the bar's pixels (D14/D8) |
+| A pull-down row lies over another window | The open menu holds the popup grab, so the click reaches the shell rather than the window underneath; before M8.3 the window got it (and a title-bar row was a drag) |
+| Apps is opened | Nothing is launched; the menu, highlight and grab change, and the first row is selected |
+| An Apps row is activated | One non-blocking `core.spawn`; the menu closes and releases the grab; a failed spawn logs the diagnostic |
+| A click outside an open pull-down | The shell is the only recipient (grab) and dismisses the menu; the click is consumed, never forwarded to the covered window |
+| A pull-down is open and its owner exits | `Task::reclaim` releases the grab and wakes input waiters; the menu pixels are left as last drawn (the window repair restores covered windows) |
 
 ## Alternatives considered
 
@@ -371,3 +401,4 @@ while that id is its own; otherwise it presents what the service last left.
 | 2026-11-17 | M2.5.6 boot to the desktop: `entrypoint` (the `desktop_shell` source staged under that file name) is the boot entry, `shell` the fallback; the `Terminal` menu item spawns `shell` with `core.spawn` and later clicks raise the live window; the desktop never attaches the terminal; graphics-disabled boot spawns the text shell. D19 records the permanent-queue-consumer limitation and the `--shell` image used for the event-injecting regression suite. `scripts/boot_desktop_qmp.py` proves the boot menu click and captures `igis-boot-desktop.png`. |
 | 2026-11-17 | M2.6.1 (spec 0015, ADR 0030): the desktop shell's menu-bar labels and clock use the proportional font, and the service title bar does too; the item hit ranges are derived from the measured label widths. D3 is strengthened: `console::paint_cell`/`repaint` now call `window::paint_visible_parts`, which holds the window table lock across the paint, replacing the bounded generation retry (a cell painted with stale parts could still overwrite a newly opened window's chrome once; `desktop_shell check` reproduced it on `-smp 4`). The generation still follows a moved terminal on the next pump. |
 | 2026-11-17 | M2.6.2 (spec 0016, ADR 0031): D3's per-cell present is replaced by one present per byte run. `Terminal` keeps a bounded dirty rectangle; `paint_cell` draws and marks it, `write_bytes`/`_print` flush after the run, the input echo defers to one `flush_pending` at the end of `poll_input` (after `pump`), and `repaint` clears the box and presents each visible part once. The flush re-reads the visible parts under `WINDOW` and copies only the dirty rectangle from the current shadow. The console byte stream, line discipline, lock order (`CONSOLE → WINDOW → SCREEN`) and every grid/pixel proof are unchanged. |
+| 2026-11-18 | D20 added and D10/D11 rewritten (M8.3): the `Apps` label becomes an application-selection pull-down (Calculator, Minesweeper, Text Editor, File Browser, Clock, Widgets) whose rows launch with non-blocking `core.spawn` and whose open/close takes/releases the modal popup input grab (spec 0011, W26; ADR 0044). Both pull-downs now take the grab, so a row over another window — and the System menu's rows below `y = 26` — reach the shell instead of the covered window or its title-bar drag. F9/F10 toggle Apps/System, Up/Down/Enter/Escape drive the open menu and Left/Right switch. D13's check mode covers both menus, the grab, one real launch and the outside click; `scripts/apps_menu_qmp.py` proves the boot-desktop Clock click over the Terminal. No opcode or `stdlib` helper is added (ABI v1 stays 75). |

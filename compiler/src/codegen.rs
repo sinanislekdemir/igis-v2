@@ -7362,6 +7362,10 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::enumeration(STATUS_ENUM)))
             }
+            // Modal popup input grab (spec 0011, W26; ADR 0044). Delegated to a
+            // helper for the same stack-frame reason as `fs_write_call`.
+            "syslib.popup_grab" => self.popup_grab_call(args, line, column),
+            "syslib.popup_release" => self.popup_release_call(args, line, column),
             // Ring operations (spec 0003, "Rings") are compiler-recognised
             // built-in procedures, not host builtins: they lower to the
             // ordinary reference/copy/branch instructions over the ring's
@@ -8164,6 +8168,65 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 }
             }
         }
+    }
+
+    /// `syslib.popup_grab(x, y, w, h) -> Status` (spec 0011, W26; ADR 0044).
+    ///
+    /// A separate function rather than another arm of [`Self::call`]: the
+    /// dispatcher is the deepest frame in a debug build, and the host tests'
+    /// compilation of `widgets` is already near the default thread stack (the
+    /// same reason `fs_write_call` exists).
+    fn popup_grab_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 4 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!(
+                    "`syslib.popup_grab` expects 4 arguments, got {}",
+                    args.len()
+                ),
+            ));
+        }
+        for (index, name) in ["x", "y", "w", "h"].iter().enumerate() {
+            let value = self.expr_scalar(args[index])?;
+            if value.kind != Kind::Int {
+                return Err(self.err_at(
+                    args[index],
+                    format_args!("`syslib.popup_grab` expects an `int` {name}, found `{value}`"),
+                ));
+            }
+        }
+        self.one(opcodes::BUILTIN, builtin::POPUP_GRAB)?;
+        self.pop(4)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// `syslib.popup_release() -> Status` (spec 0011, W26; ADR 0044).
+    fn popup_release_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if !args.is_empty() {
+            return Err(self.err(
+                line,
+                column,
+                format_args!(
+                    "`syslib.popup_release` expects 0 arguments, got {}",
+                    args.len()
+                ),
+            ));
+        }
+        self.one(opcodes::BUILTIN, builtin::POPUP_RELEASE)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
     }
 
     /// `core.fs_write(path, offset, data, var written) -> Status`

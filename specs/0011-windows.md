@@ -209,6 +209,31 @@ an `int`; `0` is never a valid id.
   `WaitFor::Input` after dropping the window lock. A `Close` addressed in the queue (an
   injected event with a non-zero `window`) passes through unchanged. The window is removed
   only by its owner (`window_close`) or by its task's termination (`close_task`).
+- **W26 (MUST):** One machine-wide **modal popup input grab** makes an application-drawn
+  popup (a pull-down menu with no window) usable over other windows (M8.3, ADR 0044).
+  `syslib.popup_grab(x, y, w, h) -> Status` (builtin 58) makes the calling task the owner
+  and stores an **advisory** rectangle; `syslib.popup_release() -> Status` (builtin 59)
+  releases it. There is exactly one grab machine-wide, behind the same table lock.
+  `popup_grab` is `Ok` when the grab is free or already the caller's (the rectangle is
+  then updated), `Full` for another task, and `Invalid` for a non-positive `w`/`h` or
+  disabled graphics. `popup_release` is `Ok` for the owner, `NotFound` when none is held
+  and `Invalid` for another task. Taking a grab ends any pointer drag.
+  While a grab is active:
+  - `window::pointer_event` ignores pointer presses: no title-bar drag starts and no close
+    box posts a request (W22/W23 are suspended, not changed); the press is still published
+    as an ordinary event for the owner;
+  - `KernelHost::poll_event` still serves the caller's own pending `Close`/`Expose`
+    (W12/W25), then returns `WouldBlock` **without consuming the queue** to any task other
+    than the owner;
+  - the owner dequeues events unchanged: producers keep `window = 0`, so there is no
+    hit-test, no raise and no focus change while the popup is open;
+  - every input-readiness probe (`input_ready`, the scheduler's post-block `Input`
+    re-check and `next_any` source `1`) reports the queue only for the owner, through the
+    single `window::grab_allows(task)` rule; the owner's own expose/close still count.
+  Releasing the grab (the owner's call or `Task::reclaim` through `close_task`) wakes
+  every input waiter after the table lock is dropped, so queued events are deliverable
+  again. The rectangle is advisory only: the service never filters by it. A grab is a UI
+  focus mechanism, not an authority boundary; there is no timeout.
 
 ## Design
 
@@ -665,6 +690,60 @@ System → About through QMP pointer events, click the About close box, wait for
 the scheduler idle summary or a `halt:` line appears. Resize remains deferred (open
 question 4): this slice drags whole windows only.
 
+### Modal popup input grab (implemented in M8.3)
+
+W26 adds one machine-wide grab, held by at most one task. It exists because an
+application-drawn pull-down has no window: without it a click in a lower menu row is
+positionally routed to the window underneath (W16), and a press on a title-bar row is
+consumed as a service drag (W22/W24), so the menu never sees the click. ADR 0044 records
+the decision and the alternatives.
+
+- **State.** `Table` carries `grab: Option<Grab>` beside the drag; `Grab` is `{ owner,
+  rect }`. `Table::grab` rejects a non-positive extent (`Invalid`) and another owner
+  (`Full`), updates the rectangle for the owner, and clears any in-progress drag. The
+  public wrappers are `window::popup_grab(owner, x, y, w, h)` (reads the screen size first,
+  like `open`) and `window::popup_release(owner)`.
+- **Pointer service.** `window::pointer_event` checks the grab under the table lock before
+  classifying a press and returns `false` (not consumed) while one is held. The press is
+  therefore published normally and reaches the owner; no drag starts, no close box posts
+  and no window is raised by the click.
+- **Polling.** `KernelHost::poll_event` serves the caller's pending `Close` then `Expose`
+  as before, and only then applies the grab: a non-owner gets `WouldBlock` with the queue
+  untouched, and the owner gets the event exactly as produced (`window = 0`), skipping the
+  hit-test/raise branch. The queue itself is never filtered, so no event is lost.
+- **Readiness.** `window::grab_allows(owner)` is the single rule: no grab, or the caller is
+  the owner. `KernelHost::input_ready`, the scheduler's post-block `Input` re-check and
+  `task::source_ready` for `SOURCE_INPUT` all use `event::has_event() && grab_allows(task)`
+  and still add the caller's own `has_expose`/`has_close`.
+- **Release.** `popup_release` and `Table::close_task` clear the grab; both wrappers drop
+  the table lock and then call `task::wake_input`, so every blocked reader can observe the
+  queue again. `Task::reclaim` reaches `close_task` on every destruction path (W8).
+- **Advisory rectangle.** The service stores and returns nothing about the rectangle after
+  the call; the owner uses its own copy of the frame to decide whether a click was inside
+  the popup or dismisses it. Routing is modal, not geometric, so no coordinate comparison
+  happens in the kernel.
+- **Lock order.** The grab lives in the window table, so no new lock is introduced. The
+  queue still never takes the window lock, and the pointer path still publishes after the
+  service hook. `grab_allows` takes the table lock and `has_event` takes the queue lock in
+  separate calls; there is no nesting in either direction.
+
+`window::grab_self_check` proves the pure rules on a scratch table: the free state,
+`Ok`/`Full`/update, a non-positive extent, another task's release, owner release and
+`NotFound` afterwards, and `close_task` releasing only its own task's grab. Boot prints
+`window: grab ok` beside `window: drag ok` and `window: close ok`.
+
+The desktop opens its `Apps` and `System` pull-downs with
+`syslib.popup_grab(menu_x - 4, MenuHeight, width, rows * 16 + 2)` and releases on every
+close path (Escape, an item activation, a bar switch, an outside click, a signalled
+`Close`). Because a click on a row over the kernel Terminal now reaches the menu,
+`Clock` — row 4 at `y = 94` — is the harness's regression proof.
+`scripts/apps_menu_qmp.py` opens Apps, captures the pull-down, clicks Clock over the
+Terminal, waits for `clock_window: ok`, dismisses System with an outside click, and then
+launches the terminal and types `terminal`; it fails on the idle-summary/halt lines.
+`samples/apps/base/desktop_shell check` exercises both menus' open/close and grab, the
+Apps item table, one real launch, the outside-click dismissal, the F9/F10 and Left/Right
+switching, and the pixel checks on `-smp 4` and `-smp 1`.
+
 ## Interfaces
 
 ### Language surface
@@ -681,6 +760,8 @@ syslib.window_focus() -> int
 syslib.window_present(id: int) -> Status
 syslib.window_info(index: uint, var id: int, var rect: Rect,
                    var title: string[64]) -> Status
+syslib.popup_grab(x: int, y: int, w: int, h: int) -> Status
+syslib.popup_release() -> Status
 ```
 
 `(x, y)` in `window_open` and `window_move` is the **frame origin**; `(w, h)` in
@@ -731,6 +812,8 @@ fn window_content_rect(&mut self, id: u64) -> Result<Rect, Status> { Err(Status:
 fn window_focus(&mut self) -> u64 { 0 }
 fn window_present(&mut self, id: u64) -> Status { Status::Invalid }
 fn window_info(&mut self, index: u64) -> Option<WindowInfo> { None }
+fn popup_grab(&mut self, x: i64, y: i64, w: i64, h: i64) -> Status { Status::Invalid }
+fn popup_release(&mut self) -> Status { Status::Invalid }
 ```
 
 `WindowInfo` (interpreter crate) carries `id`, the frame `Rect`, and a fixed
@@ -763,6 +846,10 @@ pub fn take_close(owner: u64) -> Option<u64>;    // poll-time close request
 pub fn has_close(owner: u64) -> bool;            // input block re-check
 pub fn route_click(x: i64, y: i64) -> Option<u64>; // hit-test + raise + repair
 pub fn close_task(owner: u64);       // Task::reclaim
+pub fn popup_grab(owner: u64, x: i64, y: i64, w: i64, h: i64) -> Status; // W26
+pub fn popup_release(owner: u64) -> Status;      // W26, wakes input waiters
+pub fn grab_allows(owner: u64) -> bool;          // input readiness rule (W26)
+pub fn grab_active() -> bool;                    // poll-time routing check
 ```
 
 The monolithic table is one `SpinLock<Table>`. `open` reads the screen size before taking
@@ -800,6 +887,17 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | Owner ignores a `Close` request | The window stays live with its last content; no retry and no automatic close (W18/W23) |
 | Close request for a task that owns several windows | Only the topmost pending window is returned per take; each window carries its own flag |
 | Dragged window closes or its owner terminates | The drag is cancelled in the same removal pass |
+| `popup_grab` from a second task while one is held | `Full`; the held grab and its rectangle are unchanged |
+| `popup_grab` repeat by the owner | `Ok`; the advisory rectangle is updated |
+| `popup_grab` with `w <= 0` or `h <= 0` | `Invalid`; the held grab is unchanged, and the machine rejects the extent before the host call |
+| `popup_release` with no grab | `NotFound`; nothing changes |
+| `popup_release` by a non-owner | `Invalid`; the owner's grab stays |
+| A press while a grab is held | The service ignores it (no drag, no close request) and still publishes the event; the owner receives it with `window = 0` |
+| A non-owner polls input while a grab is held | `WouldBlock`, and the queued event is not consumed, so the owner still receives it |
+| A non-owner is blocked in `next_event` when a grab starts | It stays blocked; release wakes it and the queued events flow again |
+| The grab owner terminates while holding the grab | `Task::reclaim` releases the grab and wakes input waiters |
+| Graphics disabled | `popup_grab` is `Invalid` like the other service calls; `popup_release` of a nonexistent grab is `NotFound` |
+| A menu owner never releases the grab | Input to other tasks stays blocked until it releases or terminates; there is no timeout (accepted, ADR 0044) |
 
 ## Alternatives considered
 
@@ -841,3 +939,4 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | 2026-11-18 | M8.1 implemented (W22–W24, ADR 0042): service-owned pointer drag from the title bar (raise/focus, grab offset, clamp, release, ignored second press, cancellation on close) and close-box termination of the owner task via `task::request_kill` and `Task::reclaim`; owner-0 close boxes are inert. The hook runs from both `gfx` pointer paths after the graphics lock is dropped, keeps `WINDOW → SCREEN` and never holds the table lock across `request_kill`/`wake_input`; a handled press is suppressed before event publication. `window::drag_self_check` prints `window: drag ok`, and `samples/apps/base/windows_drag` (+ `windows_drag_victim`) proves both interactions headlessly. Resize remains deferred (open question 4). |
 | 2026-11-18 | M8.1 follow-up: W24 strengthened against an SMP poll race. The two pointer paths serialise the whole transaction with a dedicated `POINTER_ORDER` lock (`POINTER_ORDER → SCREEN`, `POINTER_ORDER → WINDOW → SCREEN`), run the service hook after dropping the graphics lock, and publish the events afterwards with `push_pointer(..., suppress_down)` omitting a consumed press; `event::consume_pointer_down` is deleted, so a handled `PointerDown` is never enqueued and a woken client cannot observe it. A second press during a drag is now `Consumed` (swallowed) instead of delivered. |
 | 2026-11-18 | M8.2 implemented (W23 rewritten, W25 added; ADR 0043 amends ADR 0042's close clause): the close box posts an owner-only `EventKind.Close` (ordinal 6, `window = id`) instead of `task::request_kill`; the window stays until its owner closes it. One per-window `close_pending` flag with `take_close`/`has_close` (topmost-first, owner-only), served before a pending `Expose` and before the queue; `input_ready`, the scheduler's post-block `Input` re-check and `next_any` source 1 include it, and the pointer hook wakes `WaitFor::Input` after the unlock. `window::close_self_check` prints `window: close ok`; `windows_drag` proves a same-task dialog and a victim that closes itself and exits `Ok`; `desktop_shell check` closes About from its real close box and stays alive; `scripts/about_close_qmp.py` reproduces the reported System → About → close-box → Terminal scenario on the boot desktop. `desktop_shell` handles `Close` in both modes, the user-facing apps close their own windows, and proof/demo windows may ignore it. No opcode, builtin, `Host`, `syslib` or `stdlib` change (ABI v1 stays 75). |
+| 2026-11-18 | M8.3 implemented (W26 added; ADR 0044): one machine-wide modal popup input grab in the window table, exposed as `syslib.popup_grab`/`popup_release` (builtins 58/59, no opcode; ABI v1 stays 75). The pointer service ignores presses while a grab is held; `KernelHost::poll_event` gives non-owners `WouldBlock` without consuming the queue and passes producer events (`window = 0`, no hit-test/raise) to the owner; `input_ready`, the scheduler's post-block re-check and `next_any` source 1 use the one `grab_allows(task)` rule; release and `close_task` wake input waiters. `window::grab_self_check` prints `window: grab ok`. The desktop's Apps menu (Calculator, Minesweeper, Text Editor, File Browser, Clock, Widgets) and the existing System menu take the grab on open; `scripts/apps_menu_qmp.py` launches Clock from a row over the kernel Terminal; `desktop_shell check` covers both menus, the grab, one launch and the outside-click dismissal. |

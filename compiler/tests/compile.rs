@@ -8854,3 +8854,96 @@ fn too_many_modules_are_refused_at_the_unit_cap() {
     );
     assert_eq!(compiler::MAX_MODULE_UNITS, 15);
 }
+
+#[test]
+fn popup_grab_and_release_are_builtins_58_and_59_and_check_their_signatures() {
+    use abi::opcodes::{self, builtin};
+
+    let source = r#"
+unit t;
+uses core, syslib;
+var
+  status: Status;
+  x: int;
+  y: int;
+  w: int;
+  h: int;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.popup_grab(x, y, w, h);
+  status := syslib.popup_grab(10, 22, 176, 98);
+  status := syslib.popup_release();
+end;
+"#;
+    let package = compile(source.as_bytes(), "t.ig").expect("popup grab compiles");
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+    let mut seen = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        if op == opcodes::BUILTIN {
+            seen.push(u32::from_le_bytes(
+                instructions[pc + 4..pc + 8].try_into().unwrap(),
+            ));
+        }
+        pc += words * 4;
+    }
+    assert_eq!(
+        seen,
+        vec![
+            builtin::POPUP_GRAB,
+            builtin::POPUP_GRAB,
+            builtin::POPUP_RELEASE
+        ]
+    );
+    assert_eq!(builtin::POPUP_GRAB, 58);
+    assert_eq!(builtin::POPUP_RELEASE, 59);
+    assert_eq!(builtin::effect(builtin::POPUP_GRAB), Some((4, 1)));
+    assert_eq!(builtin::effect(builtin::POPUP_RELEASE), Some((0, 1)));
+
+    let cases = [
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.popup_grab(0, 0, 10);
+end;
+"#,
+            "`syslib.popup_grab` expects 4 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.popup_grab(0, 0, uint(10), 10);
+end;
+"#,
+            "`syslib.popup_grab` expects an `int` w",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.popup_release(1);
+end;
+"#,
+            "`syslib.popup_release` expects 0 arguments",
+        ),
+    ];
+    for (source, expected) in cases {
+        let error = compile(source.as_bytes(), "t.ig").expect_err("must be a compile error");
+        assert!(error.message.contains(expected), "{}", error.message);
+    }
+}

@@ -1388,6 +1388,8 @@ syslib.window_focus() -> int
 syslib.window_present(id: int) -> Status
 syslib.window_info(index: uint, var id: int, var rect: Rect,
                    var title: string[64]) -> Status
+syslib.popup_grab(x: int, y: int, w: int, h: int) -> Status
+syslib.popup_release() -> Status
 ```
 
 `(x, y)` is the frame origin and `(w, h)` the content size; the service derives the frame
@@ -1407,6 +1409,15 @@ are truncated to that cap by the window service. When graphics are disabled, `op
 the rect reads are `Invalid`, `close`/`raise`/`move` are `NotFound`, `window_info` is
 `NotFound` and `window_focus` is `0`. The window model is fixed by spec 0011 and ADR 0024;
 no opcode is added.
+
+`popup_grab`/`popup_release` (M8.3; spec 0011, W26; ADR 0044) are the one machine-wide
+modal popup input grab: while a task holds it, only that task receives queued input events
+and the window service ignores pointer presses, so an application-drawn pull-down is usable
+over other windows. `popup_grab` is `Ok` for a free grab or the caller's own (updating the
+advisory rectangle), `Full` for another task and `Invalid` for a non-positive extent or
+disabled graphics; `popup_release` is `Ok` for the owner, `NotFound` when none is held and
+`Invalid` for another task. It is a UI focus mechanism, not an authority boundary. No
+opcode is added; both are host builtins 58/59 (spec 0008).
 
 ## Constants and manifests
 
@@ -2187,3 +2198,4 @@ controls and input dialog for the QMP screenshot harness.
 | 2026-11-17 | Q39 adds multi-source waits. `core.poll_any` (builtin 51) and `core.next_any` (builtin 52) inspect `const array[uint, 8]` with `count` in `1..=8` and write the first ready index through `var ready`; source `0` is one completed console line, `1` one input event (including a pending `Expose`) and every other value a stream handle whose data or close is ready (a read select; send space is not included). `core.stream_source(ep) -> uint` is compiler-lowered and is the only way to name a stream in the array. `poll_any` returns `WouldBlock` (destination untouched) when nothing is ready; `next_any` blocks on the whole set. Readiness is a snapshot, not a reservation: the following `read_line`/`next_event`/`recv` is authoritative. C10 states the one-wait rule. Spec 0007, ADR 0036. |
 | 2026-11-17 | Q44 resolved (ADR 0037): console input is `core.read_input(var dst: bytes[N]) -> int`, a raw non-blocking read (0 when empty) reusing the retired `READ_LINE` opcode slot as `READ_INPUT` (ABI v1 stays at 75). A `string` destination is a compile error (a partial read could split a code point); callers convert with the checked slice. Source `0` of `core.poll_any`/`core.next_any` now means a console byte is available, and the shell echoes/edits its own `string[256]` with the `stdlib.str_*` helpers. The keyboard feeds events only, never the byte stream; `core.read_line` no longer exists. |
 | 2026-11-18 | `EventKind.Close` joins the predeclared enum (ordinal 6, M8.2/spec 0011 W25). It is a global constant like `Expose`; an application compares `ev.kind = Close` and closes its own window. The compiler's predeclared variant list carries the same order (`PointerMove` 0 … `Expose` 5, `Close` 6); `Event`'s layout and every other type are unchanged. |
+| 2026-11-18 | M8.3 adds the modal popup input grab surface (spec 0011 W26, ADR 0044): `syslib.popup_grab(x: int, y: int, w: int, h: int) -> Status` and `syslib.popup_release() -> Status`. The grab is machine-wide and task-owned; while held, only the owner receives queued input events and the window service ignores pointer presses, so an app-drawn pull-down works over another window. `Ok`/`Full`/`Invalid` on take (a repeat by the owner updates the advisory rectangle), `Ok`/`NotFound`/`Invalid` on release. Host builtins 58/59, no opcode; the machine rejects a non-positive extent before the host call. |

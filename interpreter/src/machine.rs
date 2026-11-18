@@ -416,6 +416,22 @@ pub trait Host {
         None
     }
 
+    /// Takes the one machine-wide modal popup input grab (`syslib.popup_grab`,
+    /// spec 0011, W26; ADR 0044). The calling task is the owner; the rectangle
+    /// is advisory for its inside/outside policy. The machine has already
+    /// rejected a non-positive extent. The default is a disabled service
+    /// (`Invalid`), so `langhost` and a bare host stay safe.
+    fn popup_grab(&mut self, _x: i64, _y: i64, _w: i64, _h: i64) -> Status {
+        Status::Invalid
+    }
+
+    /// Releases the caller's popup grab (`syslib.popup_release`, spec 0011,
+    /// W26). The default is a disabled service (`Invalid`). The kernel also
+    /// wakes every input waiter after the release so queued events flow again.
+    fn popup_release(&mut self) -> Status {
+        Status::Invalid
+    }
+
     /// Attaches the console's terminal grid to a window owned by the calling
     /// task (`core.terminal_attach`, spec 0014). The host supplies the caller's
     /// task id and validates the window ownership itself. The default is
@@ -1931,6 +1947,26 @@ impl Machine {
                     builtin::WINDOW_PRESENT => {
                         let window = self.pop(stack)?;
                         let status = host.window_present(window);
+                        self.push(stack, status as u64)?;
+                    }
+                    // Modal popup input grab (spec 0011, W26; ADR 0044). The
+                    // machine rejects a non-positive extent before the host
+                    // call, so every host agrees that such a rectangle is
+                    // `Invalid`; the host owns ownership and the one-grab rule.
+                    builtin::POPUP_GRAB => {
+                        let h = self.pop(stack)?;
+                        let w = self.pop(stack)?;
+                        let y = self.pop(stack)?;
+                        let x = self.pop(stack)?;
+                        if w as i64 <= 0 || h as i64 <= 0 {
+                            self.push(stack, Status::Invalid as u64)?;
+                        } else {
+                            let status = host.popup_grab(x as i64, y as i64, w as i64, h as i64);
+                            self.push(stack, status as u64)?;
+                        }
+                    }
+                    builtin::POPUP_RELEASE => {
+                        let status = host.popup_release();
                         self.push(stack, status as u64)?;
                     }
                     // Terminal attach (spec 0014): the kernel host supplies the
