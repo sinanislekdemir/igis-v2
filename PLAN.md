@@ -14,8 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `866b976` (M6.1: ATA home disk, `ext2w` read path and the
-  router) plus this docs commit. The tree is clean.
+- **Last commit:** `a06feb1` (M6.2: the ext2 writer and `core.fs_write`) plus this
+  docs commit. The tree is clean; `build/home.img` was reset to the initial tree.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -78,17 +78,20 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   uppercase letter codes, so `calculator`, `editor`, `browser` and `minesweeper`
   now accept both shapes and QMP `send-key` exits each (`task 6..9: exit Ok`).
   This also fixed a pre-existing bug in the editor/browser shortcuts.
-- **Verified at that point (M6.1, independently by the parent):** **458 host tests**
-  (6 new `ext2w` tests). Boot with the drive (`ext2w: home ok`, `ext2: tree ok`)
-  and without (`ext2w: no home disk`) on `-smp 4` and `-smp 1`; an all-zero image
-  prints `ext2w: home failed` and `/home` falls back read-only. The 29-command
-  batch passes in all four combinations; `e2fsck -fn build/home.img` exits 0;
-  visual golden (`37802052…e9e81c9f`) and `boot_desktop_qmp.py` pass on both.
-- **Next slice:** **M6.2 — the ext2 writer and `core.fs_write`** (spec 0019
-  W1–W7, A1–A3): allocation/free, inode and block-pointer growth, offset writes
-  with gap zero-fill, implicit create, the write-through cache, builtin 53, and
-  the host `e2fsck` proof. Then M6.3 (`remove`/`mkdir`/`rename` and the apps) and
-  M6.4 (reboot persistence).
+- **Verified at that point (M6.2, independently by the parent):** **474 host tests**
+  (9 new `ext2w` write tests, including `e2fsck -fn` on the mutated image).
+  With the drive, `run home_write` prints its nine step lines and
+  `home_write: ok` on `-smp 4` and `-smp 1`; without it,
+  `home_write: no writable home` and `files: ok`. `e2fsck -fn` exits 0 after the
+  writes (12 → 13 files), and the image was reset afterwards (12 files);
+  `run files` still ok; visual golden (`37802052…e9e81c9f`) and
+  `boot_desktop_qmp.py` pass on both. The no-home batch entry was checked
+  separately with the right verdict (the batch pattern expects `ok`).
+- **Next slice:** **M6.3 — `remove`, `mkdir`, `rename` and the applications**
+  (spec 0019 W3–W6, A1–A3, E1–E2): free blocks/inodes, directory entry removal,
+  `mkdir`, `rename` with a regular-file replace, builtins 54–56, the editor save
+  (temporary + rename) and the browser actions, plus host `ext2w` tests with
+  `e2fsck`. Then M6.4 (reboot persistence).
 
 - **M2.6.3 complete:** the headless visual-regression harness (spec 0009 "Visual proof",
   G21; ADR 0032) and the resolution of M2.1.2. `samples/apps/visual` opens a window whose
@@ -963,14 +966,24 @@ parent verifies each.
   `run files` exercises the home listing and a 238-byte `home/readme.txt` read;
   `e2fsck -fn` exits 0; visual golden and `boot_desktop_qmp.py` pass on both.
 
-- [ ] **M6.2 The ext2 writer and `core.fs_write`.**
-  `ext2w` gains block/inode allocation and free, inode and superblock/group count
+- [x] **M6.2 The ext2 writer and `core.fs_write`.**
+  `ext2w` gains block/inode allocation, inode and superblock/group count
   updates, block-pointer growth (direct/single/double indirect), writing at an
   offset with gap zero-fill, implicit create, and the write-through block cache.
   Host tests over the in-memory device. `core.fs_write(path, offset, data, var
   written) -> Status` (builtin 53) plus interpreter/compiler checks; writes only
-  under `home/`. Kernel proof: write a file, read it back, reboot the image with
-  `e2fsck -fn` clean. No remove/rename yet.
+  under `home/`. Kernel proof: write a file, read it back, `e2fsck -fn` clean.
+  **Done (`a06feb1`):** 474 host tests (9 new `ext2w` write tests including
+  `e2fsck -fn` on the mutated image); writable mount marks the fs clean, allocates
+  blocks/inodes (bitmap → group descriptor → superblock), plans capacity before
+  mutating, writes data/inode/dirent in order; `core.fs_write` (builtin 53) is
+  `fs_write_call` in codegen, `validate_writable` in `abi::fs`, a router
+  create-on-offset-0; `samples/apps/base/home_write` prints nine step lines then
+  `home_write: ok` on `-smp 4`/`-smp 1` and on `langhost` (which now has a
+  temporary home), and `home_write: no writable home` without the disk;
+  `e2fsck -fn` exits 0 after the writes (12 → 13 files, 563 → 564 blocks) and
+  after reset; the 30-command batch with/without the drive, visual golden and
+  `boot_desktop_qmp.py` pass on both.
 
 - [ ] **M6.3 `remove`, `mkdir`, `rename` and the applications.**
   Directory entry add/remove, `mkdir` (`.`/`..`, link counts), `remove` (empty
