@@ -121,9 +121,15 @@ unchanged — its names are reachable as `math.<name>`, it may import `core`, `s
 - **Manifest.** It keeps the application's unit name and entry point, plus the stream
   endpoint descriptors in declaration order (name, direction, capacity). Handle `i` is
   written at `state[i * 8]`; no offset is stored in the descriptor.
-- **Types.** Type ids are compiler-local per unit. A library or module signature may use
-  scalars, buffers, `Status` and `FaultCode`; a record, sum or user enum crossing the unit
-  boundary is a compile error until a shared type table exists.
+- **Types.** Type ids are package-wide (ADR 0039) and never reach the artifact. The
+  predeclared `Status`, `FaultCode`, `Diagnostic`, `Event`, `Rect` and `ExitReason`
+  have fixed ids and may cross any unit boundary, alone or inside an
+  array/ring/map (M4.1). User-declared enums, records and sums follow with
+  package-global ids in `stdlib` → module discovery → application order, and
+  declaration order inside a unit, so a cross-unit signature check is id equality
+  (M4.2); a module's type is named `<unit>.<Type>` from another unit and its enum
+  constants `<unit>.<Type>.<Variant>`. The application's types stay
+  application-local, and a by-value cycle is a compile error.
 - **Cost.** Every unit is recompiled from source for each application instance that
   imports it (ADR 0019); nothing precompiled is ever shipped.
 

@@ -86,9 +86,11 @@ mount table. `stdlib` stays embedded and is not moved into the image.
   depth-first over `uses` clauses in declaration order, starting at the
   application, so ids depend only on source text. The verifier accepts unit ids
   `0..=16`.
-- **M9 (MUST):** Type rules across units are unchanged (spec 0008): scalars,
-  buffers, `f64`, `Status`, `FaultCode` and structural `array`/`ring`/`map` types
-  cross the boundary; records, sum types and user enums do not.
+- **M9 (MUST):** Type rules across units follow spec 0008 and ADR 0039: the
+  predeclared `Status`, `FaultCode`, `Diagnostic`, `Event`, `Rect` and `ExitReason`
+  cross every boundary (M4.1); a module's own enums/records/sums cross as
+  package-global nominal types named `<unit>.<Type>` (M4.2). The application's types
+  stay application-local, and structural `array`/`ring`/`map` types remain shared.
 - **M10 (MUST):** A module may be declared in any directory under `lib`, but its
   unit name (the last dotted component) is what qualifies its calls, so two modules
   in different directories cannot share a unit name (M4).

@@ -14,8 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `d669146` (M3.4: browser tree navigation) plus this docs commit
-  closing M3. The tree is clean.
+- **Last commit:** `7c14ef5` (M3 complete) plus this docs commit opening **M4**
+  (ADR 0039: package-wide nominal types). The tree is clean.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -52,12 +52,10 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `terminal: ok` on both; the visual golden matches on both
   (`37802052…e9e81c9f`); the browser screenshot harness writes a 1024×768
   `/home/sinan/Desktop/igis-browser.png`.
-- **Next slice:** **M3 is complete** (M3.1–M3.5). The next milestone is not yet
-  planned. The deferred backlog (below) is the input: `f32`/Q40, writable
-  `/home`/Q51 (save), MMIO/DMA/Q45, a nominal `TaskId`/Q43, runtime-capacity
-  buffer parameters/Q46, an explicit stream close/Q10, the guard-recovery
-  blocker/Q47, the compile-arena headroom (16 MiB with `/lib` now in use) and
-  the `cargo fmt`/CI housekeeping.
+- **Next slice:** **M4.1 — predeclared nominal types cross a unit boundary (C1)**
+  (ADR 0039, spec 0008 "Types"). One compiler gate, a `lib/probe.ig` proof and
+  `module_demo` calls; then M4.2 (package-global user types, unit-qualified names)
+  and M4.3 (extract the shared application helpers into `/lib`).
 
 - **M2.6.3 complete:** the headless visual-regression harness (spec 0009 "Visual proof",
   G21; ADR 0032) and the resolution of M2.1.2. `samples/apps/visual` opens a window whose
@@ -782,6 +780,42 @@ application's package. One ticket per session; the parent verifies each.
   path), spec 0013 (tree view and browser navigation), spec 0018 (Implemented),
   OPEN-QUESTIONS Q51 (subdirectories resolved) and the AGENTS narrative plus the
   M3.1–M3.4 status rows. Done by the parent; see the docs commit.
+
+## M4 — package-wide types and the `/lib` refactor
+
+Normative: ADR 0039, spec 0008 "Types", spec 0003 "Cross-unit types". Goal: a
+`/lib` module can expose real APIs (predeclared and its own records, sums and
+enums), then the duplicated application helpers move into `/lib`. One ticket per
+session; the parent verifies each.
+
+- [ ] **M4.1 Predeclared nominal types cross a unit boundary (C1).**
+  Relax the one compiler gate (`cross_unit_type_ok`) so `Status`, `FaultCode`,
+  `Diagnostic`, `Event`, `Rect` and `ExitReason` — and arrays/rings/maps of them —
+  may appear in another unit's parameters and results; user-declared types stay
+  rejected until M4.2. Add `samples/apps/lib/probe.ig` (a `Rect` area helper, an
+  `ExitReason` classifier using `case`, a `Diagnostic` field read, an `Event` kind
+  helper) and extend `samples/apps/base/module_demo` to call all four with real
+  values; compiler tests for the accepted and still-rejected cases. Prove on
+  `langhost`, `-smp 4` and `-smp 1`. No ABI, verifier or runtime change.
+
+- [ ] **M4.2 Package-global user types and unit-qualified names (C2).**
+  Assign package-global enum/record/sum ids (predeclared fixed, then `stdlib`,
+  modules in discovery order, application, declaration order inside a unit);
+  allow forward references; reject by-value cycles. Parse and resolve
+  `<unit>.<Type>` in every type position and `<unit>.<Type>.<Variant>` for enum
+  constants; keep sum construction/`case` arms unqualified. The application's
+  types stay application-local. Compiler tests for module records/sums/enums
+  crossing both ways, nested and array element types, qualified enum constants,
+  duplicate names across units, application-type leakage, and cycles. Runtime
+  proof through `langhost` and the kernel.
+
+- [ ] **M4.3 Extract the shared helpers into `/lib` and migrate the apps.**
+  Move the duplicated application helpers into modules (event/pointer loop
+  helpers taking `Event`, window geometry taking `Rect`, reason classification
+  taking `ExitReason`, text/number writers) and migrate representative apps
+  (`files`, `ui_*`, `windows_events`, `desktop_shell`, `module_demo`), with a
+  before/after source-size and arena report; prove the same verdicts on both core
+  counts.
 
 ## Deferred (not UI; pick up when they matter)
 

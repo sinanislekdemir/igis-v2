@@ -887,6 +887,27 @@ There are **no user-defined generics**. The parametric types above are built in;
 compiler knows their layout and operations. Generic algorithms are either built-ins
 (`ring`, `map`) or written per type in `stdlib`.
 
+### Cross-unit types (ADR 0039)
+
+Nominal types have one identity per package. The predeclared `Status`, `FaultCode`,
+`Diagnostic`, `Event`, `Rect` and `ExitReason` are package-global and unqualified in
+every unit; they may appear in another unit's parameters, results, state, record fields
+and aggregate element types.
+
+A type declared in a `/lib` module is package-global too, and another unit names it with
+the unit qualifier: `math.Point` in a declaration, `math.Point` in `T(x)` casts, and
+`math.Color.Red` for an enum constant. Inside the declaring unit the unqualified forms
+(`Point`, `Color.Red`, or a bare `Red` within its own enum) keep working. Sum
+construction and `case` arms stay unqualified — the destination or scrutinee type picks
+the variant — so `Ok`/`Faulted(code)` work with an imported `ExitReason`.
+
+The application's own types are application-local: no module may name `app.Something`.
+A unit may hold a value of any type in the package, but a *call* still requires a
+`uses` import of the callee's unit. Two modules may both declare `Point`; the unit
+qualifier distinguishes them. A by-value cycle (a record or sum whose layout contains
+itself) is a compile error, and forward references to a type declared later in the same
+unit are allowed now that ids are assigned before layout.
+
 ### Capacity compatibility
 
 Capacities are part of the type: `string[128]` and `string[256]` are distinct (D11), and
@@ -1159,6 +1180,9 @@ application may stop or reset the machine (vision R14, "no capability model").
   `stdlib`; a cycle is a compile error (M4). A module may not declare `main`, top-level
   `var` state or a stream endpoint. The package-wide unit cap and the source/arena caps
   are spec 0018 M8/M11; `stdlib` stays embedded and is never read from the image.
+  A type declared in the module is named `math.<Type>` from another unit, and its enum
+  constants `math.<Type>.<Variant>` (ADR 0039); the predeclared nominal types are
+  unqualified everywhere.
 - **M3 (MUST):** The three roots are distinct namespaces: `core.*` (native builtins),
   `stdlib.*` (written in the language), `syslib.*` (hardware), plus the imported
   module's own unit name (`math.*`). The namespace tells the reader where the code and
