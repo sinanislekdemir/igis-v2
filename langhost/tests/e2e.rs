@@ -2885,3 +2885,17 @@ end;
          multiplex_host: ok\n"
     );
 }
+
+/// The M8.1 drag/close-box sample on `langhost`'s disabled screen: the service
+/// interactions need a framebuffer, so the host path reports the no-graphics
+/// contract (spec 0011, W22/W23).
+#[test]
+fn the_windows_drag_sample_reports_the_host_path() {
+    let path = app_path("windows_drag");
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "windows_drag").expect("the drag sample compiles");
+    let result = langhost::run(&package.code, b"check", langhost::DEFAULT_BUDGET)
+        .expect("verifies and runs");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"windows_drag: host ok\n".to_vec());
+}

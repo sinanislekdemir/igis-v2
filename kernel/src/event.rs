@@ -161,6 +161,40 @@ pub fn poll(dst: &mut [u8]) -> Status {
     Status::Ok
 }
 
+/// Removes the newest queued `PointerDown` at `(x, y)` (spec 0011, W24).
+///
+/// The window service consumes a title-bar or close-box press after the
+/// pointer path has already queued its `PointerDown` (the producer runs under
+/// the graphics lock, the service hook after it). Removing that one event keeps
+/// the client from seeing a press the service handled. Matching is by kind,
+/// position and an unaddressed record; exactly one event is removed, so
+/// unrelated events keep their order. Returns whether an event was removed.
+pub fn consume_pointer_down(x: i64, y: i64) -> bool {
+    let mut queue = QUEUE.lock();
+    for back in (0..queue.len).rev() {
+        let index = (queue.head + back) % CAPACITY;
+        let Some(event) = layout::event::read(&queue.events[index]) else {
+            continue;
+        };
+        if event.kind != EventKind::PointerDown || event.window != 0 {
+            continue;
+        }
+        if event.x != x || event.y != y {
+            continue;
+        }
+        // Shift the newer entries down over the removed slot; `head` is
+        // unchanged and one event leaves the queue.
+        for shift in back..queue.len - 1 {
+            let from = (queue.head + shift + 1) % CAPACITY;
+            let to = (queue.head + shift) % CAPACITY;
+            queue.events[to] = queue.events[from];
+        }
+        queue.len -= 1;
+        return true;
+    }
+    false
+}
+
 /// True when at least one event is queued.
 pub fn has_event() -> bool {
     QUEUE.lock().len != 0

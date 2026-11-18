@@ -1,0 +1,44 @@
+unit windows_drag_victim;
+
+// M8.1 close-box target (spec 0011, W23): open "Close Target", paint and
+// present it, then block in `next_event` until the parent's close-box press
+// terminates this task. The window disappears through `Task::reclaim` ->
+// `window::close_task`, and the parent's `core.wait` observes `Killed`.
+
+uses core, syslib, lib.out;
+
+const
+  WindowX = 650;
+  WindowY = 80;
+  ContentW = 200;
+  ContentH = 120;
+
+var
+  id: int;
+  status: Status;
+  ev: Event;
+  rect: Rect;
+
+procedure main(args: const string[1024]);
+begin
+  id := 0;
+  status := syslib.window_open(WindowX, WindowY, ContentW, ContentH, "Close Target", id);
+  if status = Ok then
+  begin
+    status := syslib.window_content_rect(id, rect);
+    if status = Ok then
+    begin
+      status := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, uint(0x00EEDD66));
+      status := syslib.draw_rect(rect.x + 2, rect.y + 2, rect.w - 4, rect.h - 4, uint(0));
+      status := syslib.draw_text(rect.x + 16, rect.y + 20, "Close Target", uint(0));
+      status := syslib.window_present(id);
+    end;
+    out.say("windows_drag_victim: ready\n");
+    // Blocking reads are the normal client loop; the close box kills us before
+    // any of these returns more than an expose.
+    while id > 0 do
+      status := syslib.next_event(ev);
+  end
+  else
+    out.say("windows_drag_victim: no window\n");
+end;

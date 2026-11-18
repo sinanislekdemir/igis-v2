@@ -761,6 +761,20 @@ pub fn update_pointer(dx: i64, dy: i64, buttons: u32) -> Status {
     // to the machine-wide queue while the graphics lock still orders them
     // (spec 0010, I19).
     crate::event::push_pointer(old_x, old_y, old_buttons, x, y, u64::from(buttons));
+    // Service-owned window interaction (spec 0011, W22/W23) runs only after
+    // the graphics lock is dropped: the repair takes window -> graphics.
+    drop(guard);
+    let consumed = crate::window::pointer_event(
+        old_x,
+        old_y,
+        old_buttons,
+        x,
+        y,
+        u64::from(buttons),
+    );
+    if consumed {
+        crate::event::consume_pointer_down(x, y);
+    }
     Status::Ok
 }
 
@@ -847,6 +861,20 @@ pub fn set_pointer_absolute(x: i64, y: i64, buttons: u32) -> Status {
         i64::from(y),
         u64::from(buttons),
     );
+    // Window drag/close interaction, after the graphics lock is dropped
+    // (spec 0011, W22/W23).
+    drop(guard);
+    let consumed = crate::window::pointer_event(
+        old_x,
+        old_y,
+        old_buttons,
+        i64::from(x),
+        i64::from(y),
+        u64::from(buttons),
+    );
+    if consumed {
+        crate::event::consume_pointer_down(i64::from(x), i64::from(y));
+    }
     Status::Ok
 }
 

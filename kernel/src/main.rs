@@ -196,6 +196,16 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
             arch_x86_64::halt();
         }
     }
+    // Service-owned pointer interaction (spec 0011, W22/W23): title-bar drag,
+    // close-box owner lookup, clamp, release and cancellation, all on scratch
+    // state.
+    match window::drag_self_check() {
+        Ok(()) => println!("window: drag ok"),
+        Err(step) => {
+            println!("window: drag FAIL at step {step}");
+            arch_x86_64::halt();
+        }
+    }
 
     // The pointer device and the software cursor (spec 0010). This needs the
     // shadow (screen size, cursor compositing) and the console (boot log), and

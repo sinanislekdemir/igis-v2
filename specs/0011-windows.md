@@ -5,8 +5,8 @@
   `syslib`; M2.3 of the desktop milestone
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0020, 0024
-- **Updated:** 2026-11-17
+- **ADRs:** 0020, 0024, 0042
+- **Updated:** 2026-11-18
 
 ## Context
 
@@ -33,7 +33,8 @@ Non-goals for M2.3:
 - no interactive resizing, no window menus, no icons — those arrive with M2.4;
 - no pointer-driven continuous drag loop: M2.3.5 proves a **scripted** owner drag
   (a sequence of `window_move` calls); following the pointer while a button is held is
-  M2.4;
+  M2.4. *(Superseded by M8.1: W22 implements the service-owned pointer drag; the M2.3
+  scripted proof and its text remain the historical record.)*
 - no multiple displays, no off-screen windows, no virtual desktops;
 - no capability model: ownership is a service check, not a security boundary (vision
   R14);
@@ -165,6 +166,33 @@ an `int`; `0` is never a valid id.
   damage, and every presented rectangle is copied from the current shadow. Coalescing
   happens after the per-window `Expose` flags are marked, so the exact original damage —
   not a grown bounding box — decides which clients repaint.
+- **W22 (MUST):** A left-button press inside a window's 16-pixel title bar but not inside
+  its close box raises and focuses that window (any task, like `raise`) and starts a
+  **service-owned drag**. The service records the grab offset `(pointer - frame origin)`;
+  while button 1 stays held every pointer move sets the frame origin to
+  `pointer - grab offset`, clamped on screen exactly like `window_move` (W4). The move
+  records the same damage and repair as `window_move`, so the owner is exposed and the
+  desktop is restored underneath. Implicit capture applies: the pointer may leave the
+  title bar. Release (button 1 clear) ends the drag and later motion does not move the
+  window; a second press during the drag is ignored; a dragged window that closes or
+  whose owner terminates cancels the drag. Owner `0` windows drag exactly like task
+  windows, because the service move bypasses the owner check only for this path (W23's
+  close box keeps the ownership rule). Resize is not part of this requirement.
+- **W23 (MUST):** A left-button press inside a window's 11 × 11 close box at
+  `(frame.x + 4, frame.y + 3)` requests termination of the owning task through
+  `task::request_kill`; the task's windows then disappear through `Task::reclaim` →
+  `window::close_task` (W8) and `core.wait` observes `Killed`. A close box on an owner-`0`
+  (kernel) window is inert: no task is killed and nothing changes. The press is consumed
+  like a title-bar press. This is immediate termination with the same data-loss semantics
+  as `core.kill`; there is no graceful save-on-close handshake (deferred, ADR 0042).
+- **W24 (MUST):** A press the service handles under W22/W23 MUST NOT be delivered to a
+  client as a `PointerDown`. The pointer path already queued the event before the service
+  hook runs (producers run under the graphics lock), so the service removes exactly that
+  one queued `PointerDown` (matching kind, position and the unaddressed record); unrelated
+  events keep their order and no queue entry is starved. Content-area presses, desktop
+  presses and key events are unchanged and still route at poll time (W16). The service
+  hook runs from both pointer paths after the graphics lock is dropped, so injected
+  `syslib.inject_pointer` events get the same synchronous behaviour as a device.
 
 ## Design
 
@@ -384,6 +412,7 @@ The kernel host routes on `poll_event`, where no graphics lock is held:
 | Path | Takes | Then |
 |------|-------|------|
 | pointer producer (`gfx`) | graphics | nothing (enqueues only) |
+| pointer service hook (`gfx` → `window::pointer_event`) | nothing (graphics dropped first) | window → graphics for a drag repair; `request_kill`/`wake_input` only **after** the window unlock; then the event queue to consume one press |
 | keyboard/console producer | console, graphics per cell | nothing |
 | poll-time routing | nothing | window (`take_expose`/`route_click`); routing a click repairs: window → graphics; input waiters are woken **after** the window lock is dropped |
 | window wrappers (`open`/`move`/`rect` reads) | graphics (screen size, released) | window → graphics for the repair; input wake after the unlock |
@@ -476,9 +505,75 @@ the drag/move checks so `scripts/windows_proof_screenshot_qmp.py` can capture it
 with QMP `screendump`; that harness never views the image.
 
 The drag is scripted. Pointer-driven continuous dragging (and the resize handles it
-would enable) is deliberately M2.4, not an M2.3 promise.
+would enable) was deliberately M2.4, not an M2.3 promise; M8.1 implements the service
+drag below.
 
-## Interfaces
+### Pointer drag and close box (implemented in M8.1)
+
+W22–W24 add two service-owned interactions over the same table. There is no new opcode,
+builtin, `Host` method, `syslib` primitive, `stdlib` helper or `EventKind`, and no
+application-visible surface: a client opens a window as before and the service intercepts
+the press.
+
+- **Hook and lock order.** `gfx::update_pointer` and `gfx::set_pointer_absolute` publish
+  the pointer transition and then **drop the graphics lock** before calling
+  `window::pointer_event(old_x, old_y, old_buttons, x, y, buttons)`. The hook reads the
+  screen size (graphics, released), takes the table lock, runs the pure table methods and
+  repairs under `WINDOW → SCREEN`, then drops the table lock. It never holds the table
+  lock across `task::request_kill` or `task::wake_input`: the kill is issued after the
+  unlock, and the wake follows the existing wrapper pattern. Injected
+  `syslib.inject_pointer` goes through the same two functions, so the proof is synchronous
+  and deterministic.
+- **Press classification.** On a left-button press (bit 0, `0 → 1`) with no drag active,
+  the topmost window under the pointer is classified: the close box first
+  (`frame.x + 4 .. + 15`, `frame.y + 3 .. + 14`), then the 16-pixel title band (including
+  the border). A content or desktop press returns "not handled" and is routed at poll time
+  exactly as before.
+- **Drag.** A title-band press calls the ordinary `raise` (focus + z-order + repair), then
+  records `Drag { id, offset_x, offset_y }`. Each subsequent pointer update with bit 0 held
+  calls `Table::drag_move`, which is `window_move`'s clamp/damage body without the owner
+  check (`Table::relocate`); the public `syslib.window_move` stays owner-only. A release or
+  a vanished window clears the drag. `remove_at` also clears a drag whose id disappears, so
+  `close`, `close_task` and `Task::reclaim` cancel it in the same pass that removes the
+  window. A press while `Drag` is set is ignored.
+- **Close box.** A task-owned close box returns `PressAction::Kill(owner)`; the hook drops
+  the table lock and calls `task::request_kill(owner)`. The task terminates at its next
+  safe point, `Task::reclaim` runs the ordinary `window::close_task`, and the focus
+  fallback (W6) applies. Owner `0` returns `Consumed` and does nothing. There is no
+  save-on-close and no close-request event; data loss is the same as `core.kill` (ADR
+  0042, accepted limitation).
+- **Consumed press.** The pointer producer has already queued its `PointerDown` when the
+  service hook runs, so a handled press calls `event::consume_pointer_down(x, y)`, which
+  removes the newest matching unaddressed `PointerDown` from the bounded queue (one
+  event, order preserved, no starvation). A client therefore sees no click for a
+  title-bar or close-box press; the subsequent `PointerMove`/`PointerUp` records are not
+  the click and stay queued.
+- **Damage and expose.** `drag_move` uses the same `relocate` path as `window_move`: the
+  old frame is erased to the desktop in the parts no live window covers, the new frame is
+  filled under the moved window, chrome is redrawn, and every intersecting window gets its
+  whole-content `Expose` (W12). The drag therefore restores the area underneath and asks
+  the owner for a repaint exactly like an owner `move`; the client's repaint remains its
+  own (W17), and a lower window must not paint over the dragged one (no per-task clip).
+
+`window::drag_self_check` proves the pure rules on a scratch table: title-bar vs close-box
+vs content classification, the grab offset, moves and clamps at all four edges, release,
+the ignored second press, the owner-0 close-box exemption, the owner lookup and drag
+cancellation on close. Boot prints `window: drag ok` beside the existing `window:` lines;
+`kmain` halts on the first mismatch.
+
+`samples/apps/base/windows_drag` (+ `windows_drag_victim`) is the proof: it opens an
+"Underlay" window and a "Drag Target" above it, injects a real title-bar press (asserting
+the press is consumed, the window focused and not moved), drags with button 1 through
+both screen clamps, releases and checks the frame does not move again, drains the exposes,
+repaints the target and the underlay's visible bands, and checks the new content and the
+restored old area with `syslib.get_pixel`. It then verifies a content press is delivered
+to the client with the window id, spawns the victim, presses its close box, requires
+`core.wait` to report `Killed`, and requires the window and its frame to be gone. Without
+graphics it prints `windows_drag: host ok`.
+
+Resize remains deferred (open question 4): this slice drags whole windows only.
+
+### Interfaces
 
 ### Language surface
 
@@ -604,6 +699,11 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | Application draws outside its content rectangle | Possible (no clip primitive, no capability model); the service repairs the damage on the next pass |
 | `move` to the same origin | `Ok`, no change |
 | `raise` on the top window | `Ok`, focus set, order unchanged |
+| Title-bar press while a drag is active | Ignored by the service; the existing drag continues |
+| Drag beyond a screen edge | Clamped so the frame stays fully on screen, like `move_to` |
+| Close box on an owner-`0` window | Consumed, no kill, nothing changes |
+| Close box on a task window | The task is killed (data loss like `core.kill`); its windows close via `Task::reclaim` |
+| Dragged window closes or its owner terminates | The drag is cancelled in the same removal pass |
 
 ## Alternatives considered
 
@@ -627,7 +727,7 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | 1 | ~~Expose delivery: a new `EventKind.Expose` event, a dedicated blocking wait, or a callback-like `window_present` handshake~~ | Resolved in M2.3.3: `EventKind.Expose` (ordinal 5), one coalesced pending expose per damaged window, owner-only take at poll time; `window_present` is the presentation call, not the delivery mechanism (W12/W17) |
 | 2 | ~~Damage coalescing across several operations in one pass (union vs per-window flags)~~ | Resolved in M2.6.2: damage is coalesced per list before paint (W21), the presentation is the coalesced rectangle set rather than one bounding box, and `Expose` is still a per-window whole-content flag |
 | 3 | ~~Client liveness: a window whose owner never calls `next_event` or never repaints — close it, or leave stale content forever~~ | Resolved for M2: leave stale content; no timeout, forced close or kill for a missed expose (W18). Revisit when the desktop shell can judge a client (M2.3.5/M2.4) |
-| 4 | Resize and minimum/maximum size interaction with the 8 × 8 content floor | M2.3.5/M2.4 |
+| 4 | Resize and minimum/maximum size interaction with the 8 × 8 content floor | M8.2 (deferred; M8.1 drags whole windows only) |
 | 5 | Title truncation for proportional text in M2.6 (the 8 × 8 font truncates by bytes, a proportional font by glyphs) | M2.6 |
 | 6 | ~~Whether `window_present` should be the only present path for a window client, or `syslib.present` stays legal~~ | Resolved in M2.3.3: `window_present` is the sanctioned window-client path and is clipped to visible content; `syslib.present` stays a legal generic full-screen primitive (W17) |
 
@@ -642,3 +742,4 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | 2026-11-16 | M2.3.4 (spec 0012, ADR 0025): read-only `syslib.window_info` (builtin 40, no new opcode) returning a topmost-first id, frame and 64-byte title snapshot; owner `0` admitted as the kernel owner (task ids start at 1) and kernel windows are ordinary windows; the kernel's terminal and system-log windows use the same public functions. The three samples that assumed an empty window baseline record `window_focus()` at start and compare against it. |
 | 2026-11-17 | M2.3.5 implemented: `samples/apps/windows_proof` plus the `windows_proof_a`/`windows_proof_b` children prove two side-by-side windows owned by separate tasks, a focus switch and raise by real injected pointer clicks (state asserted, because the queue is machine-wide), a four-step scripted owner drag with old-area restoration, and an `Expose`/`window_present` repaint after another task moves over and away (including the covered-content check and the visible-part-only draw that M2's missing per-task clip requires). The parent-owned `Proof Control` frame origin is the persistent command channel; teardown is a stage-4 close-and-exit acknowledged by `core.wait`. `run windows_proof shot` and `scripts/windows_proof_screenshot_qmp.py` capture the composed frame. The two prerequisites the proof exposed are fixed separately: a fair claim cursor (spec 0007, Sch12) and the console's stale-parts retry (spec 0012, D3). Pointer-driven continuous dragging remains M2.4. |
 | 2026-11-17 | M2.6.2 implemented (W21, ADR 0031): a repair coalesces erase and chrome damage before painting (empty/contained dropped, touching/overlapping merged; different erase coverage limits never merged) and presents the coalesced rectangles instead of one bounding box of all damage. `window::damage_self_check` proves the merge rules, the erase coverage rule and the coverage invariant on scratch state and measures a diagonal move: 4 rectangles / 510 874 px as a bounding box become 2 rectangles / 55 348 px (89 % less present area); boot prints `window: damage ok (present 4 -> 2 rects, 510874 -> 55348 px)`. Expose marking still uses the exact original damage. Open question 2 is resolved. |
+| 2026-11-18 | M8.1 implemented (W22–W24, ADR 0042): service-owned pointer drag from the title bar (raise/focus, grab offset, clamp, release, ignored second press, cancellation on close) and close-box termination of the owner task via `task::request_kill` and `Task::reclaim`; owner-0 close boxes are inert. The hook runs from both `gfx` pointer paths after the graphics lock is dropped, keeps `WINDOW → SCREEN` and never holds the table lock across `request_kill`/`wake_input`; a handled press removes its queued `PointerDown`. `window::drag_self_check` prints `window: drag ok`, and `samples/apps/base/windows_drag` (+ `windows_drag_victim`) proves both interactions headlessly. Resize remains deferred (open question 4). |

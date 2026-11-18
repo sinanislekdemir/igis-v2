@@ -147,6 +147,46 @@ impl Window {
     }
 }
 
+/// An in-progress pointer drag (spec 0011, W22): the window and the grab
+/// offset from its frame origin. Set by a left-button press in the title bar
+/// (outside the close box) and cleared on release, on a second owner change or
+/// when the window disappears.
+#[derive(Clone, Copy)]
+struct Drag {
+    id: u64,
+    offset_x: i64,
+    offset_y: i64,
+}
+
+/// What a left-button press did to the service (spec 0011, W22/W23). Only
+/// `None` leaves the click to the client; the other outcomes consume the
+/// queued `PointerDown`.
+enum PressAction {
+    /// No window interaction: the client sees the press.
+    None,
+    /// The service handled the press (title-bar drag or an owner-0 close box).
+    Consumed,
+    /// The close box named a task-owned window: request its termination.
+    Kill(u64),
+}
+
+/// The close box is an 11 × 11 square at `(frame.x + 4, frame.y + 3)` (W22).
+fn close_box_hit(frame: Rect, x: i64, y: i64) -> bool {
+    x >= frame.x.saturating_add(4)
+        && y >= frame.y.saturating_add(3)
+        && x < frame.x.saturating_add(4 + 11)
+        && y < frame.y.saturating_add(3 + 11)
+}
+
+/// The title bar is the 16-pixel band from the frame origin, including the
+/// border and the close box (W3/W22). The close box is checked first.
+fn title_bar_hit(frame: Rect, x: i64, y: i64) -> bool {
+    x >= frame.x
+        && y >= frame.y
+        && x < frame.x.saturating_add(frame.w)
+        && y < frame.y.saturating_add(TITLE_BAR_HEIGHT)
+}
+
 /// The title-bar band of a window: the region whose style depends on focus.
 fn title_rect(window: &Window) -> Rect {
     Rect {
@@ -587,6 +627,8 @@ struct Table {
     focus: u64,
     /// Next id to assign; starts at 1 and skips 0 on wrap (W2).
     next_id: u64,
+    /// The pointer drag in progress, if any (W22).
+    drag: Option<Drag>,
     /// Pending desktop restore and chrome damage for the next repair pass.
     erases: EraseList,
     chrome: ChromeList,
@@ -606,6 +648,7 @@ impl Table {
             count: 0,
             focus: 0,
             next_id: 1,
+            drag: None,
             erases: EraseList::new(),
             chrome: ChromeList::new(),
             generation: 0,
@@ -635,6 +678,10 @@ impl Table {
         let slot = self.order[pos];
         let removed = self.windows[slot].id;
         self.windows[slot] = Window::EMPTY;
+        // A dragged window that disappears cancels the drag (W22).
+        if self.drag.is_some_and(|drag| drag.id == removed) {
+            self.drag = None;
+        }
         for index in pos..self.count - 1 {
             self.order[index] = self.order[index + 1];
         }
@@ -797,10 +844,23 @@ impl Table {
         let Some(pos) = self.position(id) else {
             return Status::NotFound;
         };
-        let window = &mut self.windows[self.order[pos]];
-        if window.owner != owner {
+        if self.windows[self.order[pos]].owner != owner {
             return Status::Invalid;
         }
+        self.relocate(screen_w, screen_h, pos, x, y)
+    }
+
+    /// Moves the window at z-order position `pos`, clamping the origin on
+    /// screen and recording the same damage as `window_move` (W4/W11).
+    fn relocate(
+        &mut self,
+        screen_w: i64,
+        screen_h: i64,
+        pos: usize,
+        x: i64,
+        y: i64,
+    ) -> Status {
+        let window = &mut self.windows[self.order[pos]];
         let frame = window.frame();
         if screen_w <= 0 || screen_h <= 0 || frame.w > screen_w || frame.h > screen_h {
             return Status::Invalid;
@@ -824,6 +884,72 @@ impl Table {
         self.chrome.add(frame);
         self.chrome.add(moved);
         Status::Ok
+    }
+
+    /// Handles a left-button press at `(x, y)` (W22/W23).
+    ///
+    /// A press on the title bar (outside the close box) raises and focuses the
+    /// window like `raise` and starts a drag; a press on a task-owned close box
+    /// asks for the owner's termination; an owner-0 close box is consumed but
+    /// inert. A second press while a drag is in progress is ignored. Content
+    /// presses and desktop presses are left to the client.
+    fn press(&mut self, x: i64, y: i64) -> PressAction {
+        if self.drag.is_some() {
+            return PressAction::None;
+        }
+        let Some(id) = self.hit_test(x, y) else {
+            return PressAction::None;
+        };
+        let Some(pos) = self.position(id) else {
+            return PressAction::None;
+        };
+        let frame = self.windows[self.order[pos]].frame();
+        let owner = self.windows[self.order[pos]].owner;
+        if close_box_hit(frame, x, y) {
+            return if owner == 0 {
+                PressAction::Consumed
+            } else {
+                PressAction::Kill(owner)
+            };
+        }
+        if !title_bar_hit(frame, x, y) {
+            return PressAction::None;
+        }
+        if self.raise(id) != Status::Ok {
+            return PressAction::None;
+        }
+        self.drag = Some(Drag {
+            id,
+            offset_x: x.saturating_sub(frame.x),
+            offset_y: y.saturating_sub(frame.y),
+        });
+        PressAction::Consumed
+    }
+
+    /// Moves the dragged window so its origin follows the pointer minus the
+    /// grab offset (W22). Clamps like `move_to` and records the same damage, so
+    /// the owner is exposed and the desktop restored underneath.
+    fn drag_move(&mut self, screen_w: i64, screen_h: i64, x: i64, y: i64) -> Status {
+        let Some(drag) = self.drag else {
+            return Status::Ok;
+        };
+        let Some(pos) = self.position(drag.id) else {
+            // The dragged window disappeared (owner terminated/closed): cancel.
+            self.drag = None;
+            return Status::NotFound;
+        };
+        self.relocate(
+            screen_w,
+            screen_h,
+            pos,
+            x.saturating_sub(drag.offset_x),
+            y.saturating_sub(drag.offset_y),
+        )
+    }
+
+    /// Ends a drag; further motion does not move the window (W22).
+    fn end_drag(&mut self) {
+        self.drag = None;
     }
 
     fn frame_rect(&self, id: u64) -> Result<Rect, Status> {
@@ -1209,6 +1335,68 @@ pub fn move_to(owner: u64, id: u64, x: i64, y: i64) -> Status {
         crate::task::wake_input();
     }
     status
+}
+
+/// Service-owned pointer interaction hook (spec 0011, W22/W23).
+///
+/// Called by `gfx` from both pointer paths **after** the graphics lock is
+/// dropped, so the repair can take `WINDOW → SCREEN` without inverting the
+/// order. Returns `true` when the press was consumed by the service (a
+/// title-bar drag or a close box); `gfx` then removes the matching queued
+/// `PointerDown` so the client never sees it. The table lock is never held
+/// across `task::request_kill` or `task::wake_input`: the kill is issued after
+/// the unlock.
+pub fn pointer_event(
+    old_x: i64,
+    old_y: i64,
+    old_buttons: u64,
+    x: i64,
+    y: i64,
+    buttons: u64,
+) -> bool {
+    let (screen_w, screen_h) = gfx::size();
+    if screen_w == 0 {
+        return false;
+    }
+    const LEFT: u64 = 1;
+    let pressed = buttons & LEFT != 0 && old_buttons & LEFT == 0;
+    let released = buttons & LEFT == 0 && old_buttons & LEFT != 0;
+    let held = buttons & LEFT != 0;
+
+    let mut table = TABLE.lock();
+    let mut consumed = false;
+    let mut kill = 0u64;
+    let mut dirty = false;
+
+    if pressed {
+        match table.press(x, y) {
+            PressAction::Consumed => {
+                consumed = true;
+                dirty = true;
+            }
+            PressAction::Kill(owner) => {
+                consumed = true;
+                kill = owner;
+            }
+            PressAction::None => {}
+        }
+    }
+    if released {
+        table.end_drag();
+    } else if held && table.drag.is_some() && (x != old_x || y != old_y) {
+        let _ = table.drag_move(screen_w as i64, screen_h as i64, x, y);
+        dirty = true;
+    }
+
+    let wake = if dirty { table.repair() } else { false };
+    drop(table);
+    if wake {
+        crate::task::wake_input();
+    }
+    if kill != 0 {
+        let _ = crate::task::request_kill(kill);
+    }
+    consumed
 }
 
 /// The frame rectangle of `id`; `Invalid` when graphics are disabled (W13).
@@ -2120,6 +2308,169 @@ pub fn route_self_check() -> Result<(), u32> {
     }
     if table.take_expose(3).is_some() {
         return Err(25);
+    }
+
+    Ok(())
+}
+
+/// Boot self-check for the service-owned pointer interactions (spec 0011,
+/// W22/W23): title-bar vs close-box vs content classification, the grab
+/// offset, clamping at all four edges, release, the ignored second press, the
+/// owner-0 close-box exemption and drag cancellation when the window closes.
+/// Pure: it works on a scratch table and never touches the screen or the task
+/// table.
+///
+/// Returns the first failing step, or `Ok(())`; `kmain` prints
+/// `window: drag ok` and halts on a mismatch.
+pub fn drag_self_check() -> Result<(), u32> {
+    const SCREEN_W: i64 = 1024;
+    const SCREEN_H: i64 = 768;
+
+    let mut table = Table::new();
+    let id = table
+        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"drag")
+        .map_err(|_| 1u32)?;
+    let frame = table.frame_rect(id).map_err(|_| 2u32)?;
+
+    // 1. A title-bar press (outside the close box) is consumed, raises and
+    //    focuses the window, and records the grab offset from the frame origin.
+    let px = frame.x + 50;
+    let py = frame.y + 8;
+    match table.press(px, py) {
+        PressAction::Consumed => {}
+        _ => return Err(3),
+    }
+    let Some(drag) = table.drag else {
+        return Err(4);
+    };
+    if drag.id != id || drag.offset_x != px - frame.x || drag.offset_y != py - frame.y {
+        return Err(5);
+    }
+    if table.focus != id {
+        return Err(6);
+    }
+
+    // 2. A second press while the drag is active is ignored: the drag is
+    //    unchanged and no new grab replaces it.
+    let other = table
+        .open(SCREEN_W, SCREEN_H, 8, 600, 500, 100, 50, b"other")
+        .map_err(|_| 7u32)?;
+    let other_frame = table.frame_rect(other).map_err(|_| 8u32)?;
+    match table.press(other_frame.x + 40, other_frame.y + 8) {
+        PressAction::None => {}
+        _ => return Err(9),
+    }
+    match table.drag {
+        Some(current) if current.id == id && current.offset_x == drag.offset_x => {}
+        _ => return Err(10),
+    }
+
+    // 3. The drag follows the pointer minus the grab offset, with the same
+    //    damage a `window_move` records.
+    table.clear_damage();
+    if table.drag_move(SCREEN_W, SCREEN_H, 400, 300) != Status::Ok {
+        return Err(11);
+    }
+    let moved = Rect {
+        x: 400 - drag.offset_x,
+        y: 300 - drag.offset_y,
+        w: frame.w,
+        h: frame.h,
+    };
+    if table.frame_rect(id) != Ok(moved) {
+        return Err(12);
+    }
+    if !table.erases.covers(frame, 0) || !table.chrome.covers(moved) || !table.chrome.covers(frame)
+    {
+        return Err(13);
+    }
+
+    // 4. All four edges clamp like `move_to`; the frame never leaves the screen.
+    if table.drag_move(SCREEN_W, SCREEN_H, -500, -500) != Status::Ok
+        || table.frame_rect(id)
+            != Ok(Rect {
+                x: 0,
+                y: 0,
+                w: frame.w,
+                h: frame.h,
+            })
+    {
+        return Err(14);
+    }
+    if table.drag_move(SCREEN_W, SCREEN_H, 5000, 5000) != Status::Ok
+        || table.frame_rect(id)
+            != Ok(Rect {
+                x: SCREEN_W - frame.w,
+                y: SCREEN_H - frame.h,
+                w: frame.w,
+                h: frame.h,
+            })
+    {
+        return Err(15);
+    }
+
+    // 5. Release ends the drag; further motion does not move the window.
+    let parked = table.frame_rect(id).map_err(|_| 16u32)?;
+    table.end_drag();
+    if table.drag.is_some() {
+        return Err(17);
+    }
+    table.clear_damage();
+    if table.drag_move(SCREEN_W, SCREEN_H, 200, 200) != Status::Ok {
+        return Err(18);
+    }
+    if table.frame_rect(id) != Ok(parked) || table.erases.count != 0 || table.chrome.count != 0 {
+        return Err(19);
+    }
+
+    // 6. A content press is not consumed and starts no drag.
+    match table.press(parked.x + 40, parked.y + 40) {
+        PressAction::None => {}
+        _ => return Err(20),
+    }
+    if table.drag.is_some() {
+        return Err(21);
+    }
+
+    // 7. The close box names the owner: owner 0 is consumed but inert, a task
+    //    window yields its owner for the kill request.
+    let kernel = table
+        .open(SCREEN_W, SCREEN_H, 0, 300, 100, 100, 50, b"kernel")
+        .map_err(|_| 22u32)?;
+    let kernel_frame = table.frame_rect(kernel).map_err(|_| 23u32)?;
+    match table.press(kernel_frame.x + 5, kernel_frame.y + 5) {
+        PressAction::Consumed => {}
+        _ => return Err(24),
+    }
+    if table.drag.is_some() {
+        return Err(25);
+    }
+    let victim = table
+        .open(SCREEN_W, SCREEN_H, 9, 500, 100, 100, 50, b"victim")
+        .map_err(|_| 26u32)?;
+    let victim_frame = table.frame_rect(victim).map_err(|_| 27u32)?;
+    match table.press(victim_frame.x + 5, victim_frame.y + 5) {
+        PressAction::Kill(9) => {}
+        _ => return Err(28),
+    }
+    if table.drag.is_some() {
+        return Err(29);
+    }
+
+    // 8. Closing the dragged window cancels the drag.
+    let doomed = table
+        .open(SCREEN_W, SCREEN_H, 7, 600, 300, 100, 50, b"doomed")
+        .map_err(|_| 30u32)?;
+    let doomed_frame = table.frame_rect(doomed).map_err(|_| 31u32)?;
+    match table.press(doomed_frame.x + 40, doomed_frame.y + 8) {
+        PressAction::Consumed => {}
+        _ => return Err(32),
+    }
+    if table.drag.is_none() {
+        return Err(33);
+    }
+    if table.close(7, doomed) != Status::Ok || table.drag.is_some() {
+        return Err(34);
     }
 
     Ok(())

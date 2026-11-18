@@ -66,3 +66,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0039 | [Nominal type identity is package-wide; `/lib` types are unit-qualified](0039-package-wide-nominal-types.md) | Accepted | 2026-11-18 |
 | 0040 | [A real ext2 writer on a dedicated ATA home disk behind a path router](0040-real-ext2-writer-home-disk.md) | Accepted | 2026-11-18 |
 | 0041 | [Add a truncate primitive to the home file API](0041-home-truncate.md) | Accepted | 2026-11-18 |
+| 0042 | [Window drag and close are service-owned pointer interactions](0042-service-owned-window-drag-and-close.md) | Accepted | 2026-11-18 |
