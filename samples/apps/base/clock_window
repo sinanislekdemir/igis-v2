@@ -389,6 +389,21 @@ begin
   ignored := syslib.window_present(id);
 end;
 
+// Re-reads the content rectangle and recomputes the absolute face/readout
+// geometry after the service moved the window (spec 0011, W12/W17/W28;
+// ADR 0046).
+procedure refresh_geometry();
+begin
+  status := syslib.window_content_rect(id, rect);
+  if status = Ok then
+  begin
+    cx := rect.x + ContentW div 2;
+    cy := rect.y + FaceCenterDy;
+    dx0 := cx - DigitalCells * 4;
+    dy0 := rect.y + DigitalY;
+  end;
+end;
+
 procedure check_pixels();
 begin
   // Client bezel: two frames with a white gap.
@@ -463,6 +478,7 @@ begin
     begin
       if ev.kind = Expose and ev.window = id then
       begin
+        refresh_geometry();
         now_s := int(core.clock() div uint(NanosPerSecond));
         split(now_s, hour, minute, second);
         draw_clock(hour, minute, second);
@@ -582,15 +598,11 @@ begin
       out.say("clock_window: no window\n")
     else
     begin
-      status := syslib.window_content_rect(id, rect);
+      refresh_geometry();
       if status <> Ok then
         out.say("clock_window: no content rect\n")
       else
       begin
-        cx := rect.x + ContentW div 2;
-        cy := rect.y + FaceCenterDy;
-        dx0 := cx - DigitalCells * 4;
-        dy0 := rect.y + DigitalY;
         if stdlib.starts_with(args, "shot") then
           shot_mode()
         else

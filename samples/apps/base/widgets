@@ -1155,6 +1155,40 @@ begin
   end;
 end;
 
+// ---- layout ------------------------------------------------------------
+
+// Re-reads the content rectangle after the service moved the window and
+// recomputes every cached absolute control origin (spec 0011, W12/W17/W28;
+// ADR 0046). The event handlers and drawing use these screen coordinates.
+procedure refresh_layout();
+begin
+  status := syslib.window_content_rect(id, rect);
+  if status = Ok then
+  begin
+    menu_x := rect.x + 8;
+    menu_y := rect.y + 8;
+    menu_w := rect.w - 16;
+    bx := rect.x + 16;
+    by := rect.y + 60;
+    cx := rect.x + 16;
+    cy := rect.y + 96;
+    tx := rect.x + 16;
+    ty := rect.y + 128;
+    lx := rect.x + 16;
+    ly := rect.y + 170;
+    docx := rect.x + 400;
+    docy := rect.y + 60;
+    sbx := rect.x + 728;
+    sby := rect.y + 60;
+    icx := rect.x + 400;
+    icy := rect.y + 232;
+    ttx := rect.x + 660;
+    tty := rect.y + 232;
+    dx := rect.x + 200;
+    dy := rect.y + 170;
+  end;
+end;
+
 // Poll and handle every queued event. A repaint happens after the batch when
 // `auto_present` is set; check mode paints explicitly before its pixel probes.
 procedure drain_events();
@@ -1171,7 +1205,10 @@ begin
     begin
       count := count + 1;
       if ev.kind = Expose then
-        dirty := true
+      begin
+        refresh_layout();
+        dirty := true;
+      end
       else if ev.kind = Close then
       begin
         // A close-box press asks the owner to close this window (spec 0011,
@@ -1810,33 +1847,11 @@ begin
       out.say("widgets: no window\n")
     else
     begin
-      status := syslib.window_content_rect(id, rect);
+      refresh_layout();
       if status <> Ok then
         out.say("widgets: no content rect\n")
       else
       begin
-        menu_x := rect.x + 8;
-        menu_y := rect.y + 8;
-        menu_w := rect.w - 16;
-        bx := rect.x + 16;
-        by := rect.y + 60;
-        cx := rect.x + 16;
-        cy := rect.y + 96;
-        tx := rect.x + 16;
-        ty := rect.y + 128;
-        lx := rect.x + 16;
-        ly := rect.y + 170;
-        docx := rect.x + 400;
-        docy := rect.y + 60;
-        sbx := rect.x + 728;
-        sby := rect.y + 60;
-        icx := rect.x + 400;
-        icy := rect.y + 232;
-        ttx := rect.x + 660;
-        tty := rect.y + 232;
-        dx := rect.x + 200;
-        dy := rect.y + 170;
-
         // Flush anything the boot windows queued so the injected stream starts
         // from a known state; our own panel is repainted immediately.
         flushed := syslib.event_flush();

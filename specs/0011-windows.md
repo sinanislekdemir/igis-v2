@@ -5,7 +5,7 @@
   `syslib`; M2.3 of the desktop milestone
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0020, 0024, 0042, 0043, 0044, 0045
+- **ADRs:** 0020, 0024, 0042, 0043, 0044, 0045, 0046
 - **Updated:** 2026-11-18
 
 ## Context
@@ -103,6 +103,10 @@ an `int`; `0` is never a valid id.
   the machine-wide queue. The service never blocks on a client: one that does not repaint
   leaves its previous pixels (stale content), and the repair pass still presents the union.
   A client that ignores an expose is not closed in M2 (see W18).
+  The content rectangle is **dynamic**: after a move the owner MUST re-read
+  `window_content_rect` on the `Expose` before drawing or hit-testing, and recompute any
+  geometry cached from it (W28, ADR 0046). The `Expose` record deliberately carries no
+  geometry (`x = y = code = 0`); the service call is authoritative.
 - **W13 (MUST):** With graphics disabled (`screen_width() == 0`), `window_open` is
   `Status.Invalid`, `close`/`raise`/`move` are `Status.NotFound` (no window can exist),
   `window_frame_rect`/`window_content_rect`/`window_present` are `Status.Invalid`,
@@ -135,7 +139,8 @@ an `int`; `0` is never a valid id.
   another task's window or disabled graphics. It does not repair, raise or mark anything.
   `syslib.present` remains a legal generic primitive (spec 0009, G10), but
   `window_present` is the sanctioned path for a window client: it bounds what the client's
-  presentation can cover.
+  presentation can cover. It reads the content rectangle at call time, so a client that
+  draws after a move MUST use the refreshed rectangle from an owner `Expose` (W12/W28).
 - **W18 (MUST):** Client liveness policy for M2: a task that never reads its events and
   never repaints leaves stale content on screen; the service does **not** close it, kill
   it, or reclaim its window for missing an expose. Window lifetime remains exactly task
@@ -268,6 +273,20 @@ an `int`; `0` is never a valid id.
   input waiter after the table lock is dropped. There is no timeout: a claim reserves only
   the press inside its rectangle and leaves every other event routing normally. A claim is
   a UI focus mechanism, not an authority boundary.
+- **W28 (MUST):** A move of a **topmost** window copies its content rectangle from the old
+  to the new origin **before** the repair, so the content follows the frame immediately
+  (M8.5, ADR 0046). The copy is an exact shadow-to-shadow snapshot of the content
+  rectangle (never the service chrome), clipped to the screen and the shadow clip,
+  overlap-safe in both axes, and performed only when the source is the visible top window.
+  The move records the old-frame desktop erase (whose `covers_from = 0` subtraction
+  protects the moved window's new frame) and MUST NOT record a new-frame desktop erase:
+  that erase would paint the desktop across the new content and wipe the snapshot. The
+  new border and title bar are drawn by the ordinary chrome pass, and the copy is included
+  in the damage union that the repair presents. A **non-topmost** move keeps both erases
+  and does not copy: its source may be covered, so it relies on the client's refreshed
+  repaint. The snapshot is not a canvas — the service retains no content, and the owner
+  MUST still re-read `window_content_rect` and redraw at the new origin (W12/W17). A client
+  that never processes the `Expose` keeps the copied snapshot (W18).
 
 ## Design
 
@@ -377,7 +396,9 @@ lock:
    - `open`: `covers_from = count` (the new window is topmost) — its whole frame starts
      as desktop, including the content the client is about to draw;
    - `move`, new frame: `covers_from = moved index + 1` — windows above the moved one
-     keep their pixels; windows below are covered and correctly erased;
+     keep their pixels; windows below are covered and correctly erased. A **topmost**
+     move records no new-frame erase (W28): the moved window covers its own new frame and
+     a desktop erase there would wipe the copied content snapshot;
    - `move`, old frame and `close`: `covers_from = 0` — any live window overlapping the
      area keeps its pixels and has its chrome redrawn.
 2. **Chrome, bottom-to-top.** Every window whose frame intersects the chrome damage
@@ -394,6 +415,25 @@ lock:
 `move` to the same origin records nothing. A refused operation (`NotFound`, `Invalid`)
 records nothing. `close_task` accumulates every removed frame and repairs once, so a
 terminated task's windows disappear together.
+
+#### Moving content (implemented in M8.5)
+
+A relocation of the topmost window first copies its content rectangle to the new origin
+(W28). The source pixels are still the old content because the copy runs before the
+geometry changes and before any painting; the copy is clipped like every other `gfx`
+operation and never touches the cursor. The repair then restores the old frame (the
+moved window's new frame is subtracted automatically, so an overlap is safe), paints the
+new chrome, asks every intersected window to repaint with its whole-content `Expose`, and
+presents the coalesced damage union, which includes the new frame. The content area is
+never painted by the service; if the snapshot is missing (a client drew outside its
+content, or a non-topmost move), the owner's refreshed repaint fills it.
+
+The client half is a normal `Expose` handler: read `window_content_rect` again, recompute
+cached origins and draw at the new absolute coordinates. Calculator, Minesweeper, Editor,
+Browser, Clock Window, Widgets and the desktop shell do this; the proof apps that read the
+rectangle on every paint (`windows_drag`, `windows_events`, `windows_proof_*`) were
+already correct, and the pure drawing/timer demos (`visual`, `font`, `perf`, `windows_demo`)
+never take input after a move and are allowed to keep their startup snapshot (W18).
 
 #### Damage coalescing and present batching (implemented in M2.6.2)
 
@@ -649,11 +689,14 @@ press. The close box is application-visible only through the predeclared
   `POINTER_ORDER → SCREEN` and `POINTER_ORDER → WINDOW → SCREEN`; only the two pointer
   paths take it.
 - **Damage and expose.** `drag_move` uses the same `relocate` path as `window_move`: the
-  old frame is erased to the desktop in the parts no live window covers, the new frame is
-  filled under the moved window, chrome is redrawn, and every intersecting window gets its
-  whole-content `Expose` (W12). The drag therefore restores the area underneath and asks
-  the owner for a repaint exactly like an owner `move`; the client's repaint remains its
-  own (W17), and a lower window must not paint over the dragged one (no per-task clip).
+  old frame is erased to the desktop in the parts no live window covers, chrome is
+  redrawn, and every intersecting window gets its whole-content `Expose` (W12). Because a
+  title-bar press raises the window first, a drag is always a topmost move, so the service
+  copies the content snapshot to the new origin before the repair (W28) and records no
+  new-frame erase; the new content is visible without waiting for the owner. The owner's
+  refreshed repaint still lands at the new origin (W12/W17), and a lower window must not
+  paint over the dragged one (no per-task clip). A programmatic `window_move` of a
+  topmost window takes the same path.
 
 `window::drag_self_check` proves the pure rules on a scratch table: title-bar vs close-box
 vs content classification, the grab offset, moves and clamps at all four edges, release,
@@ -981,6 +1024,9 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | Kernel window clicked (M2.3.4) | Ordinary hit-test/raise/focus; `Expose` asks the console to repaint |
 | Application draws outside its content rectangle | Possible (no clip primitive, no capability model); the service repairs the damage on the next pass |
 | `move` to the same origin | `Ok`, no change |
+| A **topmost** move (including every drag) | The content snapshot is copied to the new origin before the repair, the new frame is not desktop-erased, chrome is painted, and the owner still gets its `Expose` (W28) |
+| A **non-topmost** move | Both frames are desktop-erased and no copy is made; the new content shows the underlay until the owner's refreshed repaint |
+| A client with a stale content rectangle | It draws and hit-tests at the old origin until it processes the `Expose`; the copied snapshot remains visible (W18/W28) |
 | `raise` on the top window | `Ok`, focus set, order unchanged |
 | Title-bar press while a drag is active | Ignored by the service; the existing drag continues |
 | Drag beyond a screen edge | Clamped so the frame stays fully on screen, like `move_to` |
@@ -1026,6 +1072,9 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | A global clip held across the expose | One shadow and several cores: the client runs asynchronously, so there is nothing to hold the clip against |
 | Resize in M2.3 | Needs a drag loop, minimum-size policy and client reflow; deferred to M2.4/M2.3.5 |
 | Let a client draw into the shadow with its own clip | No clip primitive, no capability model, and a second clip would need per-task state the drawing primitives do not have |
+| Block the drag until the client repaints synchronously | The service never blocks on a client; a slow client would freeze input, and there is no per-task clip to repaint into |
+| Give clients relative drawing origins instead of absolute coordinates | Every drawing primitive and UI helper would need per-task origin state; absolute screen coordinates are the language model |
+| Let the service own and redraw the content | That is the per-window canvas in disguise, and clients would still hit-test the stale origin (ADR 0046) |
 | A lifetime-long modal grab for the desktop | It would hide the queue from every other task; the desktop would be the only event consumer and no client could read input (ADR 0045) |
 | Make the menu bar a window | It would gain service chrome, a z-order record and a second drawing surface for something the shell already draws; the opening click would be treated as an ordinary window hit-test |
 
@@ -1056,3 +1105,4 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | 2026-11-18 | M8.2 implemented (W23 rewritten, W25 added; ADR 0043 amends ADR 0042's close clause): the close box posts an owner-only `EventKind.Close` (ordinal 6, `window = id`) instead of `task::request_kill`; the window stays until its owner closes it. One per-window `close_pending` flag with `take_close`/`has_close` (topmost-first, owner-only), served before a pending `Expose` and before the queue; `input_ready`, the scheduler's post-block `Input` re-check and `next_any` source 1 include it, and the pointer hook wakes `WaitFor::Input` after the unlock. `window::close_self_check` prints `window: close ok`; `windows_drag` proves a same-task dialog and a victim that closes itself and exits `Ok`; `desktop_shell check` closes About from its real close box and stays alive; `scripts/about_close_qmp.py` reproduces the reported System → About → close-box → Terminal scenario on the boot desktop. `desktop_shell` handles `Close` in both modes, the user-facing apps close their own windows, and proof/demo windows may ignore it. No opcode, builtin, `Host`, `syslib` or `stdlib` change (ABI v1 stays 75). |
 | 2026-11-18 | M8.3 implemented (W26 added; ADR 0044): one machine-wide modal popup input grab in the window table, exposed as `syslib.popup_grab`/`popup_release` (builtins 58/59, no opcode; ABI v1 stays 75). The pointer service ignores presses while a grab is held; `KernelHost::poll_event` gives non-owners `WouldBlock` without consuming the queue and passes producer events (`window = 0`, no hit-test/raise) to the owner; `input_ready`, the scheduler's post-block re-check and `next_any` source 1 use the one `grab_allows(task)` rule; release and `close_task` wake input waiters. `window::grab_self_check` prints `window: grab ok`. The desktop's Apps menu (Calculator, Minesweeper, Text Editor, File Browser, Clock, Widgets) and the existing System menu take the grab on open; `scripts/apps_menu_qmp.py` launches Clock from a row over the kernel Terminal; `desktop_shell check` covers both menus, the grab, one launch and the outside-click dismissal. |
 | 2026-11-18 | M8.4 implemented (W27 added; ADR 0045): one machine-wide persistent pointer-region claim in the window table, exposed as `syslib.region_claim`/`region_release` (builtins 60/61, no opcode; ABI v1 stays 75). A queued `PointerDown` with `window = 0` inside the rectangle is dequeued only by the claim owner (a non-owner gets `WouldBlock` without consuming it); the modal grab still takes precedence. The pointer service starts no drag and posts no close request for a new press inside the claim, while moves/releases still follow an in-progress drag. `task::input_queue_ready` folds the grab and region rules into `input_ready`, the scheduler's post-block re-check and `next_any` source 1. Release and `close_task` wake input waiters. `window::region_self_check` prints `window: region ok`; the desktop claims the 22-pixel bar at startup and releases it on exit; `scripts/apps_menu_qmp.py` now launches `File Browser`, opens/dismisses Apps while it is live, then reaches `terminal: ok` (it fails on M8.3 on `-smp 4`). |
+| 2026-11-18 | M8.5 implemented (W12/W17 clarified, W28 added; ADR 0046): a topmost move copies the window's content rectangle to the new origin in the shadow before the repair (internal `gfx::copy_rect`, overlap-safe, clipped, no `syslib` binding) and records no new-frame desktop erase, so the content follows the frame immediately; non-topmost moves keep both erases and rely on the client. Every windowed app re-reads `window_content_rect` on an owner `Expose` and recomputes cached geometry (Calculator, Minesweeper, Editor, Browser, Clock Window, Widgets; the desktop shell's own draw already did). `windows_drag` proves the copied mark before its pump and a changed repaint marker at the new origin after it; `scripts/drag_content_qmp.py` drags Calculator, checks the panel/display at the new origin and requires a `7` click to change the display. No opcode, builtin or `stdlib` change (ABI v1 stays 75). |

@@ -646,6 +646,102 @@ pub fn set_clip(x: i64, y: i64, w: i64, h: i64) -> bool {
     true
 }
 
+/// Copies a rectangle inside the shadow (spec 0011, W28).
+///
+/// Kernel-internal: the window service uses it to move a topmost window's
+/// content snapshot to the new origin before a repair. There is no `syslib`
+/// binding, so an application cannot copy screen pixels. The copy is clipped to
+/// the screen and the current shadow clip; a fully clipped request is a no-op
+/// `Ok`. Rows are copied with an overlap-safe `copy_within`, and the row order
+/// follows the vertical direction (`bottom-to-top` when the destination is
+/// lower) so a vertically overlapping source is not clobbered. The cursor is
+/// never touched: it lives in the framebuffer, composited by [`present`].
+///
+/// Returns `Invalid` for a non-positive extent or disabled graphics.
+pub fn copy_rect(
+    src_x: i64,
+    src_y: i64,
+    dst_x: i64,
+    dst_y: i64,
+    w: i64,
+    h: i64,
+) -> Status {
+    if w <= 0 || h <= 0 {
+        return Status::Invalid;
+    }
+    let mut guard = SCREEN.lock();
+    let Some(screen) = guard.as_mut() else {
+        return Status::Invalid;
+    };
+    let screen_w = screen.width as i64;
+    let screen_h = screen.height as i64;
+    let clip_x0 = i64::from(screen.clip.x).max(0);
+    let clip_y0 = i64::from(screen.clip.y).max(0);
+    let clip_x1 = i64::from(screen.clip.x) + i64::from(screen.clip.w);
+    let clip_y1 = i64::from(screen.clip.y) + i64::from(screen.clip.h);
+
+    // Start with the destination rectangle clipped to the screen and clip.
+    let mut left = dst_x.max(clip_x0);
+    let mut top = dst_y.max(clip_y0);
+    let mut right = dst_x.saturating_add(w).min(clip_x1).min(screen_w);
+    let mut bottom = dst_y.saturating_add(h).min(clip_y1).min(screen_h);
+    if right <= left || bottom <= top {
+        return Status::Ok;
+    }
+
+    // The source keeps the same crop. Clip it to the screen by shrinking the
+    // destination by the same amount, so source and destination stay aligned.
+    let src_left = src_x.saturating_add(left - dst_x);
+    if src_left < 0 {
+        left -= src_left;
+    }
+    let src_top = src_y.saturating_add(top - dst_y);
+    if src_top < 0 {
+        top -= src_top;
+    }
+    let src_right = src_x.saturating_add(right - dst_x);
+    if src_right > screen_w {
+        right -= src_right - screen_w;
+    }
+    let src_bottom = src_y.saturating_add(bottom - dst_y);
+    if src_bottom > screen_h {
+        bottom -= src_bottom - screen_h;
+    }
+    if right <= left || bottom <= top {
+        return Status::Ok;
+    }
+
+    let columns = (right - left) as usize;
+    let rows = (bottom - top) as usize;
+    let row_bytes = columns * 4;
+    let src_column = (src_x + (left - dst_x)) as usize;
+    let src_row = (src_y + (top - dst_y)) as usize;
+    let dst_column = left as usize;
+    let dst_row = top as usize;
+
+    // Vertical overlap is the row-iteration order: moving down (destination
+    // below the source) must start at the last row. Horizontal overlap is
+    // handled by the slice's own `copy_within`.
+    if dst_y >= src_y {
+        for step in (0..rows).rev() {
+            let source = (src_row + step) * screen.pitch + src_column * 4;
+            let destination = (dst_row + step) * screen.pitch + dst_column * 4;
+            screen
+                .shadow
+                .copy_within(source..source + row_bytes, destination);
+        }
+    } else {
+        for step in 0..rows {
+            let source = (src_row + step) * screen.pitch + src_column * 4;
+            let destination = (dst_row + step) * screen.pitch + dst_column * 4;
+            screen
+                .shadow
+                .copy_within(source..source + row_bytes, destination);
+        }
+    }
+    Status::Ok
+}
+
 /// Restores the full-screen clip (spec 0011, W10).
 pub fn reset_clip() {
     let mut guard = SCREEN.lock();

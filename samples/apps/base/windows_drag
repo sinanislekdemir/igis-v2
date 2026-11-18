@@ -66,6 +66,7 @@ var
   rect: Rect;
   frame: Rect;
   content: Rect;
+  old_content: Rect;
   screen_w: uint;
   screen_h: uint;
   black: uint;
@@ -86,6 +87,13 @@ var
   count: int;
   running: bool;
   flushed: uint;
+  paint_count: int;
+  marker_color: uint;
+  last_marker: uint;
+  marker_a: uint;
+  marker_b: uint;
+  copied_marker: uint;
+  repaints_before: int;
 
 procedure verify(label: const string[0]; passed: bool);
 begin
@@ -224,6 +232,17 @@ begin
     st := syslib.fill_rect(content.x + 20, content.y + 20, 16, 16, mark);
     st := syslib.draw_rect(content.x + 2, content.y + 2, content.w - 4, content.h - 4, black);
     st := syslib.draw_text(content.x + 20, content.y + 48, "Drag Target", black);
+    // Repaint marker (W28 proof): a 4x4 patch at content+(2,2), after the
+    // outline, alternating between two colours on every repaint. The service
+    // copy moves the current colour to the new origin; the client's refreshed
+    // repaint must replace it with the other one.
+    last_marker := marker_color;
+    st := syslib.fill_rect(content.x + 2, content.y + 2, 4, 4, marker_color);
+    if marker_color = marker_a then
+      marker_color := marker_b
+    else
+      marker_color := marker_a;
+    paint_count := paint_count + 1;
     st := syslib.window_present(id);
   end;
 end;
@@ -334,6 +353,11 @@ begin
   base := uint(0x00224466);
   mark := uint(0x0033CC66);
   under_color := uint(0x00CC44AA);
+  marker_a := uint(0x00FF00FF);
+  marker_b := uint(0x0000FFFF);
+  marker_color := marker_a;
+  last_marker := marker_a;
+  paint_count := 0;
   screen_w := syslib.screen_width();
   screen_h := syslib.screen_height();
 
@@ -362,6 +386,7 @@ begin
     begin
       paint_underlay();
       paint_target();
+      old_content := content;
       status := syslib.window_frame_rect(id, frame);
       verify("target frame", status = Ok
         and frame.x = TargetX and frame.y = TargetY
@@ -413,12 +438,28 @@ begin
       verify("release parks", status = Ok
         and rect.x = expect_x and rect.y = expect_y);
 
-      // 5. Repaint after the owner exposes: the new content is at the new
-      //    origin and the old area shows the underlay colour.
+      // 5. The service already copied the topmost content snapshot to the new
+      //    origin during the move (W28): the distinctive mark and the current
+      //    repaint-marker colour are there before any client repaint. Then the
+      //    refreshed `Expose` repaint must replace the marker at the new origin
+      //    and restore the old area to the underlay.
+      status := syslib.window_content_rect(id, content);
+      verify("service copy has the mark", status = Ok
+        and syslib.get_pixel(content.x + 28, content.y + 28) = mark);
+      copied_marker := syslib.get_pixel(content.x + 2, content.y + 2);
+      verify("service copy carries the marker", copied_marker = last_marker);
+      repaints_before := paint_count;
       pump();
       status := syslib.window_content_rect(id, content);
+      verify("refresh repainted the client", paint_count > repaints_before);
       verify("new content mark", status = Ok
         and syslib.get_pixel(content.x + 28, content.y + 28) = mark);
+      verify("client repainted the marker", status = Ok
+        and syslib.get_pixel(content.x + 2, content.y + 2) = last_marker
+        and syslib.get_pixel(content.x + 2, content.y + 2) <> copied_marker);
+      verify("old origin is not the new marker",
+        syslib.get_pixel(old_content.x + 2, old_content.y + 2)
+          <> syslib.get_pixel(content.x + 2, content.y + 2));
       verify("old area restored",
         syslib.get_pixel(TargetX + 21, TargetY + 36) = under_color);
 

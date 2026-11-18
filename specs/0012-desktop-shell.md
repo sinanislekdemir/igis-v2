@@ -5,7 +5,7 @@
   `interpreter`, `abi`; `samples/apps`; M2.3.4 of the desktop milestone
 - **Supersedes:** the full-screen console of spec 0009 G14 (superseded in part)
 - **Superseded by:** none
-- **ADRs:** 0020, 0024, 0025, 0029, 0030
+- **ADRs:** 0020, 0024, 0025, 0029, 0030, 0046
 - **Updated:** 2026-11-18
 
 ## Context
@@ -130,10 +130,12 @@ resize. Those are M2.4/M2.5.
   and a click outside the menu frame dismisses it.
 - **D12 (MUST):** The shell may own one window of its own ("Desktop"). It draws the
   window content on open and on every `Expose` for that id, calls `window_present`, and
-  ignores exposes for windows it does not own. It repaints the content only while it is
-  the topmost window; when another window is above it, it presents without redrawing, so
-  a client with no per-task clip (M2) cannot overwrite the window above. It never draws in
-  another window's content rectangle.
+  ignores exposes for windows it does not own. Every repaint re-reads
+  `window_content_rect` first, because the frame origin is dynamic after a drag or move
+  (spec 0011, W12/W28; ADR 0046); the About panel's `draw_about` does the same. It repaints
+  the content only while it is the topmost window; when another window is above it, it
+  presents without redrawing, so a client with no per-task clip (M2) cannot overwrite the
+  window above. It never draws in another window's content rectangle.
 - **D13 (MUST):** `check` mode is deterministic and headless: draw the bar and window,
   check menu-bar/chrome/content pixels with `get_pixel`, call each menu item's handler
   directly (the boot desktop is itself an event consumer from M2.5.6, so an injected
@@ -194,7 +196,11 @@ resize. Those are M2.4/M2.5.
   the shell-entry image (`cargo xtask image --shell`), which has no `entrypoint` and is
   exactly the pre-M2.5.6 boot. The shell's terminal (`core.write` and its own
   `core.read_input` echo) is independent of the queue, though the shell's input loop
-  also consumes key events when it is waiting at the prompt.
+  also consumes key events when it is waiting at the prompt. A harness that must
+  deliver a content click to a boot-desktop application deterministically may close the
+  desktop's own window with its close box first (W23): the desktop exits normally, its
+  task-exit line acknowledges it, and the application becomes the only queue consumer.
+  `scripts/drag_content_qmp.py` does this before its Calculator drag/click proof.
 - **D20 (MUST):** The `Apps` item is the application-selection pull-down (M8.3). It has
   one 16-pixel row per item, in this order: `Calculator` → `calculator`, `Minesweeper` →
   `minesweeper`, `Text Editor` → `editor`, `File Browser` → `browser`, `Clock` →
@@ -414,3 +420,4 @@ while that id is its own; otherwise it presents what the service last left.
 | 2026-11-17 | M2.6.2 (spec 0016, ADR 0031): D3's per-cell present is replaced by one present per byte run. `Terminal` keeps a bounded dirty rectangle; `paint_cell` draws and marks it, `write_bytes`/`_print` flush after the run, the input echo defers to one `flush_pending` at the end of `poll_input` (after `pump`), and `repaint` clears the box and presents each visible part once. The flush re-reads the visible parts under `WINDOW` and copies only the dirty rectangle from the current shadow. The console byte stream, line discipline, lock order (`CONSOLE → WINDOW → SCREEN`) and every grid/pixel proof are unchanged. |
 | 2026-11-18 | D20 added and D10/D11 rewritten (M8.3): the `Apps` label becomes an application-selection pull-down (Calculator, Minesweeper, Text Editor, File Browser, Clock, Widgets) whose rows launch with non-blocking `core.spawn` and whose open/close takes/releases the modal popup input grab (spec 0011, W26; ADR 0044). Both pull-downs now take the grab, so a row over another window — and the System menu's rows below `y = 26` — reach the shell instead of the covered window or its title-bar drag. F9/F10 toggle Apps/System, Up/Down/Enter/Escape drive the open menu and Left/Right switch. D13's check mode covers both menus, the grab, one real launch and the outside click; `scripts/apps_menu_qmp.py` proves the boot-desktop Clock click over the Terminal. No opcode or `stdlib` helper is added (ABI v1 stays 75). |
 | 2026-11-18 | D20 extended (M8.4, spec 0011 W27, ADR 0045): the desktop claims the persistent pointer-region `(0, 0, screen_w, MenuHeight)` at startup in normal and check mode and releases it on exit. The grab only starts after a menu opens, so the claim protects the bar press that opens it while applications are blocked in `next_event`; check mode accepts `Ok` or `Full` (the boot desktop may already own the bar) and releases only its own claim. `scripts/apps_menu_qmp.py` now launches `File Browser`, opens and dismisses a second Apps menu while it is live, then clicks `Terminal` and requires `terminal: ok`; the sequence fails on M8.3 on `-smp 4` and passes on M8.4. No opcode or `stdlib` helper is added (ABI v1 stays 75). |
+| 2026-11-18 | M8.5 (spec 0011 W28, ADR 0046): D12 records that the shell's own-window repaint re-reads `window_content_rect` on every `Expose` (its `draw_shell_window`/`draw_about` already did), so a dragged "Desktop" window redraws at the new origin after the service copies its content snapshot. No shell behaviour, opcode or `stdlib` helper changes. |

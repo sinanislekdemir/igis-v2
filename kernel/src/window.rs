@@ -17,8 +17,10 @@
 //!   in its visible parts), and the damage union is presented once.
 //!
 //! Client content is not kept by the service: a repair redraws chrome and the
-//! desktop, never another window's content. M2.3.3's `Expose` will ask the
-//! owner to repaint when a repair uncovers its content.
+//! desktop, never another window's content. A **topmost** move copies a
+//! one-shot content snapshot to the new origin before the repair (spec 0011,
+//! W28), so the content follows the frame immediately; the owner still
+//! repaints from its refreshed `Expose`, and the snapshot is not a canvas.
 //!
 //! Owner `0` is reserved for the kernel (spec 0012, D6): task ids start at `1`,
 //! and the kernel's terminal and system-log windows use the same public
@@ -880,6 +882,7 @@ impl Table {
         id: u64,
         x: i64,
         y: i64,
+        copy_content: bool,
     ) -> Status {
         let Some(pos) = self.position(id) else {
             return Status::NotFound;
@@ -887,11 +890,18 @@ impl Table {
         if self.windows[self.order[pos]].owner != owner {
             return Status::Invalid;
         }
-        self.relocate(screen_w, screen_h, pos, x, y)
+        self.relocate(screen_w, screen_h, pos, x, y, copy_content)
     }
 
     /// Moves the window at z-order position `pos`, clamping the origin on
     /// screen and recording the same damage as `window_move` (W4/W11).
+    ///
+    /// A **topmost** move with `copy_content` copies the visible content
+    /// snapshot from the old to the new origin before the repair and omits the
+    /// new-frame erase, so the content follows the frame immediately (W28).
+    /// The copy is a presentation snapshot, not a canvas: the client is still
+    /// asked to repaint at the new origin. `copy_content` is `false` only for
+    /// the pure boot self-checks, which must never touch the screen.
     fn relocate(
         &mut self,
         screen_w: i64,
@@ -899,6 +909,7 @@ impl Table {
         pos: usize,
         x: i64,
         y: i64,
+        copy_content: bool,
     ) -> Status {
         let window = &mut self.windows[self.order[pos]];
         let frame = window.frame();
@@ -910,17 +921,38 @@ impl Table {
         if window.x == new_x && window.y == new_y {
             return Status::Ok;
         }
+        let topmost = pos + 1 == self.count;
+        // Copy before the geometry and the repair: the source pixels are still
+        // the old content, and nothing has been painted over them yet. A
+        // non-topmost window may be covered at the source, so it keeps the old
+        // damage and relies on its refreshed repaint.
+        if copy_content && topmost {
+            let _ = gfx::copy_rect(
+                window.content().x,
+                window.content().y,
+                new_x.saturating_add(BORDER_WIDTH),
+                new_y.saturating_add(TITLE_BAR_HEIGHT),
+                window.w,
+                window.h,
+            );
+        }
         window.x = new_x;
         window.y = new_y;
         let moved = window.frame();
         self.bump();
 
-        // The old frame becomes desktop where no live window covers it; the
-        // new frame covers the desktop and any lower window. Windows above the
-        // moved one keep their pixels, so the new frame is filled only in the
-        // parts below it. Chrome is redrawn for every window over both frames.
+        // The old frame becomes desktop where no live window covers it. The
+        // moved window's new frame is a live window, so the subtraction
+        // protects the copied overlap. A topmost move adds no new-frame erase:
+        // a `covers_from = count` erase would paint the desktop across the
+        // whole new content and wipe the snapshot. Chrome (the new border and
+        // title bar) is painted separately and never touches the content
+        // rectangle. Non-topmost moves keep the old damage (underlay until the
+        // client's refreshed repaint).
         self.erases.add(frame, 0);
-        self.erases.add(moved, pos + 1);
+        if !topmost {
+            self.erases.add(moved, pos + 1);
+        }
         self.chrome.add(frame);
         self.chrome.add(moved);
         Status::Ok
@@ -987,6 +1019,7 @@ impl Table {
             pos,
             x.saturating_sub(drag.offset_x),
             y.saturating_sub(drag.offset_y),
+            true,
         )
     }
 
@@ -1498,7 +1531,7 @@ pub fn raise(id: u64) -> Status {
 pub fn move_to(owner: u64, id: u64, x: i64, y: i64) -> Status {
     let (screen_w, screen_h) = gfx::size();
     let mut table = TABLE.lock();
-    let status = table.move_to(screen_w as i64, screen_h as i64, owner, id, x, y);
+    let status = table.move_to(screen_w as i64, screen_h as i64, owner, id, x, y, true);
     let wake = if status == Status::Ok {
         table.repair()
     } else {
@@ -1867,7 +1900,7 @@ pub fn self_check() -> Result<(), u32> {
 
     // 3. A non-owner cannot close or move; focus and geometry stay put.
     if table.close(8, 1) != Status::Invalid
-        || table.move_to(SCREEN_W, SCREEN_H, 8, 1, 0, 0) != Status::Invalid
+        || table.move_to(SCREEN_W, SCREEN_H, 8, 1, 0, 0, false) != Status::Invalid
     {
         return Err(7);
     }
@@ -1889,7 +1922,7 @@ pub fn self_check() -> Result<(), u32> {
     }
 
     // 5. Move clamps and does not change focus.
-    if table.move_to(SCREEN_W, SCREEN_H, 7, 1, 5, 6) != Status::Ok || table.focus != 1 {
+    if table.move_to(SCREEN_W, SCREEN_H, 7, 1, 5, 6, false) != Status::Ok || table.focus != 1 {
         return Err(10);
     }
     if table.frame_rect(1)
@@ -2170,15 +2203,20 @@ pub fn paint_self_check() -> Result<(), u32> {
         return Err(20);
     }
 
-    // Moving the top window records both frames for the desktop restore and
-    // the chrome; the new frame subtracts only the windows above it.
+    // Moving the top window records the old frame for the desktop restore and
+    // both frames for the chrome, but not the new frame for the desktop
+    // restore: the topmost content copy must survive (W28). The self-check
+    // passes `copy_content = false` so it never touches the screen.
     table.clear_damage();
     let old = table.frame_rect(a).map_err(|_| 21u32)?;
-    if table.move_to(SCREEN_W, SCREEN_H, 1, a, 300, 220) != Status::Ok {
+    if table.move_to(SCREEN_W, SCREEN_H, 1, a, 300, 220, false) != Status::Ok {
         return Err(22);
     }
     let new = table.frame_rect(a).map_err(|_| 23u32)?;
-    if !table.erases.covers(old, 0) || !table.erases.covers(new, table.count) {
+    if !table.erases.covers(old, 0)
+        || table.erases.covers(new, 0)
+        || table.erases.covers(new, table.count)
+    {
         return Err(24);
     }
     if !table.chrome.covers(old) || !table.chrome.covers(new) {
@@ -2201,7 +2239,7 @@ pub fn paint_self_check() -> Result<(), u32> {
     if table.raise(999) != Status::NotFound
         || table.close(1, 999) != Status::NotFound
         || table.close(2, b) != Status::Invalid
-        || table.move_to(SCREEN_W, SCREEN_H, 2, b, 0, 0) != Status::Invalid
+        || table.move_to(SCREEN_W, SCREEN_H, 2, b, 0, 0, false) != Status::Invalid
         || table.erases.count != 0
         || table.chrome.count != 0
     {
@@ -2401,7 +2439,7 @@ pub fn damage_self_check() -> Result<DamageStats, u32> {
         .open(SCREEN_W, SCREEN_H, 2, 600, 400, 200, 120, b"Beta")
         .map_err(|_| 7u32)?;
     table.clear_damage();
-    if table.move_to(SCREEN_W, SCREEN_H, 1, alpha, 700, 600) != Status::Ok {
+    if table.move_to(SCREEN_W, SCREEN_H, 1, alpha, 700, 600, false) != Status::Ok {
         return Err(8);
     }
 
@@ -2528,7 +2566,7 @@ pub fn route_self_check() -> Result<(), u32> {
     if table.hit_test(900, 700).is_some() {
         return Err(13);
     }
-    if table.move_to(SCREEN_W, SCREEN_H, 2, b, 20, 20) != Status::Ok {
+    if table.move_to(SCREEN_W, SCREEN_H, 2, b, 20, 20, false) != Status::Ok {
         return Err(14);
     }
     // A was raised above B earlier, so the overlap still hits A.
