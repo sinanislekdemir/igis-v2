@@ -15,7 +15,7 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 ## Resume point (update this when a session ends)
 
 - **Current state:** **505 host tests**; specs 0001–0019 (0018 and 0019
-  Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1–M8.4 complete**. The
+  Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1–M8.5 complete**. The
   application image is a read-only ext2 tree (`lib`, `base`, `home`, `system`);
   `/home` is a separate 8 MiB ext2 image on an ATA disk, read-write through
   `ext2w` and one router, persistent across reboots. Write builtins are 53–57.
@@ -26,8 +26,13 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   58/59, no opcode) makes both pull-downs reachable over other windows. M8.4 adds a
   machine-wide persistent pointer-region claim (`syslib.region_claim`/`region_release`,
   builtins 60/61, no opcode): the desktop claims the menu-bar strip, so the press that
-  opens a menu reaches it even while an application is blocked in `next_event`.
-- **Last commit:** `1304df8` (M8.4) plus this docs commit.
+  opens a menu reaches it even while an application is blocked in `next_event`. M8.5 makes
+  a dragged window's content follow its frame: a topmost move copies the content rectangle
+  to the new origin before the repair (`gfx::copy_rect`, kernel-internal, no `syslib`
+  binding) and omits the new-frame desktop erase, and every windowed app re-reads
+  `window_content_rect` on an owner `Expose` before drawing or hit-testing (spec 0011
+  W28, ADR 0046).
+- **Last commit:** `f478f9b` (M8.5) plus this docs commit.
   The tree is clean; `build/home.img` is reset.
 - **Next:** M8 is complete. Pick from the deferred backlog in
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) / the "Deferred" table below, or extend the
@@ -63,8 +68,9 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   and M7.1 (`core.fs_truncate`). Each ticket section below has its commit hashes
   and evidence.
 - **Done since M7.1:** M8.1 (window drag and close box), M8.2 (owner close requests),
-  M8.3 (Apps application menu and the modal popup input grab, `94187ed`) and M8.4
-  (persistent menu-bar pointer-region claim, `1304df8`; M8 close).
+  M8.3 (Apps application menu and the modal popup input grab, `94187ed`), M8.4
+  (persistent menu-bar pointer-region claim, `1304df8`) and M8.5 (topmost content
+  snapshot plus the client content-rect refresh, `f478f9b`; M8 close).
 - **Verified at that point (M3.4, independently by the parent):** **439 host tests**
   (abi 23, compiler 184, interpreter 150, langhost 81, 1 doctest); `cargo xtask
   build`/`image`/`image --shell` clean; boot `ext2: tree ok`. `run browser check`
@@ -1334,6 +1340,72 @@ parent verifies each.
   `about_close_qmp.py`, `system_menu_qmp.py`, `boot_desktop_qmp.py`, the visual golden
   `37802052…e9e81c9f` and `e2fsck -fn build/home.img` pass. `apps_menu_qmp.py --cores 4`
   captures `/home/sinan/Desktop/igis-apps-menu.png` (1024×768).
+
+- [x] **M8.5 Move the content rectangle, then redraw the window at the new position.**
+  Regression: dragging a window moves its frame and chrome, but the client
+  content does not follow or reappear. Reproduced with Calculator: after a
+  title-bar drag the new frame shows stale underlay pixels, not the calculator
+  panel; the old content rect is stale in the app, so its Expose repaint draws
+  at the old coordinates (and `window_present` clips it to the new content) and
+  its hit-testing still uses the old origin. Two coordinated fixes:
+  - **Service, "move the rectangle first".** Add an internal
+    `gfx::copy_rect` (shadow-to-shadow, row-wise, overlap-safe, clipped). In
+    `Table::relocate`, when the moved window is **topmost** (a drag always
+    raises it first), copy its visible content rectangle from the old to the
+    new origin before the repair, and omit the new frame's erase so the copy
+    survives; the old frame erase still subtracts every live window (including
+    the moved window's new frame), the chrome pass paints the new border/title,
+    and the normal damage/`Expose` path runs. Non-topmost moves keep the current
+    erase and rely on the client. The copy is a presentation snapshot, not a
+    canvas: the service still owns no content.
+  - **Apps, "redraw at the new position".** Every windowed sample must re-read
+    `syslib.window_content_rect(id, rect)` on an owner `Expose` before drawing
+    or hit-testing, and recompute any cached dependent geometry (Calculator's
+    `disp_x`/`disp_y`; similar locals elsewhere). At minimum Calculator,
+    Minesweeper, Editor, Browser, Clock Window, Widgets, the desktop shell's own
+    window and any other sample that caches the content rect; audit all
+    `window_open` callers. A client that ignores the expose keeps the copied
+    snapshot (W18 policy).
+  - **Proof:** extend `windows_drag` — after the drag and **before** draining
+    exposes, the mark must already be at the new content origin (the copy), then
+    drain/present and check a repaint-counter marker at the new origin (the
+    client's redraw with a fresh rect; a stale client would draw at the old
+    coordinates and fail). New `scripts/drag_content_qmp.py` launches
+    Calculator from Apps, drags it by the title bar, verifies the panel/display
+    at the new origin, clicks the `7` button at the new coordinates and requires
+    the display pixels to change (proves both the refreshed paint and the
+    refreshed hit-test), then captures `/home/sinan/Desktop/igis-drag.png`; no
+    halt. Run both core counts.
+  - **Docs:** spec 0011 W12/W17 clarification and W28 (topmost move copy plus
+    the client's re-read obligation), ADR 0046 (why a snapshot copy is not a
+    canvas, why the client must re-read the rect, rejected alternatives:
+    per-window canvas, blocking the drag for a repaint, absolute drawing
+    handles), spec 0012 app guidance, PLAN/AGENTS. No new opcode/builtin.
+  **Done (`f478f9b`):** **505 host tests** (abi 25, compiler 201, interpreter 168,
+  langhost 89, ext2w 22; no new host harness — the kernel crates have none).
+  Kernel-internal `gfx::copy_rect` (clipped, per-row `copy_within`, direction from the
+  vertical move, cursor untouched); `Table::relocate` copies the content snapshot for a
+  **topmost** move before the repair, records the old-frame erase (`covers_from = 0`,
+  protecting the new frame by subtraction) and no new-frame erase, and keeps both erases
+  for a non-topmost move; `window_move` and the drag pass `true`, the pure self-checks
+  pass `false`. `paint_self_check` now asserts the topmost no-new-frame-erase shape
+  (`window: paint ok`). Calculator (`disp_x`/`disp_y`), Minesweeper, Editor
+  (`compute_layout`), Browser, Clock Window (face/readout) and Widgets (control origins)
+  re-read `window_content_rect` on an owner `Expose`; the desktop shell already re-read
+  its own and About rectangles. `windows_drag` proves the copied mark and marker before
+  its pump and a changed repaint marker at the new origin after it (`windows_drag: ok`
+  on `-smp 4` and `-smp 1`); `scripts/drag_content_qmp.py` launches Calculator from Apps,
+  closes the desktop's own window with its close box (the accepted queue competition,
+  spec 0012 D19), drags (330,108) → (580,308), requires the new display edge 284/284 and
+  panel border 360/360 black with the old edge 0/284 and border 0/360, clicks `7` and
+  requires the display region to change (22 px, ink 36 → 20), writes
+  `/home/sinan/Desktop/igis-drag.png` (1024×768, ~24 KB) on `--cores 4` and passes on
+  `--cores 1 --no-capture`. Regressions pass on both core counts: `desktop_shell check`,
+  `windows`, `windows_events`, `windows_demo`, `windows_proof` (own boot), `editor`,
+  `browser`, `minesweeper`, `calculator`, `clock_window`, `widgets`, the shell `terminal`;
+  `apps_menu_qmp.py`, `about_close_qmp.py`, `boot_desktop_qmp.py`,
+  `system_menu_qmp.py` and the visual golden `37802052…e9e81c9f` are unchanged; no
+  opcode/builtin/`stdlib` change (ABI v1 75, 125 functions).
 
 ## Deferred (not UI; pick up when they matter)
 
