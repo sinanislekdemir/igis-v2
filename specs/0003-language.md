@@ -1109,8 +1109,7 @@ core.fs_size(path: const string[0]; var size: uint) -> Status
 
 They are host builtins (41–43), not opcodes. The view is the read-only image tree
 (spec 0018, L6): `fs_list` accepts `""`/`"."` or any directory path, and
-`fs_read`/`fs_size` accept any regular-file path. Paths use the same syntax as
-`core.spawn` (relative, at most 256 bytes, at most eight components of at most 64
+`fs_read`/`fs_size` accept any regular-file path. Paths use the same syntax as `core.spawn` (relative, at most 256 bytes, at most eight components of at most 64
 bytes each, no leading/trailing `/`, no empty or `.`/`..` component); a malformed
 path is `Invalid` and an over-long one is `CapacityExceeded`. A missing component is
 `NotFound`; a directory or other non-regular inode is `Invalid` for a read or size.
@@ -1124,7 +1123,9 @@ destination's runtime length and `read` to the copied count, so the caller loops
 and a missing name is `NotFound`, a directory `Invalid`. `fs_size` returns the same
 inode byte size the kernel's loader uses. Every failure leaves all out-parameters
 untouched; there is no allocation and no handle. The exact error table is spec 0013,
-F14.
+F14. Spec 0019 adds `core.fs_write`/`fs_remove`/`fs_mkdir`/`fs_rename` (builtins
+53–56) for the writable `/home` mount; the read primitives above are unchanged and
+writes elsewhere are `Invalid`.
 
 ### Terminal window (M2.5.5)
 

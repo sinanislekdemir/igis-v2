@@ -78,11 +78,9 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   uppercase letter codes, so `calculator`, `editor`, `browser` and `minesweeper`
   now accept both shapes and QMP `send-key` exits each (`task 6..9: exit Ok`).
   This also fixed a pre-existing bug in the editor/browser shortcuts.
-- **Next slice:** **the writable filesystem (Q51)**. M5 is complete; the owner
-  decision is the scope: a RAM overlay for `/home` (session-only, no disk writes,
-  `fs_write`/`fs_remove` over an in-memory layer) versus a real ext2 writer
-  (block/inode allocation, persistence, fsck-free but much larger). Spec/ADR
-  first, then tickets.
+- **Next slice:** **M6.1 — ATA disk, home image, `ext2w` read path and the
+  router** (spec 0019, ADR 0040). The writable primitives arrive in M6.2/M6.3 and
+  the persistence proof in M6.4.
 
 - **M2.6.3 complete:** the headless visual-regression harness (spec 0009 "Visual proof",
   G21; ADR 0032) and the resolution of M2.1.2. `samples/apps/visual` opens a window whose
@@ -922,6 +920,54 @@ toolkit on real programs before the writable-filesystem milestone.
   codes uppercase (`Q` = 0x51), while `calculator`/`editor`/`browser` compared
   the lower-case forms (0x71, 0x73/0x4F, 0x6C); all now accept both, and QMP
   `send-key` Ctrl+Q exits each app (`task 6..9: exit Ok`).
+
+## M6 — the writable home filesystem
+
+Normative: spec 0019, ADR 0040. Goal: a real, persistent ext2 `/home` on a
+dedicated disk, reached through one path router. One ticket per session; the
+parent verifies each.
+
+- [ ] **M6.1 ATA disk, home image, `ext2w` read path and the router.**
+  New `ext2w` crate (`no_std`, `SectorDevice`, allocation-free) with a read-only
+  mount (superblock/group/inode validation, lookup, `list`, `read_at`,
+  `read_file`, `file_size`) and host tests against an `mke2fs` image in a
+  temporary file. `kernel/src/ata.rs`: primary-master ATA PIO identify and
+  512-byte sector read (LBA28, bounded polling, reset; no DMA/interrupts), behind
+  `ext2w::SectorDevice`; `arch_x86_64::port` gains `inw`/`outw`/`insw`/`outsw`.
+  `xtask`: `build/home.img` (8 MiB, 1 KiB blocks, initial tree from
+  `samples/home/`), created when missing, `--reset-home`, `run` attaches
+  `-drive if=ide`, `--no-home` omits it. `kernel/src/fs.rs` router: `home/*` from
+  the writable mount (fallback to the application image when absent), everything
+  else from the read-only image; the file builtins, `repl::load` and
+  `core.spawn` use it. Boot prints `ext2w: mounted ...` or `ext2w: no home disk`
+  and the self-check `ext2w: home ok` (read `readme.txt`, list the root; no write
+  yet). Prove with the drive attached and without it, both core counts, and the
+  existing regression set.
+
+- [ ] **M6.2 The ext2 writer and `core.fs_write`.**
+  `ext2w` gains block/inode allocation and free, inode and superblock/group count
+  updates, block-pointer growth (direct/single/double indirect), writing at an
+  offset with gap zero-fill, implicit create, and the write-through block cache.
+  Host tests over the in-memory device. `core.fs_write(path, offset, data, var
+  written) -> Status` (builtin 53) plus interpreter/compiler checks; writes only
+  under `home/`. Kernel proof: write a file, read it back, reboot the image with
+  `e2fsck -fn` clean. No remove/rename yet.
+
+- [ ] **M6.3 `remove`, `mkdir`, `rename` and the applications.**
+  Directory entry add/remove, `mkdir` (`.`/`..`, link counts), `remove` (empty
+  dir or file, free blocks/inodes), `rename` within and across directories with a
+  regular-file replace; builtins 54–56. Editor: File-menu Save enabled, `Ctrl+S`
+  writes a sibling temporary and renames it over the document, status on success
+  and failure. Browser: create-directory and remove actions in `home/`. Host
+  `langhost` home over a temporary directory; e2e tests for all four primitives
+  and the editor save.
+
+- [ ] **M6.4 Persistence, `e2fsck` and the M6 close.**
+  A persistence harness: boot with `build/home.img`, write from an app, reboot or
+  power-cycle QEMU with the same image, boot, read it back; `e2fsck -fn` exits 0
+  after the write and after a remove/rename/mkdir session. Full regression on
+  both core counts with and without the disk; visual golden and boot desktop
+  unchanged; docs, AGENTS row, screenshots.
 
 ## Deferred (not UI; pick up when they matter)
 

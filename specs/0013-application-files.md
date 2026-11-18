@@ -17,7 +17,9 @@ so they need a read-only view of the same image. There is no writable
 filesystem and no block-device handle for applications. M2.5.1 exposed the image
 root only; M3.1 (spec 0018) generalised the view to the whole tree
 (`lib`, `base`, `home`, `system`) with a path walk, and M3.4 teaches the browser
-to descend into directories.
+to descend into directories. Spec 0019 adds the four writable primitives for
+`/home` (a real ext2 writer on a dedicated disk); the read primitives below are
+unchanged.
 
 The driver is already the right shape: `Ext2` reads from an in-memory
 `BlockDevice`, allocates nothing, validates every block number and streams an
