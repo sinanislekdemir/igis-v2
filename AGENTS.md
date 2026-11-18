@@ -765,8 +765,10 @@ the predeclared nominal types and user-declared types (`<unit>.<Type>`,
 helpers now live in `lib/out` (`say`/`say_int`), `lib/inject` (pointer/key event
 injection) and `lib/outcome` (`is_ok(ExitReason)`), with 40 applications migrated.
 **M5 is complete:** the calculator (M5.1) and minesweeper (M5.2) are real windowed
-applications over the existing UI/`/lib` surface; the next milestone is the writable
-filesystem.
+applications over the existing UI/`/lib` surface. **M6 has started:** M6.1 mounts a
+dedicated 8 MiB ext2 home image from an ATA disk read-only through one path router
+(`ext2w`); M6.2 adds the writer and `core.fs_write`, M6.3
+`remove`/`mkdir`/`rename` and the editor save, M6.4 persistence.
 
 ## Ground rules
 
