@@ -14,9 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `2b2a910` (M6.3: `remove`/`mkdir`/`rename`, the editor save and
-  the browser actions) plus this docs commit. The tree is clean; `build/home.img`
-  is reset.
+- **Last commit:** `1e0548e` (M6.4: the persistence proof) plus this docs commit
+  closing M6. The tree is clean; `build/home.img` is reset.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -79,21 +78,22 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   uppercase letter codes, so `calculator`, `editor`, `browser` and `minesweeper`
   now accept both shapes and QMP `send-key` exits each (`task 6..9: exit Ok`).
   This also fixed a pre-existing bug in the editor/browser shortcuts.
-- **Verified at that point (M6.3, independently by the parent):** **484 host tests**
-  (new `ext2w` mkdir/remove/rename tests with `e2fsck -fn`). With the drive,
-  `run home_ops` → `home_ops: ok`, `run editor check` → `editor: ok` (save to
-  `home/child`), `run browser check` → `browser: ok`, `run files` → `files: ok`
-  on `-smp 4` and `-smp 1`; without it, `home_ops: no writable home` and the
-  editor/browser read-only arms still pass. `e2fsck -fn` exits 0 after the
-  proofs (13 files) and after reset (12 files); visual golden
-  (`37802052…e9e81c9f`) and `boot_desktop_qmp.py` pass on both. The owner's
-  31-verdict batch log confirms the same on `-smp 4` with zero `failed check`
-  lines.
-- **Next slice:** **M6.4 — persistence, `e2fsck` and the M6 close** (spec 0019
-  V2–V4): a persistence harness (write, quit/power-cycle QEMU, boot the same
-  `build/home.img`, verify the bytes and a mkdir/rename state), `e2fsck -fn`
-  after the cycle, the full regression with and without the disk, the visual
-  golden and the boot desktop, then docs/AGENTS and spec 0019 → Implemented.
+- **Verified at that point (M6.4, independently by the parent):** **486 host tests**;
+  `scripts/home_persistence_qmp.py --cores 4 --reset --keep` and a second cycle
+  `--cores 1 --keep` both print `home_persist: ok` in boot 1 and
+  `home_verify: ok` in boot 2; `debugfs -R "cat /persist/b.txt"` shows the exact
+  34-byte payload; `e2fsck -fn` exits 0 (14/2048 files, 565/8192 blocks) and the
+  idempotent second cycle stays at 14/565; the image was reset afterwards
+  (12/563, fsck 0). Targeted checks pass on both counts with the drive
+  (`home_persist`/`home_verify`/`home_ops`/`editor`/`browser`/`files`) and
+  without it (`home_persist: no writable home`, `home_verify: FAIL`, the
+  read-only editor/browser arms). Visual golden (`37802052…e9e81c9f`) and
+  `boot_desktop_qmp.py` pass on both.
+- **Next slice:** **M6 is complete** (M6.1–M6.4). The next milestone is not yet
+  planned; the deferred table below is the input (the handle model/Q51, `f32`/Q40,
+  virtio-blk behind `SectorDevice`, a journal or `e2fsck -fy` repair, truncate,
+  MMIO/DMA/Q45, nominal `TaskId`/Q43, runtime-capacity buffers/Q46, stream
+  close/Q10, guard recovery/Q47, module dead-code elimination, `cargo fmt`/CI).
 
 - **M2.6.3 complete:** the headless visual-regression harness (spec 0009 "Visual proof",
   G21; ADR 0032) and the resolution of M2.1.2. `samples/apps/visual` opens a window whose
@@ -1008,12 +1008,19 @@ parent verifies each.
   batch with/without the drive, visual golden and `boot_desktop_qmp.py` pass on
   both.
 
-- [ ] **M6.4 Persistence, `e2fsck` and the M6 close.**
+- [x] **M6.4 Persistence, `e2fsck` and the M6 close.**
   A persistence harness: boot with `build/home.img`, write from an app, reboot or
   power-cycle QEMU with the same image, boot, read it back; `e2fsck -fn` exits 0
   after the write and after a remove/rename/mkdir session. Full regression on
   both core counts with and without the disk; visual golden and boot desktop
   unchanged; docs, AGENTS row, screenshots.
+  **Done (`1e0548e`):** 486 host tests; `home_persist` (mkdir, write, rename) and
+  `home_verify` (directory, absent old name, exact 34-byte content),
+  `scripts/home_persistence_qmp.py` (two QEMU processes, same image, fsck),
+  `--cores 4`/`--cores 1 --reset` and a second cycle without reset (idempotent,
+  14/565), fsck exit 0, `debugfs` shows `/persist/b.txt` with the expected text;
+  the four no-home arms report the read-only verdicts; visual golden and
+  `boot_desktop_qmp.py` pass on both. **M6 is complete.**
 
 ## Deferred (not UI; pick up when they matter)
 
@@ -1022,7 +1029,6 @@ parent verifies each.
 | `f32` (Q40) | OPEN-QUESTIONS Q40 | when single precision is needed |
 | Recovery from a hardware guard hit (Q47) | OPEN-QUESTIONS Q47 | when a task must survive a kernel-bug guard hit |
 | MMIO/DMA/block handles (Q45/Q9) | OPEN-QUESTIONS | first real block device or MMIO peripheral |
-| Writable filesystem / persistence | none yet | when the editor must save |
 | Debug/introspection primitive (Q8) | OPEN-QUESTIONS Q8 | when the desktop needs task/system info |
 | Nominal `TaskId` (Q43) | OPEN-QUESTIONS Q43 | before `stdlib` exposes task primitives |
 | Runtime-capacity buffer parameters (Q46) | OPEN-QUESTIONS Q46 | when slicing/wider stream reads need it |

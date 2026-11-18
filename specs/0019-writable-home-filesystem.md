@@ -1,6 +1,6 @@
 # 0019: The writable home filesystem
 
-- **Status:** Draft
+- **Status:** Implemented
 - **Scope:** `ext2w` (new crate), `kernel` (ATA driver, fs router, sched/REPL), `abi`,
   `compiler`, `interpreter`, `langhost`, `xtask`, `samples/apps`
 - **Supersedes:** none
@@ -174,3 +174,10 @@ freeing updates the inode and directory before the bitmap. A power loss between
 those steps may leave an orphaned block or a stale directory entry, which
 `e2fsck -fn` reports (and a future `-fy` can repair). The kernel never panics on a
 corrupt structure; it refuses the mount or returns `IoError`.
+
+## Changelog
+
+| Date | Change |
+|------|--------|
+| 2026-11-18 | Initial draft and acceptance: dedicated 8 MiB ext2 home image, ATA PIO, `ext2w`, the router, four write builtins (53–56), no truncate, no journal, `e2fsck` as the consistency proof. |
+| 2026-11-18 | Implemented in M6.1–M6.4: read mount and router, the writer and `fs_write`, `remove`/`mkdir`/`rename` with the editor save and browser actions, and the reboot persistence harness. ABI v1 stays at 75 opcodes; the kernel's application image remains read-only. |

@@ -79,7 +79,7 @@ self-check proves the rule (`stack: layout ok`). Spec 0004 C6, spec 0002 H2.
 
 | # | Question | Options / recommendation | Trigger |
 |---|----------|--------------------------|---------|
-| Q51 | Application file API: writable save and a handle model (subdirectories resolved) | Subdirectories and path traversal are **resolved** by spec 0018 (M3.1: the image is a tree and `abi::fs`/`Ext2` walk paths; M3.4: the browser navigates it). What remains: there is no writable path, so the editor cannot save; the editor and browser still re-resolve a path on every call (no per-open handle). ADR 0027 rejected handles for M2 and can be revisited if the per-call path walk measures badly | when a writable filesystem exists for save; if the path walk becomes measurable |
+| Q51 | Application file API: a handle model (writable save and subdirectories resolved) | Subdirectories/traversal are resolved by spec 0018 (M3.1/M3.4) and the writable save by spec 0019/ADR 0040 (a real ext2 writer on a dedicated home disk, M6.1–M6.4). What remains: every call still resolves a path (no per-open handle); ADR 0027 rejected handles for M2 and can be revisited if the per-call walk measures badly | if the path walk becomes measurable; never otherwise |
 
 ## Decided in the 2026-11-16 guards session
 
