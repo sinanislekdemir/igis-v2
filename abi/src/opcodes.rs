@@ -645,6 +645,27 @@ pub mod builtin {
     /// `[path reference][size reference]`.
     pub const FS_SIZE: u32 = 43;
 
+    // ---- the writable home filesystem (spec 0019, A1–A3) --------------
+    //
+    // `core.fs_write` is the first write primitive: only a path whose first
+    // component is `home` is writable, and only when the home disk is mounted
+    // (otherwise the mount is read-only). No opcode is added: the machine
+    // validates the path and the data buffer, and the host writes through the
+    // ext2 writer. The remaining write primitives (remove/mkdir/rename) are
+    // builtins 54–56 in M6.3.
+
+    /// `core.fs_write(path, offset, data, var written) -> Status`: write
+    /// `data` at byte `offset` of the regular file at `path` (spec 0019, A1/A3).
+    /// Only a path whose first component is `home` is writable; every other path
+    /// and a read-only mount are `Invalid`. A missing file is created
+    /// implicitly when `offset` is `0` and only then; a missing parent is
+    /// `NotFound` and a directory target is `Invalid`. `Ok` sets `written` to
+    /// the copied byte count; every failure leaves `written` untouched. A write
+    /// that would leave the double-indirect reach, or that needs more blocks
+    /// than are free, is `CapacityExceeded`. The data buffer is read-only.
+    /// Operands: `[path reference][offset][data reference][written reference]`.
+    pub const FS_WRITE: u32 = 53;
+
     // ---- terminal window (spec 0014) ------------------------------------
     //
     // `core.terminal_attach` binds the machine-wide console terminal grid to a
@@ -810,6 +831,7 @@ pub mod builtin {
             FS_LIST => Some((5, 1)),
             FS_READ => Some((4, 1)),
             FS_SIZE => Some((2, 1)),
+            FS_WRITE => Some((4, 1)),
             TERMINAL_ATTACH => Some((1, 1)),
             TEXT_WIDTH_PROP => Some((1, 1)),
             TEXT_HEIGHT_PROP => Some((0, 1)),

@@ -448,8 +448,7 @@ impl Host for KernelHost {
     // serves `home/...` from the optional home mount and everything else from
     // the read-only application image. The machine has validated the path
     // syntax; the host re-checks it defensively, converts the language `string`
-    // to `str` and lets the driver walk the tree. No allocation, and M6.1 still
-    // exposes no write primitive.
+    // to `str` and lets the driver walk the tree. No allocation.
     fn fs_list(
         &mut self,
         path: &[u8],
@@ -482,6 +481,16 @@ impl Host for KernelHost {
         let path = core::str::from_utf8(path).map_err(|_| Status::Invalid)?;
         match abi::fs::validate_path(path) {
             Status::Ok => crate::fs::file_size(path),
+            status => Err(status),
+        }
+    }
+
+    /// `core.fs_write` (spec 0019, A1–A3): only a `home` path is writable, and
+    /// the router takes the `HOME` lock around the ext2w writer.
+    fn fs_write(&mut self, path: &[u8], offset: u64, data: &[u8]) -> Result<usize, Status> {
+        let path = core::str::from_utf8(path).map_err(|_| Status::Invalid)?;
+        match abi::fs::validate_writable(path) {
+            Status::Ok => crate::fs::write_at(path, offset, data),
             status => Err(status),
         }
     }

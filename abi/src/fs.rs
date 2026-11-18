@@ -1,12 +1,13 @@
 //! The application file API's fixed limits and path rules (spec 0013, spec
-//! 0018).
+//! 0018, spec 0019).
 //!
 //! Three read-only `core` builtins expose the image tree to applications
 //! (`fs_list`, `fs_read`, `fs_size`), and `core.spawn`/`core.run` resolve their
-//! launch path against the same tree. This module holds the limits shared by
-//! the compiler and the interpreter, and the one path-syntax validator every
-//! call site uses, so a malformed path means the same thing everywhere. There
-//! is no writable API.
+//! launch path against the same tree. `core.fs_write` is the one write
+//! primitive and is confined to the writable `home` mount. This module holds
+//! the limits shared by the compiler and the interpreter, and the path-syntax
+//! validators every call site uses, so a malformed or unwritable path means the
+//! same thing everywhere.
 //!
 //! Paths are relative to the image root (`spec 0018`, L6): `base/shell`,
 //! `lib/ui/menu.ig`, `home/readme.txt`. They never start or end with `/`, never
@@ -76,6 +77,22 @@ pub fn validate_dir(path: &str) -> Status {
         Status::Ok
     } else {
         validate_path(path)
+    }
+}
+
+/// Validates a writable path (spec 0019, A2): it must pass [`validate_path`]
+/// and its first component must be `home`. Every other path is
+/// [`Status::Invalid`], which is also what a read-only mount's host reports.
+pub fn validate_writable(path: &str) -> Status {
+    match validate_path(path) {
+        Status::Ok => {
+            if path == "home" || path.starts_with("home/") {
+                Status::Ok
+            } else {
+                Status::Invalid
+            }
+        }
+        status => status,
     }
 }
 
@@ -158,5 +175,28 @@ mod tests {
         assert_eq!(MAX_COMPONENTS, 8);
         assert_eq!(READ_CHUNK, 256);
         assert_eq!((KIND_FILE, KIND_DIR, KIND_OTHER), (0, 1, 2));
+    }
+
+    #[test]
+    fn only_the_home_tree_is_writable() {
+        for path in ["home/written.txt", "home/a/b", "home"] {
+            assert_eq!(validate_writable(path), Status::Ok, "{path}");
+        }
+        for path in [
+            "written.txt",
+            "base/child",
+            "homex/file",
+            "lib/home/x",
+            "homer",
+        ] {
+            assert_eq!(validate_writable(path), Status::Invalid, "{path}");
+        }
+        // Syntax errors keep their own status.
+        assert_eq!(validate_writable("../home/x"), Status::Invalid);
+        assert_eq!(validate_writable(""), Status::Invalid);
+        let mut long = [b'x'; PATH_MAX + 1];
+        long[..5].copy_from_slice(b"home/");
+        let long = core::str::from_utf8(&long).unwrap();
+        assert_eq!(validate_writable(long), Status::CapacityExceeded);
     }
 }

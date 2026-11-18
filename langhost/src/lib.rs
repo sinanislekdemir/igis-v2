@@ -208,6 +208,12 @@ struct ConsoleHost {
     output: Vec<u8>,
     depth: u32,
     source_dir: PathBuf,
+    /// The temporary directory that stands in for the home disk (spec 0019,
+    /// A6). `home` and `home/...` resolve here; the top-level host owns it and
+    /// removes it on drop, a child shares the parent's directory.
+    home_dir: PathBuf,
+    /// True only for the host that created `home_dir`.
+    home_owned: bool,
     children: HashMap<u64, ExitReason>,
     next_id: u64,
     /// Bytes the scripted console has not delivered yet (`core.read_input`).
@@ -219,20 +225,41 @@ struct ConsoleHost {
 }
 
 impl ConsoleHost {
-    fn new(depth: u32) -> Self {
-        Self::with_input(depth, HOST_INPUT)
+    /// A child host that shares this run's home directory (a child's write is
+    /// visible to its parent, as it is in the kernel).
+    fn child(&self) -> Self {
+        ConsoleHost {
+            output: Vec::new(),
+            depth: self.depth + 1,
+            source_dir: self.source_dir.clone(),
+            home_dir: self.home_dir.clone(),
+            home_owned: false,
+            children: HashMap::new(),
+            next_id: 1,
+            input: HOST_INPUT.to_vec(),
+            stream: Vec::new(),
+            events: Vec::new(),
+        }
     }
 
-    /// Resolves an image path under the sample tree (spec 0018, L6).
+    /// Resolves an image path under the sample tree (spec 0018, L6) or, for
+    /// `home`, under this run's home directory (spec 0019, A6).
     fn resolve_path(&self, path: &str) -> Result<PathBuf, Status> {
-        resolve_in(&self.source_dir, path)
+        match home_local(path) {
+            Some(local) => resolve_in(&self.home_dir, local),
+            None => resolve_in(&self.source_dir, path),
+        }
     }
 
     fn with_input(depth: u32, input: &[u8]) -> Self {
+        let source_dir = app_dir();
+        let home_dir = make_home_dir(&source_dir);
         ConsoleHost {
             output: Vec::new(),
             depth,
-            source_dir: app_dir(),
+            source_dir,
+            home_dir,
+            home_owned: true,
             children: HashMap::new(),
             next_id: 1,
             input: input.to_vec(),
@@ -240,6 +267,52 @@ impl ConsoleHost {
             events: Vec::new(),
         }
     }
+}
+
+impl Drop for ConsoleHost {
+    fn drop(&mut self) {
+        if self.home_owned {
+            let _ = std::fs::remove_dir_all(&self.home_dir);
+        }
+    }
+}
+
+/// Splits `home` / `home/...` into the path local to the home directory. Every
+/// other path is `None` and stays on the image tree (spec 0019, A4).
+fn home_local(path: &str) -> Option<&str> {
+    if path == "home" {
+        Some("")
+    } else {
+        path.strip_prefix("home/")
+    }
+}
+
+/// Creates this run's home directory under the system temp directory and seeds
+/// it from the image's `home` tree, so `home/readme.txt` reads the same file on
+/// the host as in the guest (spec 0019, A6).
+fn make_home_dir(source_dir: &std::path::Path) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "igis-langhost-home-{}-{unique}",
+        std::process::id()
+    ));
+    if std::fs::create_dir_all(&path).is_err() {
+        return path;
+    }
+    let seed = source_dir.join("home");
+    if let Ok(entries) = std::fs::read_dir(&seed) {
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if !kind.is_file() {
+                continue;
+            }
+            let _ = std::fs::copy(entry.path(), path.join(entry.file_name()));
+        }
+    }
+    path
 }
 
 /// Resolves the directory `core.spawn` reads sources from.
@@ -433,7 +506,7 @@ impl Host for ConsoleHost {
             }
         };
 
-        let mut child = ConsoleHost::new(self.depth + 1);
+        let mut child = self.child();
         match run_with_host(&package.code, args, DEFAULT_BUDGET, &mut child) {
             Ok(result) => {
                 self.output.extend_from_slice(&result.output);
@@ -476,10 +549,15 @@ impl Host for ConsoleHost {
             return Err(status);
         }
         let index = usize::try_from(index).map_err(|_| Status::NotFound)?;
-        let directory = if path.is_empty() || path == "." {
-            self.source_dir.clone()
-        } else {
-            self.source_dir.join(path)
+        let directory = match home_local(path) {
+            Some(local) => resolve_in(&self.home_dir, local)?,
+            None => {
+                if path.is_empty() || path == "." {
+                    self.source_dir.clone()
+                } else {
+                    self.source_dir.join(path)
+                }
+            }
         };
         let mut entries = Vec::new();
         let read_dir = std::fs::read_dir(&directory).map_err(|error| {
@@ -573,6 +651,60 @@ impl Host for ConsoleHost {
             return Err(Status::Invalid);
         }
         Ok(metadata.len())
+    }
+
+    // The writable home directory (spec 0019, A6). Only `home/...` is
+    // writable, exactly as in the kernel; a bare host (the default trait
+    // implementation) reports `Invalid`. The write is a plain host write: the
+    // temporary directory has no ext2 behind it, so it exercises the API, the
+    // router and the sample application, not the writer (the `ext2w` host
+    // tests own that).
+    fn fs_write(&mut self, path: &[u8], offset: u64, data: &[u8]) -> Result<usize, Status> {
+        let path = std::str::from_utf8(path).map_err(|_| Status::Invalid)?;
+        let status = abi::fs::validate_writable(path);
+        if status != Status::Ok {
+            return Err(status);
+        }
+        let local = home_local(path).ok_or(Status::Invalid)?;
+        // The final component may not exist yet (implicit create), so only the
+        // parent is resolved through the tree walk.
+        let (parent, name) = match local.rfind('/') {
+            Some(index) => (&local[..index], &local[index + 1..]),
+            None => ("", local),
+        };
+        if name.is_empty() {
+            return Err(Status::Invalid);
+        }
+        let directory = resolve_in(&self.home_dir, parent)?;
+        let metadata = std::fs::symlink_metadata(&directory).map_err(|error| io_status(&error))?;
+        if !metadata.is_dir() {
+            return Err(Status::Invalid);
+        }
+        let target = directory.join(name);
+        if let Ok(metadata) = std::fs::symlink_metadata(&target) {
+            if metadata.is_dir() {
+                return Err(Status::Invalid);
+            }
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true);
+        if offset == 0 {
+            // A missing file is created implicitly at offset 0 only (A3).
+            options.create(true);
+        }
+        let mut file = options.open(&target).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Status::NotFound
+            } else if error.kind() == std::io::ErrorKind::IsADirectory {
+                Status::Invalid
+            } else {
+                Status::IoError
+            }
+        })?;
+        file.seek(std::io::SeekFrom::Start(offset))
+            .map_err(|_| Status::IoError)?;
+        file.write_all(data).map_err(|_| Status::IoError)?;
+        Ok(data.len())
     }
 }
 

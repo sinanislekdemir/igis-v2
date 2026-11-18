@@ -7909,6 +7909,13 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::enumeration(STATUS_ENUM)))
             }
+            // The writable home filesystem (spec 0019, A1/A3). Only a `home`
+            // path is writable; the machine enforces the path rule and the host
+            // writes through the ext2 writer. The data buffer is read-only.
+            // The body is a separate function: `call` is the deepest frame in a
+            // debug build, and one more inline arm would push the host tests'
+            // nested-expression compilation over their stack budget.
+            "core.fs_write" => self.fs_write_call(args, line, column),
             // Terminal attach (spec 0014): bind the console's machine-wide
             // terminal grid to a window owned by the caller. The kernel host
             // supplies the task id; the compiler only checks the staged
@@ -8145,6 +8152,65 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 }
             }
         }
+    }
+
+    /// `core.fs_write(path, offset, data, var written) -> Status`
+    /// (spec 0019, A1/A3).
+    ///
+    /// A separate function rather than another arm of [`Self::call`]: the
+    /// dispatcher is the deepest frame in a debug build (the parser and
+    /// `call` recurse for nested expressions), and the extra arm pushed the
+    /// host tests' compilation of `widgets` over the default thread stack.
+    fn fs_write_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 4 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`core.fs_write` expects 4 arguments, got {}", args.len()),
+            ));
+        }
+        let path = self.emit_ref(args[0], None)?;
+        if path.kind != Kind::String {
+            let found = self.type_name(path);
+            return Err(self.err_at(
+                args[0],
+                format_args!("`core.fs_write` expects a `string` path, found `{found}`"),
+            ));
+        }
+        let offset = self.expr_scalar(args[1])?;
+        if offset.kind != Kind::Uint {
+            return Err(self.err_at(
+                args[1],
+                format_args!("`core.fs_write` expects a `uint` offset, found `{offset}`"),
+            ));
+        }
+        let data = self.emit_ref(args[2], None)?;
+        if data.kind != Kind::Bytes {
+            let found = self.type_name(data);
+            return Err(self.err_at(
+                args[2],
+                format_args!(
+                    "`core.fs_write` expects a `const bytes` data buffer, found `{found}`"
+                ),
+            ));
+        }
+        let written = self.emit_scalar_ref(args[3])?;
+        if written.kind != Kind::Int {
+            let found = self.type_name(written);
+            return Err(self.err_at(
+                args[3],
+                format_args!("`core.fs_write` expects `var written: int`, found `{found}`"),
+            ));
+        }
+        self.one(opcodes::BUILTIN, builtin::FS_WRITE)?;
+        self.pop(4)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
     }
 
     fn argument(

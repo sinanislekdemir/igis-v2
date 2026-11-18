@@ -7043,6 +7043,102 @@ end;
 }
 
 #[test]
+fn fs_write_is_builtin_fifty_three_and_checks_its_signature() {
+    use abi::opcodes::{self, builtin};
+
+    let source = r#"
+unit t;
+uses core;
+var
+  status: Status;
+  written: int;
+  data: bytes[64];
+procedure main(args: const string[1024]);
+begin
+  data := "abc";
+  status := core.fs_write("home/written.txt", uint(0), data, written);
+  status := core.fs_write("home/written.txt", uint(7), data, written);
+end;
+"#;
+    let package = compile(source.as_bytes(), "t.ig").expect("fs_write compiles");
+    assert_eq!(builtin_count(&package, builtin::FS_WRITE), 2);
+    assert_eq!(builtin::FS_WRITE, 53);
+    // The builtin keeps its declared stack effect (four operands, one result).
+    assert_eq!(opcodes::builtin::effect(builtin::FS_WRITE), Some((4, 1)));
+
+    let cases = [
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; written: int; data: bytes[64];
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_write("home/x", uint(0), data);
+end;
+"#,
+            "`core.fs_write` expects 4 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; written: int; data: bytes[64]; raw: bytes[16];
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_write(raw, uint(0), data, written);
+end;
+"#,
+            "`core.fs_write` expects a `string` path",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; written: int; data: bytes[64];
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_write("home/x", 0, data, written);
+end;
+"#,
+            "`core.fs_write` expects a `uint` offset",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; written: int; text: string[64];
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_write("home/x", uint(0), text, written);
+end;
+"#,
+            "`core.fs_write` expects a `const bytes` data buffer",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; count: uint; data: bytes[64];
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_write("home/x", uint(0), data, count);
+end;
+"#,
+            "`core.fs_write` expects `var written: int`",
+        ),
+    ];
+    for (source, expected) in cases {
+        let error = compile(source.as_bytes(), "t.ig").expect_err("must be a compile error");
+        assert!(
+            error.message.contains(expected),
+            "expected `{expected}`, got `{}`",
+            error.message
+        );
+    }
+}
+
+#[test]
 fn terminal_attach_is_builtin_forty_four_and_checks_its_signature() {
     use abi::opcodes::{self, builtin};
 

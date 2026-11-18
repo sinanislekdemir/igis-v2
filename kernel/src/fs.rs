@@ -1,5 +1,5 @@
-//! One read path over the read-only application image and the optional writable
-//! home filesystem (spec 0019, A4/A5; ADR 0040).
+//! One path over the read-only application image and the optional writable
+//! home filesystem (spec 0019, A1–A5; ADR 0040).
 //!
 //! The application image is the GRUB module the bootloader leaves in RAM; the
 //! home filesystem is the `ext2w` mount over the ATA home disk. Nothing above
@@ -12,7 +12,8 @@
 //! ```
 //!
 //! `/` is listed from the application image, which contains `home`, and `home`
-//! is listed from the home mount when one is mounted.
+//! is listed from the home mount when one is mounted. Only `home/...` is
+//! writable; every other path refuses a write with `Invalid`.
 //!
 //! # Locks
 //!
@@ -22,7 +23,9 @@
 //! module never takes it while another kernel lock is held. The lock order is
 //! therefore `HOME → (ATA ports only)`: no console, window, graphics or
 //! scheduler lock is taken under it. Read paths outside `home` never touch
-//! [`HOME`].
+//! [`HOME`]. A write holds it from the implicit create through the inode
+//! update, and the writer is synchronous, so the lock is never a write-back
+//! queue (spec 0019, H4).
 
 use abi::Status;
 
@@ -65,12 +68,16 @@ fn image() -> &'static Ext2<'static> {
 /// self-check also leaves the mount read-only, so a boot never trusts a tree it
 /// could not read. None of these cases halts: the system boots read-only, which
 /// is exactly the no-disk behaviour (spec 0019, H3).
+///
+/// A successful mount is the writable one (spec 0019, H5): the filesystem is
+/// marked clean when it opens. The self-check itself never writes, so a boot
+/// leaves no trace on the disk.
 pub fn mount_home() {
     let Some(disk) = crate::ata::init() else {
         println!("ext2w: no home disk");
         return;
     };
-    let home = match ext2w::mount(disk) {
+    let home = match ext2w::mount_write(disk) {
         Ok(home) => home,
         Err(status) => {
             println!("ext2w: home failed ({})", status.name());
@@ -93,9 +100,11 @@ pub fn mount_home() {
 
 /// Reads the initial file and lists the root of a freshly mounted home image.
 ///
-/// M6.1 has no writes, so `readme.txt` from `samples/home/` must be present.
-/// The check runs on the local mount before it is published, so a bad tree is
-/// never served; it returns the failed step number.
+/// `readme.txt` from `samples/home/` must be present. The check runs on the
+/// local mount before it is published, so a bad tree is never served; it
+/// returns the failed step number. It is deliberately read-only: a scratch
+/// write here would either persist or need a removal primitive (M6.3), and
+/// `base/home_write` is the write proof.
 fn home_self_check(home: &ext2w::Fs<AtaDisk>) -> Result<(), u32> {
     let size = match home.file_size("readme.txt") {
         Ok(size) if size > 0 => size,
@@ -192,6 +201,30 @@ pub fn file_size(path: &str) -> Result<u64, Status> {
         }
     }
     self::image().file_size(path)
+}
+
+/// Writes at an offset through the router (spec 0019, A2/A3).
+///
+/// Only a `home/...` path is writable, and only when the home disk is mounted;
+/// every other path is [`Status::Invalid`]. A missing file is created
+/// implicitly when `offset` is `0` and only then (A3), which is why the create
+/// and the write are two writer calls here rather than two API primitives. The
+/// returned count is the number of bytes written.
+pub fn write_at(path: &str, offset: u64, data: &[u8]) -> Result<usize, Status> {
+    let Some(local) = home_local(path) else {
+        return Err(Status::Invalid);
+    };
+    let mut home = HOME.lock();
+    let Some(home) = home.as_mut() else {
+        return Err(Status::Invalid);
+    };
+    match home.write_at(local, offset, data) {
+        Err(Status::NotFound) if offset == 0 => {
+            home.create(local)?;
+            home.write_at(local, offset, data)
+        }
+        result => result,
+    }
 }
 
 /// Returns one directory entry through the router (spec 0013, `core.fs_list`).

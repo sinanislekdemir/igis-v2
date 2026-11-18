@@ -2465,10 +2465,19 @@ fn the_browser_sample_lists_and_previews_on_the_host() {
     // checks), previews by full path, goes up to the root, then enters `system`,
     // `home` and `lib` and previews a file in each.
     assert!(output.contains("browser: nav dir=base\n"), "{output}");
-    assert!(output.contains("browser: nav preview=base/child\n"), "{output}");
+    assert!(
+        output.contains("browser: nav preview=base/child\n"),
+        "{output}"
+    );
     assert!(output.contains("browser: nav dir=/\n"), "{output}");
-    assert!(output.contains("browser: nav preview=system/system_probe\n"), "{output}");
-    assert!(output.contains("browser: nav preview=home/readme.txt\n"), "{output}");
+    assert!(
+        output.contains("browser: nav preview=system/system_probe\n"),
+        "{output}"
+    );
+    assert!(
+        output.contains("browser: nav preview=home/readme.txt\n"),
+        "{output}"
+    );
     assert!(output.contains("browser: nav lib=math.ig\n"), "{output}");
     assert_eq!(
         output,
@@ -2496,6 +2505,24 @@ fn the_files_sample_lists_and_reads_the_application_directory() {
     assert!(output.contains("files: root entries="), "{output}");
     assert!(output.contains("files: chunked read ok"), "{output}");
     assert!(output.ends_with("files: ok\n"), "{output}");
+    assert_eq!(result.reason, ExitReason::Ok);
+}
+
+/// The writable home proof sample (spec 0019, A6): `langhost` implements the
+/// home rule over a temporary directory, so the write primitive, the router and
+/// the sample run end to end on the host and print the same verdict as the
+/// kernel.
+#[test]
+fn the_home_write_sample_writes_and_reads_back_on_the_host() {
+    let path = app_path("home_write");
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "home_write").expect("the sample compiles");
+    let result =
+        langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies and runs");
+    let output = String::from_utf8(result.output).expect("UTF-8 output");
+    assert!(output.contains("home_write: write ok\n"), "{output}");
+    assert!(output.contains("home_write: gap read ok\n"), "{output}");
+    assert!(output.ends_with("home_write: ok\n"), "{output}");
     assert_eq!(result.reason, ExitReason::Ok);
 }
 

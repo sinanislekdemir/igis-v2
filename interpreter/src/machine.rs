@@ -441,14 +441,15 @@ pub trait Host {
         Status::Invalid
     }
 
-    // ---- application files (spec 0013, spec 0018) -----------------------
+    // ---- application files (spec 0013, spec 0018, spec 0019) ------------
     //
-    // The view is the read-only image tree. The machine validates the path
-    // syntax and the destination buffers, so every host agrees that a
-    // malformed path is `Invalid`; the host walks the path and copies the
-    // bytes. The defaults model a machine with no filesystem: every call is
-    // `NotFound`, which is what `langhost`'s bare mock reports and what the
-    // interpreter's own tests inherit.
+    // The view is the image tree plus, for `home/...`, the writable home
+    // mount. The machine validates the path syntax and the destination
+    // buffers, so every host agrees that a malformed path is `Invalid`; the
+    // host walks the path and copies the bytes. The defaults model a machine
+    // with no filesystem: every call is `NotFound`, which is what
+    // `langhost`'s bare mock reports and what the interpreter's own tests
+    // inherit.
 
     /// One directory entry (`core.fs_list`): `index` is 0-based in directory
     /// order, `.` and `..` excluded. `name` is a local buffer of at least
@@ -472,6 +473,15 @@ pub trait Host {
     /// `NotFound`.
     fn fs_size(&mut self, _path: &[u8]) -> Result<u64, Status> {
         Err(Status::NotFound)
+    }
+
+    /// Writes `data` at byte `offset` of the regular file at `path`
+    /// (`core.fs_write`, spec 0019). Only a path whose first component is
+    /// `home` is writable, and only on a writable mount; the machine enforces
+    /// the path rule before the call. The default is `Invalid`, which is what a
+    /// bare host and a machine without a home disk report.
+    fn fs_write(&mut self, _path: &[u8], _offset: u64, _data: &[u8]) -> Result<usize, Status> {
+        Err(Status::Invalid)
     }
 
     /// Requests a new application instance (`core.spawn`).
@@ -2256,6 +2266,67 @@ impl Machine {
                         match result {
                             Ok(size) => {
                                 self.write_ref(size_bits, size, state, stack, constants, args)?;
+                                self.push(stack, Status::Ok as u64)?;
+                            }
+                            Err(status) => self.push(stack, status as u64)?,
+                        }
+                    }
+                    // The writable home filesystem (spec 0019, A1/A3). Only a
+                    // `home` path reaches the host; the data buffer is
+                    // read-only and `written` is published only on `Ok`.
+                    builtin::FS_WRITE => {
+                        let written_bits = self.pop(stack)?;
+                        let data_bits = self.pop(stack)?;
+                        let offset = self.pop(stack)?;
+                        let path_bits = self.pop(stack)?;
+                        let mut requested = 0usize;
+                        let result = {
+                            let (path_region, path_offset) =
+                                self.resolve(path_bits, state, stack, constants, args)?;
+                            let path_len = self.buffer_len(
+                                path_region,
+                                path_offset,
+                                state,
+                                stack,
+                                constants,
+                                args,
+                            )?;
+                            let path = buffer_slice(
+                                path_region,
+                                path_offset,
+                                path_len,
+                                state,
+                                stack,
+                                constants,
+                                args,
+                            )?;
+                            match core::str::from_utf8(path) {
+                                Err(_) => Err(Status::Invalid),
+                                Ok(text) => match abi::fs::validate_writable(text) {
+                                    Status::Ok => {
+                                        let data = self.resolve_text(
+                                            data_bits, state, stack, constants, args,
+                                        )?;
+                                        requested = data.len();
+                                        host.fs_write(text.as_bytes(), offset, data)
+                                    }
+                                    status => Err(status),
+                                },
+                            }
+                        };
+                        match result {
+                            Ok(count) => {
+                                if count > requested {
+                                    return Err(FaultCode::IllegalOperation);
+                                }
+                                self.write_ref(
+                                    written_bits,
+                                    count as u64,
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
                                 self.push(stack, Status::Ok as u64)?;
                             }
                             Err(status) => self.push(stack, status as u64)?,

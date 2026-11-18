@@ -78,11 +78,13 @@ struct FileHost {
     read: Result<usize, Status>,
     read_bytes: Vec<u8>,
     size: Result<u64, Status>,
+    write: Result<usize, Status>,
     calls: usize,
     last_path: Vec<u8>,
     last_index: u64,
     last_offset: u64,
     last_dst_len: usize,
+    last_data: Vec<u8>,
 }
 
 impl FileHost {
@@ -97,11 +99,13 @@ impl FileHost {
             read: Ok(0),
             read_bytes: Vec::new(),
             size: Ok(1234),
+            write: Ok(0),
             calls: 0,
             last_path: Vec::new(),
             last_index: 0,
             last_offset: 0,
             last_dst_len: 0,
+            last_data: Vec::new(),
         }
     }
 }
@@ -150,6 +154,14 @@ impl Host for FileHost {
         self.calls += 1;
         self.last_path = path.to_vec();
         self.size
+    }
+
+    fn fs_write(&mut self, path: &[u8], offset: u64, data: &[u8]) -> Result<usize, Status> {
+        self.calls += 1;
+        self.last_path = path.to_vec();
+        self.last_offset = offset;
+        self.last_data = data.to_vec();
+        self.write
     }
 }
 
@@ -451,4 +463,110 @@ fn the_default_file_host_is_not_found() {
     );
     assert_eq!(state_word(&state, 104), Status::NotFound as u64);
     assert_eq!(state_word(&state, 16), 0);
+}
+
+/// State layout used by the `fs_write` tests:
+/// `[path len][path data 8..32][data len][data 40][written 48][status 56]`.
+fn write_state(path: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut state = vec![0u8; 64];
+    set_word(&mut state, 0, path.len() as u64);
+    state[8..8 + path.len()].copy_from_slice(path);
+    set_word(&mut state, 32, data.len() as u64);
+    state[40..40 + data.len()].copy_from_slice(data);
+    state
+}
+
+/// Operands: path reference, offset, data reference, written reference.
+fn write_program(offset: i64) -> Vec<u8> {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 8);
+    op_const(&mut instructions, offset);
+    op_imm(&mut instructions, opcodes::REF_STATE, 40);
+    op_imm(&mut instructions, opcodes::REF_STATE, 48);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::FS_WRITE,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 56);
+    op(&mut instructions, opcodes::RET);
+    build(&instructions, &[], 64)
+}
+
+#[test]
+fn fs_write_passes_the_path_offset_and_read_only_data() {
+    let mut state = write_state(b"home/x", b"abc");
+    let mut host = FileHost::new();
+    host.write = Ok(3);
+    assert_eq!(
+        run(&write_program(4), &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(host.last_path, b"home/x");
+    assert_eq!(host.last_offset, 4);
+    assert_eq!(host.last_data, b"abc");
+    assert_eq!(state_word(&state, 48), 3);
+    assert_eq!(state_word(&state, 56), Status::Ok as u64);
+    // The data buffer is published unchanged: `fs_write` only reads it.
+    assert_eq!(state_word(&state, 32), 3);
+    assert_eq!(&state[40..43], b"abc");
+}
+
+#[test]
+fn fs_write_leaves_the_count_when_the_host_refuses() {
+    let mut state = write_state(b"home/x", b"abc");
+    set_word(&mut state, 48, 77);
+    let mut host = FileHost::new();
+    host.write = Err(Status::NotFound);
+    assert_eq!(
+        run(&write_program(0), &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(state_word(&state, 56), Status::NotFound as u64);
+    assert_eq!(state_word(&state, 48), 77, "a failure writes nothing");
+}
+
+#[test]
+fn fs_write_rejects_every_path_outside_home_before_the_host() {
+    let mut host = FileHost::new();
+    for path in [&b"home/x"[..], b"base/child", b"written.txt", b"homex/x"] {
+        let mut state = write_state(path, b"abc");
+        set_word(&mut state, 48, 77);
+        host.calls = 0;
+        assert_eq!(
+            run(&write_program(0), &mut state, &mut host),
+            Outcome::Exited(ExitReason::Ok)
+        );
+        if path.starts_with(b"home/") {
+            assert_eq!(state_word(&state, 56), Status::Ok as u64, "{path:?}");
+            assert_eq!(host.calls, 1, "{path:?}");
+        } else {
+            assert_eq!(state_word(&state, 56), Status::Invalid as u64, "{path:?}");
+            assert_eq!(state_word(&state, 48), 77, "{path:?}");
+            assert_eq!(host.calls, 0, "{path:?}");
+        }
+    }
+
+    // A malformed path never reaches the host either.
+    let mut state = write_state(b"home//x", b"abc");
+    host.calls = 0;
+    assert_eq!(
+        run(&write_program(0), &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(state_word(&state, 56), Status::Invalid as u64);
+    assert_eq!(host.calls, 0);
+}
+
+#[test]
+fn the_default_fs_write_is_invalid() {
+    let mut state = write_state(b"home/x", b"abc");
+    set_word(&mut state, 48, 77);
+    let mut host = DisabledHost;
+    assert_eq!(
+        run(&write_program(0), &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(state_word(&state, 56), Status::Invalid as u64);
+    assert_eq!(state_word(&state, 48), 77);
 }
