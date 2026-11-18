@@ -202,6 +202,10 @@ pub enum EventKind {
     KeyUp = 4,
     /// A window needs its whole content repainted (spec 0011, W12).
     Expose = 5,
+    /// The owner of a window is asked to close it after a close-box press
+    /// (spec 0011, W23). Owner-only; the window stays until the owner closes
+    /// it.
+    Close = 6,
 }
 
 impl EventKind {
@@ -214,6 +218,7 @@ impl EventKind {
             EventKind::KeyDown => "KeyDown",
             EventKind::KeyUp => "KeyUp",
             EventKind::Expose => "Expose",
+            EventKind::Close => "Close",
         }
     }
 
@@ -226,6 +231,7 @@ impl EventKind {
             3 => Some(EventKind::KeyDown),
             4 => Some(EventKind::KeyUp),
             5 => Some(EventKind::Expose),
+            6 => Some(EventKind::Close),
             _ => None,
         }
     }

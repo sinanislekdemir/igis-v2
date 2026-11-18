@@ -7,7 +7,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0021, 0022, 0023
-- **Updated:** 2026-11-16
+- **Updated:** 2026-11-18
 
 ## Context
 
@@ -229,8 +229,9 @@ events", "The event queue") record how they were implemented.
   event it is about to process. The queue itself is machine-wide and keeps
   `Event.window = 0`; the kernel host fills the target at **poll time** (spec 0011, W16):
   a pointer-down is hit-tested and raises/focuses the topmost window, other pointer and
-  key events go to the focused window, and an `Expose` (kind 5) is a per-window, owner-only
-  pending notification that is returned before the queue.
+  key events go to the focused window, and an `Expose` (kind 5) and a `Close` (kind 6) are
+  per-window, owner-only pending notifications returned before the queue (a `Close` before
+  an `Expose`; spec 0011, W25).
 - **I29 (MUST):** `syslib.inject_event(ev: Event) -> Status` appends a caller-built
   record to the queue, and `syslib.event_drops() -> uint` / `syslib.event_flush() -> uint`
   expose the drop counter and discard the queue (returning the count). Injection is
@@ -244,9 +245,9 @@ events", "The event queue") record how they were implemented.
 - **I31 (MUST):** The queue is one machine-wide FIFO: two tasks that call `next_event`
   compete for the same queued events and each queued event is delivered once. Window
   routing is applied to the record when it is polled (never to a shared queue entry), and
-  an `Expose` is not a queue entry at all: it is one coalesced pending flag per damaged
-  window, readable only by that window's owner. A non-zero `window` on a queued event (an
-  injection) is passed through unchanged.
+  an `Expose` or `Close` is not a queue entry at all: each is a per-window pending flag,
+  readable only by that window's owner (`Close` added by spec 0011 W25). A non-zero
+  `window` on a queued event (an injection) is passed through unchanged.
 
 ### Absolute pointer (M2.2.6)
 
@@ -484,15 +485,17 @@ One machine-wide FIFO in `kernel/src/event.rs`:
 ```text
 Event record (40 bytes, abi::layout::event)
   0   kind    EventKind enum ordinal: 0 PointerMove | 1 PointerDown |
-              2 PointerUp | 3 KeyDown | 4 KeyUp | 5 Expose
-  8   x       int, pointer x in pixels (0 for key events and Expose)
-  16  y       int, pointer y in pixels (0 for key events and Expose)
+              2 PointerUp | 3 KeyDown | 4 KeyUp | 5 Expose | 6 Close
+  8   x       int, pointer x in pixels (0 for key events, Expose and Close)
+  16  y       int, pointer y in pixels (0 for key events, Expose and Close)
   24  code    uint, packed key value (key events) or button mask (pointer)
   32  window  int, filled at poll time: the routed window id, or 0
 ```
 
 An `Expose` asks the owner to repaint the **whole content rectangle** of window `window`
-(spec 0011, W12); `x`, `y` and `code` are 0.
+(spec 0011, W12); `x`, `y` and `code` are 0. A `Close` asks the owner of window `window`
+to close it after a close-box press (spec 0011, W23/W25); the window stays open until the
+owner calls `window_close`. `Close` is owner-only and is served before `Expose`.
 
 The queue holds **64** events. A full queue drops the incoming event and increments a
 monotonic drop counter; `event_flush` empties the queue and returns the discarded count
@@ -713,3 +716,4 @@ drains the ring (and, only while IRQ12 is inactive, the controller) and decodes 
 | 2026-11-16 | M2.2.7 PS/2 aux IRQ12 (ADR 0023): the IDT gate `0x2C` and `arch/x86_64::ioapic` route IRQ12 through the I/O APIC to the boot core as a level-triggered fixed/physical/active-high entry, with the `0xFEC00000` page split and marked `PWT \| PCD`. The handler drains at most 64 aux bytes into a 1024-byte single-producer/single-consumer atomic ring and EOIs only the local APIC; `mouse::poll` decodes the ring in the service opportunity, and the direct controller drain remains the bounded backstop when the route is unavailable (the two modes are exclusive, so an aux byte has one reader). The controller configuration value is now written to the data port (the old code wrote it to the command port, so bit 1 never persisted); `enable_irq` stops reporting, re-reads the configuration, re-enables reporting and writes `config \| 0x02` last, because once bit 1 is set the handler would steal the `0xF4` ACK. Boot lines: `ioapic: version ...`, `mouse: aux IRQ12 enabled ...`, one-time `mouse: aux IRQ12 delivered ...`, and the `absent/unavailable ... polling` fallbacks. `scripts/mouse_burst_qmp.py` injects a 300×(+2) burst after clamping at x=0 and requires +600; on QEMU 10.2.2 the polled build is also 600/600 because the emulated PS/2 model retains deltas, so the historical 346/600 is a host-window result and is not reproducible headlessly. Verified `-smp 4` and `-smp 1` with all regressions and QMP absolute 7/7. |
 | 2026-11-16 | M2.2.3–M2.2.5 key events and the event queue: `arch/x86_64::keyboard` decodes set 1 into a console byte and a `KeyEvent` (stable key code, text, Shift/Ctrl/Alt/Caps state, arrows, F1–F12, E1 Pause skipped) with a boot self-check. Predeclared `EventKind` (`PointerMove`/`PointerDown`/`PointerUp`/`KeyDown`/`KeyUp`) and `Event` (`kind,x,y,code,window`, 40 bytes at `abi::layout::event`); key events pack text/modifiers/key code into `code` (`abi::key`). `kernel/src/event.rs` owns a 64-event queue that drops the newest on overflow with a monotonic counter, and pointer transitions enqueue move/down/up. `syslib.next_event` (blocks on `WaitFor::Input`, SMP-safe wake), `poll_event`, `inject_event` (debug-only), `event_drops` and `event_flush` are builtins 27–31 with no new opcode. `samples/apps/events` + `events_poke` prove the API, the overflow policy and a genuinely blocked wake; `keyboard: decoder ok` and `events: ok` run on `-smp 4` and `-smp 1`. |
 | 2026-11-16 | M2.3.3 routing and `Expose` (spec 0011, W12/W16/W17): `EventKind` gains `Expose` (ordinal 5). Producers still enqueue `window = 0`; the kernel host routes on poll — a pending owner-only `Expose` first, then a queued event, with a pointer-down hit-tested against the topmost frame and raising/focusing it before delivery and other pointer/key events naming the focused window. An injected non-zero `window` is passed through. Exposes are per-window coalesced flags marked by a repair and are not queue entries, so a foreign task cannot steal them; the scheduler's input-block re-check includes pending exposes. |
+| 2026-11-18 | `EventKind.Close` (ordinal 6, spec 0011 W25/M8.2): a close-box press posts an owner-only close request instead of killing the task. The kernel host serves a pending `Close` before a pending `Expose` and before the queue (`window::take_close`/`has_close`, topmost-first), writes `window = id` with `x = y = code = 0`, counts it as input readiness (`input_ready`, the post-block `Input` re-check and `next_any` source 1), and the event layout is unchanged. An injected non-zero `window` still passes through; a queued `Close` with `window = 0` is not re-addressed. |

@@ -37,9 +37,11 @@ DEFAULT_OUTPUT = "/home/sinan/Desktop/igis-system-menu.png"
 
 # The menu bar's `System` label sits after `Terminal` (measured prop widths:
 # File 24, Apps 56, Windows 94, Terminal 153..194, System starts at 208). Its
-# pull-down frame is (204, 22, 224, 66); row 0 (About) is y 23..38.
+# pull-down frame is (204, 22, 224, 66); row 0 (About) is y 23..38. Click it at
+# y = 24, above the kernel Terminal frame (y >= 26): since M8.1 a title-bar
+# press is the service-owned drag (W22) and is consumed before the client.
 SYSTEM_LABEL = (224, 10)
-ABOUT_ROW = (260, 30)
+ABOUT_ROW = (260, 24)
 
 
 def hid_axis(pixel, extent):

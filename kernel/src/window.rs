@@ -109,6 +109,9 @@ struct Window {
     title: [u8; TITLE_CAP],
     /// A whole-content repaint is pending for this window (spec 0011, W12).
     expose_pending: bool,
+    /// The close box was pressed and the owner has not taken the request yet
+    /// (spec 0011, W23/W25).
+    close_pending: bool,
     used: bool,
 }
 
@@ -123,6 +126,7 @@ impl Window {
         title_len: 0,
         title: [0; TITLE_CAP],
         expose_pending: false,
+        close_pending: false,
         used: false,
     };
 
@@ -166,8 +170,9 @@ enum PressAction {
     None,
     /// The service handled the press (title-bar drag or an owner-0 close box).
     Consumed,
-    /// The close box named a task-owned window: request its termination.
-    Kill(u64),
+    /// The close box of a task-owned window was pressed: the window's
+    /// `close_pending` flag is set and its owner is asked to close it.
+    Close,
 }
 
 /// The close box is an 11 × 11 square at `(frame.x + 4, frame.y + 3)` (W22).
@@ -890,9 +895,10 @@ impl Table {
     ///
     /// A press on the title bar (outside the close box) raises and focuses the
     /// window like `raise` and starts a drag; a press on a task-owned close box
-    /// asks for the owner's termination; an owner-0 close box is consumed but
-    /// inert. A second press while a drag is in progress is ignored. Content
-    /// presses and desktop presses are left to the client.
+    /// marks the window for a close request (the owner gets a `Close` event);
+    /// an owner-0 close box is consumed but inert. A second press while a drag
+    /// is in progress is ignored. Content presses and desktop presses are left
+    /// to the client.
     fn press(&mut self, x: i64, y: i64) -> PressAction {
         if self.drag.is_some() {
             // A second press during a drag is swallowed like the first, so it
@@ -908,11 +914,11 @@ impl Table {
         let frame = self.windows[self.order[pos]].frame();
         let owner = self.windows[self.order[pos]].owner;
         if close_box_hit(frame, x, y) {
-            return if owner == 0 {
-                PressAction::Consumed
-            } else {
-                PressAction::Kill(owner)
-            };
+            if owner == 0 {
+                return PressAction::Consumed;
+            }
+            self.windows[self.order[pos]].close_pending = true;
+            return PressAction::Close;
         }
         if !title_bar_hit(frame, x, y) {
             return PressAction::None;
@@ -1144,6 +1150,27 @@ impl Table {
         })
     }
 
+    /// Takes the topmost pending close request owned by `owner`, clearing it
+    /// (spec 0011, W25). Mirrors `take_expose`: only the owner can take it.
+    fn take_close(&mut self, owner: u64) -> Option<u64> {
+        for pos in (0..self.count).rev() {
+            let slot = self.order[pos];
+            if self.windows[slot].owner == owner && self.windows[slot].close_pending {
+                self.windows[slot].close_pending = false;
+                return Some(self.windows[slot].id);
+            }
+        }
+        None
+    }
+
+    /// Whether `owner` has any pending close request.
+    fn has_close(&self, owner: u64) -> bool {
+        (0..self.count).any(|pos| {
+            let slot = self.order[pos];
+            self.windows[slot].owner == owner && self.windows[slot].close_pending
+        })
+    }
+
     /// The topmost window whose frame contains `(x, y)` (spec 0011, W16).
     fn hit_test(&self, x: i64, y: i64) -> Option<u64> {
         for pos in (0..self.count).rev() {
@@ -1339,15 +1366,15 @@ pub fn move_to(owner: u64, id: u64, x: i64, y: i64) -> Status {
     status
 }
 
-/// Service-owned pointer interaction hook (spec 0011, W22/W23).
+/// Service-owned pointer interaction hook (spec 0011, W22/W23/W25).
 ///
 /// Called by `gfx` from both pointer paths **after** the graphics lock is
 /// dropped, so the repair can take `WINDOW → SCREEN` without inverting the
 /// order. Returns `true` when the press was consumed by the service (a
 /// title-bar drag or a close box); `gfx` then removes the matching queued
 /// `PointerDown` so the client never sees it. The table lock is never held
-/// across `task::request_kill` or `task::wake_input`: the kill is issued after
-/// the unlock.
+/// across `task::wake_input`: a posted close request wakes the owner after the
+/// unlock.
 pub fn pointer_event(
     old_x: i64,
     old_y: i64,
@@ -1367,7 +1394,7 @@ pub fn pointer_event(
 
     let mut table = TABLE.lock();
     let mut consumed = false;
-    let mut kill = 0u64;
+    let mut close_requested = false;
     let mut dirty = false;
 
     if pressed {
@@ -1376,9 +1403,9 @@ pub fn pointer_event(
                 consumed = true;
                 dirty = true;
             }
-            PressAction::Kill(owner) => {
+            PressAction::Close => {
                 consumed = true;
-                kill = owner;
+                close_requested = true;
             }
             PressAction::None => {}
         }
@@ -1392,11 +1419,10 @@ pub fn pointer_event(
 
     let wake = if dirty { table.repair() } else { false };
     drop(table);
-    if wake {
+    if wake || close_requested {
+        // The owner may be blocked in `next_event`; a close request counts as
+        // input readiness, exactly like an expose.
         crate::task::wake_input();
-    }
-    if kill != 0 {
-        let _ = crate::task::request_kill(kill);
     }
     consumed
 }
@@ -1504,6 +1530,18 @@ pub fn take_expose(owner: u64) -> Option<u64> {
 /// uses it so an expose marked between the empty read and the block is not lost.
 pub fn has_expose(owner: u64) -> bool {
     TABLE.lock().has_expose(owner)
+}
+
+/// Takes the topmost pending close request owned by `owner`, if any (spec 0011,
+/// W25). Only the owner can take it; the window stays until the owner closes it.
+pub fn take_close(owner: u64) -> Option<u64> {
+    TABLE.lock().take_close(owner)
+}
+
+/// Whether `owner` has a pending close request. Every input-readiness probe and
+/// block re-check includes it, so a close genuinely wakes a blocked owner.
+pub fn has_close(owner: u64) -> bool {
+    TABLE.lock().has_close(owner)
 }
 
 /// Takes the pending whole-content `Expose` of exactly `id`, if any, clearing
@@ -2435,8 +2473,8 @@ pub fn drag_self_check() -> Result<(), u32> {
         return Err(21);
     }
 
-    // 7. The close box names the owner: owner 0 is consumed but inert, a task
-    //    window yields its owner for the kill request.
+    // 7. The close box posts an owner request: owner 0 is consumed but inert,
+    //    a task window yields `Close` and a pending flag the owner can take.
     let kernel = table
         .open(SCREEN_W, SCREEN_H, 0, 300, 100, 100, 50, b"kernel")
         .map_err(|_| 22u32)?;
@@ -2445,7 +2483,7 @@ pub fn drag_self_check() -> Result<(), u32> {
         PressAction::Consumed => {}
         _ => return Err(24),
     }
-    if table.drag.is_some() {
+    if table.drag.is_some() || table.has_close(0) {
         return Err(25);
     }
     let victim = table
@@ -2453,10 +2491,10 @@ pub fn drag_self_check() -> Result<(), u32> {
         .map_err(|_| 26u32)?;
     let victim_frame = table.frame_rect(victim).map_err(|_| 27u32)?;
     match table.press(victim_frame.x + 5, victim_frame.y + 5) {
-        PressAction::Kill(9) => {}
+        PressAction::Close => {}
         _ => return Err(28),
     }
-    if table.drag.is_some() {
+    if table.drag.is_some() || !table.has_close(9) || table.take_close(9) != Some(victim) {
         return Err(29);
     }
 
@@ -2474,6 +2512,118 @@ pub fn drag_self_check() -> Result<(), u32> {
     }
     if table.close(7, doomed) != Status::Ok || table.drag.is_some() {
         return Err(34);
+    }
+
+    Ok(())
+}
+
+/// Boot self-check for the close request (spec 0011, W23/W25): a close-box
+/// press sets a pending flag and is consumed, `take_close` returns only the
+/// owner's topmost window and clears it, another owner sees nothing, owner-`0`
+/// close boxes stay inert, and closing the window (or its owner's task) drops
+/// the flag. Pure: it works on a scratch table and never touches the screen or
+/// the task table.
+///
+/// Returns the first failing step, or `Ok(())`; `kmain` prints
+/// `window: close ok` and halts on a mismatch.
+pub fn close_self_check() -> Result<(), u32> {
+    const SCREEN_W: i64 = 1024;
+    const SCREEN_H: i64 = 768;
+
+    let mut table = Table::new();
+    let a = table
+        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"A")
+        .map_err(|_| 1u32)?;
+    let b = table
+        .open(SCREEN_W, SCREEN_H, 7, 400, 100, 200, 100, b"B")
+        .map_err(|_| 2u32)?;
+    let other = table
+        .open(SCREEN_W, SCREEN_H, 8, 700, 100, 100, 50, b"other")
+        .map_err(|_| 3u32)?;
+
+    // 1. A close-box press on A posts a request for its owner and is consumed;
+    //    it does not raise or focus the window.
+    let a_frame = table.frame_rect(a).map_err(|_| 4u32)?;
+    let focus = table.focus;
+    match table.press(a_frame.x + 5, a_frame.y + 5) {
+        PressAction::Close => {}
+        _ => return Err(5),
+    }
+    if table.focus != focus || table.drag.is_some() {
+        return Err(6);
+    }
+    if !table.has_close(7) {
+        return Err(7);
+    }
+    // The owner takes the topmost pending request; taking clears it.
+    if table.take_close(7) != Some(a) || table.has_close(7) {
+        return Err(8);
+    }
+
+    // 2. Another owner sees nothing: A's request is not visible to owner 8.
+    let other_frame = table.frame_rect(other).map_err(|_| 9u32)?;
+    match table.press(other_frame.x + 5, other_frame.y + 5) {
+        PressAction::Close => {}
+        _ => return Err(10),
+    }
+    if table.take_close(7).is_some() || !table.has_close(8) {
+        return Err(11);
+    }
+    if table.take_close(8) != Some(other) || table.has_close(8) {
+        return Err(12);
+    }
+
+    // 3. Two pending requests: the topmost window's request comes first.
+    let b_frame = table.frame_rect(b).map_err(|_| 13u32)?;
+    for frame in [a_frame, b_frame] {
+        match table.press(frame.x + 5, frame.y + 5) {
+            PressAction::Close => {}
+            _ => return Err(14),
+        }
+    }
+    if table.take_close(7) != Some(b) || table.take_close(7) != Some(a) {
+        return Err(15);
+    }
+    if table.has_close(7) {
+        return Err(16);
+    }
+
+    // 4. Closing the window drops a pending request with the record.
+    match table.press(a_frame.x + 5, a_frame.y + 5) {
+        PressAction::Close => {}
+        _ => return Err(17),
+    }
+    if table.close(7, a) != Status::Ok || table.has_close(7) {
+        return Err(18);
+    }
+    if table.take_close(7).is_some() {
+        return Err(19);
+    }
+
+    // 5. An owner-0 close box is consumed but posts nothing.
+    let kernel = table
+        .open(SCREEN_W, SCREEN_H, 0, 300, 400, 100, 50, b"kernel")
+        .map_err(|_| 20u32)?;
+    let kernel_frame = table.frame_rect(kernel).map_err(|_| 21u32)?;
+    match table.press(kernel_frame.x + 5, kernel_frame.y + 5) {
+        PressAction::Consumed => {}
+        _ => return Err(22),
+    }
+    if table.has_close(0) {
+        return Err(23);
+    }
+
+    // 6. Task termination closes its windows and drops their requests.
+    match table.press(b_frame.x + 5, b_frame.y + 5) {
+        PressAction::Close => {}
+        _ => return Err(24),
+    }
+    if !table.has_close(7) {
+        return Err(25);
+    }
+    table.close_task(7);
+    if table.has_close(7) {
+        return Err(26);
     }
 
     Ok(())

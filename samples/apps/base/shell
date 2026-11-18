@@ -212,7 +212,17 @@ begin
         begin
           st := syslib.next_event(ev);
           if st = Ok then
-            handle_key(ev);
+          begin
+            if ev.kind = Close and ev.window = term then
+            begin
+              // A close-box press is an owner request, not a kill (spec 0011,
+              // W23). Close our own terminal window and leave both loops.
+              done := true;
+              cancelled := true;
+            end
+            else
+              handle_key(ev);
+          end;
         end;
       end;
     end;
@@ -344,4 +354,6 @@ begin
   end;
 
   out.say("bye\n");
+  if term_status = Ok then
+    st := syslib.window_close(term);
 end;

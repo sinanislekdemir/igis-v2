@@ -380,13 +380,14 @@ const STATUS_VARIANTS: [&str; 8] = [
 /// Variants of the predeclared `EventKind` enum, in the order
 /// `abi::EventKind` fixes (spec 0010, I19). The variants are global constants,
 /// so an application writes `KeyDown` and compares `ev.kind = KeyDown`.
-const EVENT_KIND_VARIANTS: [&str; 6] = [
+const EVENT_KIND_VARIANTS: [&str; 7] = [
     "PointerMove",
     "PointerDown",
     "PointerUp",
     "KeyDown",
     "KeyUp",
     "Expose",
+    "Close",
 ];
 
 /// Fields of the predeclared `Event` record, at the offsets `abi::layout`

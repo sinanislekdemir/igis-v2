@@ -691,6 +691,13 @@ begin
         if ev.window = id then
           dirty := true;
       end
+      else if ev.kind = Close then
+      begin
+        // A close-box press is a request, never a kill (spec 0011, W23); the
+        // interactive loop closes this window and exits.
+        if ev.window = id then
+          running := false;
+      end
       else if ev.kind = KeyDown then
       begin
         handle_key();
@@ -731,6 +738,11 @@ begin
           draw_frame();
           present_frame();
         end;
+      end
+      else if ev.kind = Close then
+      begin
+        if ev.window = id then
+          running := false;
       end
       else if ev.window = id then
       begin

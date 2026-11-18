@@ -197,12 +197,22 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
         }
     }
     // Service-owned pointer interaction (spec 0011, W22/W23): title-bar drag,
-    // close-box owner lookup, clamp, release and cancellation, all on scratch
-    // state.
+    // close-box classification, clamp, release and cancellation, all on
+    // scratch state.
     match window::drag_self_check() {
         Ok(()) => println!("window: drag ok"),
         Err(step) => {
             println!("window: drag FAIL at step {step}");
+            arch_x86_64::halt();
+        }
+    }
+    // The close box posts an owner request (spec 0011, W23/W25): flag, take
+    // order, owner isolation, owner-0 exemption and flag cleanup, all on
+    // scratch state.
+    match window::close_self_check() {
+        Ok(()) => println!("window: close ok"),
+        Err(step) => {
+            println!("window: close FAIL at step {step}");
             arch_x86_64::halt();
         }
     }

@@ -1,7 +1,7 @@
 unit windows_drag;
 
-// M8.1 proof: service-owned pointer drag and close-box termination
-// (spec 0011, W22/W23/W24).
+// M8.1/M8.2 proof: service-owned pointer drag and close requests
+// (spec 0011, W22/W23/W24/W25).
 //
 //   run windows_drag check   // headless proof, prints `windows_drag: ok`
 //   run windows_drag shot    // same checks, then holds the frame for a QMP
@@ -20,9 +20,11 @@ unit windows_drag;
 //   3. Draining the owner `Expose`s and repainting shows the target content at
 //      the new position and the underlay colour where the target used to be.
 //   4. A content-area press is still delivered normally (window = target id).
-//   5. `windows_drag_victim` opens "Close Target" and blocks in `next_event`;
-//      a press in its close box terminates it, `core.wait` reports `Killed`
-//      and the window disappears.
+//   5. A same-task dialog receives `Close` (no client click); the app closes
+//      only that window and its main window survives.
+//   6. `windows_drag_victim` opens "Close Target" and blocks in `next_event`;
+//      a press in its close box delivers `Close`, the victim closes its own
+//      window and exits `Ok` (it is never killed).
 //
 // The underlay is repainted in the four bands around the target's current
 // frame, because M2 has no per-task clip: a whole-content repaint of a lower
@@ -60,6 +62,7 @@ var
   id: int;
   child: int;
   victim: int;
+  dialog: int;
   rect: Rect;
   frame: Rect;
   content: Rect;
@@ -73,13 +76,13 @@ var
   started: uint;
   ok: bool;
   saw_down: bool;
+  saw_close: bool;
   expect_x: int;
   expect_y: int;
   drag_x: int;
   drag_y: int;
   dx: int;
   dy: int;
-  killed: bool;
   count: int;
   running: bool;
   flushed: uint;
@@ -278,6 +281,31 @@ begin
   end;
 end;
 
+// Drains the queue looking for the close request of `wanted` and a client
+// PointerDown addressed to it. The close-box press is consumed by the service,
+// so only the Close record may appear.
+procedure drain_for_close(wanted: int);
+begin
+  saw_close := false;
+  saw_down := false;
+  count := 0;
+  running := true;
+  while running and count < 32 do
+  begin
+    status := syslib.poll_event(ev);
+    if status = Ok then
+    begin
+      if ev.kind = Close and ev.window = wanted then
+        saw_close := true;
+      if ev.kind = PointerDown and ev.window = wanted then
+        saw_down := true;
+      count := count + 1;
+    end
+    else
+      running := false;
+  end;
+end;
+
 // Move the pointer with button 1 held by screen-oriented deltas.
 procedure drag_pointer(x: int; y: int);
 begin
@@ -294,16 +322,6 @@ begin
   begin
     pump();
     victim := window_id_of("Close Target");
-  end;
-end;
-
-procedure classify();
-begin
-  killed := false;
-  case reason of
-    Ok: killed := false
-    Killed: killed := true
-    Faulted(code): killed := false
   end;
 end;
 
@@ -330,6 +348,7 @@ begin
     id := 0;
     child := 0;
     victim := 0;
+    dialog := 0;
 
     // A known pointer state and no stale events.
     status := inject.pointer_to(0, 0);
@@ -414,7 +433,35 @@ begin
       verify("content press delivered", saw_down);
       status := syslib.inject_pointer(0, 0, uint(0));
 
-      // 7. The close box terminates the owner of the window under it.
+      // 7. A same-task dialog: a second window owned by this task gets a
+      //    close request, the app closes only that window and its main window
+      //    survives. The close-box press never reaches the client as a click.
+      status := syslib.window_open(820, 620, 160, 100, "Drag Dialog", dialog);
+      verify("open dialog", status = Ok and dialog > 0);
+      if dialog > 0 then
+      begin
+        status := syslib.window_frame_rect(dialog, frame);
+        verify("dialog frame", status = Ok);
+        dx := frame.x + 5 - syslib.pointer_x();
+        dy := frame.y + 5 - syslib.pointer_y();
+        status := syslib.inject_pointer(dx, dy, uint(0));
+        flushed := syslib.event_flush();
+        status := syslib.inject_pointer(0, 0, uint(1));
+        status := syslib.inject_pointer(0, 0, uint(0));
+        drain_for_close(dialog);
+        verify("dialog close requested", saw_close);
+        verify("dialog close is not a client click", not saw_down);
+        verify("dialog stays until the owner closes", window_id_of("Drag Dialog") = dialog);
+        status := syslib.window_close(dialog);
+        verify(
+          "dialog closed by its owner",
+          status = Ok and window_id_of("Drag Dialog") = 0);
+        verify("main window survives the dialog", window_id_of("Drag Target") = id);
+        dialog := 0;
+      end;
+
+      // 8. The close box of another task's window asks that task to close it;
+      //    the victim handles Close, closes its own window and exits Ok.
       status := core.spawn("windows_drag_victim", "", diag, child);
       verify("spawn victim", status = Ok and child > 0);
       if child > 0 then
@@ -432,8 +479,7 @@ begin
           status := syslib.inject_pointer(0, 0, uint(1));
           status := syslib.inject_pointer(0, 0, uint(0));
           status := core.wait(child, reason);
-          classify();
-          verify("victim killed", status = Ok and killed);
+          verify("victim closed by request", status = Ok and outcome.is_ok(reason));
           verify("victim window gone", window_id_of("Close Target") = 0);
           status := syslib.window_frame_rect(victim, rect);
           verify("victim frame gone", status = NotFound);
@@ -454,6 +500,8 @@ begin
       end;
     end;
 
+    if dialog > 0 then
+      status := syslib.window_close(dialog);
     if id > 0 then
       status := syslib.window_close(id);
     if under > 0 then

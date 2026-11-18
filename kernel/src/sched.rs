@@ -302,19 +302,34 @@ impl Host for KernelHost {
     }
 
     // The machine-wide event queue (spec 0010, I19), routed at poll time
-    // (spec 0011, W16). Producers keep `window = 0` and may run under the
+    // (spec 0011, W16/W25). Producers keep `window = 0` and may run under the
     // graphics lock, so stamping there would nest graphics -> window against
     // the repair's window -> graphics. Here no graphics lock is held:
     //
-    // 1. A pending `Expose` for the calling task comes first; only the owner
+    // 1. A pending close request for the calling task comes first; only the
+    //    owner can take it, topmost-first, and the event names the window so
+    //    the owner can close exactly that one.
+    // 2. A pending `Expose` for the calling task comes next; only the owner
     //    can take it, and the event names the whole content rectangle.
-    // 2. Otherwise the global queue supplies the event. A `PointerDown` is
+    // 3. Otherwise the global queue supplies the event. A `PointerDown` is
     //    hit-tested against the topmost frame, which is raised and focused
     //    before the click is delivered (the W7 affordance). Other pointer and
     //    key events target the focused window. An explicitly addressed event
-    //    (non-zero `window`, including an injected `Expose`) is passed through
-    //    unchanged, so `inject_event` remains the deterministic test hook.
+    //    (non-zero `window`, including an injected `Expose` or `Close`) is
+    //    passed through unchanged, so `inject_event` remains the deterministic
+    //    test hook.
     fn poll_event(&mut self, event: &mut [u8]) -> Status {
+        if let Some(id) = crate::window::take_close(self.current) {
+            let close = abi::Event {
+                kind: abi::EventKind::Close,
+                x: 0,
+                y: 0,
+                code: 0,
+                window: id as i64,
+            };
+            abi::layout::event::write(event, close);
+            return Status::Ok;
+        }
         if let Some(id) = crate::window::take_expose(self.current) {
             let expose = abi::Event {
                 kind: abi::EventKind::Expose,
@@ -341,6 +356,7 @@ impl Host for KernelHost {
                     }
                 }
                 abi::EventKind::Expose => {}
+                abi::EventKind::Close => {}
                 _ => routed.window = crate::window::focus() as i64,
             }
         }
@@ -368,7 +384,9 @@ impl Host for KernelHost {
     }
 
     fn input_ready(&mut self) -> bool {
-        crate::event::has_event() || crate::window::has_expose(self.current)
+        crate::event::has_event()
+            || crate::window::has_expose(self.current)
+            || crate::window::has_close(self.current)
     }
 
     fn stream_readable(&mut self, handle: u64) -> bool {
@@ -742,9 +760,13 @@ fn loop_body(core: usize) -> ! {
                                     let id = task.id;
                                     task::block(task, WaitFor::Input);
                                     // An event may have been queued, or an
-                                    // expose marked for this task, between the
-                                    // empty read and the block above.
-                                    if crate::event::has_event() || crate::window::has_expose(id) {
+                                    // expose/close marked for this task,
+                                    // between the empty read and the block
+                                    // above.
+                                    if crate::event::has_event()
+                                        || crate::window::has_expose(id)
+                                        || crate::window::has_close(id)
+                                    {
                                         task::wake_input();
                                     }
                                 }

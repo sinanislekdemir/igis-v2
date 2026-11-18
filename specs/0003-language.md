@@ -847,7 +847,8 @@ contributes no global constants. Every other enum's variants are global constant
 `abi::layout::event`:
 
 ```text
-type EventKind = (PointerMove, PointerDown, PointerUp, KeyDown, KeyUp, Expose);
+type EventKind = (PointerMove, PointerDown, PointerUp, KeyDown, KeyUp, Expose,
+                  Close);
 
 type Event = record              // offsets, size 40
   kind: EventKind;               // 0   (ordinal in one 8-byte slot)
@@ -858,9 +859,11 @@ type Event = record              // offsets, size 40
 end;
 ```
 
-The `EventKind` variants are global constants (`KeyDown`, `PointerMove`, ..., `Expose`), so
-an application writes `ev.kind := KeyDown` and compares `ev.kind = PointerDown`. `Expose`
-is the window service's whole-content repaint request (spec 0011, W12). For a key
+The `EventKind` variants are global constants (`KeyDown`, `PointerMove`, ..., `Expose`,
+`Close`), so an application writes `ev.kind := KeyDown` and compares
+`ev.kind = PointerDown`. `Expose` is the window service's whole-content repaint request
+(spec 0011, W12) and `Close` is its owner-only close request after a close-box press
+(spec 0011, W23/W25); neither is addressed to any other task. For a key
 event, `code` packs `text | modifiers << 8 | key code << 16` with `abi::key`'s shifts;
 the text byte is the ASCII/control byte (0 for a non-text key or a release), the modifier
 bits are Shift 1 / Ctrl 2 / Alt 4 / Caps 8 at the time of the transition, and the key code
@@ -2183,3 +2186,4 @@ controls and input dialog for the QMP screenshot harness.
 | 2026-11-17 | Correctly rounded decimal → binary64 parsing (Q41). `core.parse_f64_into(src, var value: f64) -> Status` is builtin 50 and pure interpreter code: it checks the spec grammar over the source bytes and converts with `core`'s `f64: FromStr`, which is allocation-free and correctly rounded (round half to even) over the whole mantissa, including subnormals and the overflow/underflow boundaries. `nan` writes one canonical quiet NaN, `-0.0`/`-inf` keep their sign, malformed text (including non-UTF-8) is `Invalid` with `value` untouched, and the cost does not grow with the exponent. `stdlib.parse_f64_into` keeps its signature and `stdlib` function count and now only delegates, so existing callers and the format→parse round trip are unchanged. `samples/apps/f64parse` proves 52 cases in the kernel (hard ties, `1e-7`, the smallest normal, both sides of the smallest-subnormal half ulp, max finite and overflow, underflow to `-0`, a 38-digit mantissa and every rejected form); the reader is pinned by exact bit tables and an exact shortest-text round trip in `interpreter/src/f64parse.rs`, builtin tests in `interpreter/tests/f64parse.rs`, compiler signature/encoding tests and a `langhost` boundary test. No new opcode; ABI v1 stays at 75. |
 | 2026-11-17 | Q39 adds multi-source waits. `core.poll_any` (builtin 51) and `core.next_any` (builtin 52) inspect `const array[uint, 8]` with `count` in `1..=8` and write the first ready index through `var ready`; source `0` is one completed console line, `1` one input event (including a pending `Expose`) and every other value a stream handle whose data or close is ready (a read select; send space is not included). `core.stream_source(ep) -> uint` is compiler-lowered and is the only way to name a stream in the array. `poll_any` returns `WouldBlock` (destination untouched) when nothing is ready; `next_any` blocks on the whole set. Readiness is a snapshot, not a reservation: the following `read_line`/`next_event`/`recv` is authoritative. C10 states the one-wait rule. Spec 0007, ADR 0036. |
 | 2026-11-17 | Q44 resolved (ADR 0037): console input is `core.read_input(var dst: bytes[N]) -> int`, a raw non-blocking read (0 when empty) reusing the retired `READ_LINE` opcode slot as `READ_INPUT` (ABI v1 stays at 75). A `string` destination is a compile error (a partial read could split a code point); callers convert with the checked slice. Source `0` of `core.poll_any`/`core.next_any` now means a console byte is available, and the shell echoes/edits its own `string[256]` with the `stdlib.str_*` helpers. The keyboard feeds events only, never the byte stream; `core.read_line` no longer exists. |
+| 2026-11-18 | `EventKind.Close` joins the predeclared enum (ordinal 6, M8.2/spec 0011 W25). It is a global constant like `Expose`; an application compares `ev.kind = Close` and closes its own window. The compiler's predeclared variant list carries the same order (`PointerMove` 0 … `Expose` 5, `Close` 6); `Event`'s layout and every other type are unchanged. |

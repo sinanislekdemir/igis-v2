@@ -592,9 +592,12 @@ fn source_ready(task: u64, source: u64) -> bool {
     if source == SOURCE_CONSOLE_BYTE {
         crate::console::has_byte()
     } else if source == SOURCE_INPUT {
-        // `syslib.next_event` also returns a pending `Expose` (spec 0011,
-        // W16), so the input source means "next_event would not block".
-        crate::event::has_event() || crate::window::has_expose(task)
+        // `syslib.next_event` also returns a pending `Expose` and a `Close`
+        // (spec 0011, W16/W25), so the input source means "next_event would
+        // not block".
+        crate::event::has_event()
+            || crate::window::has_expose(task)
+            || crate::window::has_close(task)
     } else {
         crate::stream::readable(task, source)
     }

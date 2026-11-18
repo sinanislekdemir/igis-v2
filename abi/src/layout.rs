@@ -332,6 +332,22 @@ mod tests {
     }
 
     #[test]
+    fn a_close_event_round_trips_and_is_named() {
+        let event = Event {
+            kind: EventKind::Close,
+            x: 0,
+            y: 0,
+            code: 0,
+            window: 7,
+        };
+        let mut bytes = [0u8; event::SIZE as usize];
+        event::write(&mut bytes, event);
+        assert_eq!(event::read(&bytes), Some(event));
+        assert_eq!(EventKind::Close.name(), "Close");
+        assert_eq!(EventKind::from_ordinal(6), Some(EventKind::Close));
+    }
+
+    #[test]
     fn key_codes_pack_text_modifiers_and_identity() {
         let code = key::pack(key::LEFT, 0, key::MOD_SHIFT | key::MOD_CTRL);
         assert_eq!(key::text(code), 0);
@@ -352,8 +368,10 @@ mod tests {
         assert_eq!(EventKind::KeyDown as u8, 3);
         assert_eq!(EventKind::KeyUp as u8, 4);
         assert_eq!(EventKind::Expose as u8, 5);
+        assert_eq!(EventKind::Close as u8, 6);
         assert_eq!(EventKind::from_ordinal(5), Some(EventKind::Expose));
-        assert_eq!(EventKind::from_ordinal(6), None);
+        assert_eq!(EventKind::from_ordinal(6), Some(EventKind::Close));
+        assert_eq!(EventKind::from_ordinal(7), None);
         assert_eq!(EventKind::from_ordinal(4), Some(EventKind::KeyUp));
     }
 

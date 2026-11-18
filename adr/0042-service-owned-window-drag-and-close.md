@@ -1,6 +1,6 @@
 # 0042: Window drag and close are service-owned pointer interactions
 
-- **Status:** Accepted
+- **Status:** Accepted (close semantics amended by 0043)
 - **Date:** 2026-11-18
 - **Deciders:** igis-v2 kernel/UI
 - **Related specs:** 0011, 0010, 0009

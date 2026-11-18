@@ -1782,6 +1782,13 @@ begin
         present_frame();
       end;
     end
+    else if ev.kind = Close then
+    begin
+      // The close box requests a close; only this window goes (spec 0011,
+      // W23). The loop then closes it and returns.
+      if ev.window = id then
+        running := false;
+    end
     else if ev.kind = KeyDown then
     begin
       if ev.window = id then

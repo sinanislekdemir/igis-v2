@@ -109,6 +109,7 @@ var
 
   ev: Event;
   draining: bool;
+  quit: bool;
 
 // Silent check: the first failure is printed with its step number.
 procedure verify(label: const string[0]; passed: bool);
@@ -450,7 +451,8 @@ begin
 end;
 
 // Drain the machine-wide queue without blocking. A whole-content `Expose` for
-// this window repaints from the current clock.
+// this window repaints from the current clock; a close request ends the live
+// loop so the app closes its own window and exits (spec 0011, W23).
 procedure drain_events();
 begin
   draining := true;
@@ -465,6 +467,11 @@ begin
         split(now_s, hour, minute, second);
         draw_clock(hour, minute, second);
         present_clock();
+      end
+      else if ev.kind = Close and ev.window = id then
+      begin
+        quit := true;
+        draining := false;
       end;
     end
     else
@@ -480,11 +487,12 @@ begin
   now_s := int(core.clock() div uint(NanosPerSecond));
   last_s := now_s;
   end_s := now_s + LiveSeconds;
+  quit := false;
   split(now_s, hour, minute, second);
   draw_clock(hour, minute, second);
   present_clock();
   out.say("clock_window: ready\n");
-  while now_s <= end_s do
+  while now_s <= end_s and not quit do
   begin
     now_s := int(core.clock() div uint(NanosPerSecond));
     if now_s <> last_s then
@@ -497,7 +505,10 @@ begin
     drain_events();
   end;
   ignored := syslib.window_close(id);
-  out.say("clock_window: done\n");
+  if quit then
+    out.say("clock_window: closed\n")
+  else
+    out.say("clock_window: done\n");
 end;
 
 // The disabled-screen path: time decomposition, formatting and the direction

@@ -1706,6 +1706,11 @@ begin
         present_frame();
       end;
     end
+    else if ev.kind = Close then
+    begin
+      if ev.window = id then
+        running := false;
+    end
     else if ev.window = id then
     begin
       ready := false;

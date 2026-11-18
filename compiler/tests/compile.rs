@@ -6703,6 +6703,32 @@ end;
 }
 
 #[test]
+fn close_is_a_predeclared_event_kind_constant() {
+    let source = br#"
+unit t;
+
+uses core, syslib;
+
+var
+  ev: Event;
+  status: Status;
+
+procedure main(args: const string[1024]);
+begin
+  ev.kind := Close;
+  ev.x := 0;
+  ev.y := 0;
+  ev.code := uint(0);
+  ev.window := 7;
+  status := syslib.poll_event(ev);
+  if ev.kind = Close then
+    status := syslib.window_close(ev.window);
+end;
+"#;
+    compile(source, "t.ig").expect("Close is a predeclared EventKind constant");
+}
+
+#[test]
 fn rect_is_predeclared_and_cannot_be_redeclared() {
     let source = br#"
 unit t;

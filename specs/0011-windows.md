@@ -5,7 +5,7 @@
   `syslib`; M2.3 of the desktop milestone
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0020, 0024, 0042
+- **ADRs:** 0020, 0024, 0042, 0043
 - **Updated:** 2026-11-18
 
 ## Context
@@ -180,12 +180,14 @@ an `int`; `0` is never a valid id.
   check only for this path (W23's close box keeps the ownership rule). Resize is not part
   of this requirement.
 - **W23 (MUST):** A left-button press inside a window's 11 × 11 close box at
-  `(frame.x + 4, frame.y + 3)` requests termination of the owning task through
-  `task::request_kill`; the task's windows then disappear through `Task::reclaim` →
-  `window::close_task` (W8) and `core.wait` observes `Killed`. A close box on an owner-`0`
-  (kernel) window is inert: no task is killed and nothing changes. The press is consumed
-  like a title-bar press. This is immediate termination with the same data-loss semantics
-  as `core.kill`; there is no graceful save-on-close handshake (deferred, ADR 0042).
+  `(frame.x + 4, frame.y + 3)` posts a **close request** for the window; it never
+  terminates the owning task. The service sets the window's pending-close flag, and the
+  owner receives the predeclared `EventKind.Close` (W25). The window stays open until its
+  owner closes it; an owner that ignores the request leaves the window (no timeout, no
+  automatic kill). A close box on an owner-`0` (kernel) window is inert: nothing is posted
+  and nothing changes. The press is consumed like a title-bar press (W24). This is a
+  request, not a save-on-close handshake: the owner decides how to close and may save
+  first (ADR 0043).
 - **W24 (MUST):** A press the service handles under W22/W23 MUST NOT be delivered to a
   client as a `PointerDown`, **even under an SMP poll race**. The two pointer paths
   serialise the whole transaction with one dedicated pointer-order lock: update the
@@ -196,6 +198,17 @@ an `int`; `0` is never a valid id.
   presses, desktop presses and key events are unchanged and still route at poll time
   (W16). The hook runs from both pointer paths after the graphics lock is dropped, so
   injected `syslib.inject_pointer` events get the same synchronous behaviour as a device.
+- **W25 (MUST):** A pending close request is delivered as `EventKind.Close` (ordinal 6)
+  with `window = id` and `x = y = code = 0`. It is **owner-only** and **topmost-first**
+  like an expose: `window::take_close(owner)` returns and clears the topmost pending
+  request of that owner, `window::has_close(owner)` reports whether one is pending, and no
+  other task can see or take it. The kernel host serves a pending `Close` **before** a
+  pending `Expose` and before the machine-wide queue. A close request counts as input
+  readiness for the owner: `input_ready`, the scheduler's post-block `Input` re-check and
+  `next_any` source `1` include `has_close(owner)`, and the pointer hook wakes
+  `WaitFor::Input` after dropping the window lock. A `Close` addressed in the queue (an
+  injected event with a non-zero `window`) passes through unchanged. The window is removed
+  only by its owner (`window_close`) or by its task's termination (`close_task`).
 
 ## Design
 
@@ -398,30 +411,33 @@ entry stays address-free until it is polled.
 
 The kernel host routes on `poll_event`, where no graphics lock is held:
 
-1. **Pending expose first.** `window::take_expose(current)` returns the topmost window of
+1. **Pending close request first.** `window::take_close(current)` returns the topmost
+   window of the calling task with a pending close request, clears it and builds the event
+   (`kind = Close`, `window = id`, `x = y = code = 0`). Only the owner can take it (W25).
+2. **Pending expose next.** `window::take_expose(current)` returns the topmost window of
    the calling task with a pending flag, clears it and builds the event
    (`kind = Expose`, `window = id`, `x = y = code = 0`). A foreign task can never take
-   another task's expose, because the table is searched by owner; there is no per-task
-   queue to steal from.
-2. **Queue next.** `event::poll` supplies one queued event. If it already carries a
-   non-zero `window` (an injected `Expose`, or any explicitly addressed injection) it is
-   passed through unchanged. A `PointerDown` is hit-tested against the topmost window
-   **frame**: a hit raises and focuses that window (the W7 affordance) before the event is
-   handed over, and the event names it; a miss stays 0. Every other pointer or key event
-   names `window_focus()` (0 when no window exists).
+   another task's expose or close request, because the table is searched by owner; there
+   is no per-task queue to steal from.
+3. **Queue next.** `event::poll` supplies one queued event. If it already carries a
+   non-zero `window` (an injected `Expose` or `Close`, or any explicitly addressed
+   injection) it is passed through unchanged. A `PointerDown` is hit-tested against the
+   topmost window **frame**: a hit raises and focuses that window (the W7 affordance)
+   before the event is handed over, and the event names it; a miss stays 0. Every other
+   pointer or key event names `window_focus()` (0 when no window exists).
 
 #### Lock order (the only nesting is window → graphics)
 
 | Path | Takes | Then |
 |------|-------|------|
 | pointer producer (`gfx`) | pointer-order | graphics (state/cursor), released before the hook; then window → graphics; then the event queue (press suppressed when handled) |
-| pointer service hook (`gfx` → `window::pointer_event`) | pointer-order already held | window → graphics for a drag repair; `request_kill`/`wake_input` only **after** the window unlock |
+| pointer service hook (`gfx` → `window::pointer_event`) | pointer-order already held | window → graphics for a drag repair; `wake_input` only **after** the window unlock (a drag repair or a posted close request) |
 | keyboard/console producer | console, graphics per cell | nothing |
-| poll-time routing | nothing | window (`take_expose`/`route_click`); routing a click repairs: window → graphics; input waiters are woken **after** the window lock is dropped |
+| poll-time routing | nothing | window (`take_close`/`take_expose`/`route_click`); routing a click repairs: window → graphics; input waiters are woken **after** the window lock is dropped |
 | window wrappers (`open`/`move`/`rect` reads) | graphics (screen size, released) | window → graphics for the repair; input wake after the unlock |
 | repair | window | graphics (dither, chrome, present) |
 | `Task::reclaim` → `close_task` | nothing (no scheduler lock held) | window → graphics; input wake after the unlock |
-| scheduler `Input` block | no lock | `event::has_event` / `window::has_expose`; then slot locks in `wake_input` |
+| scheduler `Input` block | no lock | `event::has_event` / `window::has_expose` / `window::has_close`; then slot locks in `wake_input` |
 
 No path takes graphics and then window, and no path takes a scheduler slot lock and then
 window. The repair is synchronous under the window lock, so the z-order it walks is the
@@ -433,10 +449,12 @@ state the caller produced.
 damage — the same set whose chrome it repaints — before it paints, and returns whether it
 marked anything. The wrappers drop the window lock and only then call
 `task::wake_input()`, so a task blocked in `next_event` wakes and retries; the scheduler's
-`WaitKind::Input` block re-check also tests `window::has_expose(task_id)`, closing the race
-between the empty read and the block. A flag is coalesced per window and dropped with the
-window on close; a task that never polls leaves stale content (W18) and receives the
-request again on the next damage.
+`WaitKind::Input` block re-check also tests `window::has_expose(task_id)` (and
+`window::has_close(task_id)` for a posted close request), closing the race between the
+empty read and the block. A flag is coalesced per window and dropped with the window on
+close; a task that never polls leaves stale content (W18) and receives the request again
+on the next damage. A close request is a separate per-window flag served before the
+expose (W25); it is not coalesced with damage and stays pending until its owner takes it.
 
 #### `window_present`
 
@@ -513,10 +531,11 @@ drag below.
 
 ### Pointer drag and close box (implemented in M8.1)
 
-W22–W24 add two service-owned interactions over the same table. There is no new opcode,
-builtin, `Host` method, `syslib` primitive, `stdlib` helper or `EventKind`, and no
-application-visible surface: a client opens a window as before and the service intercepts
-the press.
+W22–W25 add two service-owned interactions over the same table. There is no new opcode,
+builtin, `Host` method, `syslib` primitive or `stdlib` helper. The drag is not
+application-visible: a client opens a window as before and the service intercepts the
+press. The close box is application-visible only through the predeclared
+`EventKind.Close` (W25), which M8.2 added in place of M8.1's kill (ADR 0043).
 
 - **Hook and lock order.** `gfx::update_pointer` and `gfx::set_pointer_absolute` take one
   dedicated pointer-order lock for the whole transaction: update the pointer state and
@@ -525,8 +544,9 @@ the press.
   event records (with a consumed press suppressed) and release the pointer-order lock.
   The hook reads the screen size (graphics, released), takes the table lock, runs the
   pure table methods and repairs under `WINDOW → SCREEN`, then drops the table lock. It
-  never holds the table lock across `task::request_kill` or `task::wake_input`: the kill
-  is issued after the unlock, and the wake follows the existing wrapper pattern. The
+  never holds the table lock across `task::wake_input`: the wake for a drag repair or a
+  posted close request follows the existing wrapper pattern and is issued after the
+  unlock. The
   order is `POINTER_ORDER → SCREEN` and `POINTER_ORDER → WINDOW → SCREEN`; only these two
   paths take the pointer-order lock, so there is no cycle. Injected
   `syslib.inject_pointer` goes through the same two functions, so the proof is synchronous
@@ -544,12 +564,14 @@ the press.
   `close`, `close_task` and `Task::reclaim` cancel it in the same pass that removes the
   window. A press while `Drag` is set is consumed and ignored (no raise, no new drag), so
   it cannot reach a client and raise another window mid-drag.
-- **Close box.** A task-owned close box returns `PressAction::Kill(owner)`; the hook drops
-  the table lock and calls `task::request_kill(owner)`. The task terminates at its next
-  safe point, `Task::reclaim` runs the ordinary `window::close_task`, and the focus
-  fallback (W6) applies. Owner `0` returns `Consumed` and does nothing. There is no
-  save-on-close and no close-request event; data loss is the same as `core.kill` (ADR
-  0042, accepted limitation).
+- **Close box.** A task-owned close box sets the window's `close_pending` flag and
+  returns `PressAction::Close`; the hook drops the table lock and wakes
+  `WaitFor::Input` (the owner may be blocked in `next_event`). It never calls
+  `task::request_kill`. Owner `0` returns `Consumed` and does nothing. The owner takes the
+  request as a `Close` event (W25) and closes its own window; until then the window stays
+  open. M8.1 originally killed the owner here; the About freeze showed that a dialog must
+  close itself, so W23 was rewritten and ADR 0043 records the decision (it amends ADR
+  0042's close clause).
 - **Consumed press.** A handled press is suppressed **before publication**: after the
   service hook returns `consumed`, `event::push_pointer(..., suppress_down = true)` omits
   the `PointerDown` record entirely (the `PointerMove`/`PointerUp` records still publish
@@ -568,21 +590,80 @@ the press.
 
 `window::drag_self_check` proves the pure rules on a scratch table: title-bar vs close-box
 vs content classification, the grab offset, moves and clamps at all four edges, release,
-the ignored second press, the owner-0 close-box exemption, the owner lookup and drag
-cancellation on close. Boot prints `window: drag ok` beside the existing `window:` lines;
-`kmain` halts on the first mismatch.
+the ignored second press, the owner-0 close-box exemption, the close request posting and
+drag cancellation on close. Boot prints `window: drag ok` beside the existing `window:`
+lines; `kmain` halts on the first mismatch.
 
-`samples/apps/base/windows_drag` (+ `windows_drag_victim`) is the proof: it opens an
-"Underlay" window and a "Drag Target" above it, injects a real title-bar press (asserting
-the press is consumed, the window focused and not moved), drags with button 1 through
-both screen clamps, releases and checks the frame does not move again, drains the exposes,
-repaints the target and the underlay's visible bands, and checks the new content and the
-restored old area with `syslib.get_pixel`. It then verifies a content press is delivered
-to the client with the window id, spawns the victim, presses its close box, requires
-`core.wait` to report `Killed`, and requires the window and its frame to be gone. Without
-graphics it prints `windows_drag: host ok`.
+`samples/apps/base/windows_drag` (+ `windows_drag_victim`) is the pointer proof: it opens
+an "Underlay" window and a "Drag Target" above it, injects a real title-bar press
+(asserting the press is consumed, the window focused and not moved), drags with button 1
+through both screen clamps, releases and checks the frame does not move again, drains the
+exposes, repaints the target and the underlay's visible bands, and checks the new content
+and the restored old area with `syslib.get_pixel`. It then verifies a content press is
+delivered to the client with the window id, proves the same-task dialog pattern below,
+spawns the victim, presses its close box, requires the victim to close its own window and
+exit `Ok`, and requires the window and its frame to be gone. Without graphics it prints
+`windows_drag: host ok`.
 
-Resize remains deferred (open question 4): this slice drags whole windows only.
+### Close requests (implemented in M8.2)
+
+W23/W25 replace the M8.1 kill-on-close with an owner close **request**. A close-box press
+sets one per-window `close_pending` flag (`PressAction::Close`); nothing else changes in
+the pointer path, the lock order or the consumed-press rule. The owner takes the request
+through `poll_event` (the kernel host serves it before a pending `Expose` and before the
+queue) and closes its own window with the ordinary owner-only `window_close`. The window
+remains live until that call, so the service can keep repairing and presenting it; an
+ignored request is simply not delivered again. `take_close` searches topmost-first and
+clears the taken flag; a foreign owner sees nothing because the table is searched by
+owner, exactly like `take_expose`.
+
+Delivery and wake-up:
+
+- `EventKind.Close` (ordinal 6) is predeclared with `window = id`, `x = y = code = 0`.
+  The compiler's predeclared `EventKind` list and `abi::EventKind` carry the same order;
+  `Event`'s 40-byte layout is unchanged. No opcode, builtin, `Host` method, `syslib`
+  primitive or `stdlib` helper is added (ABI v1 stays at 75 opcodes).
+- `window::take_close(owner)` / `has_close(owner)` mirror `take_expose` / `has_expose`.
+  `remove_at` drops the flag with the record, so `close`, `close_task` and `Task::reclaim`
+  clear it in the same pass that removes the window.
+- The pointer hook wakes `WaitFor::Input` after dropping the window lock when a request
+  was posted. `input_ready`, the scheduler's post-block `Input` re-check and `next_any`
+  source `1` include `has_close(owner)`, so a genuinely blocked owner wakes and observes
+  the event; readiness stays a snapshot and the following `next_event` is authoritative.
+- An injected `Close` with a non-zero `window` is passed through unchanged, like an
+  injected `Expose`; a `Close` queued with `window = 0` is not re-addressed to the focus.
+
+`window::close_self_check` proves the pure rules on a scratch table: a close-box press
+posts a request and is consumed (no raise, no drag), `take_close` returns only the owner's
+topmost window and clears it, another owner sees nothing, an owner-`0` close box posts
+nothing, and closing the window or its task drops the flag. Boot prints
+`window: close ok` beside `window: drag ok`; `kmain` halts on the first mismatch.
+
+Application behaviour:
+
+- `desktop_shell` handles `Close` in both its blocking and check-mode paths: a request for
+  `about_id` closes only the About panel and keeps the desktop running, while a request for
+  its own `Desktop` window closes that window and exits.
+- The user-facing windows (`calculator`, `minesweeper`, `editor`, `browser`,
+  `clock_window`, `shell`, `widgets`) close their own window and exit on `Close`.
+  `clock_window`'s bounded poll loop breaks out and closes; `shell` closes its terminal
+  window after its last line.
+- Proof and demo windows (`ui_*`, `visual`, `font`, `perf`, `windows*` proofs) may ignore
+  `Close` and exit on their own schedule; ignoring a request leaves the window open, which
+  is the accepted liveness rule (W18).
+
+`samples/apps/base/windows_drag` proves both owner patterns: a same-task dialog window
+receives `Close` (the only event; the close-box press never reaches the client as a
+`PointerDown`), the app closes only that window and its main window survives, and the
+separate victim task handles `Close`, closes its own window, prints one line and exits
+`Ok` (not `Killed`). `desktop_shell check` injects a real press in the About close box,
+requires exactly one `Close` event and no client click, closes About, and then reopens it
+to prove the desktop (and the boot entrypoint) is still alive — the exact M8.1 freeze.
+`scripts/about_close_qmp.py` reproduces the reported scenario on the boot desktop: open
+System → About through QMP pointer events, click the About close box, wait for
+`desktop_shell: about closed`, then launch the Terminal and type `terminal`. It fails if
+the scheduler idle summary or a `halt:` line appears. Resize remains deferred (open
+question 4): this slice drags whole windows only.
 
 ## Interfaces
 
@@ -678,6 +759,8 @@ pub fn info(index: u64) -> Option<Info>;          // window_info, topmost first
 pub fn visible_content_parts(id: u64, out: &mut [Rect]) -> usize; // kernel-only
 pub fn take_expose(owner: u64) -> Option<u64>;   // poll-time routing
 pub fn has_expose(owner: u64) -> bool;           // input block re-check
+pub fn take_close(owner: u64) -> Option<u64>;    // poll-time close request
+pub fn has_close(owner: u64) -> bool;            // input block re-check
 pub fn route_click(x: i64, y: i64) -> Option<u64>; // hit-test + raise + repair
 pub fn close_task(owner: u64);       // Task::reclaim
 ```
@@ -712,8 +795,10 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | `raise` on the top window | `Ok`, focus set, order unchanged |
 | Title-bar press while a drag is active | Ignored by the service; the existing drag continues |
 | Drag beyond a screen edge | Clamped so the frame stays fully on screen, like `move_to` |
-| Close box on an owner-`0` window | Consumed, no kill, nothing changes |
-| Close box on a task window | The task is killed (data loss like `core.kill`); its windows close via `Task::reclaim` |
+| Close box on an owner-`0` window | Consumed, no request, nothing changes |
+| Close box on a task window | A pending `Close` request is posted for the owner; the window stays until the owner closes it (no kill, no timeout) |
+| Owner ignores a `Close` request | The window stays live with its last content; no retry and no automatic close (W18/W23) |
+| Close request for a task that owns several windows | Only the topmost pending window is returned per take; each window carries its own flag |
 | Dragged window closes or its owner terminates | The drag is cancelled in the same removal pass |
 
 ## Alternatives considered
@@ -738,7 +823,7 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | 1 | ~~Expose delivery: a new `EventKind.Expose` event, a dedicated blocking wait, or a callback-like `window_present` handshake~~ | Resolved in M2.3.3: `EventKind.Expose` (ordinal 5), one coalesced pending expose per damaged window, owner-only take at poll time; `window_present` is the presentation call, not the delivery mechanism (W12/W17) |
 | 2 | ~~Damage coalescing across several operations in one pass (union vs per-window flags)~~ | Resolved in M2.6.2: damage is coalesced per list before paint (W21), the presentation is the coalesced rectangle set rather than one bounding box, and `Expose` is still a per-window whole-content flag |
 | 3 | ~~Client liveness: a window whose owner never calls `next_event` or never repaints — close it, or leave stale content forever~~ | Resolved for M2: leave stale content; no timeout, forced close or kill for a missed expose (W18). Revisit when the desktop shell can judge a client (M2.3.5/M2.4) |
-| 4 | Resize and minimum/maximum size interaction with the 8 × 8 content floor | M8.2 (deferred; M8.1 drags whole windows only) |
+| 4 | Resize and minimum/maximum size interaction with the 8 × 8 content floor | Not scheduled; M8.1/M8.2 drag and close whole windows only (deferred, not M8.2) |
 | 5 | Title truncation for proportional text in M2.6 (the 8 × 8 font truncates by bytes, a proportional font by glyphs) | M2.6 |
 | 6 | ~~Whether `window_present` should be the only present path for a window client, or `syslib.present` stays legal~~ | Resolved in M2.3.3: `window_present` is the sanctioned window-client path and is clipped to visible content; `syslib.present` stays a legal generic full-screen primitive (W17) |
 
@@ -755,3 +840,4 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | 2026-11-17 | M2.6.2 implemented (W21, ADR 0031): a repair coalesces erase and chrome damage before painting (empty/contained dropped, touching/overlapping merged; different erase coverage limits never merged) and presents the coalesced rectangles instead of one bounding box of all damage. `window::damage_self_check` proves the merge rules, the erase coverage rule and the coverage invariant on scratch state and measures a diagonal move: 4 rectangles / 510 874 px as a bounding box become 2 rectangles / 55 348 px (89 % less present area); boot prints `window: damage ok (present 4 -> 2 rects, 510874 -> 55348 px)`. Expose marking still uses the exact original damage. Open question 2 is resolved. |
 | 2026-11-18 | M8.1 implemented (W22–W24, ADR 0042): service-owned pointer drag from the title bar (raise/focus, grab offset, clamp, release, ignored second press, cancellation on close) and close-box termination of the owner task via `task::request_kill` and `Task::reclaim`; owner-0 close boxes are inert. The hook runs from both `gfx` pointer paths after the graphics lock is dropped, keeps `WINDOW → SCREEN` and never holds the table lock across `request_kill`/`wake_input`; a handled press is suppressed before event publication. `window::drag_self_check` prints `window: drag ok`, and `samples/apps/base/windows_drag` (+ `windows_drag_victim`) proves both interactions headlessly. Resize remains deferred (open question 4). |
 | 2026-11-18 | M8.1 follow-up: W24 strengthened against an SMP poll race. The two pointer paths serialise the whole transaction with a dedicated `POINTER_ORDER` lock (`POINTER_ORDER → SCREEN`, `POINTER_ORDER → WINDOW → SCREEN`), run the service hook after dropping the graphics lock, and publish the events afterwards with `push_pointer(..., suppress_down)` omitting a consumed press; `event::consume_pointer_down` is deleted, so a handled `PointerDown` is never enqueued and a woken client cannot observe it. A second press during a drag is now `Consumed` (swallowed) instead of delivered. |
+| 2026-11-18 | M8.2 implemented (W23 rewritten, W25 added; ADR 0043 amends ADR 0042's close clause): the close box posts an owner-only `EventKind.Close` (ordinal 6, `window = id`) instead of `task::request_kill`; the window stays until its owner closes it. One per-window `close_pending` flag with `take_close`/`has_close` (topmost-first, owner-only), served before a pending `Expose` and before the queue; `input_ready`, the scheduler's post-block `Input` re-check and `next_any` source 1 include it, and the pointer hook wakes `WaitFor::Input` after the unlock. `window::close_self_check` prints `window: close ok`; `windows_drag` proves a same-task dialog and a victim that closes itself and exits `Ok`; `desktop_shell check` closes About from its real close box and stays alive; `scripts/about_close_qmp.py` reproduces the reported System → About → close-box → Terminal scenario on the boot desktop. `desktop_shell` handles `Close` in both modes, the user-facing apps close their own windows, and proof/demo windows may ignore it. No opcode, builtin, `Host`, `syslib` or `stdlib` change (ABI v1 stays 75). |

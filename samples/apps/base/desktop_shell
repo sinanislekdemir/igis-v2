@@ -45,7 +45,7 @@ unit desktop_shell;
 // `core.write`. It never attaches the terminal itself: the launched `shell`
 // does (spec 0014, the one-terminal rule).
 
-uses core, stdlib, syslib, lib.out;
+uses core, stdlib, syslib, lib.out, lib.inject;
 
 const
   MenuHeight = 22;
@@ -86,6 +86,7 @@ var
   // successful spawn; later Terminal clicks raise the live window instead.
   shell_launched: bool;
   shell_task: int;
+  running: bool;
 
   // Menu bookkeeping.
   handled: bool;
@@ -138,6 +139,10 @@ var
   clk_h: string[2];
   clk_m: string[2];
   used: int;
+  flushed: uint;
+  saw_click: bool;
+  more_events: bool;
+  count_events: int;
   now: uint;
   minutes: uint;
   hours: uint;
@@ -595,14 +600,22 @@ end;
 
 // A modal event while the About panel is open: an owner expose repaints it, a
 // key applies the dialog mapping (Enter is the default, Escape cancels; both
-// close), and a pointer-down routed to the panel closes it (the OK button, the
-// title bar or any click inside).
+// close), a close request for the panel closes only the panel, and a
+// pointer-down routed to it closes it (the OK button, the title bar or any
+// click inside).
 procedure handle_about_event();
 begin
   if ev.kind = Expose then
   begin
     if ev.window = about_id then
       draw_about();
+  end
+  else if ev.kind = Close then
+  begin
+    // The close box of the About window asks the owner (this task) to close
+    // it. A dialog closes itself; the desktop keeps running (spec 0011, W23).
+    if ev.window = about_id then
+      close_about();
   end
   else if ev.kind = KeyDown then
     handle_about_key(ev.code)
@@ -945,6 +958,53 @@ begin
     verify("ctrl+a opens about", about_open and about_runs = 3);
     handle_about_key(uint(0x1000000));
     verify("shortcut about closed", not about_open);
+    // The close box is an owner close request, never a kill (M8.2, spec 0011
+    // W23/W25). A real pointer press in the About close box must deliver
+    // exactly one Close event for the panel (no client PointerDown), and the
+    // dialog handler closes only the panel while the desktop stays alive.
+    open_about();
+    verify("about reopened for close box", about_open and about_runs = 4);
+    status := syslib.window_frame_rect(about_id, about_rect);
+    verify("about frame for close box", status = Ok);
+    // Close box: frame + (4..15, 3..14); its centre is frame + (9, 8).
+    status := inject.pointer_to(about_rect.x + 9, about_rect.y + 8);
+    flushed := syslib.event_flush();
+    status := inject.pointer_down();
+    status := inject.pointer_up();
+    ev.kind := Expose;
+    ev.window := 0;
+    status := syslib.poll_event(ev);
+    verify(
+      "close box requests close",
+      status = Ok and ev.kind = Close and ev.window = about_id);
+    verify("close box is not a click", ev.kind <> PointerDown);
+    handle_about_event();
+    verify(
+      "about close box closes only the panel",
+      not about_open and about_id = 0);
+    // Drain what the press left behind: the consumed PointerDown must not have
+    // been queued, so no client click for the About window may appear.
+    saw_click := false;
+    more_events := true;
+    count_events := 0;
+    while more_events and count_events < 16 do
+    begin
+      status := syslib.poll_event(ev);
+      if status = Ok then
+      begin
+        if ev.kind = PointerDown and ev.window = about_id then
+          saw_click := true;
+        count_events := count_events + 1;
+      end
+      else
+        more_events := false;
+    end;
+    verify("close box press never reaches the client", not saw_click);
+    // The desktop is still alive: it can open About again and close it.
+    open_about();
+    verify("desktop survives the close box", about_open and about_runs = 5);
+    handle_about_key(uint(0x1000000));
+    verify("about closes after survival", not about_open);
     // The checks never fired a system action.
     verify("no system action fired", restart_runs = 0 and halt_runs = 0);
     // The desktop window still redraws after the panels.
@@ -985,15 +1045,27 @@ begin
   // is still enough to show the frame.
   status := core.realtime_on();
   out.say("desktop_shell: ready\n");
-  while true do
+  running := true;
+  while running do
   begin
     core.heartbeat();
     status := syslib.next_event(ev);
     if status = Ok then
     begin
       core.heartbeat();
-      // The About panel is modal: every event goes to it until it closes.
-      if about_open then
+      // A close request is owner-only and always addressed: the About panel
+      // closes itself, while closing the desktop's own window exits (the
+      // close box never kills the task; spec 0011, W23).
+      if ev.kind = Close then
+      begin
+        if about_open and ev.window = about_id then
+          close_about()
+        else if ev.window = own then
+          running := false;
+      end
+      // The About panel is modal: every other event goes to it until it
+      // closes.
+      else if about_open then
         handle_about_event()
       else if ev.kind = Expose then
       begin
@@ -1024,6 +1096,10 @@ begin
       draw_menu_bar();
     end;
   end;
+  // The Desktop window was asked to close: close our own window and exit, not
+  // the task-by-kill path.
+  if own > 0 then
+    status := syslib.window_close(own);
 end;
 
 procedure main(args: const string[1024]);
