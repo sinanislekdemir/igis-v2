@@ -7366,6 +7366,8 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             // helper for the same stack-frame reason as `fs_write_call`.
             "syslib.popup_grab" => self.popup_grab_call(args, line, column),
             "syslib.popup_release" => self.popup_release_call(args, line, column),
+            "syslib.region_claim" => self.region_claim_call(args, line, column),
+            "syslib.region_release" => self.region_release_call(args, line, column),
             // Ring operations (spec 0003, "Rings") are compiler-recognised
             // built-in procedures, not host builtins: they lower to the
             // ordinary reference/copy/branch instructions over the ring's
@@ -8225,6 +8227,65 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             ));
         }
         self.one(opcodes::BUILTIN, builtin::POPUP_RELEASE)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// `syslib.region_claim(x, y, w, h) -> Status` (spec 0011, W27; ADR 0045).
+    ///
+    /// The persistent counterpart of `popup_grab`: a UI focus mechanism, not an
+    /// authority boundary. A separate function for the same reason as
+    /// [`Self::popup_grab_call`] (the dispatcher's frame is the deepest one in
+    /// a debug build).
+    fn region_claim_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 4 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!(
+                    "`syslib.region_claim` expects 4 arguments, got {}",
+                    args.len()
+                ),
+            ));
+        }
+        for (index, name) in ["x", "y", "w", "h"].iter().enumerate() {
+            let value = self.expr_scalar(args[index])?;
+            if value.kind != Kind::Int {
+                return Err(self.err_at(
+                    args[index],
+                    format_args!("`syslib.region_claim` expects an `int` {name}, found `{value}`"),
+                ));
+            }
+        }
+        self.one(opcodes::BUILTIN, builtin::REGION_CLAIM)?;
+        self.pop(4)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// `syslib.region_release() -> Status` (spec 0011, W27; ADR 0045).
+    fn region_release_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if !args.is_empty() {
+            return Err(self.err(
+                line,
+                column,
+                format_args!(
+                    "`syslib.region_release` expects 0 arguments, got {}",
+                    args.len()
+                ),
+            ));
+        }
+        self.one(opcodes::BUILTIN, builtin::REGION_RELEASE)?;
         self.push();
         Ok(Some(Type::enumeration(STATUS_ENUM)))
     }

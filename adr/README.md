@@ -69,3 +69,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0042 | [Window drag and close are service-owned pointer interactions](0042-service-owned-window-drag-and-close.md) | Accepted (close semantics amended by 0043) | 2026-11-18 |
 | 0043 | [A close-box press is a close request, never a task kill](0043-close-is-a-request.md) | Accepted | 2026-11-18 |
 | 0044 | [A modal popup input grab makes an app-drawn menu reachable over windows](0044-modal-popup-input-grab.md) | Accepted | 2026-11-18 |
+| 0045 | [A persistent pointer-region claim protects the menu bar's opening click](0045-persistent-pointer-region-claim.md) | Accepted | 2026-11-18 |

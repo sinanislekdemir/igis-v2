@@ -176,6 +176,21 @@ struct Grab {
     rect: Rect,
 }
 
+/// The one machine-wide persistent pointer-region claim (spec 0011, W27;
+/// ADR 0045).
+///
+/// The menu bar is app-drawn like a pull-down but persistent, and the press
+/// that opens a menu arrives before any modal grab exists. A region claim
+/// outlives menus: a queued `PointerDown` inside the rectangle belongs to the
+/// owner even while every other task is blocked in `next_event`, and the
+/// window service refuses to start a drag or post a close request for a new
+/// press inside it.
+#[derive(Clone, Copy)]
+struct Region {
+    owner: u64,
+    rect: Rect,
+}
+
 /// What a left-button press did to the service (spec 0011, W22/W23). Only
 /// `None` leaves the click to the client; the other outcomes consume the
 /// queued `PointerDown`.
@@ -650,6 +665,8 @@ struct Table {
     drag: Option<Drag>,
     /// The modal popup grab, if any (W26).
     grab: Option<Grab>,
+    /// The persistent pointer-region claim, if any (W27).
+    region: Option<Region>,
     /// Pending desktop restore and chrome damage for the next repair pass.
     erases: EraseList,
     chrome: ChromeList,
@@ -671,6 +688,7 @@ impl Table {
             next_id: 1,
             drag: None,
             grab: None,
+            region: None,
             erases: EraseList::new(),
             chrome: ChromeList::new(),
             generation: 0,
@@ -1021,6 +1039,59 @@ impl Table {
         self.grab.is_some()
     }
 
+    /// Takes or updates the one machine-wide persistent pointer-region claim
+    /// for `owner` (W27). `Full` when another task holds it, `Invalid` for a
+    /// non-positive extent. A repeat by the owner updates the rectangle. The
+    /// modal grab (W26) is independent: taking or updating a claim neither
+    /// takes nor releases it, and an existing pointer drag is left alone so a
+    /// drag that crosses the bar still follows the pointer.
+    fn claim_region(&mut self, owner: u64, x: i64, y: i64, w: i64, h: i64) -> Status {
+        if w <= 0 || h <= 0 {
+            return Status::Invalid;
+        }
+        if self.region.is_some_and(|region| region.owner != owner) {
+            return Status::Full;
+        }
+        self.region = Some(Region {
+            owner,
+            rect: Rect { x, y, w, h },
+        });
+        Status::Ok
+    }
+
+    /// Releases the caller's region claim (W27): `Ok` for the owner,
+    /// `NotFound` when none is held, `Invalid` for another task's claim.
+    fn release_region(&mut self, owner: u64) -> Status {
+        match self.region {
+            None => Status::NotFound,
+            Some(region) if region.owner != owner => Status::Invalid,
+            Some(_) => {
+                self.region = None;
+                Status::Ok
+            }
+        }
+    }
+
+    /// The owner of the region claim covering `(x, y)`, if any (W27). Used by
+    /// poll-time routing (only that task may dequeue a press there) and by the
+    /// pointer service (a new press there starts no drag and posts no close
+    /// request).
+    fn region_owner_at(&self, x: i64, y: i64) -> Option<u64> {
+        self.region.and_then(|region| {
+            let rect = region.rect;
+            (x >= rect.x
+                && y >= rect.y
+                && x < rect.x.saturating_add(rect.w)
+                && y < rect.y.saturating_add(rect.h))
+            .then_some(region.owner)
+        })
+    }
+
+    /// Whether `(x, y)` lies inside the region claim, regardless of owner.
+    fn region_contains(&self, x: i64, y: i64) -> bool {
+        self.region_owner_at(x, y).is_some()
+    }
+
     fn frame_rect(&self, id: u64) -> Result<Rect, Status> {
         self.position(id)
             .map(|pos| self.windows[self.order[pos]].frame())
@@ -1056,12 +1127,17 @@ impl Table {
     /// each removal (W8). The damage accumulates and one repair pass covers all
     /// removed frames, so a terminated task's windows disappear together.
     ///
-    /// A terminating task's modal popup grab is released here too (W26); the
-    /// caller wakes input waiters because queued events flow again.
+    /// A terminating task's modal popup grab (W26) and persistent
+    /// pointer-region claim (W27) are released here too; the caller wakes input
+    /// waiters because queued events flow again.
     fn close_task(&mut self, owner: u64) -> bool {
         let released_grab = self.grab.is_some_and(|grab| grab.owner == owner);
         if released_grab {
             self.grab = None;
+        }
+        let released_region = self.region.is_some_and(|region| region.owner == owner);
+        if released_region {
+            self.region = None;
         }
         let mut removed = false;
         let mut pos = 0;
@@ -1084,7 +1160,7 @@ impl Table {
                 self.chrome.add(title_rect(&self.windows[self.order[pos]]));
             }
         }
-        released_grab
+        released_grab || released_region
     }
 
     /// The parts of `rect` not covered by live windows at z-order indices
@@ -1475,7 +1551,12 @@ pub fn pointer_event(
         return false;
     }
 
-    if pressed {
+    // A persistent region claim owns a *new* press inside its rectangle
+    // (W27): the menu bar wins over a window moved under it, so no drag starts
+    // and no close request posts. The press is not consumed; the claim owner
+    // receives it unchanged. Moves and releases are deliberately not filtered:
+    // a drag that started before the pointer crossed the bar still follows it.
+    if pressed && !table.region_contains(x, y) {
         match table.press(x, y) {
             PressAction::Consumed => {
                 consumed = true;
@@ -1588,14 +1669,14 @@ pub fn focus() -> u64 {
 /// Closes every window owned by a terminating task and repairs the screen once.
 /// Called from `Task::reclaim`, so it covers normal exit, kill, fault, a failed
 /// spawn and a stale-slot eviction (W8). A terminating task's modal popup grab
-/// is released here too (W26), and input waiters are woken so queued events flow
-/// again.
+/// (W26) and pointer-region claim (W27) are released here too, and input
+/// waiters are woken so queued events flow again.
 pub fn close_task(owner: u64) {
     let mut table = TABLE.lock();
-    let released_grab = table.close_task(owner);
+    let released_input = table.close_task(owner);
     let wake = table.repair();
     drop(table);
-    if wake || released_grab {
+    if wake || released_input {
         crate::task::wake_input();
     }
 }
@@ -1633,6 +1714,36 @@ pub fn grab_allows(owner: u64) -> bool {
 /// skips hit-testing and raising while a grab is active.
 pub fn grab_active() -> bool {
     TABLE.lock().grab_active()
+}
+
+/// Takes or updates the persistent pointer-region claim for `owner` (spec
+/// 0011, W27; ADR 0045). `Full` for another owner, `Invalid` for a
+/// non-positive extent or disabled graphics; a repeat by the owner updates the
+/// rectangle and is `Ok`. The modal grab is independent.
+pub fn region_claim(owner: u64, x: i64, y: i64, w: i64, h: i64) -> Status {
+    if gfx::size().0 == 0 {
+        return Status::Invalid;
+    }
+    TABLE.lock().claim_region(owner, x, y, w, h)
+}
+
+/// Releases the caller's region claim (W27). `Ok` for the owner (`NotFound`
+/// when none is held, `Invalid` for another task); a release wakes every input
+/// waiter after the table unlock so a press that was gated for the owner is
+/// deliverable again.
+pub fn region_release(owner: u64) -> Status {
+    let status = TABLE.lock().release_region(owner);
+    if status == Status::Ok {
+        crate::task::wake_input();
+    }
+    status
+}
+
+/// The owner of the region claim covering `(x, y)`, if any (W27). The
+/// poll-time router consults this for a queued `PointerDown`; the pointer
+/// service uses the same geometry to suppress a new press.
+pub fn region_owner_at(x: i64, y: i64) -> Option<u64> {
+    TABLE.lock().region_owner_at(x, y)
 }
 
 /// Takes the topmost pending whole-content `Expose` owned by `owner`, if any
@@ -2841,6 +2952,113 @@ pub fn grab_self_check() -> Result<(), u32> {
     }
     if table.close_task(7) || !table.grab_allows(8) {
         return Err(22);
+    }
+
+    Ok(())
+}
+
+/// Boot self-check: the persistent pointer-region claim on a scratch table
+/// (spec 0011, W27; ADR 0045). Pure: no allocation, no global table, no screen.
+pub fn region_self_check() -> Result<(), u32> {
+    const SCREEN_W: i64 = 1024;
+    const SCREEN_H: i64 = 768;
+    let mut table = Table::new();
+    let id = table
+        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"window")
+        .map_err(|_| 1u32)?;
+    if table.frame_rect(id).is_err() {
+        return Err(2);
+    }
+
+    // 0. No claim: nothing is covered and a release finds nothing.
+    if table.region_owner_at(0, 0).is_some()
+        || table.region_contains(10, 10)
+        || table.release_region(7) != Status::NotFound
+    {
+        return Err(3);
+    }
+
+    // 1. Task 7 claims the bar strip; the rectangle hit-test is half-open.
+    if table.claim_region(7, 0, 0, SCREEN_W, 22) != Status::Ok {
+        return Err(4);
+    }
+    if table.region_owner_at(0, 0) != Some(7)
+        || table.region_owner_at(1023, 21) != Some(7)
+        || table.region_owner_at(1024, 0).is_some()
+        || table.region_owner_at(0, 22).is_some()
+        || !table.region_contains(170, 10)
+    {
+        return Err(5);
+    }
+
+    // 2. Another task is `Full` and changes nothing.
+    if table.claim_region(8, 50, 50, 100, 100) != Status::Full {
+        return Err(6);
+    }
+    if table.region_owner_at(50, 50).is_some() || table.region_owner_at(170, 10) != Some(7) {
+        return Err(7);
+    }
+
+    // 3. The owner's repeat updates the rectangle and stays `Ok`.
+    if table.claim_region(7, 0, 0, 40, 22) != Status::Ok {
+        return Err(8);
+    }
+    if table.region_owner_at(39, 21) != Some(7) || table.region_owner_at(40, 0).is_some() {
+        return Err(9);
+    }
+
+    // 4. A non-positive extent is `Invalid` and leaves the claim unchanged.
+    if table.claim_region(7, 0, 0, 0, 22) != Status::Invalid
+        || table.claim_region(7, 0, 0, 40, -1) != Status::Invalid
+        || table.region_owner_at(39, 21) != Some(7)
+    {
+        return Err(10);
+    }
+
+    // 5. Coexistence with the modal grab: taking one changes neither, and the
+    //    grab remains the routing precedence rule (W26/W27).
+    if table.claim_region(7, 0, 0, SCREEN_W, 22) != Status::Ok
+        || table.grab(7, 50, 22, 176, 98) != Status::Ok
+        || table.region_owner_at(170, 10) != Some(7)
+        || !table.grab_allows(7)
+        || table.grab_allows(8)
+        || table.release_region(7) != Status::Ok
+        || !table.grab_active()
+        || table.release_grab(7) != Status::Ok
+    {
+        return Err(11);
+    }
+
+    // 6. Only the owner releases; another task is `Invalid` and the claim stays.
+    if table.claim_region(7, 0, 0, SCREEN_W, 22) != Status::Ok {
+        return Err(12);
+    }
+    if table.release_region(8) != Status::Invalid || table.region_owner_at(170, 10) != Some(7) {
+        return Err(13);
+    }
+    if table.release_region(7) != Status::Ok || table.region_owner_at(170, 10).is_some() {
+        return Err(14);
+    }
+    if table.release_region(7) != Status::NotFound {
+        return Err(15);
+    }
+
+    // 7. Task termination releases its claim and reports it, so its caller can
+    //    wake the waiters. Another task's claim is untouched, and a grab is
+    //    still released by the same path.
+    if table.claim_region(7, 0, 0, SCREEN_W, 22) != Status::Ok
+        || table.grab(7, 0, 0, 10, 10) != Status::Ok
+    {
+        return Err(16);
+    }
+    if !table.close_task(7) || table.region_owner_at(170, 10).is_some() || table.grab_active() {
+        return Err(17);
+    }
+    if table.claim_region(8, 0, 0, SCREEN_W, 22) != Status::Ok {
+        return Err(18);
+    }
+    if table.close_task(7) || table.region_owner_at(170, 10) != Some(8) {
+        return Err(19);
     }
 
     Ok(())

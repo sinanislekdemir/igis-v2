@@ -841,6 +841,33 @@ pub mod builtin {
     /// another task's grab. No operands.
     pub const POPUP_RELEASE: u32 = 59;
 
+    // ---- persistent pointer-region claim (spec 0011, W27; ADR 0045) -----
+    //
+    // A menu bar is app-drawn and has no window either, but it is persistent:
+    // the press that opens a pull-down arrives *before* any grab is taken, so
+    // the modal grab cannot protect it. One task claims a rectangle that
+    // outlives individual menus; a queued press inside it belongs to the
+    // claimant even while every other task is blocked in `next_event`.
+
+    /// `syslib.region_claim(x, y, w, h) -> Status`: take the one machine-wide
+    /// persistent pointer-region claim for the calling task (spec 0011, W27).
+    /// While held, a queued `PointerDown` with `window = 0` inside the
+    /// rectangle is delivered only to the owner; a non-owner's poll returns
+    /// `WouldBlock` without consuming it. The modal popup grab (W26) takes
+    /// precedence while it is active. The rectangle also suppresses a new
+    /// service press inside it, so the claimant wins over a window under it.
+    /// `Ok` when the claim is free or already the caller's (the rectangle is
+    /// then updated); `Full` when another task holds it; `Invalid` for a
+    /// non-positive `w`/`h` or disabled graphics. Operands: `[x][y][w][h]`.
+    pub const REGION_CLAIM: u32 = 60;
+
+    /// `syslib.region_release() -> Status`: release the caller's persistent
+    /// pointer-region claim, waking every input waiter so a press that was
+    /// gated for another owner is deliverable (spec 0011, W27). `Ok` for the
+    /// owner; `NotFound` when no claim is held; `Invalid` for another task's
+    /// claim. No operands.
+    pub const REGION_RELEASE: u32 = 61;
+
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
         match id {
@@ -903,6 +930,8 @@ pub mod builtin {
             NEXT_ANY => Some((3, 1)),
             POPUP_GRAB => Some((4, 1)),
             POPUP_RELEASE => Some((0, 1)),
+            REGION_CLAIM => Some((4, 1)),
+            REGION_RELEASE => Some((0, 1)),
             _ => None,
         }
     }

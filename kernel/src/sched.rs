@@ -349,6 +349,30 @@ impl Host for KernelHost {
         if !crate::window::grab_allows(self.current) {
             return Status::WouldBlock;
         }
+        // The persistent pointer-region claim (spec 0011, W27): a queued
+        // `PointerDown` inside a claimed rectangle belongs to the claim owner.
+        // Inspect the head without consuming it, so a non-owner's `WouldBlock`
+        // leaves the press for the owner. The owner dequeues it unchanged — no
+        // hit-test and no raise — so its coordinate handler sees `window = 0`.
+        // Moves, releases, keys and presses outside the rectangle fall through
+        // to the ordinary routing path. The modal grab takes precedence: while
+        // it is active its owner receives every queued event unchanged, so the
+        // region gate is not applied.
+        if !crate::window::grab_active() {
+            let mut head = [0u8; abi::layout::event::SIZE as usize];
+            if crate::event::peek(&mut head) == Status::Ok {
+                if let Some(queued) = abi::layout::event::read(&head) {
+                    if queued.kind == abi::EventKind::PointerDown && queued.window == 0 {
+                        if let Some(owner) = crate::window::region_owner_at(queued.x, queued.y) {
+                            if owner != self.current {
+                                return Status::WouldBlock;
+                            }
+                            return crate::event::poll(event);
+                        }
+                    }
+                }
+            }
+        }
         let status = crate::event::poll(event);
         if status != Status::Ok {
             return status;
@@ -393,8 +417,9 @@ impl Host for KernelHost {
 
     fn input_ready(&mut self) -> bool {
         // The modal popup grab (W26) hides the shared queue from every
-        // non-owner; the caller's own expose/close still count.
-        (crate::event::has_event() && crate::window::grab_allows(self.current))
+        // non-owner, and a press in another task's claimed region (W27) is not
+        // a non-owner's to consume; the caller's own expose/close still count.
+        crate::task::input_queue_ready(self.current)
             || crate::window::has_expose(self.current)
             || crate::window::has_close(self.current)
     }
@@ -464,6 +489,17 @@ impl Host for KernelHost {
 
     fn popup_release(&mut self) -> Status {
         crate::window::popup_release(self.current)
+    }
+
+    /// The one machine-wide persistent pointer-region claim (spec 0011, W27;
+    /// ADR 0045). The host supplies the caller as the owner; a release wakes
+    /// input waiters after the window unlock.
+    fn region_claim(&mut self, x: i64, y: i64, w: i64, h: i64) -> Status {
+        crate::window::region_claim(self.current, x, y, w, h)
+    }
+
+    fn region_release(&mut self) -> Status {
+        crate::window::region_release(self.current)
     }
 
     // Terminal attach (spec 0014): the host knows the executing task id, so the
@@ -783,9 +819,11 @@ fn loop_body(core: usize) -> ! {
                                     // An event may have been queued, or an
                                     // expose/close marked for this task,
                                     // between the empty read and the block
-                                    // above.
-                                    if (crate::event::has_event()
-                                        && crate::window::grab_allows(id))
+                                    // above. The queue probe also respects the
+                                    // modal grab (W26) and the claimed region
+                                    // (W27), so a non-owner does not spin on a
+                                    // press that is not its to consume.
+                                    if crate::task::input_queue_ready(id)
                                         || crate::window::has_expose(id)
                                         || crate::window::has_close(id)
                                     {

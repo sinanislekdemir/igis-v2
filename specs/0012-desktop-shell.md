@@ -211,7 +211,16 @@ resize. Those are M2.4/M2.5.
   `clock_window` deterministic check exits on its own and is reaped with `core.wait`),
   the outside-click dismissal, the key switching and the pixels; `scripts/apps_menu_qmp.py`
   proves a real `Clock` click at row 4 (over the kernel Terminal) on the boot desktop.
-  Submenus, filesystem app discovery and a task switcher are out of scope.
+  The shell also claims the persistent pointer-region claim
+  `(0, 0, screen_w, MenuHeight)` at startup, in normal and check mode, and releases it on
+  exit (spec 0011, W27; ADR 0045). The modal grab only starts after a menu opens; without
+  the bar claim a live application blocked in `next_event` can consume the `window = 0`
+  press that opens the next menu (the M8.4 regression). A failed claim (`Full` when
+  another desktop instance owns the bar, or disabled graphics) is reported and the shell
+  keeps running; check mode accepts `Ok` or `Full` and releases only its own claim.
+  `scripts/apps_menu_qmp.py` launches `File Browser`, opens/dismisses Apps while it is
+  live, then clicks `Terminal` and requires `terminal: ok`; that sequence fails on M8.3 on
+  `-smp 4`. Submenus, filesystem app discovery and a task switcher are out of scope.
 
 ## Design
 
@@ -361,6 +370,8 @@ while that id is its own; otherwise it presents what the service last left.
 | Shell normal mode cannot promote to realtime | It keeps pumping under the normal budget (the stand-in for a screenshot window) |
 | Full-screen `clear` during the shell | Out of policy: the shell does not clear; apps that do erase the bar's pixels (D14/D8) |
 | A pull-down row lies over another window | The open menu holds the popup grab, so the click reaches the shell rather than the window underneath; before M8.3 the window got it (and a title-bar row was a drag) |
+| A client is live and blocked in `next_event` when a bar item is clicked | The persistent bar claim (spec 0011, W27) delivers the `window = 0` press to the desktop; before M8.4 the client could consume it and the shell never saw the click |
+| Another desktop instance already owns the bar claim | `region_claim` is `Full`; the shell prints a line and keeps running, and check mode releases only a claim it owns |
 | Apps is opened | Nothing is launched; the menu, highlight and grab change, and the first row is selected |
 | An Apps row is activated | One non-blocking `core.spawn`; the menu closes and releases the grab; a failed spawn logs the diagnostic |
 | A click outside an open pull-down | The shell is the only recipient (grab) and dismisses the menu; the click is consumed, never forwarded to the covered window |
@@ -402,3 +413,4 @@ while that id is its own; otherwise it presents what the service last left.
 | 2026-11-17 | M2.6.1 (spec 0015, ADR 0030): the desktop shell's menu-bar labels and clock use the proportional font, and the service title bar does too; the item hit ranges are derived from the measured label widths. D3 is strengthened: `console::paint_cell`/`repaint` now call `window::paint_visible_parts`, which holds the window table lock across the paint, replacing the bounded generation retry (a cell painted with stale parts could still overwrite a newly opened window's chrome once; `desktop_shell check` reproduced it on `-smp 4`). The generation still follows a moved terminal on the next pump. |
 | 2026-11-17 | M2.6.2 (spec 0016, ADR 0031): D3's per-cell present is replaced by one present per byte run. `Terminal` keeps a bounded dirty rectangle; `paint_cell` draws and marks it, `write_bytes`/`_print` flush after the run, the input echo defers to one `flush_pending` at the end of `poll_input` (after `pump`), and `repaint` clears the box and presents each visible part once. The flush re-reads the visible parts under `WINDOW` and copies only the dirty rectangle from the current shadow. The console byte stream, line discipline, lock order (`CONSOLE → WINDOW → SCREEN`) and every grid/pixel proof are unchanged. |
 | 2026-11-18 | D20 added and D10/D11 rewritten (M8.3): the `Apps` label becomes an application-selection pull-down (Calculator, Minesweeper, Text Editor, File Browser, Clock, Widgets) whose rows launch with non-blocking `core.spawn` and whose open/close takes/releases the modal popup input grab (spec 0011, W26; ADR 0044). Both pull-downs now take the grab, so a row over another window — and the System menu's rows below `y = 26` — reach the shell instead of the covered window or its title-bar drag. F9/F10 toggle Apps/System, Up/Down/Enter/Escape drive the open menu and Left/Right switch. D13's check mode covers both menus, the grab, one real launch and the outside click; `scripts/apps_menu_qmp.py` proves the boot-desktop Clock click over the Terminal. No opcode or `stdlib` helper is added (ABI v1 stays 75). |
+| 2026-11-18 | D20 extended (M8.4, spec 0011 W27, ADR 0045): the desktop claims the persistent pointer-region `(0, 0, screen_w, MenuHeight)` at startup in normal and check mode and releases it on exit. The grab only starts after a menu opens, so the claim protects the bar press that opens it while applications are blocked in `next_event`; check mode accepts `Ok` or `Full` (the boot desktop may already own the bar) and releases only its own claim. `scripts/apps_menu_qmp.py` now launches `File Browser`, opens and dismisses a second Apps menu while it is live, then clicks `Terminal` and requires `terminal: ok`; the sequence fails on M8.3 on `-smp 4` and passes on M8.4. No opcode or `stdlib` helper is added (ABI v1 stays 75). |

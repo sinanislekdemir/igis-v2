@@ -101,6 +101,10 @@ var
   app_runs: int;
   window_runs: int;
   terminal_runs: int;
+  // The persistent menu-bar pointer-region claim (M8.4, spec 0011 W27). The
+  // modal grab only starts once a menu opens; the bar click that opens it must
+  // already belong to this task.
+  bar_status: Status;
   // Proportional menu-bar layout, derived from the measured label widths
   // (spec 0015) so the hit ranges and the drawn labels cannot drift.
   menu_file_x: int;
@@ -187,6 +191,21 @@ end;
 function tw(text: const string[0]): int;
 begin
   return int(syslib.text_width_prop(text));
+end;
+
+// The menu bar is app-drawn and has no window either, but unlike a pull-down it
+// is permanent: the press that opens a menu arrives before any modal grab
+// exists, and another client blocked in `next_event` can otherwise take it
+// from the one machine-wide queue. Claim the bar strip for as long as the
+// shell runs (spec 0011, W27; ADR 0045): a queued pointer-down inside it is
+// routed here even while a launched app is waiting for input. The modal grab
+// still covers an open pull-down and takes precedence. A failed claim (another
+// owner, or graphics disabled) is reported and the shell keeps running.
+procedure claim_menu_bar();
+begin
+  bar_status := syslib.region_claim(0, 0, screen_w, MenuHeight);
+  if bar_status <> Ok then
+    out.say("desktop_shell: menu bar claim failed\n");
 end;
 
 // HH:MM from the monotonic clock, right-aligned in the menu bar. The width is
@@ -1037,6 +1056,10 @@ begin
   // `check` is run from a shell that already holds the one terminal, so the
   // Terminal item must raise that window, not spawn a second shell.
   shell_launched := true;
+  // The claim is `Ok` on an image without the boot desktop and `Full` when the
+  // running boot desktop already holds the bar, which is the expected result
+  // when `run desktop_shell check` is issued from the desktop's terminal.
+  verify("menu bar claim", bar_status = Ok or bar_status = Full);
 
   draw_menu_bar();
   status := syslib.window_open(600, 72, 360, 164, "Desktop", own);
@@ -1349,6 +1372,13 @@ begin
     draw_shell_window();
   end;
 
+  // Release the bar claim before the verdict line: a caller can then claim it
+  // (or a second `check` can) without inheriting this instance's rectangle.
+  if bar_status = Ok then
+    verify("menu bar claim released", syslib.region_release() = Ok)
+  else
+    verify("menu bar claim owned elsewhere", bar_status = Full);
+
   if failed then
   begin
     out.say("desktop_shell: FAIL at step ");
@@ -1458,7 +1488,10 @@ begin
     else if screen_w < 400 or screen_h < 300 then
       out.say("desktop_shell: screen too small\n")
     else
+    begin
+      claim_menu_bar();
       check_mode();
+    end;
   end
   else if screen_w = 0 or screen_h = 0 then
   begin
@@ -1471,5 +1504,12 @@ begin
     serial_shell();
   end
   else
+  begin
+    claim_menu_bar();
     normal_mode();
+    // The Desktop window was closed and the shell is leaving; a terminated
+    // task releases the claim through `Task::reclaim` anyway (spec 0011, W27).
+    if bar_status = Ok then
+      status := syslib.region_release();
+  end;
 end;

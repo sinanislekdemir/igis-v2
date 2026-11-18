@@ -95,6 +95,9 @@ struct WindowHost {
     grab: Option<(i64, i64, i64, i64)>,
     last_grab: Option<(i64, i64, i64, i64)>,
     released: u32,
+    region: Option<(i64, i64, i64, i64)>,
+    last_region: Option<(i64, i64, i64, i64)>,
+    region_released: u32,
 }
 
 impl WindowHost {
@@ -118,6 +121,9 @@ impl WindowHost {
             grab: None,
             last_grab: None,
             released: 0,
+            region: None,
+            last_region: None,
+            region_released: 0,
         }
     }
 }
@@ -196,6 +202,21 @@ impl Host for WindowHost {
     fn popup_release(&mut self) -> Status {
         self.released += 1;
         if self.grab.take().is_some() {
+            Status::Ok
+        } else {
+            Status::NotFound
+        }
+    }
+
+    fn region_claim(&mut self, x: i64, y: i64, w: i64, h: i64) -> Status {
+        self.region = Some((x, y, w, h));
+        self.last_region = Some((x, y, w, h));
+        Status::Ok
+    }
+
+    fn region_release(&mut self) -> Status {
+        self.region_released += 1;
+        if self.region.take().is_some() {
             Status::Ok
         } else {
             Status::NotFound
@@ -733,6 +754,99 @@ fn the_default_popup_grab_and_release_are_the_disabled_service() {
         &mut instructions,
         opcodes::BUILTIN,
         opcodes::builtin::POPUP_RELEASE,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 8);
+    op(&mut instructions, opcodes::RET);
+
+    let code = build(&instructions, &[], 64);
+    let mut state = vec![0u8; 64];
+    let mut host = DisabledHost;
+    assert_eq!(
+        run(&code, &mut state, &mut host),
+        Outcome::Exited(interpreter::ExitReason::Ok)
+    );
+    assert_eq!(state_word(&state, 0), Status::Invalid as u64);
+    assert_eq!(state_word(&state, 8), Status::Invalid as u64);
+}
+
+#[test]
+fn region_claim_passes_the_rect_and_release_returns_the_host_status() {
+    let mut instructions = Vec::new();
+    for value in [0, 0, 1024, 22] {
+        op_const(&mut instructions, value);
+    }
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::REGION_CLAIM,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::REGION_RELEASE,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 8);
+    op(&mut instructions, opcodes::RET);
+
+    let code = build(&instructions, &[], 64);
+    let mut state = vec![0u8; 64];
+    let mut host = WindowHost::new();
+    assert_eq!(
+        run(&code, &mut state, &mut host),
+        Outcome::Exited(interpreter::ExitReason::Ok)
+    );
+    assert_eq!(
+        host.last_region,
+        Some((0, 0, 1024, 22)),
+        "the four coordinates arrive in declaration order"
+    );
+    assert_eq!(host.region_released, 1);
+    assert_eq!(state_word(&state, 0), Status::Ok as u64);
+    assert_eq!(state_word(&state, 8), Status::Ok as u64);
+}
+
+#[test]
+fn region_claim_rejects_a_non_positive_extent_before_the_host_call() {
+    let mut instructions = Vec::new();
+    for value in [0, 0, 1024, 0] {
+        op_const(&mut instructions, value);
+    }
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::REGION_CLAIM,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op(&mut instructions, opcodes::RET);
+
+    let code = build(&instructions, &[], 64);
+    let mut state = vec![0u8; 64];
+    let mut host = WindowHost::new();
+    assert_eq!(
+        run(&code, &mut state, &mut host),
+        Outcome::Exited(interpreter::ExitReason::Ok)
+    );
+    assert_eq!(host.region, None, "the host is never called");
+    assert_eq!(state_word(&state, 0), Status::Invalid as u64);
+}
+
+#[test]
+fn the_default_region_claim_and_release_are_the_disabled_service() {
+    let mut instructions = Vec::new();
+    for value in [0, 0, 10, 10] {
+        op_const(&mut instructions, value);
+    }
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::REGION_CLAIM,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::REGION_RELEASE,
     );
     op_imm(&mut instructions, opcodes::STORE_STATE, 8);
     op(&mut instructions, opcodes::RET);

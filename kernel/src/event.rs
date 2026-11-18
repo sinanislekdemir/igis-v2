@@ -169,6 +169,28 @@ pub fn has_event() -> bool {
     QUEUE.lock().len != 0
 }
 
+/// Copies the oldest event into `dst` **without consuming it**. `dst` is shaped
+/// like the `Event` record ([`layout::event::SIZE`] bytes). Used by poll-time
+/// routing to inspect the head under the region claim (spec 0011, W27): a
+/// non-owner returns `WouldBlock` and must leave the press for the owner.
+///
+/// The queue lock is released before the caller takes the window lock, so the
+/// peek does not nest the two locks.
+pub fn peek(dst: &mut [u8]) -> Status {
+    let event = {
+        let queue = QUEUE.lock();
+        if queue.len == 0 {
+            return Status::WouldBlock;
+        }
+        queue.events[queue.head]
+    };
+    let Some(dst) = dst.get_mut(..layout::event::SIZE as usize) else {
+        return Status::Invalid;
+    };
+    dst.copy_from_slice(&event);
+    Status::Ok
+}
+
 /// The number of events dropped because the queue was full since boot.
 pub fn drops() -> u64 {
     QUEUE.lock().drops

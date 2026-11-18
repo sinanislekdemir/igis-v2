@@ -235,7 +235,11 @@ events", "The event queue") record how they were implemented.
   W26; ADR 0044) the queue is delivered **only to that task**, unchanged and still
   `window = 0`, with no hit-test or raise; every other task reads `WouldBlock` and sees no
   input readiness. The grab owner's own `Close`/`Expose` are still served first, and a
-  release wakes every input waiter.
+  release wakes every input waiter. A persistent pointer-region claim (spec 0011, W27;
+  ADR 0045) adds a narrower exception when no grab is active: at the head of the queue, a
+  `PointerDown` with `window = 0` inside the claimed rectangle is delivered only to the
+  claim owner; other tasks read `WouldBlock` without consuming it, and moves, releases,
+  keys and presses outside the rectangle route normally.
 - **I29 (MUST):** `syslib.inject_event(ev: Event) -> Status` appends a caller-built
   record to the queue, and `syslib.event_drops() -> uint` / `syslib.event_flush() -> uint`
   expose the drop counter and discard the queue (returning the count). Injection is
@@ -255,7 +259,12 @@ events", "The event queue") record how they were implemented.
   is the modal popup input grab (spec 0011, W26): while a task holds it, only that task
   dequeues; every other task's poll returns `WouldBlock` and consumes nothing, and its
   input readiness is false (its own `Expose`/`Close` still count). The queued events are
-  not lost or filtered — they wait for the owner or for the release.
+  not lost or filtered — they wait for the owner or for the release. The persistent
+  pointer-region claim (spec 0011, W27) is a second, narrower exception that applies only
+  while no grab is active and only to a head-of-queue `PointerDown` with `window = 0`
+  inside the claimed rectangle: it belongs to the claim owner, and every other task's poll
+  returns `WouldBlock` without consuming it. A queue entry is still delivered once, to
+  exactly one task.
 
 ### Absolute pointer (M2.2.6)
 
@@ -517,6 +526,17 @@ queue, so the insert-between-read-and-block race is closed. `next_event` restore
 operand stack and `pc` exactly like the stream and child waits, so the retry sees an
 unchanged instruction.
 
+`event::peek` copies the head record without removing it. The poll-time router uses it for
+the persistent pointer-region claim (spec 0011, W27): when no modal grab is active and the
+head is a `PointerDown` with `window = 0` inside another task's claimed rectangle, the
+caller returns `WouldBlock` and the record stays at the head for the claimant. The peek
+takes the queue lock alone; the caller releases it before taking the window lock, so the
+two service locks are never nested. `task::input_queue_ready` applies the same head rule
+to `input_ready`, the scheduler's post-block `Input` re-check and `next_any` source `1`:
+a non-owner is not told that an event it can never consume is ready, while the owner sees
+it normally. Readiness is a snapshot, so a wake race may still produce a `WouldBlock`
+followed by a re-block; no queued event is lost.
+
 `syslib.inject_event` validates the record's kind through `abi::layout::event::read` and
 appends it; it is the deterministic test hook and does not change the pointer (use
 `inject_pointer` for that). `samples/apps/events` and the helper `events_poke` prove the
@@ -681,6 +701,8 @@ drains the ring (and, only while IRQ12 is inactive, the controller) and decodes 
 | `event_flush` with an empty queue | Returns 0; the drop counter is unchanged |
 | Two tasks call `next_event` | They compete for one machine-wide FIFO; each event is delivered once |
 | A task holds the popup grab (spec 0011, W26) | Only that task dequeues events (unchanged, `window = 0`); every other task gets `WouldBlock` with the queue untouched and reports no input readiness until the grab is released |
+| A head-of-queue press lies inside another task's region claim (spec 0011, W27) | The non-owner gets `WouldBlock` without consuming it and reports no queue readiness for it; the claim owner dequeues it unchanged, with no hit-test or raise. Moves, releases, keys and presses outside the rectangle route normally |
+| A modal grab is active while a region claim covers the press | The grab takes precedence: its owner receives every queued event unchanged, and the region gate is not applied |
 | A keyboard byte arrives | It produces its console byte and its key event, or only one of them; neither path consumes the other's |
 | A Pause (`0xE1`) sequence | The whole five-byte tail is skipped, so it cannot fake Ctrl/NumLock events |
 | Pressing a key with no console meaning | No console byte; the key event is still delivered |
@@ -727,3 +749,4 @@ drains the ring (and, only while IRQ12 is inactive, the controller) and decodes 
 | 2026-11-16 | M2.3.3 routing and `Expose` (spec 0011, W12/W16/W17): `EventKind` gains `Expose` (ordinal 5). Producers still enqueue `window = 0`; the kernel host routes on poll — a pending owner-only `Expose` first, then a queued event, with a pointer-down hit-tested against the topmost frame and raising/focusing it before delivery and other pointer/key events naming the focused window. An injected non-zero `window` is passed through. Exposes are per-window coalesced flags marked by a repair and are not queue entries, so a foreign task cannot steal them; the scheduler's input-block re-check includes pending exposes. |
 | 2026-11-18 | `EventKind.Close` (ordinal 6, spec 0011 W25/M8.2): a close-box press posts an owner-only close request instead of killing the task. The kernel host serves a pending `Close` before a pending `Expose` and before the queue (`window::take_close`/`has_close`, topmost-first), writes `window = id` with `x = y = code = 0`, counts it as input readiness (`input_ready`, the post-block `Input` re-check and `next_any` source 1), and the event layout is unchanged. An injected non-zero `window` still passes through; a queued `Close` with `window = 0` is not re-addressed. |
 | 2026-11-18 | M8.3 routing exception (spec 0011 W26, ADR 0044): while a task holds the modal popup input grab, `next_event`/`poll_event` return queued events only to that task, unchanged (`window = 0`, no hit-test or raise). A non-owner returns `WouldBlock` without consuming the queue, and `input_ready`/the scheduler's post-block re-check/`next_any` source 1 report the queue only for the owner (`window::grab_allows`). The owner's own `Close`/`Expose` are still served first, and a release or the owner's termination wakes every input waiter. No `Event` layout, opcode or builtin change beyond the two `syslib.popup_*` calls. |
+| 2026-11-18 | M8.4 routing exception (spec 0011 W27, ADR 0045): `event::peek` reads the queue head without consuming it, and a head-of-queue `PointerDown` with `window = 0` inside a persistent pointer-region claim is delivered only to the claim owner; every other task gets `WouldBlock` with the queue untouched. The modal grab still takes precedence while active (its owner receives all queued events and the region gate is skipped). Moves, releases, keys and presses outside the rectangle route normally. `task::input_queue_ready` applies the grab and region rules to `input_ready`, the scheduler's post-block `Input` re-check and `next_any` source 1; release and termination wake input waiters. No `Event` layout, opcode or builtin change beyond the two `syslib.region_*` calls. |

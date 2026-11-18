@@ -5,7 +5,7 @@
   `syslib`; M2.3 of the desktop milestone
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0020, 0024, 0042, 0043
+- **ADRs:** 0020, 0024, 0042, 0043, 0044, 0045
 - **Updated:** 2026-11-18
 
 ## Context
@@ -234,6 +234,40 @@ an `int`; `0` is never a valid id.
   every input waiter after the table lock is dropped, so queued events are deliverable
   again. The rectangle is advisory only: the service never filters by it. A grab is a UI
   focus mechanism, not an authority boundary; there is no timeout.
+- **W27 (MUST):** One machine-wide **persistent pointer-region claim** reserves a
+  rectangle of the screen for one task, so an app-drawn menu bar receives the press that
+  opens a menu even while other tasks are blocked in `next_event` (M8.4, ADR 0045).
+  `syslib.region_claim(x, y, w, h) -> Status` (builtin 60) makes the calling task the
+  owner and stores the rectangle; `syslib.region_release() -> Status` (builtin 61)
+  releases it. There is exactly one claim machine-wide, behind the same table lock as the
+  grab and the pointer drag, and it is independent of them: taking or updating a claim
+  neither takes nor releases the modal grab, and it does not cancel an in-progress drag.
+  `region_claim` is `Ok` when the claim is free or already the caller's (the rectangle is
+  then updated), `Full` for another task, and `Invalid` for a non-positive `w`/`h` or
+  disabled graphics. `region_release` is `Ok` for the owner, `NotFound` when none is held
+  and `Invalid` for another task.
+  While a claim is held and **no** modal grab is active:
+  - `KernelHost::poll_event` inspects the queue head without consuming it. If it is a
+    `PointerDown` with `window = 0` inside the claimed rectangle, a task other than the
+    owner returns `WouldBlock` and consumes nothing; the owner dequeues the event
+    unchanged (no hit-test, no raise, still `window = 0`), so its coordinate handler runs.
+    Moves, releases, keys and presses outside the rectangle take the ordinary routing
+    path. The queue itself is never filtered.
+  - while a modal grab **is** active, W26 takes precedence: its owner receives every
+    queued event unchanged and the region gate is not applied.
+  - `window::pointer_event` starts no drag and posts no close request for a **new** press
+    inside the claimed rectangle, even if a window has been moved under it. Moves and
+    releases are not filtered, so a drag that began before the pointer crossed the region
+    still follows the pointer. An active modal grab still suspends the pointer service
+    entirely.
+  - the queue readiness probes (`input_ready`, the scheduler's post-block `Input`
+    re-check and `next_any` source `1`) do not report a head-of-queue press inside another
+    task's claim as ready for that task, so it does not spin on an event it cannot
+    consume. Readiness is a snapshot; a spurious wake returns `WouldBlock` and re-blocks.
+  `region_release` and `Task::reclaim` through `close_task` clear the claim and wake every
+  input waiter after the table lock is dropped. There is no timeout: a claim reserves only
+  the press inside its rectangle and leaves every other event routing normally. A claim is
+  a UI focus mechanism, not an authority boundary.
 
 ## Design
 
@@ -451,6 +485,13 @@ The kernel host routes on `poll_event`, where no graphics lock is held:
    before the event is handed over, and the event names it; a miss stays 0. Every other
    pointer or key event names `window_focus()` (0 when no window exists).
 
+A persistent region claim (W27) inserts one check before the queue is dequeued: when no
+modal grab is active, the host `peek`s at the head and, if it is a `PointerDown` with
+`window = 0` inside the claimed rectangle, only the claim owner may consume it (unchanged,
+with no hit-test or raise); every other task gets `WouldBlock` and the event stays queued.
+This is a head-of-queue rule, not a filter: once the owner takes the press the queue
+advances normally.
+
 #### Lock order (the only nesting is window → graphics)
 
 | Path | Takes | Then |
@@ -458,8 +499,9 @@ The kernel host routes on `poll_event`, where no graphics lock is held:
 | pointer producer (`gfx`) | pointer-order | graphics (state/cursor), released before the hook; then window → graphics; then the event queue (press suppressed when handled) |
 | pointer service hook (`gfx` → `window::pointer_event`) | pointer-order already held | window → graphics for a drag repair; `wake_input` only **after** the window unlock (a drag repair or a posted close request) |
 | keyboard/console producer | console, graphics per cell | nothing |
-| poll-time routing | nothing | window (`take_close`/`take_expose`/`route_click`); routing a click repairs: window → graphics; input waiters are woken **after** the window lock is dropped |
+| poll-time routing | nothing | window (`take_close`/`take_expose`/`grab_active`/`region_owner_at`); queue (`peek`/`poll`), never nested with window; routing a click repairs: window → graphics; input waiters are woken **after** the window lock is dropped |
 | window wrappers (`open`/`move`/`rect` reads) | graphics (screen size, released) | window → graphics for the repair; input wake after the unlock |
+| region-claim wrappers (`region_claim`/`region_release`) | graphics (screen size, released) | window; `region_release` wakes input waiters after the unlock |
 | repair | window | graphics (dither, chrome, present) |
 | `Task::reclaim` → `close_task` | nothing (no scheduler lock held) | window → graphics; input wake after the unlock |
 | scheduler `Input` block | no lock | `event::has_event` / `window::has_expose` / `window::has_close`; then slot locks in `wake_input` |
@@ -744,7 +786,58 @@ launches the terminal and types `terminal`; it fails on the idle-summary/halt li
 Apps item table, one real launch, the outside-click dismissal, the F9/F10 and Left/Right
 switching, and the pixel checks on `-smp 4` and `-smp 1`.
 
-## Interfaces
+### Persistent pointer-region claim (implemented in M8.4)
+
+W27 adds a second, non-modal reservation beside the popup grab. The menu bar is
+app-drawn and permanent; the press that opens a pull-down is queued before any grab
+exists, so a client blocked in `next_event` can win it. ADR 0045 records the decision.
+
+- **State.** `Table` carries `region: Option<Region>` beside `grab` and `drag`; `Region`
+  is `{ owner, rect }`. `Table::claim_region` rejects a non-positive extent (`Invalid`)
+  and another owner (`Full`), updates the rectangle for the owner, and does not touch the
+  grab or an in-progress drag. The public wrappers are
+  `window::region_claim(owner, x, y, w, h)` (reads the screen size first, like `open`)
+  and `window::region_release(owner)`.
+- **Pointer service.** `window::pointer_event` checks the grab first as before; without
+  one, a new press inside `Table::region_contains` skips `Table::press`, so no title-bar
+  drag starts and no close request posts. The press is not consumed by the service; it is
+  published and routed by W27. Releases and moves still run, so an existing drag is
+  followed across the region.
+- **Polling.** `KernelHost::poll_event` serves the caller's `Close`/`Expose` first, then
+  the grab rule, then peeks at the queue head with `event::peek` (a read that does not
+  consume). If the head is a `PointerDown` with `window = 0` inside the region,
+  `window::region_owner_at` decides: a non-owner returns `WouldBlock` with the queue
+  untouched, and the owner returns `event::poll`'s record unchanged. The peek releases
+  the queue lock before taking the window lock, so the lock order is not nested.
+- **Readiness.** `task::input_queue_ready` combines the grab rule
+  (`window::grab_allows`) with the region rule above; `KernelHost::input_ready`, the
+  scheduler's post-block `Input` re-check and `task::source_ready` for `SOURCE_INPUT`
+  all use it and still add the caller's own `has_expose`/`has_close`. When a grab is
+  active the queue is reported to its owner alone, so W26 precedence holds for
+  readiness too.
+- **Release.** `region_release` and `Table::close_task` clear the claim; both wrappers
+  drop the table lock and then call `task::wake_input`, so every blocked reader can
+  observe the queue again. `Task::reclaim` reaches `close_task` on every destruction path
+  (W8).
+- **Lock order.** No new lock: the claim lives in the window table. `event::peek` takes
+  only the queue lock, and its result is passed to `window::region_owner_at` after the
+  queue unlock. The pointer path still publishes after the service hook.
+
+`window::region_self_check` proves the pure rules on a scratch table: the free state,
+claim/`Full`/update, a non-positive extent, half-open rectangle hit-testing, coexistence
+with the modal grab, owner-only release and `NotFound`, and `close_task` releasing only
+its own task's claim. Boot prints `window: region ok` beside `window: grab ok` and the
+other `window:` self-checks.
+
+The desktop claims `(0, 0, screen_w, MenuHeight)` at startup in normal and check mode and
+releases it on exit. `samples/apps/base/desktop_shell check` accepts the claim result
+`Ok`, or `Full` when the boot desktop already owns the bar, and releases only its own
+claim. `scripts/apps_menu_qmp.py` extends the M8.3 harness: it launches `File Browser`,
+opens and dismisses a second Apps menu while the browser is live, then clicks `Terminal`
+and requires `terminal: ok`. That sequence fails on M8.3 on `-smp 4` (the browser
+consumes the bar press and no shell launches) and passes on M8.4.
+
+
 
 ### Language surface
 
@@ -762,6 +855,8 @@ syslib.window_info(index: uint, var id: int, var rect: Rect,
                    var title: string[64]) -> Status
 syslib.popup_grab(x: int, y: int, w: int, h: int) -> Status
 syslib.popup_release() -> Status
+syslib.region_claim(x: int, y: int, w: int, h: int) -> Status
+syslib.region_release() -> Status
 ```
 
 `(x, y)` in `window_open` and `window_move` is the **frame origin**; `(w, h)` in
@@ -793,6 +888,8 @@ Error values:
 | `window_focus` | id of the focused window or `0` | — | — | — |
 | `window_present` | content presented (visible parts only) | unknown id | live window owned by another task, graphics disabled | — |
 | `window_info` | id, frame and title written | index past the end, graphics disabled | title destination below capacity 64 (compile error) | — |
+| `region_claim` | claim taken or rectangle updated | — | non-positive `w`/`h`, graphics disabled | another task holds the claim |
+| `region_release` | released | no claim is held | another task holds the claim | — |
 
 An out-parameter is written only on `Ok`, like `core.spawn`/`core.wait` (spec 0003, E1).
 The id out-parameter and `window_focus` are `int`; ids are not compared to task ids except
@@ -814,6 +911,8 @@ fn window_present(&mut self, id: u64) -> Status { Status::Invalid }
 fn window_info(&mut self, index: u64) -> Option<WindowInfo> { None }
 fn popup_grab(&mut self, x: i64, y: i64, w: i64, h: i64) -> Status { Status::Invalid }
 fn popup_release(&mut self) -> Status { Status::Invalid }
+fn region_claim(&mut self, x: i64, y: i64, w: i64, h: i64) -> Status { Status::Invalid }
+fn region_release(&mut self) -> Status { Status::Invalid }
 ```
 
 `WindowInfo` (interpreter crate) carries `id`, the frame `Rect`, and a fixed
@@ -850,6 +949,9 @@ pub fn popup_grab(owner: u64, x: i64, y: i64, w: i64, h: i64) -> Status; // W26
 pub fn popup_release(owner: u64) -> Status;      // W26, wakes input waiters
 pub fn grab_allows(owner: u64) -> bool;          // input readiness rule (W26)
 pub fn grab_active() -> bool;                    // poll-time routing check
+pub fn region_claim(owner: u64, x: i64, y: i64, w: i64, h: i64) -> Status; // W27
+pub fn region_release(owner: u64) -> Status;     // W27, wakes input waiters
+pub fn region_owner_at(x: i64, y: i64) -> Option<u64>; // poll-time head gate (W27)
 ```
 
 The monolithic table is one `SpinLock<Table>`. `open` reads the screen size before taking
@@ -898,6 +1000,17 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | The grab owner terminates while holding the grab | `Task::reclaim` releases the grab and wakes input waiters |
 | Graphics disabled | `popup_grab` is `Invalid` like the other service calls; `popup_release` of a nonexistent grab is `NotFound` |
 | A menu owner never releases the grab | Input to other tasks stays blocked until it releases or terminates; there is no timeout (accepted, ADR 0044) |
+| `region_claim` from a second task while one is held | `Full`; the held claim and its rectangle are unchanged |
+| `region_claim` repeat by the owner | `Ok`; the rectangle is updated and the modal grab/drag are untouched |
+| `region_claim` with `w <= 0` or `h <= 0` | `Invalid`; the held claim is unchanged, and the machine rejects the extent before the host call |
+| `region_release` with no claim | `NotFound`; nothing changes |
+| `region_release` by a non-owner | `Invalid`; the owner's claim stays |
+| Press inside a claim (no grab active) | The service starts no drag and posts no close request; only the claim owner dequeues the `PointerDown`, other tasks get `WouldBlock` without consuming it |
+| Press inside a claim while a modal grab is active | The grab takes precedence: its owner receives every queued event, with no region filtering |
+| Pointer move/release inside a claim | Routed normally; an in-progress drag follows the pointer across the region |
+| Claim owner terminates while holding a claim | `Task::reclaim` releases the claim and wakes input waiters |
+| Graphics disabled | `region_claim` is `Invalid` like the other service calls; `region_release` of a nonexistent claim is `NotFound` |
+| A claim owner never releases | Only presses inside its rectangle are reserved for it; every other event routes normally and there is no timeout (accepted, ADR 0045) |
 
 ## Alternatives considered
 
@@ -913,6 +1026,8 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | A global clip held across the expose | One shadow and several cores: the client runs asynchronously, so there is nothing to hold the clip against |
 | Resize in M2.3 | Needs a drag loop, minimum-size policy and client reflow; deferred to M2.4/M2.3.5 |
 | Let a client draw into the shadow with its own clip | No clip primitive, no capability model, and a second clip would need per-task state the drawing primitives do not have |
+| A lifetime-long modal grab for the desktop | It would hide the queue from every other task; the desktop would be the only event consumer and no client could read input (ADR 0045) |
+| Make the menu bar a window | It would gain service chrome, a z-order record and a second drawing surface for something the shell already draws; the opening click would be treated as an ordinary window hit-test |
 
 ## Open questions
 
@@ -940,3 +1055,4 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | 2026-11-18 | M8.1 follow-up: W24 strengthened against an SMP poll race. The two pointer paths serialise the whole transaction with a dedicated `POINTER_ORDER` lock (`POINTER_ORDER → SCREEN`, `POINTER_ORDER → WINDOW → SCREEN`), run the service hook after dropping the graphics lock, and publish the events afterwards with `push_pointer(..., suppress_down)` omitting a consumed press; `event::consume_pointer_down` is deleted, so a handled `PointerDown` is never enqueued and a woken client cannot observe it. A second press during a drag is now `Consumed` (swallowed) instead of delivered. |
 | 2026-11-18 | M8.2 implemented (W23 rewritten, W25 added; ADR 0043 amends ADR 0042's close clause): the close box posts an owner-only `EventKind.Close` (ordinal 6, `window = id`) instead of `task::request_kill`; the window stays until its owner closes it. One per-window `close_pending` flag with `take_close`/`has_close` (topmost-first, owner-only), served before a pending `Expose` and before the queue; `input_ready`, the scheduler's post-block `Input` re-check and `next_any` source 1 include it, and the pointer hook wakes `WaitFor::Input` after the unlock. `window::close_self_check` prints `window: close ok`; `windows_drag` proves a same-task dialog and a victim that closes itself and exits `Ok`; `desktop_shell check` closes About from its real close box and stays alive; `scripts/about_close_qmp.py` reproduces the reported System → About → close-box → Terminal scenario on the boot desktop. `desktop_shell` handles `Close` in both modes, the user-facing apps close their own windows, and proof/demo windows may ignore it. No opcode, builtin, `Host`, `syslib` or `stdlib` change (ABI v1 stays 75). |
 | 2026-11-18 | M8.3 implemented (W26 added; ADR 0044): one machine-wide modal popup input grab in the window table, exposed as `syslib.popup_grab`/`popup_release` (builtins 58/59, no opcode; ABI v1 stays 75). The pointer service ignores presses while a grab is held; `KernelHost::poll_event` gives non-owners `WouldBlock` without consuming the queue and passes producer events (`window = 0`, no hit-test/raise) to the owner; `input_ready`, the scheduler's post-block re-check and `next_any` source 1 use the one `grab_allows(task)` rule; release and `close_task` wake input waiters. `window::grab_self_check` prints `window: grab ok`. The desktop's Apps menu (Calculator, Minesweeper, Text Editor, File Browser, Clock, Widgets) and the existing System menu take the grab on open; `scripts/apps_menu_qmp.py` launches Clock from a row over the kernel Terminal; `desktop_shell check` covers both menus, the grab, one launch and the outside-click dismissal. |
+| 2026-11-18 | M8.4 implemented (W27 added; ADR 0045): one machine-wide persistent pointer-region claim in the window table, exposed as `syslib.region_claim`/`region_release` (builtins 60/61, no opcode; ABI v1 stays 75). A queued `PointerDown` with `window = 0` inside the rectangle is dequeued only by the claim owner (a non-owner gets `WouldBlock` without consuming it); the modal grab still takes precedence. The pointer service starts no drag and posts no close request for a new press inside the claim, while moves/releases still follow an in-progress drag. `task::input_queue_ready` folds the grab and region rules into `input_ready`, the scheduler's post-block re-check and `next_any` source 1. Release and `close_task` wake input waiters. `window::region_self_check` prints `window: region ok`; the desktop claims the 22-pixel bar at startup and releases it on exit; `scripts/apps_menu_qmp.py` now launches `File Browser`, opens/dismisses Apps while it is live, then reaches `terminal: ok` (it fails on M8.3 on `-smp 4`). |

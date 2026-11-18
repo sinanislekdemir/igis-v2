@@ -587,6 +587,44 @@ fn waits_on_source(wait: WaitFor, source: u64) -> bool {
     }
 }
 
+/// True when the machine-wide event queue has an event `task` may consume
+/// (spec 0010 I19/I31; spec 0011 W26/W27).
+///
+/// The modal grab (W26) hides the whole queue from non-owners, and a
+/// head-of-queue `PointerDown` inside another task's persistent region claim
+/// (W27) belongs only to that claimant: a non-owner's poll returns
+/// `WouldBlock` without consuming it. Reporting such a press as "not ready"
+/// keeps a non-owner from spinning on it while leaving the event queued for
+/// the owner. Readiness remains a snapshot; the following `next_event` is
+/// authoritative.
+pub fn input_queue_ready(task: u64) -> bool {
+    if !crate::window::grab_allows(task) {
+        return false;
+    }
+    // While the modal grab is active its owner receives every queued event
+    // unchanged, so the region gate does not apply (W26 takes precedence over
+    // W27).
+    if crate::window::grab_active() {
+        return crate::event::has_event();
+    }
+    if !crate::event::has_event() {
+        return false;
+    }
+    let mut head = [0u8; abi::layout::event::SIZE as usize];
+    if crate::event::peek(&mut head) != Status::Ok {
+        return false;
+    }
+    match abi::layout::event::read(&head) {
+        Some(event) if event.kind == abi::EventKind::PointerDown && event.window == 0 => {
+            match crate::window::region_owner_at(event.x, event.y) {
+                Some(owner) => owner == task,
+                None => true,
+            }
+        }
+        _ => true,
+    }
+}
+
 /// True when one source is ready for `task` (`core.next_any`).
 fn source_ready(task: u64, source: u64) -> bool {
     if source == SOURCE_CONSOLE_BYTE {
@@ -595,8 +633,9 @@ fn source_ready(task: u64, source: u64) -> bool {
         // `syslib.next_event` also returns a pending `Expose` and a `Close`
         // (spec 0011, W16/W25), so the input source means "next_event would
         // not block". The modal popup grab (W26) hides the queued events from
-        // every task but its owner.
-        (crate::event::has_event() && crate::window::grab_allows(task))
+        // every task but its owner, and a claimed-region press (W27) belongs
+        // only to the claim owner.
+        input_queue_ready(task)
             || crate::window::has_expose(task)
             || crate::window::has_close(task)
     } else {

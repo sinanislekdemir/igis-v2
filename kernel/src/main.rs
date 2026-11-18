@@ -226,6 +226,17 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
             arch_x86_64::halt();
         }
     }
+    // The persistent pointer-region claim (spec 0011, W27; ADR 0045): claim,
+    // `Full`, update, invalid extent, owner-only release, rectangle hit,
+    // coexistence with the modal grab and termination release, all on scratch
+    // state.
+    match window::region_self_check() {
+        Ok(()) => println!("window: region ok"),
+        Err(step) => {
+            println!("window: region FAIL at step {step}");
+            arch_x86_64::halt();
+        }
+    }
 
     // The pointer device and the software cursor (spec 0010). This needs the
     // shadow (screen size, cursor compositing) and the console (boot log), and

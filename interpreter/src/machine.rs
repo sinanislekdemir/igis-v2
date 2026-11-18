@@ -432,6 +432,22 @@ pub trait Host {
         Status::Invalid
     }
 
+    /// Takes the one machine-wide persistent pointer-region claim
+    /// (`syslib.region_claim`, spec 0011, W27; ADR 0045). The calling task is
+    /// the owner; a queued press inside the rectangle is delivered only to it.
+    /// The machine has already rejected a non-positive extent. The default is a
+    /// disabled service (`Invalid`), so `langhost` and a bare host stay safe.
+    fn region_claim(&mut self, _x: i64, _y: i64, _w: i64, _h: i64) -> Status {
+        Status::Invalid
+    }
+
+    /// Releases the caller's pointer-region claim (`syslib.region_release`,
+    /// spec 0011, W27). The default is a disabled service (`Invalid`). The
+    /// kernel also wakes every input waiter after the release.
+    fn region_release(&mut self) -> Status {
+        Status::Invalid
+    }
+
     /// Attaches the console's terminal grid to a window owned by the calling
     /// task (`core.terminal_attach`, spec 0014). The host supplies the caller's
     /// task id and validates the window ownership itself. The default is
@@ -1967,6 +1983,26 @@ impl Machine {
                     }
                     builtin::POPUP_RELEASE => {
                         let status = host.popup_release();
+                        self.push(stack, status as u64)?;
+                    }
+                    // Persistent pointer-region claim (spec 0011, W27; ADR
+                    // 0045). Like the modal grab, the machine rejects a
+                    // non-positive extent before the host call; the host owns
+                    // ownership and the one-claim rule.
+                    builtin::REGION_CLAIM => {
+                        let h = self.pop(stack)?;
+                        let w = self.pop(stack)?;
+                        let y = self.pop(stack)?;
+                        let x = self.pop(stack)?;
+                        if w as i64 <= 0 || h as i64 <= 0 {
+                            self.push(stack, Status::Invalid as u64)?;
+                        } else {
+                            let status = host.region_claim(x as i64, y as i64, w as i64, h as i64);
+                            self.push(stack, status as u64)?;
+                        }
+                    }
+                    builtin::REGION_RELEASE => {
+                        let status = host.region_release();
                         self.push(stack, status as u64)?;
                     }
                     // Terminal attach (spec 0014): the kernel host supplies the

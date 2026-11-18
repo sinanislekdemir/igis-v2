@@ -1390,6 +1390,8 @@ syslib.window_info(index: uint, var id: int, var rect: Rect,
                    var title: string[64]) -> Status
 syslib.popup_grab(x: int, y: int, w: int, h: int) -> Status
 syslib.popup_release() -> Status
+syslib.region_claim(x: int, y: int, w: int, h: int) -> Status
+syslib.region_release() -> Status
 ```
 
 `(x, y)` is the frame origin and `(w, h)` the content size; the service derives the frame
@@ -1418,6 +1420,18 @@ advisory rectangle), `Full` for another task and `Invalid` for a non-positive ex
 disabled graphics; `popup_release` is `Ok` for the owner, `NotFound` when none is held and
 `Invalid` for another task. It is a UI focus mechanism, not an authority boundary. No
 opcode is added; both are host builtins 58/59 (spec 0008).
+
+`region_claim`/`region_release` (M8.4; spec 0011, W27; ADR 0045) are the one machine-wide
+persistent pointer-region claim. While it is held and no modal grab is active, a queued
+`PointerDown` with `window = 0` inside the rectangle is delivered only to the claim owner
+(the app-drawn menu bar that would otherwise lose the press that opens a menu), and a new
+press there starts no service drag and posts no close request. Moves, releases, keys and
+presses outside the rectangle are unchanged; an active popup grab takes precedence.
+`region_claim` is `Ok` for a free claim or the caller's own (updating the rectangle),
+`Full` for another task and `Invalid` for a non-positive extent or disabled graphics;
+`region_release` is `Ok` for the owner, `NotFound` when none is held and `Invalid` for
+another task. It is a UI focus mechanism, not an authority boundary. No opcode is added;
+both are host builtins 60/61 (spec 0008).
 
 ## Constants and manifests
 
@@ -2199,3 +2213,4 @@ controls and input dialog for the QMP screenshot harness.
 | 2026-11-17 | Q44 resolved (ADR 0037): console input is `core.read_input(var dst: bytes[N]) -> int`, a raw non-blocking read (0 when empty) reusing the retired `READ_LINE` opcode slot as `READ_INPUT` (ABI v1 stays at 75). A `string` destination is a compile error (a partial read could split a code point); callers convert with the checked slice. Source `0` of `core.poll_any`/`core.next_any` now means a console byte is available, and the shell echoes/edits its own `string[256]` with the `stdlib.str_*` helpers. The keyboard feeds events only, never the byte stream; `core.read_line` no longer exists. |
 | 2026-11-18 | `EventKind.Close` joins the predeclared enum (ordinal 6, M8.2/spec 0011 W25). It is a global constant like `Expose`; an application compares `ev.kind = Close` and closes its own window. The compiler's predeclared variant list carries the same order (`PointerMove` 0 … `Expose` 5, `Close` 6); `Event`'s layout and every other type are unchanged. |
 | 2026-11-18 | M8.3 adds the modal popup input grab surface (spec 0011 W26, ADR 0044): `syslib.popup_grab(x: int, y: int, w: int, h: int) -> Status` and `syslib.popup_release() -> Status`. The grab is machine-wide and task-owned; while held, only the owner receives queued input events and the window service ignores pointer presses, so an app-drawn pull-down works over another window. `Ok`/`Full`/`Invalid` on take (a repeat by the owner updates the advisory rectangle), `Ok`/`NotFound`/`Invalid` on release. Host builtins 58/59, no opcode; the machine rejects a non-positive extent before the host call. |
+| 2026-11-18 | M8.4 adds the persistent pointer-region claim surface (spec 0011 W27, ADR 0045): `syslib.region_claim(x: int, y: int, w: int, h: int) -> Status` and `syslib.region_release() -> Status`. The claim is machine-wide and task-owned; while it is held and no modal grab is active, a queued `PointerDown` with `window = 0` inside the rectangle belongs only to the owner, and a new press there starts no service drag and posts no close request. `Ok`/`Full`/`Invalid` on take (a repeat by the owner updates the rectangle), `Ok`/`NotFound`/`Invalid` on release. Host builtins 60/61, no opcode; the machine rejects a non-positive extent before the host call. |
