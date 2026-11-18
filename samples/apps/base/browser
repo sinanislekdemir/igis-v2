@@ -1100,6 +1100,8 @@ end;
 procedure refresh_rect();
 begin
   st := syslib.window_content_rect(id, rect);
+  if st = Ok then
+    compute_layout();
 end;
 
 // ---- event pump -----------------------------------------------------------
