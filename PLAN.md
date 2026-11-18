@@ -14,13 +14,14 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Current state:** **494 host tests**; specs 0001–0019 (0018 and 0019
-  Implemented); ABI v1 at 75 opcodes; M5, M6 and M7.1 complete. The application
-  image is a read-only ext2 tree (`lib`, `base`, `home`, `system`); `/home` is a
-  separate 8 MiB ext2 image on an ATA disk, read-write through `ext2w` and one
-  router, persistent across reboots. Write builtins are 53–57. The next milestone
-  is not planned.
-- **Last commit:** `906d8d4` (M7.1 docs) plus this synchronization commit.
+- **Current state:** **495 host tests**; specs 0001–0019 (0018 and 0019
+  Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1 complete**. The
+  application image is a read-only ext2 tree (`lib`, `base`, `home`, `system`);
+  `/home` is a separate 8 MiB ext2 image on an ATA disk, read-write through
+  `ext2w` and one router, persistent across reboots. Write builtins are 53–57.
+  Windows are draggable by the title bar and the close box terminates the owner
+  task (M8.1).
+- **Last commit:** `9dcd8b3` (M8.1 code/spec/ADR) plus this docs commit.
   The tree is clean; `build/home.img` is reset.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
@@ -107,9 +108,10 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   without the disk `home_truncate: no writable home` and the read-only arms
   pass; the persistence harness, visual golden (`37802052…e9e81c9f`) and
   `boot_desktop_qmp.py` pass on both.
-- **Next slice:** **M7.1 is complete.** The next milestone is not yet planned;
-  the deferred table is the input (virtio-blk, a journal/atomic replace, the
-  handle model/Q51, `f32`/Q40, MMIO/DMA/Q45, nominal `TaskId`/Q43,
+- **Next slice:** **M8.1 is complete.** Interactive resize (spec 0011 open
+  question 4) is the obvious next window-management slice but is not yet
+  planned; the deferred table is the input (virtio-blk, a journal/atomic replace,
+  the handle model/Q51, `f32`/Q40, MMIO/DMA/Q45, nominal `TaskId`/Q43,
   runtime-capacity buffers/Q46, stream close/Q10, guard recovery/Q47, module
   dead-code elimination, `cargo fmt`/CI).
 
@@ -1066,6 +1068,58 @@ parent verifies each.
   (15 files) and after reset (12/563); the persistence harness, the 38-command
   batch (with/without the drive), the visual golden and `boot_desktop_qmp.py`
   pass on both. The editor keeps its temporary-file save.
+
+## M8 — window management
+
+- [x] **M8.1 Pointer-driven window drag and close-box termination.**
+  Spec 0011 W22–W24, ADR 0042. Two service-owned interactions over the existing
+  window table, with no new opcode, builtin, `Host` method or `stdlib` helper:
+  - **Drag:** a left-button press inside a window's title bar (16-px band, not the
+    close box) raises/focuses it (any task, like `raise`), records a grab offset
+    from the frame origin and moves the window with the pointer while button 1
+    stays held, clamped on screen; release ends the drag. The move is the same
+    damage/`Expose` path as `window_move`, so the owner repaints and the desktop
+    is restored underneath. The press is consumed by the service (not delivered
+    as a client `PointerDown`); a second press during a drag is ignored and a
+    closed window cancels the drag.
+  - **Close box:** a left-button press inside the 11×11 close box at
+    `(frame.x + 4, frame.y + 3)` requests termination of the owner task
+    (`task::request_kill`); `Task::reclaim` closes the task's windows through the
+    existing `close_task` path, so `core.wait` observes `Killed`. Owner `0` kernel
+    windows are inert. The press is consumed. No graceful save-on-close: data is
+    lost exactly as with `core.kill`; a close-request event is deferred.
+  The hook runs after the graphics lock is released, from both pointer paths
+  (`gfx::update_pointer`, `gfx::set_pointer_absolute`), so injected events are
+  deterministic and the lock order stays `window → graphics`; the table lock is
+  never held across `request_kill`. Boot self-check `window: drag ok` covers the
+  pure rules (title-bar vs close-box vs content, grab offset, clamp, release,
+  owner-0 exemption, drag cancellation).
+  Proof: `samples/apps/base/windows_drag` (+ `windows_drag_victim`) injects real
+  pointer events, drags its own window by the title bar, checks the frame
+  rectangle after each step, both screen clamps, release, the restored desktop
+  and the repainted content after the `Expose`, verifies a title-bar press is
+  consumed while a content press still reaches the client, then finds the
+  victim's window through `window_info`, clicks its close box and requires
+  `core.wait` to report `Killed` and the window to disappear. Prints
+  `windows_drag: ok` on `-smp 4` and `-smp 1`; `langhost` runs the disabled-screen
+  path (`windows_drag: host ok`). Optional `windows_drag shot` plus a screenshot
+  script. Interactive resizing stays deferred.
+  **Done (`9dcd8b3`):** **495 host tests**; `window::drag_self_check` prints
+  `window: drag ok` at boot beside `window: rules/paint/route ok`; the `gfx`
+  hook runs after the graphics unlock, `Table::relocate` is shared with
+  `window_move` (public move stays owner-only), and `event::consume_pointer_down`
+  removes the handled press. `run windows_drag check` prints
+  `windows_drag: ok` on `-smp 4` and `-smp 1` (title press consumed, focus,
+  no move on press, drag steps, both clamps, release parks, new content mark,
+  old area restored to the underlay, content press delivered, victim killed
+  with `Killed` and its window/frame gone); `windows_drag: host ok` on
+  `langhost`. Regressions pass on both core counts: `windows`, `windows_events`,
+  `windows_demo`, `windows_proof` (own boot), `desktop_shell check`, `terminal`
+  (shell command), `calculator`, `minesweeper`, `editor check`,
+  `browser check`, `events`, `mouse` (own boot), `ui_layout`, `ui_controls`,
+  `text_edit`, `files`, `module_demo`, `kill_stress`; visual golden
+  `37802052…e9e81c9f` and `boot_desktop_qmp.py` pass on both; `e2fsck -fn` is
+  clean (no home writes). Resize remains deferred.
 
 ## Deferred (not UI; pick up when they matter)
 
