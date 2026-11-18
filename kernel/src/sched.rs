@@ -524,6 +524,15 @@ impl Host for KernelHost {
         }
     }
 
+    /// `core.fs_truncate` (spec 0019, A7): `home` only, through the router.
+    fn fs_truncate(&mut self, path: &[u8], size: u64) -> Result<(), Status> {
+        let path = core::str::from_utf8(path).map_err(|_| Status::Invalid)?;
+        match abi::fs::validate_writable(path) {
+            Status::Ok => crate::fs::truncate(path, size),
+            status => Err(status),
+        }
+    }
+
     // Streams (spec 0006): the kernel table owns the buffer and the generation
     // check. The machine turns `WouldBlock` into a block for the blocking
     // opcodes and into a staged status for `try_*`; the host is always

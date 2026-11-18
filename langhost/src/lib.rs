@@ -805,6 +805,27 @@ impl Host for ConsoleHost {
             _ => io_status(&error),
         })
     }
+
+    // Truncate over the temporary home (spec 0019, A7/A6). A missing path is
+    // `NotFound`, a directory `Invalid`; the host `set_len` zero-extends.
+    fn fs_truncate(&mut self, path: &[u8], size: u64) -> Result<(), Status> {
+        let path = std::str::from_utf8(path).map_err(|_| Status::Invalid)?;
+        let status = abi::fs::validate_writable(path);
+        if status != Status::Ok {
+            return Err(status);
+        }
+        let local = home_local(path).ok_or(Status::Invalid)?;
+        let target = resolve_in(&self.home_dir, local)?;
+        let metadata = std::fs::symlink_metadata(&target).map_err(|error| io_status(&error))?;
+        if !metadata.is_file() {
+            return Err(Status::Invalid);
+        }
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&target)
+            .map_err(|error| io_status(&error))?;
+        file.set_len(size).map_err(|_| Status::IoError)
+    }
 }
 
 /// Host-side path validation, matching the kernel's relative-path rule.

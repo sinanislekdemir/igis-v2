@@ -7251,6 +7251,74 @@ end;
 }
 
 #[test]
+fn fs_truncate_is_builtin_fifty_seven_and_checks_its_signature() {
+    use abi::opcodes::{self, builtin};
+
+    let source = r#"
+unit t;
+uses core;
+var
+  status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_truncate("home/x.txt", uint(0));
+  status := core.fs_truncate("home/x.txt", uint(1000));
+end;
+"#;
+    let package = compile(source.as_bytes(), "t.ig").expect("fs_truncate compiles");
+    assert_eq!(builtin_count(&package, builtin::FS_TRUNCATE), 2);
+    assert_eq!(builtin::FS_TRUNCATE, 57);
+    assert_eq!(opcodes::builtin::effect(builtin::FS_TRUNCATE), Some((2, 1)));
+
+    let cases = [
+        (
+            r#"
+unit t;
+uses core;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_truncate("home/x");
+end;
+"#,
+            "`core.fs_truncate` expects 2 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; raw: bytes[16];
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_truncate(raw, uint(0));
+end;
+"#,
+            "`core.fs_truncate` expects a `string` path",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := core.fs_truncate("home/x", 0);
+end;
+"#,
+            "`core.fs_truncate` expects a `uint` size",
+        ),
+    ];
+    for (source, expected) in cases {
+        let error = compile(source.as_bytes(), "t.ig").expect_err("must be a compile error");
+        assert!(
+            error.message.contains(expected),
+            "expected `{expected}`, got `{}`",
+            error.message
+        );
+    }
+}
+
+#[test]
 fn terminal_attach_is_builtin_forty_four_and_checks_its_signature() {
     use abi::opcodes::{self, builtin};
 

@@ -686,6 +686,15 @@ pub mod builtin {
     /// are `Invalid`/`NotFound`. Operands: `[from reference][to reference]`.
     pub const FS_RENAME: u32 = 56;
 
+    /// `core.fs_truncate(path, size) -> Status`: set a regular file's length
+    /// (spec 0019, A7; ADR 0041). Only a `home/...` path on a writable mount is
+    /// accepted; a directory is `Invalid`, a missing path `NotFound`, and the
+    /// current size is an `Ok` no-op. Shrinking frees the data and indirect
+    /// blocks at or past the new end (zeroing the last partial block's tail);
+    /// extending zero-fills up to `size`, and a full filesystem is
+    /// `CapacityExceeded` with no change. Operands: `[path reference][size]`.
+    pub const FS_TRUNCATE: u32 = 57;
+
     // ---- terminal window (spec 0014) ------------------------------------
     //
     // `core.terminal_attach` binds the machine-wide console terminal grid to a
@@ -855,6 +864,7 @@ pub mod builtin {
             FS_REMOVE => Some((1, 1)),
             FS_MKDIR => Some((1, 1)),
             FS_RENAME => Some((2, 1)),
+            FS_TRUNCATE => Some((2, 1)),
             TERMINAL_ATTACH => Some((1, 1)),
             TEXT_WIDTH_PROP => Some((1, 1)),
             TEXT_HEIGHT_PROP => Some((0, 1)),

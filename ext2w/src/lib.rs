@@ -1344,6 +1344,200 @@ impl<D: SectorDevice> Fs<D> {
         Ok(data.len())
     }
 
+    /// Number of data blocks a file of `size` bytes occupies.
+    fn blocks_for(size: u64) -> u32 {
+        size.div_ceil(BLOCK_SIZE as u64) as u32
+    }
+
+    /// `i_blocks` (512-byte units) for a hole-free file of `blocks` data
+    /// blocks: every data block plus every single/double indirect block.
+    fn blocks512_for(blocks: u32) -> u32 {
+        let per_block = (BLOCK_SIZE / 4) as u32;
+        let mut count = blocks;
+        if blocks > 12 {
+            count = count.saturating_add(1);
+        }
+        if blocks > 12 + per_block {
+            let extra = blocks - 12 - per_block;
+            count = count
+                .saturating_add(1)
+                .saturating_add(extra.div_ceil(per_block));
+        }
+        count.saturating_mul(2)
+    }
+
+    /// Sets a regular file's length (spec 0019, A7; ADR 0041).
+    ///
+    /// Shrinking zeroes the tail of the last kept block, clears the inode's
+    /// pointers at and past the new end (including empty indirect blocks),
+    /// writes the inode with the new size, and only then releases the block
+    /// bitmap bits and counters: a crash between the two leaks blocks, which
+    /// `e2fsck` reclaims, while freeing first could hand out a block the inode
+    /// still points at. Extending plans capacity first, then allocates and
+    /// zero-fills every block up to `size`, including the partial first block's
+    /// tail; a full filesystem is [`Status::CapacityExceeded`] with no change.
+    /// The current size is an `Ok` no-op, a directory is [`Status::Invalid`]
+    /// and a missing path is [`Status::NotFound`].
+    pub fn truncate(&mut self, path: &str, size: u64) -> Result<(), Status> {
+        if !self.writable {
+            return Err(Status::Invalid);
+        }
+        let (number, inode) = self.find(path)?;
+        if !inode.is_file() {
+            return Err(Status::Invalid);
+        }
+        if size == inode.size {
+            return Ok(());
+        }
+        if size > self.max_file_bytes() {
+            return Err(Status::CapacityExceeded);
+        }
+        if size < inode.size {
+            self.shrink_inode(number, inode, size)
+        } else {
+            self.extend_inode(number, inode, size)
+        }
+    }
+
+    /// The shrink half of [`Self::truncate`] (ADR 0041).
+    fn shrink_inode(&mut self, number: u32, old_inode: Inode, size: u64) -> Result<(), Status> {
+        let old_size = old_inode.size;
+        let old_blocks = Self::blocks_for(old_size);
+        let new_blocks = Self::blocks_for(size);
+        let per_block = (BLOCK_SIZE / 4) as u32;
+        if old_inode.blocks[14] != 0 {
+            return Err(Status::IoError);
+        }
+        if old_blocks as usize > self.max_double_indirect_blocks() {
+            return Err(Status::IoError);
+        }
+
+        // A later extension must read zeros, so the tail of the last kept
+        // partial block is cleared before the size changes.
+        let tail = (size % BLOCK_SIZE as u64) as usize;
+        if new_blocks > 0 && tail != 0 {
+            let logical = new_blocks - 1;
+            let block_number = self.pointer(&old_inode, logical)?.ok_or(Status::IoError)?;
+            let mut block = [0u8; BLOCK_SIZE];
+            self.block(block_number, &mut block)?;
+            block[tail..].fill(0);
+            self.write_block(block_number, &block)?;
+        }
+
+        // Clear the inode-level pointers, then write the new size and
+        // `i_blocks` before any bitmap bit is freed.
+        let mut new_inode = old_inode;
+        new_inode.size = size;
+        for index in 0..12 {
+            if index as u32 >= new_blocks {
+                new_inode.blocks[index] = 0;
+            }
+        }
+        if new_blocks <= 12 {
+            new_inode.blocks[12] = 0;
+            new_inode.blocks[13] = 0;
+        } else if new_blocks <= 12 + per_block {
+            new_inode.blocks[13] = 0;
+        }
+        new_inode.blocks[14] = 0;
+        new_inode.blocks512 = Self::blocks512_for(new_blocks);
+        self.store_inode(number, &new_inode)?;
+
+        // The old structure is still intact on disk (only the inode was
+        // rewritten), so every removed data block can be found through it.
+        let mut logical = new_blocks;
+        while logical < old_blocks {
+            let block_number = self.pointer(&old_inode, logical)?.ok_or(Status::IoError)?;
+            self.free_block(block_number)?;
+            logical += 1;
+        }
+
+        // A single-indirect block that survives keeps only the entries below
+        // the new end; one that is entirely past it is released.
+        if old_blocks > 12 {
+            if new_blocks <= 12 {
+                self.free_block(old_inode.blocks[12])?;
+            } else if new_blocks < 12 + per_block {
+                let indirect = old_inode.blocks[12];
+                let mut pointers = [0u8; BLOCK_SIZE];
+                self.block(indirect, &mut pointers)?;
+                for index in (new_blocks - 12)..per_block {
+                    put_u32(&mut pointers, index as usize * 4, 0)?;
+                }
+                self.write_block(indirect, &pointers)?;
+            }
+        }
+
+        // The double-indirect tree: release inner blocks entirely past the new
+        // end (their data blocks are already free), trim the straddling one and
+        // clear the outer pointers that named a released block.
+        if old_blocks > 12 + per_block {
+            let outer_number = old_inode.blocks[13];
+            let mut outer = [0u8; BLOCK_SIZE];
+            self.block(outer_number, &mut outer)?;
+            let mut outer_changed = false;
+            for outer_index in 0..per_block {
+                let inner = read_u32(&outer, outer_index as usize * 4)?;
+                if inner == 0 {
+                    continue;
+                }
+                let base = 12 + per_block + outer_index * per_block;
+                let inner_end = base + per_block - 1;
+                if base >= new_blocks {
+                    self.free_block(inner)?;
+                    put_u32(&mut outer, outer_index as usize * 4, 0)?;
+                    outer_changed = true;
+                } else if inner_end >= new_blocks {
+                    let mut pointers = [0u8; BLOCK_SIZE];
+                    self.block(inner, &mut pointers)?;
+                    for index in (new_blocks - base)..per_block {
+                        put_u32(&mut pointers, index as usize * 4, 0)?;
+                    }
+                    self.write_block(inner, &pointers)?;
+                }
+            }
+            if new_blocks <= 12 + per_block {
+                self.free_block(outer_number)?;
+            } else if outer_changed {
+                self.write_block(outer_number, &outer)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The extend half of [`Self::truncate`] (ADR 0041).
+    fn extend_inode(&mut self, number: u32, mut inode: Inode, size: u64) -> Result<(), Status> {
+        let old_size = inode.size;
+        let old_blocks = Self::blocks_for(old_size);
+        let new_blocks = Self::blocks_for(size);
+        if new_blocks as usize > self.max_double_indirect_blocks() {
+            return Err(Status::CapacityExceeded);
+        }
+        // Capacity is planned before the first allocation.
+        if self.plan_blocks(&inode, old_blocks, new_blocks - 1)? > self.free_blocks() {
+            return Err(Status::CapacityExceeded);
+        }
+
+        // The bytes between the old end and the block boundary read as zeros;
+        // the new blocks are zero-filled from end to end.
+        let tail = (old_size % BLOCK_SIZE as u64) as usize;
+        if old_blocks > 0 && tail != 0 {
+            let logical = old_blocks - 1;
+            let block_number = self.pointer(&inode, logical)?.ok_or(Status::IoError)?;
+            let mut block = [0u8; BLOCK_SIZE];
+            self.block(block_number, &mut block)?;
+            block[tail..].fill(0);
+            self.write_block(block_number, &block)?;
+        }
+        for logical in old_blocks..new_blocks {
+            let (block_number, _fresh) = self.data_block_for(&mut inode, logical)?;
+            let block = [0u8; BLOCK_SIZE];
+            self.write_block(block_number, &block)?;
+        }
+        inode.size = size;
+        self.store_inode(number, &inode)
+    }
+
     /// Finds the first directory record that can hold a `needed`-byte entry.
     ///
     /// A free record (inode 0) that is large enough is reused whole; a live

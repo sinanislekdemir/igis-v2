@@ -266,6 +266,19 @@ pub fn rename(from: &str, to: &str) -> Result<(), Status> {
     home.rename(from_local, to_local)
 }
 
+/// Sets a regular file's length through the router (spec 0019, A7; ADR 0041).
+/// Only a mounted `home/...` path is accepted.
+pub fn truncate(path: &str, size: u64) -> Result<(), Status> {
+    let Some(local) = home_local(path) else {
+        return Err(Status::Invalid);
+    };
+    let mut home = HOME.lock();
+    let Some(home) = home.as_mut() else {
+        return Err(Status::Invalid);
+    };
+    home.truncate(local, size)
+}
+
 /// Returns one directory entry through the router (spec 0013, `core.fs_list`).
 pub fn list(path: &str, index: u32, name: &mut [u8]) -> Result<Entry, Status> {
     if let Some(local) = home_local(path) {

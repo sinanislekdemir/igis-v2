@@ -7926,6 +7926,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.fs_path_call(args, line, column, "core.fs_mkdir", builtin::FS_MKDIR)
             }
             "core.fs_rename" => self.fs_rename_call(args, line, column),
+            "core.fs_truncate" => self.fs_truncate_call(args, line, column),
             // Terminal attach (spec 0014): bind the console's machine-wide
             // terminal grid to a window owned by the caller. The kernel host
             // supplies the task id; the compiler only checks the staged
@@ -8281,6 +8282,41 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             }
         }
         self.one(opcodes::BUILTIN, builtin::FS_RENAME)?;
+        self.pop(2)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// `core.fs_truncate(path, size) -> Status` (spec 0019, A7; ADR 0041).
+    fn fs_truncate_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 2 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`core.fs_truncate` expects 2 arguments, got {}", args.len()),
+            ));
+        }
+        let path = self.emit_ref(args[0], None)?;
+        if path.kind != Kind::String {
+            let found = self.type_name(path);
+            return Err(self.err_at(
+                args[0],
+                format_args!("`core.fs_truncate` expects a `string` path, found `{found}`"),
+            ));
+        }
+        let size = self.expr_scalar(args[1])?;
+        if size.kind != Kind::Uint {
+            return Err(self.err_at(
+                args[1],
+                format_args!("`core.fs_truncate` expects a `uint` size, found `{size}`"),
+            ));
+        }
+        self.one(opcodes::BUILTIN, builtin::FS_TRUNCATE)?;
         self.pop(2)?;
         self.push();
         Ok(Some(Type::enumeration(STATUS_ENUM)))

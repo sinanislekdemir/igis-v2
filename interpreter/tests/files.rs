@@ -82,6 +82,7 @@ struct FileHost {
     remove: Result<(), Status>,
     mkdir: Result<(), Status>,
     rename: Result<(), Status>,
+    truncate: Result<(), Status>,
     calls: usize,
     last_path: Vec<u8>,
     last_to: Vec<u8>,
@@ -89,6 +90,7 @@ struct FileHost {
     last_offset: u64,
     last_dst_len: usize,
     last_data: Vec<u8>,
+    last_size: u64,
 }
 
 impl FileHost {
@@ -107,6 +109,7 @@ impl FileHost {
             remove: Ok(()),
             mkdir: Ok(()),
             rename: Ok(()),
+            truncate: Ok(()),
             calls: 0,
             last_path: Vec::new(),
             last_to: Vec::new(),
@@ -114,6 +117,7 @@ impl FileHost {
             last_offset: 0,
             last_dst_len: 0,
             last_data: Vec::new(),
+            last_size: 0,
         }
     }
 }
@@ -189,6 +193,13 @@ impl Host for FileHost {
         self.last_path = from.to_vec();
         self.last_to = to.to_vec();
         self.rename
+    }
+
+    fn fs_truncate(&mut self, path: &[u8], size: u64) -> Result<(), Status> {
+        self.calls += 1;
+        self.last_path = path.to_vec();
+        self.last_size = size;
+        self.truncate
     }
 }
 
@@ -734,4 +745,75 @@ fn the_default_remove_mkdir_and_rename_are_invalid() {
         Outcome::Exited(ExitReason::Ok)
     );
     assert_eq!(state_word(&state, 80), Status::Invalid as u64);
+}
+
+// ---- truncate (spec 0019, A7; ADR 0041) --------------------------------
+
+/// `[path len][path data 8..40][status 40]`.
+fn truncate_state(path: &[u8]) -> Vec<u8> {
+    let mut state = vec![0u8; 48];
+    set_word(&mut state, 0, path.len() as u64);
+    state[8..8 + path.len()].copy_from_slice(path);
+    state
+}
+
+fn truncate_program(size: i64) -> Vec<u8> {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 8);
+    op_const(&mut instructions, size);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::FS_TRUNCATE,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 40);
+    op(&mut instructions, opcodes::RET);
+    build(&instructions, &[], 48)
+}
+
+#[test]
+fn fs_truncate_passes_the_path_and_size_and_returns_the_status() {
+    let mut state = truncate_state(b"home/x.txt");
+    let mut host = FileHost::new();
+    assert_eq!(
+        run(&truncate_program(1000), &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(host.last_path, b"home/x.txt");
+    assert_eq!(host.last_size, 1000);
+    assert_eq!(state_word(&state, 40), Status::Ok as u64);
+
+    host.truncate = Err(Status::NotFound);
+    let mut state = truncate_state(b"home/missing.txt");
+    assert_eq!(
+        run(&truncate_program(0), &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(state_word(&state, 40), Status::NotFound as u64);
+}
+
+#[test]
+fn fs_truncate_rejects_paths_outside_home_before_the_host() {
+    let mut host = FileHost::new();
+    for path in [&b"base/child"[..], b"homex/x", b"home//x", b"lib/home/a"] {
+        let mut state = truncate_state(path);
+        host.calls = 0;
+        assert_eq!(
+            run(&truncate_program(0), &mut state, &mut host),
+            Outcome::Exited(ExitReason::Ok)
+        );
+        assert_eq!(state_word(&state, 40), Status::Invalid as u64, "{path:?}");
+        assert_eq!(host.calls, 0, "{path:?}");
+    }
+}
+
+#[test]
+fn the_default_fs_truncate_is_invalid() {
+    let mut state = truncate_state(b"home/x.txt");
+    let mut host = DisabledHost;
+    assert_eq!(
+        run(&truncate_program(0), &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(state_word(&state, 40), Status::Invalid as u64);
 }

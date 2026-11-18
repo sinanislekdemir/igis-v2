@@ -2546,6 +2546,32 @@ fn the_home_ops_sample_creates_renames_and_removes_on_the_host() {
     assert_eq!(result.reason, ExitReason::Ok);
 }
 
+/// The M7.1 truncate proof (spec 0019, A7/A6): shrink, extend, zero-fill,
+/// idempotence and the error classes run over `langhost`'s temporary home.
+#[test]
+fn the_home_truncate_sample_shrinks_and_extends_on_the_host() {
+    let path = app_path("home_truncate");
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "home_truncate").expect("the sample compiles");
+    let result =
+        langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies and runs");
+    let output = String::from_utf8(result.output).expect("UTF-8 output");
+    assert!(output.contains("home_truncate: write ok\n"), "{output}");
+    assert!(output.contains("home_truncate: shrink ok\n"), "{output}");
+    assert!(output.contains("home_truncate: extend ok\n"), "{output}");
+    assert!(output.contains("home_truncate: zero fill ok\n"), "{output}");
+    assert!(
+        output.contains("home_truncate: idempotent ok\n"),
+        "{output}"
+    );
+    assert!(
+        output.contains("home_truncate: error paths ok\n"),
+        "{output}"
+    );
+    assert!(output.ends_with("home_truncate: ok\n"), "{output}");
+    assert_eq!(result.reason, ExitReason::Ok);
+}
+
 /// The M6.4 persistence write half (spec 0019, V2/A6): `home_persist` creates
 /// the directory, writes the payload and renames it over `langhost`'s temporary
 /// home directory, so the write/mkdir/rename path runs end to end on the host.

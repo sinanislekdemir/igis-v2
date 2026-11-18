@@ -504,6 +504,13 @@ pub trait Host {
         Err(Status::Invalid)
     }
 
+    /// Sets a regular file's length (`core.fs_truncate`, spec 0019, A7).
+    /// Only `home/...` on a writable mount is accepted; the machine enforces
+    /// the path rule before the call. The default is `Invalid`.
+    fn fs_truncate(&mut self, _path: &[u8], _size: u64) -> Result<(), Status> {
+        Err(Status::Invalid)
+    }
+
     /// Requests a new application instance (`core.spawn`).
     ///
     /// `path` and `args` are the bytes of the two `string` buffers. `diag` is a
@@ -2490,6 +2497,36 @@ impl Machine {
                                 }
                                 (Err(status), _) => Err(status),
                                 (_, Err(status)) => Err(status),
+                            }
+                        };
+                        self.push(
+                            stack,
+                            match result {
+                                Ok(()) => Status::Ok as u64,
+                                Err(status) => status as u64,
+                            },
+                        )?;
+                    }
+                    // Truncate on the home filesystem (spec 0019, A7; ADR
+                    // 0041). The path rule is the machine's; the host owns the
+                    // writer.
+                    builtin::FS_TRUNCATE => {
+                        let size = self.pop(stack)?;
+                        let path_bits = self.pop(stack)?;
+                        let result = {
+                            let (region, offset) =
+                                self.resolve(path_bits, state, stack, constants, args)?;
+                            let length =
+                                self.buffer_len(region, offset, state, stack, constants, args)?;
+                            let path = buffer_slice(
+                                region, offset, length, state, stack, constants, args,
+                            )?;
+                            match core::str::from_utf8(path) {
+                                Err(_) => Err(Status::Invalid),
+                                Ok(text) => match abi::fs::validate_writable(text) {
+                                    Status::Ok => host.fs_truncate(text.as_bytes(), size),
+                                    status => Err(status),
+                                },
                             }
                         };
                         self.push(

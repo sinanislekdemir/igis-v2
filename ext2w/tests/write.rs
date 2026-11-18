@@ -580,6 +580,146 @@ fn rename_moves_files_replaces_regular_targets_and_refuses_directories() {
 }
 
 #[test]
+fn truncate_shrinks_extends_and_zeroes_the_new_tail() {
+    let Some(bytes) = make_image() else {
+        return;
+    };
+    let device = MemoryDevice::new(bytes);
+    let mut fs = mount_write(device.clone()).expect("image mounts writable");
+    fs.create("cut.bin").expect("create");
+    let payload: Vec<u8> = (0..3000).map(|index| (index % 251) as u8).collect();
+    assert_eq!(fs.write_at("cut.bin", 0, &payload), Ok(3000));
+    let after_write = fs.free_blocks();
+
+    // Shrink to 1000 bytes keeps exactly one block.
+    assert_eq!(fs.truncate("cut.bin", 1000), Ok(()));
+    assert_eq!(fs.file_size("cut.bin"), Ok(1000));
+    assert_eq!(read_whole(&fs, "cut.bin", 1000), payload[..1000]);
+    assert_eq!(fs.free_blocks(), after_write + 2, "two blocks returned");
+
+    // The current size is an `Ok` no-op.
+    assert_eq!(fs.truncate("cut.bin", 1000), Ok(()));
+    assert_eq!(fs.file_size("cut.bin"), Ok(1000));
+    assert_eq!(fs.free_blocks(), after_write + 2);
+
+    // Extend to 4000: the kept bytes stay and the new range is all zeros.
+    assert_eq!(fs.truncate("cut.bin", 4000), Ok(()));
+    assert_eq!(fs.file_size("cut.bin"), Ok(4000));
+    let grown = read_whole(&fs, "cut.bin", 4000);
+    assert_eq!(&grown[..1000], &payload[..1000]);
+    assert!(grown[1000..].iter().all(|byte| *byte == 0));
+
+    // A partial-block shrink must zero the tail of the kept block so the
+    // extension reads zeros (not the old pattern) from the same block.
+    assert_eq!(fs.truncate("cut.bin", 500), Ok(()));
+    assert_eq!(fs.truncate("cut.bin", 900), Ok(()));
+    let regrown = read_whole(&fs, "cut.bin", 900);
+    assert_eq!(&regrown[..500], &payload[..500]);
+    assert!(regrown[500..].iter().all(|byte| *byte == 0));
+
+    // Error classes: a directory and a missing name.
+    assert_eq!(fs.truncate("sub", 0), Err(Status::Invalid));
+    assert_eq!(fs.truncate("missing.bin", 0), Err(Status::NotFound));
+    assert_eq!(fs.file_size("missing.bin"), Err(Status::NotFound));
+
+    // Truncating to zero empties the file and returns every block.
+    assert_eq!(fs.truncate("cut.bin", 0), Ok(()));
+    assert_eq!(fs.file_size("cut.bin"), Ok(0));
+    let mut buffer = [0u8; 8];
+    assert_eq!(fs.read_at("cut.bin", 0, &mut buffer), Ok(0));
+    assert_eq!(fs.truncate("cut.bin", 0), Ok(()), "idempotent at zero");
+    drop(fs);
+    assert_e2fsck_clean(&device.bytes(), "truncate small file");
+}
+
+#[test]
+fn truncate_crosses_the_single_and_double_indirect_boundaries() {
+    let Some(bytes) = make_image() else {
+        return;
+    };
+    let device = MemoryDevice::new(bytes);
+    let mut fs = mount_write(device.clone()).expect("image mounts writable");
+    fs.create("big.bin").expect("create");
+    let before_write = fs.free_blocks();
+    // 300 KiB: 12 direct, 256 single-indirect and 32 double-indirect blocks.
+    let payload: Vec<u8> = (0..300 * 1024).map(|index| (index % 253) as u8).collect();
+    assert_eq!(fs.write_at("big.bin", 0, &payload), Ok(payload.len()));
+    let after_write = fs.free_blocks();
+
+    // 280 KiB still uses the double-indirect tree but drops 20 data blocks.
+    assert_eq!(fs.truncate("big.bin", 280 * 1024), Ok(()));
+    assert_eq!(fs.file_size("big.bin"), Ok(280 * 1024));
+    assert_eq!(
+        read_whole(&fs, "big.bin", 280 * 1024),
+        payload[..280 * 1024]
+    );
+    assert_eq!(fs.free_blocks(), after_write + 20);
+
+    // 100 KiB removes the whole double-indirect tree (its outer and inner
+    // pointer blocks are freed too).
+    assert_eq!(fs.truncate("big.bin", 100 * 1024), Ok(()));
+    assert_eq!(fs.file_size("big.bin"), Ok(100 * 1024));
+    assert_eq!(
+        read_whole(&fs, "big.bin", 100 * 1024),
+        payload[..100 * 1024]
+    );
+    assert!(
+        fs.free_blocks() >= after_write + 202,
+        "200 data blocks and the double-indirect pointers return"
+    );
+
+    // 1 KiB then removes the single-indirect pointer block as well.
+    assert_eq!(fs.truncate("big.bin", 1024), Ok(()));
+    assert_eq!(read_whole(&fs, "big.bin", 1024), payload[..1024]);
+    assert!(
+        fs.free_blocks() >= after_write + 300,
+        "all non-kept data and pointer blocks return"
+    );
+
+    // Extend back across both boundaries: every new byte is zero.
+    assert_eq!(fs.truncate("big.bin", 300 * 1024), Ok(()));
+    assert_eq!(fs.file_size("big.bin"), Ok(300 * 1024));
+    let grown = read_whole(&fs, "big.bin", 300 * 1024);
+    assert_eq!(&grown[..1024], &payload[..1024]);
+    assert!(grown[1024..].iter().all(|byte| *byte == 0));
+
+    assert_eq!(fs.truncate("big.bin", 0), Ok(()));
+    assert_eq!(fs.free_blocks(), before_write, "every block returned");
+    drop(fs);
+    assert_e2fsck_clean(&device.bytes(), "truncate indirect boundaries");
+}
+
+#[test]
+fn an_extension_beyond_the_free_blocks_is_capacity_exceeded_and_changes_nothing() {
+    let Some(bytes) = make_image() else {
+        return;
+    };
+    let device = MemoryDevice::new(bytes);
+    let mut fs = mount_write(device.clone()).expect("image mounts writable");
+    fs.create("too_big.bin").expect("create");
+    let free = fs.free_blocks();
+    // The 1 MiB fixture cannot hold 900 KiB of data blocks; capacity is
+    // planned before the first allocation.
+    let size = 900 * 1024u64;
+    if size / 1024 <= fs.free_blocks() as u64 {
+        eprintln!("ext2w: skipping capacity test: the fixture has room");
+        return;
+    }
+    assert_eq!(
+        fs.truncate("too_big.bin", size),
+        Err(Status::CapacityExceeded)
+    );
+    assert_eq!(fs.file_size("too_big.bin"), Ok(0));
+    assert_eq!(
+        fs.free_blocks(),
+        free,
+        "a refused truncate allocates nothing"
+    );
+    drop(fs);
+    assert_e2fsck_clean(&device.bytes(), "truncate capacity refusal");
+}
+
+#[test]
 fn rename_moves_directories_updates_dotdot_and_link_counts() {
     let Some(bytes) = make_image() else {
         return;
