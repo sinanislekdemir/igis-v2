@@ -433,6 +433,8 @@ Direction: a kernel-owned window service over a full-screen shadow buffer
   already carries the presented framebuffer and a serial dump would duplicate it.
 - [ ] **M2.1.3** Optional mode request: an `xtask`/kernel parameter to ask GRUB for a
   chosen resolution (e.g. 1280×1024), verified against `syslib.screen_width/height`.
+  **Optional, deferred:** not planned; the visual golden currently pins the
+  1024×768 mode GRUB returns.
 
 ### M2.2 — input: mouse and keyboard events
 
