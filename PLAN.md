@@ -21,7 +21,7 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `ext2w` and one router, persistent across reboots. Write builtins are 53–57.
   Windows are draggable by the title bar and the close box terminates the owner
   task (M8.1).
-- **Last commit:** `9dcd8b3` (M8.1 code/spec/ADR) plus this docs commit.
+- **Last commit:** `d4a8f93` (M8.1 follow-up) plus this docs commit.
   The tree is clean; `build/home.img` is reset.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
@@ -1104,11 +1104,13 @@ parent verifies each.
   `windows_drag: ok` on `-smp 4` and `-smp 1`; `langhost` runs the disabled-screen
   path (`windows_drag: host ok`). Optional `windows_drag shot` plus a screenshot
   script. Interactive resizing stays deferred.
-  **Done (`9dcd8b3`):** **495 host tests**; `window::drag_self_check` prints
+  **Done (`9dcd8b3`, follow-up `d4a8f93`):** **495 host tests**; `window::drag_self_check` prints
   `window: drag ok` at boot beside `window: rules/paint/route ok`; the `gfx`
-  hook runs after the graphics unlock, `Table::relocate` is shared with
-  `window_move` (public move stays owner-only), and `event::consume_pointer_down`
-  removes the handled press. `run windows_drag check` prints
+  hook runs after the graphics unlock under one `POINTER_ORDER` lock,
+  `Table::relocate` is shared with `window_move` (public move stays owner-only),
+  and a handled press is suppressed before `event::push_pointer` publishes it (the
+  `PointerDown` is never queued, so no SMP poll race). A second press mid-drag is
+  consumed (`d4a8f93`). `run windows_drag check` prints
   `windows_drag: ok` on `-smp 4` and `-smp 1` (title press consumed, focus,
   no move on press, drag steps, both clamps, release parks, new content mark,
   old area restored to the underlay, content press delivered, victim killed
