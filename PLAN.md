@@ -14,8 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `7c14ef5` (M3 complete) plus this docs commit opening **M4**
-  (ADR 0039: package-wide nominal types). The tree is clean.
+- **Last commit:** `6a37202` (M4.1: predeclared nominal types cross unit
+  boundaries, plus the `EventKind` follow-up) plus this docs commit. The tree is clean.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -52,10 +52,23 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `terminal: ok` on both; the visual golden matches on both
   (`37802052…e9e81c9f`); the browser screenshot harness writes a 1024×768
   `/home/sinan/Desktop/igis-browser.png`.
-- **Next slice:** **M4.1 — predeclared nominal types cross a unit boundary (C1)**
-  (ADR 0039, spec 0008 "Types"). One compiler gate, a `lib/probe.ig` proof and
-  `module_demo` calls; then M4.2 (package-global user types, unit-qualified names)
-  and M4.3 (extract the shared application helpers into `/lib`).
+- **Verified at that point (M4.1, independently by the parent):** **441 host tests**
+  (abi 23, compiler 186, interpreter 150, langhost 81, 1 doctest); the gate admits
+  the predeclared `Rect`/`Event`/`Diagnostic`/`ExitReason`/`Status`/`FaultCode`/
+  `EventKind` (and arrays of them) across units, user aggregates still fail with
+  a precise diagnostic. `lib/probe.ig` + `module_demo` print
+  `module_demo: lib types ok` then `module_demo: ok` on `langhost` and in the
+  kernel on both core counts; the 27-command batch, visual golden
+  (`37802052…e9e81c9f`) and `boot_desktop_qmp.py` pass on both; boot still prints
+  `ext2: tree ok`.
+- **Next slice:** **M4.2 — package-global user types and unit-qualified names
+  (C2)** (ADR 0039, spec 0003 "Cross-unit types", spec 0008 "Types"). A fresh
+  subagent assigns package-global enum/record/sum ids, allows `<unit>.<Type>` in
+  every type position and `<unit>.<Type>.<Variant>` for enum constants, permits
+  forward references and rejects by-value cycles; the application's types stay
+  application-local, and sum construction/`case` arms stay unqualified. Runtime
+  proof through `langhost` and the kernel. Then M4.3 extracts the shared helpers
+  into `/lib`.
 
 - **M2.6.3 complete:** the headless visual-regression harness (spec 0009 "Visual proof",
   G21; ADR 0032) and the resolution of M2.1.2. `samples/apps/visual` opens a window whose
@@ -788,15 +801,21 @@ Normative: ADR 0039, spec 0008 "Types", spec 0003 "Cross-unit types". Goal: a
 enums), then the duplicated application helpers move into `/lib`. One ticket per
 session; the parent verifies each.
 
-- [ ] **M4.1 Predeclared nominal types cross a unit boundary (C1).**
+- [x] **M4.1 Predeclared nominal types cross a unit boundary (C1).**
   Relax the one compiler gate (`cross_unit_type_ok`) so `Status`, `FaultCode`,
-  `Diagnostic`, `Event`, `Rect` and `ExitReason` — and arrays/rings/maps of them —
-  may appear in another unit's parameters and results; user-declared types stay
-  rejected until M4.2. Add `samples/apps/lib/probe.ig` (a `Rect` area helper, an
+  `EventKind`, `Diagnostic`, `Event`, `Rect` and `ExitReason` — and arrays/rings/maps
+  of them — may appear in another unit's parameters and results; user-declared types
+  stay rejected until M4.2. Add `samples/apps/lib/probe.ig` (a `Rect` area helper, an
   `ExitReason` classifier using `case`, a `Diagnostic` field read, an `Event` kind
   helper) and extend `samples/apps/base/module_demo` to call all four with real
   values; compiler tests for the accepted and still-rejected cases. Prove on
   `langhost`, `-smp 4` and `-smp 1`. No ABI, verifier or runtime change.
+  **Done (`a218832`, `6a37202`):** 441 host tests; the gate admits record ids
+  ≤ `RECT_RECORD`, sum id `EXIT_REASON_SUM` and enum ids ≤ `EVENT_KIND_ENUM`
+  (`EventKind` added by the follow-up); `lib/probe.ig` + `module_demo` print
+  `module_demo: lib types ok` then `module_demo: ok` on `langhost`, `-smp 4` and
+  `-smp 1`; the 27-command batch, visual golden and `boot_desktop_qmp.py` pass on
+  both; user aggregates still rejected with a precise diagnostic.
 
 - [ ] **M4.2 Package-global user types and unit-qualified names (C2).**
   Assign package-global enum/record/sum ids (predeclared fixed, then `stdlib`,
