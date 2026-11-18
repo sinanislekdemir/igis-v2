@@ -32,7 +32,7 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   binding) and omits the new-frame desktop erase, and every windowed app re-reads
   `window_content_rect` on an owner `Expose` before drawing or hit-testing (spec 0011
   W28, ADR 0046).
-- **Last commit:** `f478f9b` (M8.5) plus this docs commit.
+- **Last commit:** `4a0a3d4` (File Browser layout follow-up) plus this docs commit.
   The tree is clean; `build/home.img` is reset.
 - **Next:** M8 is complete. Pick from the deferred backlog in
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) / the "Deferred" table below, or extend the
@@ -1406,6 +1406,15 @@ parent verifies each.
   `apps_menu_qmp.py`, `about_close_qmp.py`, `boot_desktop_qmp.py`,
   `system_menu_qmp.py` and the visual golden `37802052…e9e81c9f` are unchanged; no
   opcode/builtin/`stdlib` change (ABI v1 75, 125 functions).
+  **Follow-up (`4a0a3d4`):** the user's File Browser drag screenshot exposed that its
+  `refresh_rect` updated `rect` but not the cached layout (`list_x`, `preview_x`,
+  `status_y`), so the list/preview/status stayed at the old absolute origins; it now
+  calls `compute_layout`. `scripts/browser_drag_qmp.py` launches the Browser, drags the
+  title bar (460,98) → (610,233) to frame origin (310,225), and requires the new path
+  separator 680/680, the list/preview borders 420/420 and the old layout gone
+  (stale preview 2, old path run < 340), writing
+  `/home/sinan/Desktop/igis-browser-drag.png`; it passes on `--cores 4` and `--cores 1`,
+  and `browser check` still passes.
 
 ## Deferred (not UI; pick up when they matter)
 
