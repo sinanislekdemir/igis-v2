@@ -14,8 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Current state:** **501 host tests**; specs 0001–0019 (0018 and 0019
-  Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1–M8.3 complete**. The
+- **Current state:** **505 host tests**; specs 0001–0019 (0018 and 0019
+  Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1–M8.4 complete**. The
   application image is a read-only ext2 tree (`lib`, `base`, `home`, `system`);
   `/home` is a separate 8 MiB ext2 image on an ATA disk, read-write through
   `ext2w` and one router, persistent across reboots. Write builtins are 53–57.
@@ -23,12 +23,15 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `EventKind.Close` request (M8.2) — a dialog closes itself and the task survives.
   The desktop's `Apps` label is a real six-item application pull-down (M8.3), and a
   machine-wide modal popup input grab (`syslib.popup_grab`/`popup_release`, builtins
-  58/59, no opcode) makes both pull-downs reachable over other windows.
-- **Last commit:** `94187ed` (M8.3) plus this docs commit.
+  58/59, no opcode) makes both pull-downs reachable over other windows. M8.4 adds a
+  machine-wide persistent pointer-region claim (`syslib.region_claim`/`region_release`,
+  builtins 60/61, no opcode): the desktop claims the menu-bar strip, so the press that
+  opens a menu reaches it even while an application is blocked in `next_event`.
+- **Last commit:** `1304df8` (M8.4) plus this docs commit.
   The tree is clean; `build/home.img` is reset.
-- **Next:** no M8 ticket is open. Pick from the deferred backlog in
+- **Next:** M8 is complete. Pick from the deferred backlog in
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) / the "Deferred" table below, or extend the
-  desktop (a task switcher and submenus were deliberately left out of M8.3).
+  desktop (a task switcher, submenus and interactive resize were deliberately left out).
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -59,8 +62,9 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   M5.1–M5.2 (calculator, minesweeper), M6.1–M6.4 (persistent writable `/home`)
   and M7.1 (`core.fs_truncate`). Each ticket section below has its commit hashes
   and evidence.
-- **Done since M7.1:** M8.1 (window drag and close box), M8.2 (owner close requests)
-  and M8.3 (Apps application menu and the modal popup input grab, `94187ed`).
+- **Done since M7.1:** M8.1 (window drag and close box), M8.2 (owner close requests),
+  M8.3 (Apps application menu and the modal popup input grab, `94187ed`) and M8.4
+  (persistent menu-bar pointer-region claim, `1304df8`; M8 close).
 - **Verified at that point (M3.4, independently by the parent):** **439 host tests**
   (abi 23, compiler 184, interpreter 150, langhost 81, 1 doctest); `cargo xtask
   build`/`image`/`image --shell` clean; boot `ext2: tree ok`. `run browser check`
@@ -1270,6 +1274,66 @@ parent verifies each.
   Clock/About screenshots all pass; `e2fsck -fn build/home.img` is clean (no home
   writes). `cargo xtask build`/`image`/`image --shell` are clean. No `stdlib` helper
   (125) and no capability change: the grab is a UI focus mechanism (ADR 0044).
+
+- [x] **M8.4 Persistent menu-bar pointer-region claim.**
+  Regression found while using M8.3: after launching `File Browser` from the
+  Apps menu, a later click on the `Terminal` bar item no longer reaches the
+  desktop. The bar click is a `window = 0` event in the one machine-wide queue;
+  the browser is also blocked in `next_event`, the two tasks split the
+  move/down/up events, and the browser takes the press. The popup grab only
+  starts after a menu opens, so it cannot protect the click that opens it. The
+  desktop must own the menu-bar strip at the service level.
+  - **Surface:** `syslib.region_claim(x, y, w, h) -> Status` and
+    `syslib.region_release() -> Status` as host builtins 60/61 (no opcode; ABI
+    v1 stays 75): one machine-wide **pointer-region claim**, owner = caller;
+    `Ok`/`Full`/`Invalid`, a repeat by the owner updates the rect, owner-only
+    release, `Invalid` for another task. `Host` defaults `Invalid`.
+  - **Semantics:** while held, a queued `PointerDown` with `window = 0` inside
+    the rect is delivered **only** to the owner; a non-owner poll returns
+    `WouldBlock` without consuming it (the modal grab, when active, still takes
+    precedence). The owner receives it unchanged (no hit-test/raise), so the
+    desktop's coordinate handler runs. Pointer moves/ups, keys and all events
+    outside the rect route normally. The window service ignores a press inside a
+    claimed region (no drag, no close box), so the bar wins over a window moved
+    under it. Termination releases the claim and wakes input waiters.
+  - **Desktop:** claims `(0, 0, screen_w, MenuHeight)` at startup (both normal
+    and check mode) and releases on exit; the popup grab continues to cover the
+    open menu. The bar click now reaches the desktop even when a client is
+    blocked in `next_event`, and existing F9/F10 focus-scoped keys are unchanged.
+  - **Proof:** `scripts/apps_menu_qmp.py` is extended (or a sibling harness
+    added) to launch `File Browser` from Apps, wait for its spawn, then click
+    `Terminal` and require `terminal: ok` — this fails on M8.3 and must pass
+    here. Also prove a click outside the bar still routes to a client (the
+    existing window/event regressions) and a second menu open/select works while
+    the browser is live. Boot adds `window: region ok` (`region_self_check`:
+    claim/Full/update/owner-only release/rect hit/termination release).
+  - **Docs:** ADR 0045 (persistent region claim vs the modal grab; rejected:
+    permanent modal grab, bar as a window, focus tricks, accepting the race),
+    spec 0011 W27, spec 0010 routing/readiness, spec 0003 surface, spec 0008
+    60/61, spec 0012 D20, PLAN/AGENTS. No `stdlib` helper; no authority change.
+  **Done (`1304df8`):** **505 host tests** (abi 25, compiler 201, interpreter 168,
+  langhost 89, ext2w 22; +4: one compiler signature/encoding test and three interpreter
+  cases); ABI v1 stays at 75 (builtins 60/61, no opcode); `stdlib` stays at 125
+  functions. `window::region_self_check` prints `window: region ok` beside
+  `rules/paint/damage/route/drag/close/grab` on `-smp 4` and `-smp 1`. One
+  `Region { owner, rect }` lives in the window table beside the grab; `event::peek`
+  reads the head without consuming, `KernelHost::poll_event` gives a non-owner
+  `WouldBlock` for a `window = 0` `PointerDown` inside the claim and delivers it to the
+  owner unchanged, the modal grab keeps precedence, and `window::pointer_event` starts
+  no drag/posts no close for a new press inside the rectangle while moves/releases still
+  follow an in-progress drag. `task::input_queue_ready` folds the grab and region rules
+  into `input_ready`, the scheduler's post-block `Input` re-check and `next_any` source 1.
+  The desktop claims `(0, 0, screen_w, MenuHeight)` at startup in normal and check mode,
+  releases on exit, accepts `Full` when the boot desktop owns the bar and releases only
+  its own claim. `scripts/apps_menu_qmp.py` now launches `File Browser`, opens/dismisses
+  a second Apps menu while it is live, then clicks `Terminal` and reaches `terminal: ok`;
+  the same script fails on M8.3 on `-smp 4` with no `desktop_shell: launched shell task`
+  (the browser consumes the bar press). `desktop_shell check` (shell image both core
+  counts and the boot desktop's `Full` branch), `windows_drag`, `events`, `windows`,
+  `windows_events`, `mouse` (own boot), `windows_proof` (own boot), `tablet_qmp.py` 7/7,
+  `about_close_qmp.py`, `system_menu_qmp.py`, `boot_desktop_qmp.py`, the visual golden
+  `37802052…e9e81c9f` and `e2fsck -fn build/home.img` pass. `apps_menu_qmp.py --cores 4`
+  captures `/home/sinan/Desktop/igis-apps-menu.png` (1024×768).
 
 ## Deferred (not UI; pick up when they matter)
 
