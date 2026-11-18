@@ -122,7 +122,8 @@ unchanged — its names are reachable as `math.<name>`, it may import `core`, `s
   endpoint descriptors in declaration order (name, direction, capacity). Handle `i` is
   written at `state[i * 8]`; no offset is stored in the descriptor.
 - **Types.** Type ids are package-wide (ADR 0039) and never reach the artifact. The
-  predeclared `Status`, `FaultCode`, `Diagnostic`, `Event`, `Rect` and `ExitReason`
+  predeclared `Status`, `FaultCode`, `EventKind`, `Diagnostic`, `Event`, `Rect` and
+  `ExitReason`
   have fixed ids and may cross any unit boundary, alone or inside an
   array/ring/map (M4.1). User-declared enums, records and sums follow with
   package-global ids in `stdlib` → module discovery → application order, and

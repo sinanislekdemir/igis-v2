@@ -95,3 +95,10 @@ We will:
 | Structural typing for cross-unit aggregates | Contradicts the language's nominal design (spec 0003) and would make two different records with the same fields interchangeable. |
 | Put all shared helpers in the embedded `stdlib` instead | `stdlib` is a single embedded blob; application-level helpers would grow every compilation and lose the file-backed, import-what-you-use model. |
 | Pass aggregates by reference through an opaque handle | Adds a runtime type/descriptor model and allocation, contradicting the static memory model (ADR 0004/0007). |
+
+## Addendum (2026-11-18, M4.1)
+
+`EventKind` is also a predeclared enum (`abi::EventKind`, enum id 2, identical in every
+unit) and is part of the same package-global set: a helper may take `EventKind` directly
+(e.g. `is_pointer(k: EventKind)`) instead of only reading `Event.kind`. The decision text
+lists six types; this addendum adds the seventh without changing the rule or the ids.

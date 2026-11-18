@@ -494,9 +494,10 @@ impl<'a, 'b> ConstantPool<'a, 'b> {
 /// Scalars, buffers and the predeclared nominal types have identity that is
 /// identical in every unit, because `abi::layout` fixes their ids and each unit
 /// builds the same predeclared table prefix (spec 0008, "Types"; ADR 0039):
-/// `Status` (`STATUS_ENUM`), `FaultCode` (`FAULT_CODE_ENUM`), `Diagnostic`
-/// (`DIAGNOSTIC_RECORD`), `Event` (`EVENT_RECORD`), `Rect` (`RECT_RECORD`) and
-/// `ExitReason` (`EXIT_REASON_SUM`). User-declared records, sums and enums keep
+/// `Status` (`STATUS_ENUM`), `FaultCode` (`FAULT_CODE_ENUM`), `EventKind`
+/// (`EVENT_KIND_ENUM`), `Diagnostic` (`DIAGNOSTIC_RECORD`), `Event`
+/// (`EVENT_RECORD`), `Rect` (`RECT_RECORD`) and `ExitReason` (`EXIT_REASON_SUM`).
+/// User-declared records, sums and enums keep
 /// compiler-local ids and cannot cross until the package-wide type table of
 /// M4.2. Array, ring and map ids are shared by the one interning table, but
 /// their element and key/value types must themselves be safe.
@@ -506,8 +507,8 @@ fn cross_unit_type_ok(ty: Type, arrays: &[ArrayDef], rings: &[RingDef], maps: &[
         Kind::Record(id) => id <= RECT_RECORD,
         // `ExitReason` (0); user sums follow.
         Kind::Sum(id) => id == EXIT_REASON_SUM,
-        // `Status` (0) and `FaultCode` (1); user enums follow.
-        Kind::Enum(id) => id <= FAULT_CODE_ENUM,
+        // `Status` (0), `FaultCode` (1) and `EventKind` (2); user enums follow.
+        Kind::Enum(id) => id <= EVENT_KIND_ENUM,
         Kind::Array(id) => arrays
             .get(id as usize)
             .is_some_and(|array| cross_unit_type_ok(array.elem, arrays, rings, maps)),

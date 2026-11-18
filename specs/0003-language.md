@@ -890,9 +890,9 @@ compiler knows their layout and operations. Generic algorithms are either built-
 ### Cross-unit types (ADR 0039)
 
 Nominal types have one identity per package. The predeclared `Status`, `FaultCode`,
-`Diagnostic`, `Event`, `Rect` and `ExitReason` are package-global and unqualified in
-every unit; they may appear in another unit's parameters, results, state, record fields
-and aggregate element types.
+`EventKind`, `Diagnostic`, `Event`, `Rect` and `ExitReason` are package-global and
+unqualified in every unit; they may appear in another unit's parameters, results, state,
+record fields and aggregate element types.
 
 A type declared in a `/lib` module is package-global too, and another unit names it with
 the unit qualifier: `math.Point` in a declaration, `math.Point` in `T(x)` casts, and

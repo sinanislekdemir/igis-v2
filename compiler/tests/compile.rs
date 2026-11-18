@@ -7407,6 +7407,11 @@ begin
   return e.kind = KeyDown or e.kind = KeyUp;
 end;
 
+function is_pointer_kind(k: EventKind): bool;
+begin
+  return k = PointerDown or k = PointerMove or k = PointerUp;
+end;
+
 function status_of(code: FaultCode): Status;
 begin
   if code = FaultCode.Overflow then
@@ -7462,6 +7467,8 @@ begin
   n := probe_types.message_len(diag);
   ev.kind := KeyDown;
   if probe_types.is_key(ev) then
+    st := Ok;
+  if probe_types.is_pointer_kind(PointerDown) then
     st := Ok;
   st := probe_types.status_of(FaultCode.Overflow);
   rs[0] := r;
