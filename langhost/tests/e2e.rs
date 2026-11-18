@@ -2221,6 +2221,19 @@ fn clock_window_compiles_and_reports_the_host_path() {
     assert_eq!(result.output, b"clock_window: host ok\n".to_vec());
 }
 
+/// The M5.1 calculator against `langhost`'s disabled screen: the same routine
+/// arithmetic, parsing, formatting, entry editing and key dispatch run with no
+/// window and print the host verdict.
+#[test]
+fn calculator_compiles_and_reports_the_host_path() {
+    let path = app_path("calculator");
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "calculator").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"calculator: host ok\n".to_vec());
+}
+
 #[test]
 fn widgets_draw_the_documented_sequence() {
     // A composed panel: menu bar and one pull-down, every control, one icon

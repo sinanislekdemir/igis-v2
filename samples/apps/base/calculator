@@ -1,0 +1,1160 @@
+unit calculator;
+
+// M5.1: a windowed calculator over the existing UI toolkit.
+//
+//   run calculator          // interactive: click or type, blocks in `next_event`
+//   run calculator check    // deterministic checks, prints `calculator: ok`
+//   run calculator shot     // composes `12.5*4=50`, prints `calculator: ready`
+//                           // and holds ~5 s for the QMP screenshot harness
+//
+// One window (content 300x360, title `Calculator`): a white client panel with
+// a one-pixel bezel, a framed 284x40 display that right-aligns its text in the
+// 8x8 font, and a 4x5 grid of 68x48 cells with 4-pixel gaps. The last row is
+// `0`, `.` and one wider `=` cell spanning the last two columns. Every button
+// is drawn by `stdlib.ui_button` (pressed face plus the dotted inset focus
+// ring); the app owns the focus and pressed indices and routes pointer
+// down/up through `stdlib.ui_button_hit`/`ui_button_pressed`, so a release
+// outside the pressed button cancels the click.
+//
+// The typed entry is a `string[32]` staged through a `bytes[32]` and published
+// with one `core.substr_into`, so every mutation is atomic and the text stays
+// valid UTF-8. `core.parse_f64_into` converts the entry and
+// `core.format_f64_short_into` writes the shortest round-trip text into the
+// 64-byte `display`; a `-6` (destination too small) shows `error`.
+//
+// The arithmetic model is a one-register calculator: `accum` holds the folded
+// value, `pending` the operator (`0` none, `+ - * /`), and `fresh` marks an
+// entry that has not been typed since the last operation (a digit starts a new
+// entry, an operator reuses the accumulator). Division by zero shows `error`
+// and clears the pending operator. `C`/Escape reset everything to `0`; `DEL`
+// removes one byte (a fresh entry clears to `0`, never below one byte);
+// `+/-` toggles a leading `-`.
+//
+// Keyboard dispatch uses the event's text byte for digits, `.`, the operators
+// and `=`, and the packed key code for Enter, Escape and Backspace; other keys
+// are ignored. Drawing is client content only: no `syslib.clear`, one complete
+// frame before one `window_present`, and an owner `Expose` repaints the whole
+// content. The interactive loop blocks in `syslib.next_event`.
+//
+// `langhost` and a kernel without a framebuffer model a disabled screen, so the
+// sample runs the same arithmetic, formatting and key dispatch there and
+// prints `calculator: host ok`.
+
+uses core, stdlib, syslib, lib.out, lib.inject;
+
+const
+  WindowX = 180;
+  WindowY = 100;
+  ContentW = 300;
+  ContentH = 360;
+
+  // Display: a framed 284x40 panel inset 8 from the content edges.
+  DisplayX = 8;
+  DisplayY = 10;
+  DisplayW = 284;
+  DisplayH = 40;
+  DisplayPad = 8;
+  DisplayTextDy = 16;
+
+  // Button grid: 4 columns of 68 with 4-pixel gaps (284 wide) starting below
+  // the display; 5 rows of 48 with 4-pixel gaps (260 tall).
+  GridX = 8;
+  GridTop = 62;
+  CellW = 68;
+  CellH = 48;
+  CellGap = 4;
+  ButtonCount = 19;
+
+  // Entry text: at most 30 typed bytes (plus a sign) in a 32-byte buffer.
+  EntryCapacity = 32;
+  MaxEntryBytes = 30;
+
+  // Operator codes stored in `pending` (the printed characters).
+  OpNone = 0;
+  OpAdd = 43;
+  OpSub = 45;
+  OpMul = 42;
+  OpDiv = 47;
+
+  KeyEscape = 0x100;
+  KeyEnter = 0x103;
+
+  // Shot mode hold.
+  HoldSeconds = 5;
+  NanosPerSecond = 1000000000;
+
+var
+  // Calculator state.
+  entry: string[EntryCapacity];
+  entry_stage: bytes[EntryCapacity];
+  entry_len: int;
+  accum: f64;
+  pending: byte;
+  fresh: bool;
+  error: bool;
+  display: string[64];
+  focus: int;
+  pressed: int;
+
+  // Scratch: parsing, formatting and text conversion.
+  value: f64;
+  right: f64;
+  parsed: Status;
+  written: int;
+  copied: int;
+
+  // Window and absolute geometry.
+  id: int;
+  rect: Rect;
+  disp_x: int;
+  disp_y: int;
+  disp_text_x: int;
+  disp_text_y: int;
+
+  // Palette and event pump.
+  black: uint;
+  white: uint;
+  gray: uint;
+  ignored: Status;
+  status: Status;
+  dirty: bool;
+  ev: Event;
+
+  // Check reporting and injection scratch.
+  failed: bool;
+  step: int;
+  step_text: string[16];
+  started: uint;
+  at: int;
+  screen_w: uint;
+  screen_h: uint;
+
+// Silent check: every failure prints its step number and label.
+procedure verify(label: const string[0]; passed: bool);
+begin
+  step := step + 1;
+  if not passed then
+  begin
+    failed := true;
+    out.say("calculator: failed check ");
+    written := core.format_int_into(step_text, step, uint(10), uint(0));
+    out.say(step_text);
+    out.say(" (");
+    out.say(label);
+    out.say(")\n");
+  end;
+end;
+
+// ---- entry text ---------------------------------------------------------
+//
+// The entry is staged as bytes and published with one checked conversion, the
+// same rule the editor uses for its 8 KiB document. Every byte written here is
+// ASCII (digits, `.`, `-`), so the conversion always succeeds.
+
+procedure sync_entry();
+begin
+  copied := core.substr_into(entry, entry_stage, 0, entry_len);
+end;
+
+procedure append_byte(b: byte);
+begin
+  if entry_len < EntryCapacity then
+  begin
+    entry_stage[entry_len] := b;
+    entry_len := entry_len + 1;
+    sync_entry();
+  end;
+end;
+
+// Replaces the entry from any string. The stage is bounded, so a call with a
+// text longer than the entry capacity copies the prefix only; every caller
+// passes the display text of a formatted `f64` (at most 24 bytes).
+procedure load_entry(src: const string[0]);
+var
+  i: int;
+  n: int;
+begin
+  n := int(core.len(src));
+  i := 0;
+  while i < n and i < EntryCapacity do
+  begin
+    entry_stage[i] := src[i];
+    i := i + 1;
+  end;
+  entry_len := i;
+  sync_entry();
+end;
+
+// Copies any string into the display buffer (a runtime-checked construction;
+// the result text is far below the display's 64 bytes).
+procedure show_text(src: const string[0]);
+begin
+  display := src;
+end;
+
+// ---- arithmetic ---------------------------------------------------------
+//
+// `accum` is the folded value, `pending` the operator waiting for a right
+// operand, and `fresh` marks an entry that has not been typed since the last
+// operation. All conversion goes through the two `core` primitives.
+
+procedure reset_all();
+begin
+  accum := 0.0;
+  pending := byte(OpNone);
+  fresh := true;
+  error := false;
+  load_entry("0");
+  show_text("0");
+end;
+
+// Formats `v` into `display`; a formatter refusal (a destination too small)
+// shows `error`, as the ticket requires.
+procedure show_value(v: f64);
+begin
+  written := core.format_f64_short_into(display, v);
+  if written < 0 then
+  begin
+    error := true;
+    display := "error";
+  end;
+end;
+
+// Parses the entry into `value`; malformed text (unreachable through the
+// buttons, but a direct keyboard entry could produce it) shows `error`.
+function entry_value(): bool;
+begin
+  parsed := core.parse_f64_into(entry, value);
+  if parsed <> Ok then
+  begin
+    error := true;
+    display := "error";
+    return false;
+  end;
+  return true;
+end;
+
+function apply_op(lhs: f64; operand: f64; op: byte): f64;
+begin
+  if int(op) = OpAdd then
+    return lhs + operand;
+  if int(op) = OpSub then
+    return lhs - operand;
+  if int(op) = OpMul then
+    return lhs * operand;
+  return lhs / operand;
+end;
+
+// Folds `accum <pending> operand` into `accum`. A zero divisor shows `error`
+// and clears the pending operator; the fold reports whether it produced a
+// value (the caller stops on false).
+function fold(operand: f64): bool;
+begin
+  if int(pending) = OpDiv and operand = 0.0 then
+  begin
+    error := true;
+    display := "error";
+    pending := byte(OpNone);
+    fresh := true;
+    return false;
+  end;
+  accum := apply_op(accum, operand, pending);
+  return true;
+end;
+
+// ---- buttons ------------------------------------------------------------
+
+procedure type_digit(d: byte);
+begin
+  if error then
+    reset_all();
+  if fresh then
+  begin
+    entry_len := 0;
+    sync_entry();
+    fresh := false;
+  end;
+  // A lone `0` is a placeholder, not a leading zero: the next digit replaces
+  // it, so `DEL` on a fresh entry followed by `5` gives `5`, not `05`.
+  if entry_len = 1 then
+  begin
+    if entry_stage[0] = byte(48) then
+      entry_len := 0;
+  end;
+  if entry_len < MaxEntryBytes then
+    append_byte(d);
+  show_text(entry);
+end;
+
+procedure type_dot();
+begin
+  if error then
+    reset_all();
+  if fresh then
+  begin
+    entry_len := 0;
+    sync_entry();
+    fresh := false;
+  end;
+  // One decimal point per entry; a leading `.` is allowed.
+  if entry_len < MaxEntryBytes then
+  begin
+    if core.find(entry, byte(46)) < 0 then
+      append_byte(byte(46));
+  end;
+  show_text(entry);
+end;
+
+procedure backspace_entry();
+begin
+  if error then
+  begin
+    reset_all();
+    return;
+  end;
+  if fresh then
+  begin
+    // A fresh entry clears to `0` and starts editing from there.
+    entry_len := 0;
+    append_byte(byte(48));
+    fresh := false;
+  end
+  else if entry_len > 1 then
+  begin
+    entry_len := entry_len - 1;
+    sync_entry();
+  end;
+  show_text(entry);
+end;
+
+procedure toggle_sign();
+var
+  i: int;
+begin
+  if error then
+  begin
+    reset_all();
+    return;
+  end;
+  if fresh then
+  begin
+    // A fresh entry starts from the formatted accumulator.
+    show_value(accum);
+    load_entry(display);
+    fresh := false;
+  end;
+  if entry_len = 0 then
+    append_byte(byte(48));
+  if entry_stage[0] = byte(45) then
+  begin
+    i := 0;
+    while i + 1 < entry_len do
+    begin
+      entry_stage[i] := entry_stage[i + 1];
+      i := i + 1;
+    end;
+    entry_len := entry_len - 1;
+  end
+  else if entry_len < EntryCapacity then
+  begin
+    i := entry_len;
+    while i > 0 do
+    begin
+      entry_stage[i] := entry_stage[i - 1];
+      i := i - 1;
+    end;
+    entry_stage[0] := byte(45);
+    entry_len := entry_len + 1;
+  end;
+  sync_entry();
+  show_text(entry);
+end;
+
+procedure press_operator(op: byte);
+begin
+  if error then
+    return;
+  if fresh then
+  begin
+    // The entry is stale or already folded: reuse the accumulator.
+    pending := op;
+    fresh := true;
+    show_value(accum);
+    return;
+  end;
+  if not entry_value() then
+    return;
+  if int(pending) <> OpNone then
+  begin
+    if not fold(value) then
+      return;
+  end
+  else
+    accum := value;
+  pending := op;
+  fresh := true;
+  show_value(accum);
+end;
+
+procedure press_equals();
+var
+  ok: bool;
+begin
+  if error then
+    return;
+  ok := true;
+  if not fresh then
+    ok := entry_value();
+  if not ok then
+    return;
+  if int(pending) <> OpNone then
+  begin
+    if fresh then
+      right := accum
+    else
+      right := value;
+    if not fold(right) then
+      return;
+    pending := byte(OpNone);
+  end
+  else if not fresh then
+    accum := value;
+  fresh := true;
+  show_value(accum);
+  if not error then
+    load_entry(display);
+end;
+
+// One button activation; the grid indices are in reading order:
+//   0 C, 1 DEL, 2 +/-, 3 /, 4..6 7 8 9, 7 *, 8..10 4 5 6, 11 -,
+//   12..14 1 2 3, 15 +, 16 0, 17 ., 18 = (the wide last cell).
+procedure activate(index: int);
+begin
+  focus := index;
+  if index = 0 then
+    reset_all()
+  else if index = 1 then
+    backspace_entry()
+  else if index = 2 then
+    toggle_sign()
+  else if index = 3 then
+    press_operator(byte(OpDiv))
+  else if index = 4 then
+    type_digit(byte(55))
+  else if index = 5 then
+    type_digit(byte(56))
+  else if index = 6 then
+    type_digit(byte(57))
+  else if index = 7 then
+    press_operator(byte(OpMul))
+  else if index = 8 then
+    type_digit(byte(52))
+  else if index = 9 then
+    type_digit(byte(53))
+  else if index = 10 then
+    type_digit(byte(54))
+  else if index = 11 then
+    press_operator(byte(OpSub))
+  else if index = 12 then
+    type_digit(byte(49))
+  else if index = 13 then
+    type_digit(byte(50))
+  else if index = 14 then
+    type_digit(byte(51))
+  else if index = 15 then
+    press_operator(byte(OpAdd))
+  else if index = 16 then
+    type_digit(byte(48))
+  else if index = 17 then
+    type_dot()
+  else
+    press_equals();
+end;
+
+procedure label_of(index: int; label: var string[8]);
+begin
+  if index = 0 then
+    label := "C"
+  else if index = 1 then
+    label := "DEL"
+  else if index = 2 then
+    label := "+/-"
+  else if index = 3 then
+    label := "/"
+  else if index = 4 then
+    label := "7"
+  else if index = 5 then
+    label := "8"
+  else if index = 6 then
+    label := "9"
+  else if index = 7 then
+    label := "*"
+  else if index = 8 then
+    label := "4"
+  else if index = 9 then
+    label := "5"
+  else if index = 10 then
+    label := "6"
+  else if index = 11 then
+    label := "-"
+  else if index = 12 then
+    label := "1"
+  else if index = 13 then
+    label := "2"
+  else if index = 14 then
+    label := "3"
+  else if index = 15 then
+    label := "+"
+  else if index = 16 then
+    label := "0"
+  else if index = 17 then
+    label := "."
+  else
+    label := "=";
+end;
+
+// The cell of one button: a regular grid cell except the wide `=` in the last
+// row, which spans the last two columns.
+procedure button_geometry(index: int;
+                          out_x: var int; out_y: var int;
+                          out_w: var int; out_h: var int);
+var
+  row: int;
+  col: int;
+begin
+  row := index div 4;
+  col := index mod 4;
+  out_w := CellW;
+  out_h := CellH;
+  if index = 16 then
+  begin
+    row := 4;
+    col := 0;
+  end
+  else if index = 17 then
+  begin
+    row := 4;
+    col := 1;
+  end
+  else if index = 18 then
+  begin
+    row := 4;
+    col := 2;
+    out_w := CellW * 2 + CellGap;
+  end;
+  out_x := rect.x + GridX + col * (CellW + CellGap);
+  out_y := rect.y + GridTop + row * (CellH + CellGap);
+end;
+
+function button_at(px: int; py: int): int;
+var
+  i: int;
+  x: int;
+  y: int;
+  w: int;
+  h: int;
+begin
+  i := 0;
+  while i < ButtonCount do
+  begin
+    button_geometry(i, x, y, w, h);
+    if stdlib.ui_button_hit(x, y, w, h, px, py) then
+      return i;
+    i := i + 1;
+  end;
+  return -1;
+end;
+
+// ---- drawing ------------------------------------------------------------
+
+// One complete frame: panel, bezel, display and every button. The caller
+// presents once afterwards, so a partial frame is never shown.
+procedure draw_frame();
+var
+  i: int;
+  x: int;
+  y: int;
+  w: int;
+  h: int;
+  label: string[8];
+begin
+  ignored := syslib.fill_rect(rect.x, rect.y, ContentW, ContentH, white);
+  ignored := stdlib.ui_frame(rect.x, rect.y, ContentW, ContentH);
+
+  ignored := syslib.fill_rect(disp_x, disp_y, DisplayW, DisplayH, white);
+  ignored := stdlib.ui_frame(disp_x, disp_y, DisplayW, DisplayH);
+  disp_text_x := disp_x + DisplayW - DisplayPad - stdlib.ui_text_width(display);
+  if disp_text_x < disp_x + 4 then
+    disp_text_x := disp_x + 4;
+  disp_text_y := disp_y + DisplayTextDy;
+  ignored := syslib.draw_text(disp_text_x, disp_text_y, display, black);
+
+  i := 0;
+  while i < ButtonCount do
+  begin
+    button_geometry(i, x, y, w, h);
+    label_of(i, label);
+    ignored := stdlib.ui_button(x, y, w, h, label, pressed = i, focus = i);
+    i := i + 1;
+  end;
+end;
+
+procedure present_frame();
+begin
+  ignored := syslib.window_present(id);
+end;
+
+// ---- events -------------------------------------------------------------
+
+procedure handle_pointer();
+var
+  hit: int;
+  x: int;
+  y: int;
+  w: int;
+  h: int;
+begin
+  if ev.kind = PointerDown then
+  begin
+    hit := button_at(ev.x, ev.y);
+    if hit >= 0 then
+    begin
+      focus := hit;
+      pressed := hit;
+    end;
+  end
+  else if ev.kind = PointerUp then
+  begin
+    if pressed >= 0 then
+    begin
+      button_geometry(pressed, x, y, w, h);
+      if stdlib.ui_button_pressed(
+        true, stdlib.ui_button_hit(x, y, w, h, ev.x, ev.y)) then
+        activate(pressed);
+      pressed := -1;
+    end;
+  end;
+end;
+
+// The text byte decides the character (digits, `.`, `+ - * /`, `=`); the key
+// code decides Enter, Escape and Backspace. Everything else is ignored.
+procedure handle_key();
+var
+  b: byte;
+  kc: int;
+begin
+  kc := stdlib.ui_key_code(ev.code);
+  b := stdlib.ui_key_text(ev.code);
+  if kc = KeyEnter then
+    press_equals()
+  else if kc = KeyEscape then
+    reset_all()
+  else if stdlib.ui_key_is_backspace(ev.code) then
+    backspace_entry()
+  else if b >= byte(32) and b < byte(127) then
+  begin
+    if b >= byte(48) and b <= byte(57) then
+      type_digit(b)
+    else if b = byte(46) then
+      type_dot()
+    else if int(b) = OpAdd or int(b) = OpSub or int(b) = OpMul or int(b) = OpDiv then
+      press_operator(b)
+    else if b = byte(61) then
+      press_equals();
+  end;
+end;
+
+// Poll and handle every queued event, then repaint once if anything changed.
+procedure drain_events();
+var
+  running: bool;
+  count: int;
+begin
+  running := true;
+  count := 0;
+  while running and count < 64 do
+  begin
+    status := syslib.poll_event(ev);
+    if status = Ok then
+    begin
+      count := count + 1;
+      if ev.kind = Expose then
+      begin
+        if ev.window = id then
+          dirty := true;
+      end
+      else if ev.kind = KeyDown then
+      begin
+        handle_key();
+        dirty := true;
+      end
+      else if ev.kind = PointerDown or ev.kind = PointerUp then
+      begin
+        handle_pointer();
+        dirty := true;
+      end;
+    end
+    else
+      running := false;
+  end;
+  if dirty then
+  begin
+    draw_frame();
+    present_frame();
+    dirty := false;
+  end;
+end;
+
+// Interactive mode: draw once, then block for one event at a time. Only this
+// window's own events (and an addressed expose) are handled.
+procedure interactive();
+begin
+  draw_frame();
+  present_frame();
+  while true do
+  begin
+    status := syslib.next_event(ev);
+    if status = Ok then
+    begin
+      if ev.kind = Expose then
+      begin
+        if ev.window = id then
+        begin
+          draw_frame();
+          present_frame();
+        end;
+      end
+      else if ev.window = id then
+      begin
+        if ev.kind = KeyDown then
+          handle_key()
+        else if ev.kind = PointerDown or ev.kind = PointerUp then
+          handle_pointer();
+        draw_frame();
+        present_frame();
+      end;
+    end;
+  end;
+end;
+
+// ---- check mode ---------------------------------------------------------
+
+procedure click_index(index: int);
+var
+  x: int;
+  y: int;
+  w: int;
+  h: int;
+begin
+  button_geometry(index, x, y, w, h);
+  status := inject.pointer_to(x + w div 2, y + h div 2);
+  drain_events();
+  status := inject.pointer_down();
+  drain_events();
+  status := inject.pointer_up();
+  drain_events();
+end;
+
+procedure key(key_code: int; text_byte: int);
+begin
+  status := inject.inject_key(key_code, text_byte);
+  drain_events();
+end;
+
+// The kernel proof: pointer clicks and key events drive the same handlers the
+// interactive loop uses, and every result is asserted as app state plus a
+// representative pixel in the shadow.
+procedure check_mode();
+var
+  x: int;
+  y: int;
+  w: int;
+  h: int;
+  c1x: int;
+  c1y: int;
+  c9x: int;
+  c9y: int;
+  cnx: int;
+  cny: int;
+begin
+  reset_all();
+  focus := 0;
+  pressed := -1;
+  draw_frame();
+  present_frame();
+
+  // Baseline composition.
+  verify("content white", syslib.get_pixel(rect.x + 2, rect.y + 2) = white);
+  verify("bezel black", syslib.get_pixel(rect.x, rect.y + 20) = black);
+  verify("bezel inner white", syslib.get_pixel(rect.x + 1, rect.y + 20) = white);
+  verify("display frame", syslib.get_pixel(disp_x, disp_y + 20) = black);
+  verify("display interior", syslib.get_pixel(disp_x + 2, disp_y + 20) = white);
+  verify("zero ink", syslib.get_pixel(disp_text_x + 1, disp_text_y) = black);
+  verify("zero gap", syslib.get_pixel(disp_text_x, disp_text_y) = white);
+
+  // The C button: border, face and the dotted inset focus ring.
+  button_geometry(0, x, y, w, h);
+  verify("button border", syslib.get_pixel(x, y) = black);
+  verify("button face", syslib.get_pixel(x + 2, y + 2) = white);
+  verify("focus ring", syslib.get_pixel(x + 3, y + 3) = black);
+  verify("focus ring gap", syslib.get_pixel(x + 4, y + 3) = white);
+
+  // 1. A pointer press paints the pressed face; the release activates "1".
+  button_geometry(12, c1x, c1y, w, h);
+  status := inject.pointer_to(c1x + w div 2, c1y + h div 2);
+  drain_events();
+  status := inject.pointer_down();
+  drain_events();
+  verify("press sets pressed", pressed = 12 and focus = 12);
+  verify("press keeps the entry", entry = "0" and display = "0");
+  verify("pressed face", syslib.get_pixel(c1x + 2, c1y + 2) = gray);
+  status := inject.pointer_up();
+  drain_events();
+  verify("release activates one", entry = "1" and display = "1" and pressed = -1);
+  verify("released face", syslib.get_pixel(c1x + 2, c1y + 2) = white);
+  // "1" is one glyph right-aligned: row 0 has ink at column 2 only.
+  verify("one ink", syslib.get_pixel(disp_text_x + 2, disp_text_y) = black);
+  verify("one gap", syslib.get_pixel(disp_text_x, disp_text_y) = white);
+
+  // 2. "1 + 2 =" through pointer clicks.
+  click_index(15);
+  verify("add pending", int(pending) = OpAdd and fresh);
+  verify("accumulator is one", accum = 1.0);
+  verify("operator shows the accumulator", display = "1");
+  click_index(13);
+  click_index(18);
+  verify("sum state", accum = 3.0 and int(pending) = OpNone and fresh);
+  verify("sum text", entry = "3" and display = "3");
+  verify("sum ink", syslib.get_pixel(disp_text_x + 1, disp_text_y) = black);
+  verify("sum gap", syslib.get_pixel(disp_text_x, disp_text_y) = white);
+
+  // 3. Keyboard 7 * 8 = 56 (Shift+8 is the `*` key: code 56, text 42).
+  key(55, 55);
+  verify("seven typed", entry = "7");
+  key(56, 42);
+  verify("multiply pending", int(pending) = OpMul and accum = 7.0);
+  key(56, 56);
+  key(KeyEnter, 0);
+  verify("product state", accum = 56.0 and int(pending) = OpNone);
+  verify("product text", display = "56");
+  verify("product five ink", syslib.get_pixel(disp_text_x, disp_text_y) = black);
+  verify("product six ink", syslib.get_pixel(disp_text_x + 10, disp_text_y) = black);
+
+  // 4. Division by zero shows `error` and clears the pending operator.
+  key(49, 49);
+  key(47, 47);
+  key(48, 48);
+  key(61, 61);
+  verify("division by zero", error and display = "error" and int(pending) = OpNone);
+  // "error" is five glyphs right-aligned; 'e' row 2 has ink at column 1.
+  verify("error ink", syslib.get_pixel(disp_text_x + 1, disp_text_y + 2) = black);
+  verify("error top gap", syslib.get_pixel(disp_text_x, disp_text_y) = white);
+
+  // 5. Escape is C.
+  key(KeyEscape, 0);
+  verify(
+    "escape resets",
+    not error and display = "0" and entry = "0"
+      and int(pending) = OpNone and accum = 0.0);
+  verify("reset zero ink", syslib.get_pixel(disp_text_x + 1, disp_text_y) = black);
+
+  // 6. Decimal arithmetic: 1.5 + 2.25 = 3.75.
+  key(49, 49);
+  key(46, 46);
+  key(53, 53);
+  verify("decimal entry", entry = "1.5" and display = "1.5");
+  key(61, 43);
+  key(50, 50);
+  key(46, 46);
+  key(50, 50);
+  key(53, 53);
+  verify("decimal right", entry = "2.25");
+  key(KeyEnter, 0);
+  verify("decimal sum", accum = 3.75 and display = "3.75");
+  // "3.75": '3' at the left, '.' row 5 column 2 (the point is at +8).
+  verify("decimal three ink", syslib.get_pixel(disp_text_x + 1, disp_text_y) = black);
+  verify("decimal point ink", syslib.get_pixel(disp_text_x + 10, disp_text_y + 5) = black);
+
+  // 7. A second decimal point is ignored.
+  click_index(0);
+  verify("C click resets", display = "0" and focus = 0);
+  key(51, 51);
+  key(46, 46);
+  key(46, 46);
+  key(52, 52);
+  verify("single dot", entry = "3.4");
+
+  // 8. DEL removes one byte, never below one byte, and clears a fresh entry.
+  click_index(1);
+  verify("del removes", entry = "3.");
+  click_index(1);
+  verify("del last digit", entry = "3");
+  click_index(1);
+  verify("del floor", entry = "3");
+  key(KeyEnter, 0);
+  verify("normalized", display = "3" and fresh);
+  click_index(1);
+  verify("del fresh clears", entry = "0" and display = "0" and not fresh);
+
+  // 9. +/- toggles the sign; a fresh entry starts from the accumulator.
+  key(53, 53);
+  verify("five typed", entry = "5" and not fresh);
+  click_index(2);
+  verify("sign negative", entry = "-5" and display = "-5");
+  verify("minus ink", syslib.get_pixel(disp_text_x + 1, disp_text_y + 3) = black);
+  click_index(2);
+  verify("sign positive", entry = "5");
+  click_index(0);
+  key(50, 50);
+  key(61, 43);
+  key(51, 51);
+  key(KeyEnter, 0);
+  verify("five result", accum = 5.0 and display = "5");
+  click_index(2);
+  verify("sign from fresh", entry = "-5" and display = "-5");
+  click_index(2);
+  verify("sign back", entry = "5");
+
+  // 10. Pressing a button, dragging off it and releasing there cancels.
+  button_geometry(6, c9x, c9y, w, h);
+  status := inject.pointer_to(c9x + w div 2, c9y + h div 2);
+  drain_events();
+  status := inject.pointer_down();
+  drain_events();
+  verify("nine pressed", pressed = 6 and focus = 6);
+  verify("nine pressed face", syslib.get_pixel(c9x + 2, c9y + 2) = gray);
+  // Move below the grid with the button still held, then release there.
+  status := syslib.inject_pointer(0, 200, uint(1));
+  drain_events();
+  verify("drag holds the press", pressed = 6);
+  status := syslib.inject_pointer(0, 0, uint(0));
+  drain_events();
+  verify("drag off cancels", pressed = -1 and entry = "5" and display = "5");
+  verify("nine released face", syslib.get_pixel(c9x + 2, c9y + 2) = white);
+
+  // 11. The focus ring follows the last click and leaves the old button.
+  button_geometry(0, cnx, cny, w, h);
+  click_index(3);
+  button_geometry(3, x, y, w, h);
+  verify("focus follows the click", focus = 3);
+  verify("focus ring moved", syslib.get_pixel(x + 3, y + 3) = black);
+  verify("old ring gone", syslib.get_pixel(cnx + 3, cny + 3) = white);
+
+  status := syslib.window_close(id);
+  verify("window closed", status = Ok);
+
+  if failed then
+    out.say("calculator: failed\n")
+  else
+    out.say("calculator: ok\n");
+end;
+
+// ---- shot mode ----------------------------------------------------------
+
+// Composes a real result through the same handlers (12.5 * 4 = 50), presents
+// one frame and holds it for the screenshot harness without redrawing.
+procedure shot_mode();
+begin
+  reset_all();
+  type_digit(byte(49));
+  type_digit(byte(50));
+  type_dot();
+  type_digit(byte(53));
+  press_operator(byte(OpMul));
+  type_digit(byte(52));
+  press_equals();
+  focus := 18;
+  pressed := -1;
+  draw_frame();
+  present_frame();
+  out.say("calculator: ready\n");
+  started := core.clock();
+  while core.clock() - started < uint(HoldSeconds * NanosPerSecond) do
+    at := 0;
+  status := syslib.window_close(id);
+  out.say("calculator: done\n");
+end;
+
+// ---- host path ----------------------------------------------------------
+
+// The `+/-` button has no key of its own, so the host path activates its grid
+// index through the same `activate` the pointer handler calls.
+procedure click_sign_on_host();
+begin
+  activate(2);
+end;
+
+// One key through the same dispatch the kernel uses, with the packed
+// `Event.code` shape (text | modifiers << 8 | key code << 16).
+procedure host_key(key_code: int; text_byte: int);
+begin
+  ev.kind := KeyDown;
+  ev.x := 0;
+  ev.y := 0;
+  ev.code := uint(key_code * 65536 + text_byte);
+  ev.window := 0;
+  handle_key();
+end;
+
+// The disabled-screen path: arithmetic, parsing, formatting, entry editing
+// and key dispatch are pure and must agree on every host.
+procedure host_path();
+begin
+  reset_all();
+  verify("initial zero", display = "0" and entry = "0" and fresh and not error);
+  verify("initial accumulator", accum = 0.0 and int(pending) = OpNone);
+
+  // 2 + 3 = 5 through the key dispatch.
+  host_key(50, 50);
+  host_key(61, 43);
+  verify("host add pending", int(pending) = OpAdd and accum = 2.0);
+  host_key(51, 51);
+  host_key(KeyEnter, 0);
+  verify("host sum", accum = 5.0 and display = "5" and entry = "5");
+
+  // 2 - 5 = -3 (a negative result keeps its sign through format and parse).
+  reset_all();
+  host_key(50, 50);
+  host_key(45, 45);
+  host_key(53, 53);
+  host_key(KeyEnter, 0);
+  verify("negative result", accum = -3.0 and display = "-3");
+
+  // 7 * 8 = 56.
+  reset_all();
+  host_key(55, 55);
+  host_key(56, 42);
+  host_key(56, 56);
+  host_key(KeyEnter, 0);
+  verify("product", accum = 56.0 and display = "56");
+
+  // 1 / 0 = error, then a digit starts over.
+  reset_all();
+  host_key(49, 49);
+  host_key(47, 47);
+  host_key(48, 48);
+  host_key(61, 61);
+  verify("host division by zero", error and display = "error");
+  host_key(52, 52);
+  verify("digit clears an error", not error and entry = "4" and display = "4");
+
+  // 1.5 + 2.25 = 3.75.
+  reset_all();
+  host_key(49, 49);
+  host_key(46, 46);
+  host_key(53, 53);
+  verify("host decimal entry", entry = "1.5");
+  host_key(61, 43);
+  host_key(50, 50);
+  host_key(46, 46);
+  host_key(50, 50);
+  host_key(53, 53);
+  host_key(KeyEnter, 0);
+  verify("host decimal sum", accum = 3.75 and display = "3.75");
+
+  // One decimal point per entry.
+  reset_all();
+  host_key(51, 51);
+  host_key(46, 46);
+  host_key(46, 46);
+  host_key(52, 52);
+  verify("host single dot", entry = "3.4");
+
+  // DEL removes one byte and never drops below one byte.
+  reset_all();
+  host_key(49, 49);
+  host_key(50, 50);
+  host_key(0x101, 0);
+  verify("host del once", entry = "1");
+  host_key(0x101, 0);
+  verify("host del floor", entry = "1");
+
+  // A fresh entry clears to 0 on DEL.
+  host_key(61, 61);
+  verify("host fresh normalize", display = "1" and fresh);
+  host_key(0x101, 0);
+  verify("host del fresh", entry = "0" and display = "0");
+
+  // +/- toggles a leading minus, and starts from the accumulator when fresh.
+  reset_all();
+  host_key(53, 53);
+  click_sign_on_host();
+  verify("host sign negative", entry = "-5");
+  click_sign_on_host();
+  verify("host sign positive", entry = "5");
+  host_key(KeyEnter, 0);
+  verify("host five result", accum = 5.0);
+  click_sign_on_host();
+  verify("host sign from fresh", entry = "-5" and display = "-5");
+
+  // Entry capacity: 30 typed digits, further digits ignored.
+  reset_all();
+  host_key(49, 49);
+  reset_all();
+  at := 0;
+  while at < 40 do
+  begin
+    host_key(49, 49);
+    at := at + 1;
+  end;
+  verify("entry capacity", entry_len = MaxEntryBytes and int(core.len(entry)) = MaxEntryBytes);
+
+  // Escape is C.
+  host_key(KeyEscape, 0);
+  verify("host escape", display = "0" and entry = "0" and not error);
+
+  if failed then
+    out.say("calculator: host failed\n")
+  else
+    out.say("calculator: host ok\n");
+end;
+
+// ---- entry point --------------------------------------------------------
+
+procedure main(args: const string[1024]);
+begin
+  failed := false;
+  step := 0;
+  dirty := false;
+  black := stdlib.ui_black();
+  white := stdlib.ui_white();
+  gray := stdlib.ui_gray();
+  pending := byte(OpNone);
+  fresh := true;
+  error := false;
+  focus := 0;
+  pressed := -1;
+  accum := 0.0;
+  reset_all();
+
+  screen_w := syslib.screen_width();
+  screen_h := syslib.screen_height();
+  if screen_w = uint(0) then
+    host_path()
+  else if screen_w < uint(WindowX + ContentW + 20)
+      or screen_h < uint(WindowY + ContentH + 20) then
+    out.say("calculator: screen too small\n")
+  else
+  begin
+    status := syslib.window_open(WindowX, WindowY, ContentW, ContentH, "Calculator", id);
+    if status <> Ok then
+      out.say("calculator: no window\n")
+    else
+    begin
+      status := syslib.window_content_rect(id, rect);
+      if status <> Ok then
+        out.say("calculator: no content rect\n")
+      else
+      begin
+        disp_x := rect.x + DisplayX;
+        disp_y := rect.y + DisplayY;
+        if args = "shot" then
+          shot_mode()
+        else if args = "check" then
+          check_mode()
+        else
+          interactive();
+      end;
+    end;
+  end;
+end;
