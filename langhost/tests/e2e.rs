@@ -233,9 +233,10 @@ fn stage_app_samples_compile_with_the_spawn_builtins() {
 
 #[test]
 fn module_demo_imports_lib_math_on_the_host() {
-    // spec 0018 M1–M13, M3.3: the staged `/lib` proof reads `lib/math.ig` from
-    // the same tree the kernel's image reader walks, so the host run pins the
-    // module path as well as the five helpers' results.
+    // spec 0018 M1–M13, M3.3; ADR 0039 M4.1: the staged `/lib` proof reads
+    // `lib/math.ig` and `lib/probe.ig` from the same tree the kernel's image
+    // reader walks, so the host run pins the module paths, the five `math`
+    // helpers' results and the predeclared types crossing into `probe`.
     let path = app_path("module_demo");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
     let package = langhost::compile(&source, "module_demo").expect("module_demo compiles");
@@ -243,7 +244,7 @@ fn module_demo_imports_lib_math_on_the_host() {
     assert_eq!(result.reason, ExitReason::Ok);
     assert_eq!(
         String::from_utf8(result.output).expect("UTF-8 output"),
-        "module_demo: ok\n"
+        "module_demo: lib types ok\nmodule_demo: ok\n"
     );
 }
 

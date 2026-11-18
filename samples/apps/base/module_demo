@@ -1,13 +1,15 @@
 unit module_demo;
 
-// In-kernel proof of the `/lib` module path (spec 0018, M1–M13; M3.3).
+// In-kernel proof of the `/lib` module path (spec 0018, M1–M13; M3.3) and of
+// predeclared nominal types crossing a unit boundary (ADR 0039, M4.1).
 //
-// `lib.math` is `samples/apps/lib/math.ig`, resolved by the kernel's
-// `compiler::SourceReader` over the mounted image at load time. The module's
-// helpers are called as `math.*`; the application itself declares no top-level
-// `var` state, no stream endpoint and no new syntax.
+// `lib.math` is `samples/apps/lib/math.ig` and `lib.probe` is
+// `samples/apps/lib/probe.ig`, resolved by the kernel's
+// `compiler::SourceReader` over the mounted image at load time. The modules'
+// helpers are called as `math.*` and `probe.*`; the application itself declares
+// no top-level `var` state, no stream endpoint and no new syntax.
 
-uses core, lib.math;
+uses core, lib.math, lib.probe;
 
 procedure check(what: const string[0]; passed: bool; ok: var bool);
 begin
@@ -23,6 +25,11 @@ end;
 procedure main(args: const string[1024]);
 var
   ok: bool;
+  r: Rect;
+  reason: ExitReason;
+  ordinal: FaultCode;
+  diag: Diagnostic;
+  ev: Event;
 begin
   ok := true;
 
@@ -53,6 +60,36 @@ begin
   check("sign zero", math.sign(0) = 0, ok);
   check("sign positive", math.sign(3) = 1, ok);
 
+  // Predeclared nominal types cross into `lib.probe` (ADR 0039, C1): a record
+  // by value (`const Rect`), a sum matched with an exhaustive `case`, a
+  // record's buffer field, and the `EventKind` enum inside an `Event` record.
+  r.x := 0;
+  r.y := 0;
+  r.w := 6;
+  r.h := 7;
+  check("probe rect_area", probe.rect_area(r) = 42, ok);
+
+  reason := Ok;
+  check("probe reason Ok", probe.reason_ok(reason), ok);
+  reason := Killed;
+  check("probe reason Killed", not probe.reason_ok(reason), ok);
+  ordinal := FaultCode.DivideByZero;
+  reason := Faulted(ordinal);
+  check("probe reason Faulted", not probe.reason_ok(reason), ok);
+
+  diag.message := "boom";
+  check("probe diagnostic_len", probe.diagnostic_len(diag) = 4, ok);
+
+  ev.kind := KeyDown;
+  check("probe event KeyDown", probe.event_is_key(ev), ok);
+  ev.kind := KeyUp;
+  check("probe event KeyUp", probe.event_is_key(ev), ok);
+  ev.kind := PointerMove;
+  check("probe event PointerMove", not probe.event_is_key(ev), ok);
+
   if ok then
+  begin
+    core.write("module_demo: lib types ok\n");
     core.write("module_demo: ok\n");
+  end;
 end;

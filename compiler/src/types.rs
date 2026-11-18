@@ -12,9 +12,10 @@ pub const MAX_CAPACITY: u32 = 1 << 20;
 
 /// Enum id of the predeclared `Status` type (spec 0003, "Errors").
 ///
-/// Enum ids are local to one compilation and assigned in declaration order,
-/// with `Status` first. The id never reaches the artifact: an enum value is its
-/// ordinal in one 8-byte slot, and casts carry the variant count as an
+/// Enum ids are assigned in declaration order with `Status` first, so the
+/// predeclared ids are identical in every unit of a package (spec 0008,
+/// "Types"; ADR 0039). A user id never reaches the artifact: an enum value is
+/// its ordinal in one 8-byte slot, and casts carry the variant count as an
 /// immediate.
 pub const STATUS_ENUM: u16 = 0;
 
@@ -36,16 +37,19 @@ pub enum Kind {
     /// Raw bytes with a fixed capacity.
     Bytes,
     /// A nominal enum type, by compiler-local enum id. The value is the
-    /// variant ordinal in one 8-byte slot (spec 0003).
+    /// variant ordinal in one 8-byte slot (spec 0003). The predeclared
+    /// `Status` and `FaultCode` occupy fixed ids in every unit.
     Enum(u16),
     /// A nominal record type, by compiler-local record id. The layout (field
     /// offsets and size) lives in the compiler's record table; [`Type::cap`]
     /// carries the size in bytes so frame and state layout need no extra
-    /// table lookup.
+    /// table lookup. The predeclared `Diagnostic`, `Event` and `Rect` occupy
+    /// fixed ids in every unit.
     Record(u16),
     /// A nominal sum type, by compiler-local sum id. The layout (variant
     /// payloads and size) lives in the compiler's sum table; [`Type::cap`]
-    /// carries the size in bytes.
+    /// carries the size in bytes. The predeclared `ExitReason` occupies the
+    /// first id in every unit.
     Sum(u16),
     /// A fixed-size array, by compiler-local array id. The element type and
     /// count live in the compiler's array table; [`Type::cap`] carries the

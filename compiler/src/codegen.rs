@@ -491,13 +491,22 @@ impl<'a, 'b> ConstantPool<'a, 'b> {
 
 /// True when a type can cross the library/application unit boundary.
 ///
-/// Scalars, buffers and the predeclared enums have representation-only
-/// identity; records, sums and user enums are compiler-local ids. Array, ring
-/// and map ids are shared by the one interning table, but their element and
-/// key/value types must themselves be safe.
+/// Scalars, buffers and the predeclared nominal types have identity that is
+/// identical in every unit, because `abi::layout` fixes their ids and each unit
+/// builds the same predeclared table prefix (spec 0008, "Types"; ADR 0039):
+/// `Status` (`STATUS_ENUM`), `FaultCode` (`FAULT_CODE_ENUM`), `Diagnostic`
+/// (`DIAGNOSTIC_RECORD`), `Event` (`EVENT_RECORD`), `Rect` (`RECT_RECORD`) and
+/// `ExitReason` (`EXIT_REASON_SUM`). User-declared records, sums and enums keep
+/// compiler-local ids and cannot cross until the package-wide type table of
+/// M4.2. Array, ring and map ids are shared by the one interning table, but
+/// their element and key/value types must themselves be safe.
 fn cross_unit_type_ok(ty: Type, arrays: &[ArrayDef], rings: &[RingDef], maps: &[MapDef]) -> bool {
     match ty.kind {
-        Kind::Record(_) | Kind::Sum(_) => false,
+        // `Diagnostic` (0), `Event` (1) and `Rect` (2); user records follow.
+        Kind::Record(id) => id <= RECT_RECORD,
+        // `ExitReason` (0); user sums follow.
+        Kind::Sum(id) => id == EXIT_REASON_SUM,
+        // `Status` (0) and `FaultCode` (1); user enums follow.
         Kind::Enum(id) => id <= FAULT_CODE_ENUM,
         Kind::Array(id) => arrays
             .get(id as usize)
@@ -895,8 +904,10 @@ fn is_builtin_type_name(name: &str) -> bool {
 }
 
 /// Builds one unit's symbol tables: constants, enums, records, sums, state and
-/// signatures. Type ids are local to the unit, so units can be compiled side
-/// by side without a shared declaration namespace.
+/// signatures. Type ids are local to the unit, except the predeclared nominal
+/// types whose ids `abi::layout` fixes and every unit therefore agrees on
+/// (spec 0008, "Types"; ADR 0039), so units can be compiled side by side
+/// without a shared declaration namespace.
 #[derive(Clone, Copy)]
 struct UnitTables<'a> {
     name: &'a str,
@@ -7156,11 +7167,13 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                         false,
                     )
                 };
-                // Types are compiler-local per unit, so a cross-unit
-                // parameter or result that names a record, sum or user enum
-                // has no shared identity yet. Scalars, buffers, arrays of
-                // those and the two predeclared enums (`Status`, `FaultCode`)
-                // are safe; the array table itself is shared by every unit.
+                // Type ids are compiler-local per unit, except the predeclared
+                // nominal types, whose fixed ids are identical in every unit
+                // (spec 0008, "Types"; ADR 0039). A cross-unit parameter or
+                // result that names a user record, sum or enum still has no
+                // shared identity. Scalars, buffers, the six predeclared types
+                // and arrays/rings/maps of them are safe; the array, ring and
+                // map tables themselves are shared by every unit.
                 if cross_unit {
                     let arrays = self.arrays.as_slice();
                     let rings = self.rings.as_slice();
@@ -7177,7 +7190,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                             line,
                             column,
                             format_args!(
-                                "`{target}` uses a record, sum or user enum across units; aggregate types cannot cross a unit boundary"
+                                "`{target}` uses a user-declared record, sum or enum across units; only the predeclared types can cross a unit boundary"
                             ),
                         ));
                     }

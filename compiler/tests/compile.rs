@@ -7364,6 +7364,116 @@ end;
 }
 
 #[test]
+fn predeclared_nominal_types_cross_the_unit_boundary() {
+    // ADR 0039 (C1): `Status`, `FaultCode`, `Diagnostic`, `Event`, `Rect` and
+    // `ExitReason` have fixed ids in every unit, so they may appear in another
+    // unit's parameters and (for the scalar enums) results, alone or inside an
+    // array.
+    let probe = br#"
+unit probe_types;
+uses core;
+
+function area(r: const Rect): int;
+begin
+  return r.w * r.h;
+end;
+
+function move(r: var Rect; dx: int): bool;
+begin
+  r.x := r.x + dx;
+  return true;
+end;
+
+function classify(reason: const ExitReason): Status;
+var
+  st: Status;
+begin
+  st := Ok;
+  case reason of
+    Ok: st := Ok
+    Killed: st := Invalid
+    Faulted(code): st := NotFound
+  end;
+  return st;
+end;
+
+function message_len(d: const Diagnostic): int;
+begin
+  return int(core.len(d.message));
+end;
+
+function is_key(e: const Event): bool;
+begin
+  return e.kind = KeyDown or e.kind = KeyUp;
+end;
+
+function status_of(code: FaultCode): Status;
+begin
+  if code = FaultCode.Overflow then
+    return Invalid;
+  return Ok;
+end;
+
+function total_area(rs: const array[Rect, 4]): int;
+var
+  i: int;
+  total: int;
+begin
+  total := 0;
+  i := 0;
+  while i < 4 do
+  begin
+    total := total + rs[i].w * rs[i].h;
+    i := i + 1;
+  end;
+  return total;
+end;
+"#;
+    let app = br#"
+unit probe_app;
+uses core, lib.probe_types;
+
+var
+  r: Rect;
+  rs: array[Rect, 4];
+  reason: ExitReason;
+  diag: Diagnostic;
+  ev: Event;
+  st: Status;
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  r.w := 2;
+  r.h := 3;
+  n := probe_types.area(r);
+  st := Ok;
+  if probe_types.move(r, 5) then
+    st := Ok;
+  reason := Ok;
+  st := probe_types.classify(reason);
+  reason := Faulted(FaultCode.DivideByZero);
+  case reason of
+    Ok: st := Ok
+    Killed: st := NotFound
+    Faulted(code): st := Invalid
+  end;
+  diag.message := "boom";
+  n := probe_types.message_len(diag);
+  ev.kind := KeyDown;
+  if probe_types.is_key(ev) then
+    st := Ok;
+  st := probe_types.status_of(FaultCode.Overflow);
+  rs[0] := r;
+  n := probe_types.total_area(rs);
+  core.write("ok\n");
+end;
+"#;
+    compile_imports(app, "probe_app.ig", &[("lib/probe_types.ig", probe)])
+        .expect("the predeclared nominal types cross the boundary");
+}
+
+#[test]
 fn aggregate_types_are_still_rejected_across_the_unit_boundary() {
     let types = br#"
 unit types;
@@ -7391,10 +7501,88 @@ begin
 end;
 "#;
     let error = compile_imports(app, "types_app.ig", &[("lib/types.ig", types)])
-        .expect_err("a record may not cross units");
+        .expect_err("a user record may not cross units");
     assert!(error.message.contains("across units"), "{}", error.message);
     assert!(
-        error.message.contains("record, sum or user enum"),
+        error.message.contains("user-declared record, sum or enum"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.contains("predeclared types"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn user_sums_and_enums_are_still_rejected_across_the_unit_boundary() {
+    // The second half of ADR 0039's rule: only the predeclared nominal types
+    // cross until package-wide user type ids land (M4.2).
+    let sums = br#"
+unit sums;
+
+type Token = Numeric(value: int) | Empty;
+
+function score(t: const Token): int;
+begin
+  return 0;
+end;
+"#;
+    let app = br#"
+unit sums_app;
+uses lib.sums;
+
+type Token = Numeric(value: int) | Empty;
+
+var
+  t: Token;
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := sums.score(t);
+end;
+"#;
+    let error = compile_imports(app, "sums_app.ig", &[("lib/sums.ig", sums)])
+        .expect_err("a user sum may not cross units");
+    assert!(error.message.contains("across units"), "{}", error.message);
+    assert!(
+        error.message.contains("user-declared record, sum or enum"),
+        "{}",
+        error.message
+    );
+
+    let enums = br#"
+unit colors;
+
+type Color = (Red, Green, Blue);
+
+function rank(c: Color): int;
+begin
+  return 0;
+end;
+"#;
+    let app = br#"
+unit colors_app;
+uses lib.colors;
+
+type Color = (Red, Green, Blue);
+
+var
+  c: Color;
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := colors.rank(c);
+end;
+"#;
+    let error = compile_imports(app, "colors_app.ig", &[("lib/colors.ig", enums)])
+        .expect_err("a user enum may not cross units");
+    assert!(error.message.contains("across units"), "{}", error.message);
+    assert!(
+        error.message.contains("user-declared record, sum or enum"),
         "{}",
         error.message
     );
