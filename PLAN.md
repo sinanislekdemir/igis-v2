@@ -14,8 +14,9 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `a06feb1` (M6.2: the ext2 writer and `core.fs_write`) plus this
-  docs commit. The tree is clean; `build/home.img` was reset to the initial tree.
+- **Last commit:** `2b2a910` (M6.3: `remove`/`mkdir`/`rename`, the editor save and
+  the browser actions) plus this docs commit. The tree is clean; `build/home.img`
+  is reset.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -78,20 +79,21 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   uppercase letter codes, so `calculator`, `editor`, `browser` and `minesweeper`
   now accept both shapes and QMP `send-key` exits each (`task 6..9: exit Ok`).
   This also fixed a pre-existing bug in the editor/browser shortcuts.
-- **Verified at that point (M6.2, independently by the parent):** **474 host tests**
-  (9 new `ext2w` write tests, including `e2fsck -fn` on the mutated image).
-  With the drive, `run home_write` prints its nine step lines and
-  `home_write: ok` on `-smp 4` and `-smp 1`; without it,
-  `home_write: no writable home` and `files: ok`. `e2fsck -fn` exits 0 after the
-  writes (12 → 13 files), and the image was reset afterwards (12 files);
-  `run files` still ok; visual golden (`37802052…e9e81c9f`) and
-  `boot_desktop_qmp.py` pass on both. The no-home batch entry was checked
-  separately with the right verdict (the batch pattern expects `ok`).
-- **Next slice:** **M6.3 — `remove`, `mkdir`, `rename` and the applications**
-  (spec 0019 W3–W6, A1–A3, E1–E2): free blocks/inodes, directory entry removal,
-  `mkdir`, `rename` with a regular-file replace, builtins 54–56, the editor save
-  (temporary + rename) and the browser actions, plus host `ext2w` tests with
-  `e2fsck`. Then M6.4 (reboot persistence).
+- **Verified at that point (M6.3, independently by the parent):** **484 host tests**
+  (new `ext2w` mkdir/remove/rename tests with `e2fsck -fn`). With the drive,
+  `run home_ops` → `home_ops: ok`, `run editor check` → `editor: ok` (save to
+  `home/child`), `run browser check` → `browser: ok`, `run files` → `files: ok`
+  on `-smp 4` and `-smp 1`; without it, `home_ops: no writable home` and the
+  editor/browser read-only arms still pass. `e2fsck -fn` exits 0 after the
+  proofs (13 files) and after reset (12 files); visual golden
+  (`37802052…e9e81c9f`) and `boot_desktop_qmp.py` pass on both. The owner's
+  31-verdict batch log confirms the same on `-smp 4` with zero `failed check`
+  lines.
+- **Next slice:** **M6.4 — persistence, `e2fsck` and the M6 close** (spec 0019
+  V2–V4): a persistence harness (write, quit/power-cycle QEMU, boot the same
+  `build/home.img`, verify the bytes and a mkdir/rename state), `e2fsck -fn`
+  after the cycle, the full regression with and without the disk, the visual
+  golden and the boot desktop, then docs/AGENTS and spec 0019 → Implemented.
 
 - **M2.6.3 complete:** the headless visual-regression harness (spec 0009 "Visual proof",
   G21; ADR 0032) and the resolution of M2.1.2. `samples/apps/visual` opens a window whose
@@ -985,7 +987,7 @@ parent verifies each.
   after reset; the 30-command batch with/without the drive, visual golden and
   `boot_desktop_qmp.py` pass on both.
 
-- [ ] **M6.3 `remove`, `mkdir`, `rename` and the applications.**
+- [x] **M6.3 `remove`, `mkdir`, `rename` and the applications.**
   Directory entry add/remove, `mkdir` (`.`/`..`, link counts), `remove` (empty
   dir or file, free blocks/inodes), `rename` within and across directories with a
   regular-file replace; builtins 54–56. Editor: File-menu Save enabled, `Ctrl+S`
@@ -993,6 +995,18 @@ parent verifies each.
   and failure. Browser: create-directory and remove actions in `home/`. Host
   `langhost` home over a temporary directory; e2e tests for all four primitives
   and the editor save.
+  **Done (`2b2a910`):** 484 host tests; `ext2w` frees blocks/inodes (direct,
+  single, double indirect), compacts directory tails, `mkdir` with `.`/`..`,
+  links and `bg_used_dirs_count`, and `rename` with same/cross-directory moves,
+  regular-file replace, `..` rewrite and directory-target refusal; builtins 54–56
+  (`fs_remove`/`fs_mkdir`/`fs_rename`, ABI v1 stays at 75) with the `home`-only
+  rule; the editor's Save/Ctrl+S writes `<target>.tmp` and renames it (a `base/`
+  document is saved as `home/<basename>`), the browser's `N`/`Delete` create and
+  remove under `home`, and `home_ops` proves the whole cycle. Kernel proofs on
+  `-smp 4`/`-smp 1`: `home_ops: ok`, `editor: ok`, `browser: ok`, `files: ok`;
+  `e2fsck -fn` exits 0 (12 → 13 → 14 files) and after reset; the 31-command
+  batch with/without the drive, visual golden and `boot_desktop_qmp.py` pass on
+  both.
 
 - [ ] **M6.4 Persistence, `e2fsck` and the M6 close.**
   A persistence harness: boot with `build/home.img`, write from an app, reboot or
