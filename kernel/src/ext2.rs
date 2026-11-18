@@ -7,6 +7,11 @@
 //! indirect blocks. Anything outside the subset refuses the mount rather than
 //! returning a best-effort read.
 //!
+//! This reader serves the application image only. The writable `/home` disk is
+//! a separate ext2 mount with its own sector-device reader (`ext2w`); the
+//! kernel's `fs` module routes a `home/...` path there and everything else back
+//! here (spec 0019, ADR 0040).
+//!
 //! Paths are relative to the image root (spec 0018, L6): `base/shell`,
 //! `lib/ui/menu.ig`, `home/readme.txt`. The reader walks one directory at a
 //! time, never follows a symbolic link, and refuses a path deeper than
@@ -518,39 +523,6 @@ impl<'a> Ext2<'a> {
         }
 
         Ok(())
-    }
-
-    /// Visits every named entry in the directory at `path`.
-    ///
-    /// The root is `""` or `"."`. `.` and `..` are skipped.
-    pub fn list(
-        &self,
-        path: &str,
-        visit: &mut impl FnMut(&[u8], u32, u64) -> Result<(), Status>,
-    ) -> Result<(), Status> {
-        let (_, directory) = self.directory(path)?;
-        let mut error = None;
-        self.each_dir_entry(&directory, &mut |number, _, name| {
-            if name == b"." || name == b".." {
-                return Ok(true);
-            }
-            let inode = match self.inode(number) {
-                Ok(inode) => inode,
-                Err(status) => {
-                    error = Some(status);
-                    return Ok(false);
-                }
-            };
-            if let Err(status) = visit(name, number, inode.size) {
-                error = Some(status);
-                return Ok(false);
-            }
-            Ok(true)
-        })?;
-        match error {
-            Some(status) => Err(status),
-            None => Ok(()),
-        }
     }
 
     fn regular_inode(&self, path: &str) -> Result<Inode, Status> {

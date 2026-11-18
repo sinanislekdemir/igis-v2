@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+mod ata;
 mod clock;
 mod console;
 mod event;
@@ -8,6 +9,7 @@ mod ext2;
 mod font;
 mod font8x8;
 mod frame;
+mod fs;
 mod gfx;
 mod guard;
 mod mb2;
@@ -369,24 +371,35 @@ extern "C" fn kmain_on_stack(mb2_info: u64) -> ! {
             );
             let device = ext2::BlockDevice::new(apps.bytes());
             match ext2::Ext2::mount(device) {
-                Ok(fs) => {
+                Ok(image) => {
                     println!(
                         "ext2: mounted, {} byte blocks, {} KiB",
-                        fs.block_size(),
-                        fs.size_bytes() / 1024
+                        image.block_size(),
+                        image.size_bytes() / 1024
                     );
+                    // Publish the router before anything reads a path: the boot
+                    // source, `core.spawn`, the compiler's `/lib` reader and the
+                    // file builtins all go through `fs` (spec 0019, A4/A5).
+                    fs::init(&image);
                     let mut entries = 0u32;
-                    let listed = fs.list("", &mut |name, inode, size| {
-                        let name = core::str::from_utf8(name).unwrap_or("<non-utf8>");
-                        println!("  {name:<24} inode {inode:>4} {size:>6} bytes");
-                        entries += 1;
-                        Ok(())
-                    });
-                    match listed {
-                        Ok(()) => println!("  {entries} root entries"),
-                        Err(status) => println!("  root listing failed: {}", status.name()),
+                    let mut name = [0u8; abi::fs::NAME_CAP];
+                    loop {
+                        match fs::list("", entries, &mut name) {
+                            Ok(entry) => {
+                                let name = core::str::from_utf8(&name[..entry.name_len])
+                                    .unwrap_or("<non-utf8>");
+                                println!("  {name:<24} {:>6} bytes", entry.size);
+                                entries += 1;
+                            }
+                            Err(abi::Status::NotFound) => break,
+                            Err(status) => {
+                                println!("  root listing failed: {}", status.name());
+                                break;
+                            }
+                        }
                     }
-                    match fs.file_size("base/shell") {
+                    println!("  {entries} root entries");
+                    match fs::file_size("base/shell") {
                         Ok(size) => println!("ext2: base/shell is {size} bytes"),
                         Err(status) => println!("ext2: base/shell: {}", status.name()),
                     }
@@ -394,7 +407,7 @@ extern "C" fn kmain_on_stack(mb2_info: u64) -> ! {
                     // Spec 0018, L1/L6: the image is a real tree and the file
                     // API walks paths. Prove the walk before any request can be
                     // served; a mismatch halts like the other boot self-checks.
-                    match fs.tree_self_check() {
+                    match fs::tree_self_check() {
                         Ok(()) => println!("ext2: tree ok"),
                         Err(step) => {
                             println!("ext2: tree FAIL at step {step}");
@@ -402,12 +415,15 @@ extern "C" fn kmain_on_stack(mb2_info: u64) -> ! {
                         }
                     }
 
-                    // Publish the read-only mount for every core's scheduler
-                    // loop, then bring up the application processors: the boot
-                    // core's APIC, GDT/IDT and frame allocator are all ready and
-                    // the module memory is never unmapped. Absent ids simply do
-                    // not report.
-                    sched::set_image(&fs);
+                    // Spec 0019, H1/H3: a real home disk is optional. A present
+                    // image is mounted through `ext2w` and proved; an absent or
+                    // invalid one leaves `/home` on the application image.
+                    fs::mount_home();
+
+                    // Bring up the application processors: the boot core's
+                    // APIC, GDT/IDT, frame allocator and published mounts are
+                    // all ready and the module memory is never unmapped. Absent
+                    // ids simply do not report.
                     stream::init();
 
                     // Spec 0004 C6: the guarded-stack placement invariant.
@@ -438,8 +454,8 @@ extern "C" fn kmain_on_stack(mb2_info: u64) -> ! {
 
                     // The REPL leaves the boot task in the runnable set; the
                     // scheduler loop owns it and the service queue from here.
-                    let _boot_task = repl::boot(&fs);
-                    sched::run_forever(&fs);
+                    let _boot_task = repl::boot();
+                    sched::run_forever();
                 }
                 Err(status) => {
                     println!("ext2: mount refused ({})", status.name());

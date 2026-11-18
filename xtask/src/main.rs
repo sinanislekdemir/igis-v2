@@ -25,13 +25,16 @@ fn main() -> ExitCode {
 
     match command {
         "build" => build(),
-        "image" => image(args.iter().any(|arg| arg == "--shell")),
+        "image" => image(
+            args.iter().any(|arg| arg == "--shell"),
+            args.iter().any(|arg| arg == "--reset-home"),
+        ),
         "run" => run(&args[1..]),
         "clean" => clean(),
         other => {
             eprintln!("unknown command: {other}");
             eprintln!(
-                "usage: cargo xtask <build|image [--shell]|run [--headless] [--no-tablet] [--shell] [--cores N]|clean>"
+                "usage: cargo xtask <build|image [--shell] [--reset-home]|run [--headless] [--no-tablet] [--no-home] [--reset-home] [--shell] [--cores N]|clean>"
             );
             ExitCode::FAILURE
         }
@@ -60,7 +63,7 @@ fn kernel_elf() -> PathBuf {
         .join(KERNEL_ELF)
 }
 
-fn image(shell: bool) -> ExitCode {
+fn image(shell: bool, reset_home: bool) -> ExitCode {
     if build() == ExitCode::FAILURE {
         return ExitCode::FAILURE;
     }
@@ -88,6 +91,11 @@ fn image(shell: bool) -> ExitCode {
         }
     };
     fs::copy(&apps, boot.join("apps.img")).expect("copy apps image");
+
+    if let Err(message) = home_image(reset_home) {
+        eprintln!("home image: {message}");
+        return ExitCode::FAILURE;
+    }
 
     let cmdline = "multiboot2 /boot/kernel.elf";
     let module = "module2 /boot/apps.img apps";
@@ -213,6 +221,51 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
     Ok(image)
 }
 
+/// Ensures the writable home image exists (spec 0019, H1/H2).
+///
+/// The image is 8 MiB of 1 KiB-block ext2 with an initial tree from
+/// `samples/home/`. It is created only when missing; an existing image is
+/// user data and is never overwritten unless `reset` is set (`--reset-home`).
+fn home_image(reset: bool) -> Result<PathBuf, String> {
+    let image = root().join("build").join("home.img");
+    if image.exists() && !reset {
+        return Ok(image);
+    }
+    if image.exists() {
+        fs::remove_file(&image).map_err(|error| format!("{}: {error}", image.display()))?;
+    }
+
+    let source = root().join("samples").join("home");
+    if !source.is_dir() {
+        return Err(format!("{} is not a directory", source.display()));
+    }
+    let staging = root().join("build").join("home-root");
+    if staging.exists() {
+        fs::remove_dir_all(&staging).map_err(|error| format!("{}: {error}", staging.display()))?;
+    }
+    fs::create_dir_all(&staging).map_err(|error| format!("{}: {error}", staging.display()))?;
+    stage_tree(&source, &staging)?;
+
+    let status = Command::new("mke2fs")
+        .arg("-q")
+        .arg("-t")
+        .arg("ext2")
+        .arg("-b")
+        .arg("1024")
+        .arg("-d")
+        .arg(&staging)
+        .arg("-F")
+        .arg(&image)
+        .arg("8M")
+        .status()
+        .map_err(|error| format!("failed to run mke2fs: {error}"))?;
+    if !status.success() {
+        return Err(format!("mke2fs failed with {status}"));
+    }
+    println!("home image: {}", image.display());
+    Ok(image)
+}
+
 /// Copies the tree under `source` into `destination`, creating real
 /// directories (spec 0018, X1).
 ///
@@ -244,7 +297,8 @@ fn stage_tree(source: &Path, destination: &Path) -> Result<(), String> {
 
 fn run(args: &[String]) -> ExitCode {
     let shell = args.iter().any(|arg| arg == "--shell");
-    if image(shell) == ExitCode::FAILURE {
+    let reset_home = args.iter().any(|arg| arg == "--reset-home");
+    if image(shell, reset_home) == ExitCode::FAILURE {
         return ExitCode::FAILURE;
     }
 
@@ -253,6 +307,9 @@ fn run(args: &[String]) -> ExitCode {
     // same image with the UHCI bus but no HID device, so the PS/2 fallback can
     // be checked (spec 0010, M2.2.6).
     let no_tablet = args.iter().any(|arg| arg == "--no-tablet");
+    // The home disk is optional (spec 0019, H2/H3); `--no-home` proves the
+    // read-only fallback exactly as an image without the drive would.
+    let no_home = args.iter().any(|arg| arg == "--no-home");
     // Guest cores; the kernel brings up at most `MAX_CORES`. `-smp 1` is the
     // single-core path, `-smp 2` proves absent APIC ids are tolerated.
     let mut cores = 4u32;
@@ -273,9 +330,17 @@ fn run(args: &[String]) -> ExitCode {
         .join("build")
         .join(if shell { "igis-shell.iso" } else { "igis.iso" });
     let mut qemu = Command::new("qemu-system-x86_64");
+    qemu.current_dir(root());
 
-    qemu.current_dir(root())
-        .arg("-cdrom")
+    // The home disk is the primary-master IDE disk (spec 0019, H2). It is
+    // added before the CD-ROM so the fixed drive order keeps it on ide0 and
+    // the boot ISO on the CD-ROM interface.
+    if !no_home {
+        qemu.arg("-drive")
+            .arg("file=build/home.img,format=raw,if=ide");
+    }
+
+    qemu.arg("-cdrom")
         .arg(&iso)
         .arg("-m")
         .arg("256M")

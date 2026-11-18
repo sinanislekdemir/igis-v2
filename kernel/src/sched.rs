@@ -48,7 +48,6 @@ use interpreter::{Diagnostic, Host, Outcome, Program, StreamError, WaitKind, Wai
 
 use crate::clock;
 use crate::console;
-use crate::ext2::Ext2;
 use crate::frame;
 use crate::println;
 use crate::repl;
@@ -135,10 +134,10 @@ static EXITS: [AtomicU64; smp::MAX_CORES] = [const { AtomicU64::new(0) }; smp::M
 /// The kernel's implementation of the interpreter host interface (spec 0005).
 ///
 /// `current` is the id of the task being advanced, so `core.wait` on oneself is
-/// `Invalid` rather than a permanent block. `image` is the read-only ext2
-/// mount the REPL service compiles from.
-struct KernelHost<'a> {
-    image: &'a Ext2<'a>,
+/// `Invalid` rather than a permanent block. File reads go through the kernel's
+/// one [`crate::fs`] router, which serves the read-only application image and
+/// the optional home mount.
+struct KernelHost {
     current: u64,
     /// The task's class at quantum start. A `realtime_on` on an already
     /// realtime task is a no-op that consumes no second admission slot.
@@ -160,7 +159,7 @@ struct KernelHost<'a> {
     exit_diag_ready: bool,
 }
 
-impl Host for KernelHost<'_> {
+impl Host for KernelHost {
     fn console_write(&mut self, bytes: &[u8]) {
         crate::console::write_bytes(bytes);
     }
@@ -445,11 +444,12 @@ impl Host for KernelHost<'_> {
         crate::sched::reboot()
     }
 
-    // Application files (spec 0013, spec 0018): the read-only ext2 tree the
-    // REPL service already compiles from. The machine has validated the path
+    // Application files (spec 0013, spec 0018, spec 0019). The one `fs` router
+    // serves `home/...` from the optional home mount and everything else from
+    // the read-only application image. The machine has validated the path
     // syntax; the host re-checks it defensively, converts the language `string`
-    // to `str` and lets the driver walk the tree. No allocation and no writable
-    // path.
+    // to `str` and lets the driver walk the tree. No allocation, and M6.1 still
+    // exposes no write primitive.
     fn fs_list(
         &mut self,
         path: &[u8],
@@ -462,7 +462,7 @@ impl Host for KernelHost<'_> {
             return Err(status);
         }
         let index = u32::try_from(index).map_err(|_| Status::NotFound)?;
-        let entry = self.image.list_entry(path, index, name)?;
+        let entry = crate::fs::list(path, index, name)?;
         Ok(interpreter::FsEntry {
             name_len: entry.name_len,
             kind: entry.kind,
@@ -473,7 +473,7 @@ impl Host for KernelHost<'_> {
     fn fs_read(&mut self, path: &[u8], offset: u64, dst: &mut [u8]) -> Result<usize, Status> {
         let path = core::str::from_utf8(path).map_err(|_| Status::Invalid)?;
         match abi::fs::validate_path(path) {
-            Status::Ok => self.image.read_at(path, offset, dst),
+            Status::Ok => crate::fs::read_at(path, offset, dst),
             status => Err(status),
         }
     }
@@ -481,7 +481,7 @@ impl Host for KernelHost<'_> {
     fn fs_size(&mut self, path: &[u8]) -> Result<u64, Status> {
         let path = core::str::from_utf8(path).map_err(|_| Status::Invalid)?;
         match abi::fs::validate_path(path) {
-            Status::Ok => self.image.file_size(path),
+            Status::Ok => crate::fs::file_size(path),
             status => Err(status),
         }
     }
@@ -499,7 +499,7 @@ impl Host for KernelHost<'_> {
     }
 
     fn spawn(&mut self, path: &[u8], args: &[u8], diag: &mut [u8]) -> Result<u64, Status> {
-        repl::request_spawn(self.image, self.current, path, args, diag)
+        repl::request_spawn(self.current, path, args, diag)
     }
 
     fn wait(&mut self, id: u64) -> WaitOutcome {
@@ -581,32 +581,6 @@ fn parse_program_on(core: usize, code: &[u8]) -> Result<Program<'_>, Diagnostic>
     Program::parse(code, &mut verify[..])
 }
 
-/// The ext2 mount the REPL service compiles from, published before the APs
-/// start (every core's loop needs it).
-static IMAGE: SpinLock<Option<&'static Ext2<'static>>> = SpinLock::new(None);
-
-/// Publishes the mount for the AP loops. Called once on the boot core, before
-/// the first SIPI.
-pub fn set_image(image: &Ext2<'_>) {
-    // SAFETY: the mount borrows the GRUB module's bytes, which the bootloader
-    // owns for the lifetime of the system; nothing unmaps or frees them (see
-    // `module::bytes`). Extending the borrow to 'static is what lets the AP
-    // loops share the read-only mount without an allocator.
-    let image: &'static Ext2<'static> = unsafe { core::mem::transmute(image) };
-    *IMAGE.lock() = Some(image);
-}
-
-/// The published mount, for a core that did not receive it as an argument.
-fn image() -> &'static Ext2<'static> {
-    match *IMAGE.lock() {
-        Some(image) => image,
-        None => {
-            println!("sched: no image published; this core halts");
-            arch_x86_64::halt();
-        }
-    }
-}
-
 /// The boot core's scheduler loop. Never returns.
 ///
 /// The loop ends when no task is live and no request is pending: with no
@@ -614,22 +588,22 @@ fn image() -> &'static Ext2<'static> {
 /// halts. A blocked task keeps the system alive (it will be woken by a child
 /// termination or console input), so the check is "no live task", not
 /// "boot task finished".
-pub fn run_forever(image: &Ext2<'_>) -> ! {
-    loop_body(smp::core_index(), image)
+pub fn run_forever() -> ! {
+    loop_body(smp::core_index())
 }
 
 /// An AP's scheduler loop: the same claim → quantum → release cycle over the
 /// same global runnable set (Sch1–Sch3). Any core may claim any task.
 pub fn run_secondary(core: usize) -> ! {
-    loop_body(core, image())
+    loop_body(core)
 }
 
-fn loop_body(core: usize, image: &Ext2<'_>) -> ! {
+fn loop_body(core: usize) -> ! {
     loop {
         // The service opportunity runs before every claim: at most one
         // pending request is compiled and enqueued, on whichever core got
         // here first (spec 0007, "Services and task creation").
-        service(image);
+        service();
 
         // The atomic take under the slot lock is the claim (Sch2, Sch3).
         match task::claim() {
@@ -640,7 +614,7 @@ fn loop_body(core: usize, image: &Ext2<'_>) -> ! {
                 // normal task always leaves after one quantum.
                 loop {
                     let started = clock::now_ns();
-                    let quantum = run_quantum(core, &mut task, image);
+                    let quantum = run_quantum(core, &mut task);
                     let elapsed = clock::now_ns().saturating_sub(started);
 
                     task.budget_ns = task.budget_ns.saturating_add(elapsed);
@@ -805,7 +779,7 @@ struct Quantum {
 /// bytes the task executes are the bytes the verifier checked, and nothing
 /// self-referential has to live inside the [`Task`]. Parsing is host-side work
 /// and is not charged to the quantum.
-fn run_quantum(core: usize, task: &mut Task, image: &Ext2<'_>) -> Quantum {
+fn run_quantum(core: usize, task: &mut Task) -> Quantum {
     let Task {
         id,
         class,
@@ -829,7 +803,6 @@ fn run_quantum(core: usize, task: &mut Task, image: &Ext2<'_>) -> Quantum {
     };
 
     let mut host = KernelHost {
-        image,
         current: *id,
         class: *class,
         promoted: false,
@@ -911,14 +884,14 @@ fn terminate(core: usize, mut task: Task, reason: ExitReason) {
 /// Input is polled here too: with no input the loop `hlt`s, the timer wakes it
 /// every millisecond, and this is where a typed byte reaches the console ring
 /// and wakes a task blocked on source `0` (`core.next_any`).
-fn service(image: &Ext2<'_>) {
+fn service() {
     console::poll_input();
     crate::mouse::poll();
     crate::usb::poll();
     if console::has_byte() {
         task::wake_console_input();
     }
-    repl::service(image);
+    repl::service();
 }
 
 /// Nothing is runnable. Wait for the next interrupt and re-check, unless there

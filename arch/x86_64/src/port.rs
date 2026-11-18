@@ -55,3 +55,31 @@ pub unsafe fn inl(port: u16) -> u32 {
     asm!("in eax, dx", in("dx") port, out("eax") value, options(nomem, nostack, preserves_flags));
     value
 }
+
+/// # Safety
+/// The caller must know that `port` is safe to read and that `out` is valid
+/// for `out.len()` 16-bit writes by the device.
+#[inline]
+pub unsafe fn insw(port: u16, out: &mut [u16]) {
+    asm!(
+        "rep insw",
+        in("dx") port,
+        in("rdi") out.as_mut_ptr(),
+        in("rcx") out.len(),
+        options(nostack, preserves_flags)
+    );
+}
+
+/// # Safety
+/// The caller must know that `port` is safe to write and that `data` remains
+/// valid for the duration of the transfer.
+#[inline]
+pub unsafe fn outsw(port: u16, data: &[u16]) {
+    asm!(
+        "rep outsw",
+        in("dx") port,
+        in("rsi") data.as_ptr(),
+        in("rcx") data.len(),
+        options(nostack, preserves_flags)
+    );
+}

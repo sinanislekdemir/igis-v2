@@ -4,11 +4,12 @@
 //! Applications ask for another application with `core.spawn`, which reserves
 //! a global task id and enqueues a [`Request`]. [`service`] runs before every
 //! claim and processes at most one request per opportunity: it reads the source
-//! from ext2, compiles it in the kernel with the same static buffers the boot
-//! path uses, validates the package, places `code`/`state`/`stack` and enqueues
-//! the task under the reserved id. A `uses lib.*` clause is compiled in the same
-//! pass: [`ImageReader`] supplies the module sources from the same image (spec
-//! 0018, M1–M13).
+//! through the [`crate::fs`] router (the read-only application image, and the
+//! home mount for a `home/...` source), compiles it in the kernel with the same
+//! static buffers the boot path uses, validates the package, places
+//! `code`/`state`/`stack` and enqueues the task under the reserved id. A
+//! `uses lib.*` clause is compiled in the same pass: [`ImageReader`] supplies
+//! the module sources from the same router (spec 0018, M1–M13).
 //!
 //! A failure is not reported to the caller directly (`core.spawn` returns
 //! `Status.Ok` once the id is reserved; the compile happens later). It is
@@ -33,7 +34,7 @@ use abi::{
     MANIFEST_HEADER_SIZE, MANIFEST_MAGIC, PROFILE_X86_64_LE,
 };
 
-use crate::ext2::Ext2;
+use crate::fs;
 use crate::println;
 use crate::sched;
 use crate::stream;
@@ -65,26 +66,24 @@ static MANIFEST: SpinLock<[u8; compiler::MAX_MANIFEST_BYTES]> =
 /// The compiler is a single resource; one compile at a time.
 static COMPILER_LOCK: SpinLock<()> = SpinLock::new(());
 
-/// [`compiler::SourceReader`] over the mounted image (spec 0018, "Compiler
-/// interface").
+/// [`compiler::SourceReader`] over the [`crate::fs`] router (spec 0018,
+/// "Compiler interface").
 ///
 /// `uses lib.a` resolves to `lib/a.ig` and the compiler reads it through this
 /// reader; the bytes are copied into the compiler's own arena, so the kernel
 /// needs no per-module buffer and [`SOURCE`] stays at one unit's cap. A read
 /// failure is reported by the compiler as a `Diagnostic` naming the unit, the
 /// resolved path and the `uses` line.
-struct ImageReader<'image, 'device> {
-    image: &'image Ext2<'device>,
-}
+struct ImageReader;
 
-impl compiler::SourceReader for ImageReader<'_, '_> {
+impl compiler::SourceReader for ImageReader {
     fn size(&self, path: &str) -> Result<usize, Status> {
-        let size = self.image.file_size(path)?;
+        let size = fs::file_size(path)?;
         usize::try_from(size).map_err(|_| Status::CapacityExceeded)
     }
 
     fn read(&self, path: &str, out: &mut [u8]) -> Result<usize, Status> {
-        self.image.read_file(path, out)
+        fs::read_file(path, out)
     }
 }
 
@@ -362,11 +361,11 @@ static EXITS: SpinLock<ExitRing> = SpinLock::new(ExitRing::new());
 /// Returns the id of the task left in the runnable set. A failed attempt
 /// burns its reserved id (ids are never reused) and falls through to the next
 /// name, as before.
-pub fn boot(image: &Ext2<'_>) -> u64 {
+pub fn boot() -> u64 {
     for name in ["system/entrypoint", "base/shell"] {
         let id = task::reserve_id();
         let mut diag = [0u8; DIAG_BYTES];
-        if load(image, name, id, &[], &mut diag).is_ok() {
+        if load(name, id, &[], &mut diag).is_ok() {
             return id;
         }
     }
@@ -420,7 +419,6 @@ fn resolve_launch(path: &str, out: &mut [u8; PATH_BYTES]) -> Result<usize, Statu
 /// compiler's diagnostic in the exit record, which `core.run` copies into the
 /// caller's `diag` (spec 0005, "Implemented ABI").
 pub fn request_spawn(
-    image: &Ext2<'_>,
     requester: u64,
     path: &[u8],
     args: &[u8],
@@ -481,7 +479,7 @@ pub fn request_spawn(
         return Err(Status::Invalid);
     }
     // `file_size` also refuses a directory with `Invalid`.
-    match image.file_size(resolved) {
+    match fs::file_size(resolved) {
         Ok(_) => {}
         Err(Status::NotFound) => {
             message.clear();
@@ -527,7 +525,7 @@ pub fn request_spawn(
 }
 
 /// Processes at most one pending request. Called before every claim.
-pub fn service(image: &Ext2<'_>) {
+pub fn service() {
     let request = REQUESTS.lock().pop();
     let Some(request) = request else {
         return;
@@ -557,7 +555,7 @@ pub fn service(image: &Ext2<'_>) {
     );
     let args = &request.args[..8 + request.args_len as usize];
     let mut diag = [0u8; DIAG_BYTES];
-    if load(image, name, request.reserved_id, args, &mut diag).is_err() {
+    if load(name, request.reserved_id, args, &mut diag).is_err() {
         // The caller already has the id and may already be blocked in `run`.
         // A synthetic fault record wakes it; the diagnostic rides along so a
         // `run` caller can report the compiler's message. The regions were
@@ -622,14 +620,14 @@ pub fn has_pending() -> bool {
 /// `Err(())` means "not runnable": a missing file, an over-cap source, a
 /// failed compile and a rejected package are all reported and treated the same
 /// way. On `Ok`, the task is in the runnable set and the scheduler owns it.
-fn load(image: &Ext2<'_>, name: &str, id: u64, args: &[u8], diag: &mut [u8]) -> Result<(), ()> {
+fn load(name: &str, id: u64, args: &[u8], diag: &mut [u8]) -> Result<(), ()> {
     let describe = |diag: &mut [u8], message: &[u8]| {
         layout::diagnostic::write(diag, b"", message, 0, 0);
     };
     println!("repl: trying `{name}`");
 
     let mut source = SOURCE.lock();
-    let source_len = match image.read_file(name, &mut source[..]) {
+    let source_len = match fs::read_file(name, &mut source[..]) {
         Ok(len) => len,
         Err(Status::NotFound) => {
             println!("repl: {name}: not found");
@@ -661,7 +659,7 @@ fn load(image: &Ext2<'_>, name: &str, id: u64, args: &[u8], diag: &mut [u8]) -> 
     let package = match compiler::compile_with_imports(
         &source[..source_len],
         name,
-        &mut ImageReader { image },
+        &mut ImageReader,
         &mut arena[..],
         &mut code_scratch[..],
         &mut manifest[..],

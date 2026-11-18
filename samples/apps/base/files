@@ -35,7 +35,9 @@ var
   found_child: bool;
   found_text: bool;
   found_probe: bool;
+  found_readme: bool;
   child_size: uint;
+  readme_size: uint;
   total: uint;
   off: uint;
   got: int;
@@ -80,6 +82,7 @@ begin
   found_child := false;
   found_text := false;
   found_probe := false;
+  found_readme := false;
   index := uint(0);
 end;
 
@@ -181,6 +184,54 @@ begin
   out.say_int(int(total));
   out.say("/");
   out.say_int(int(child_size));
+  out.say("\n");
+end;
+
+procedure read_home();
+begin
+  // `home` is the home mount when a disk is attached and the application
+  // image's `home` otherwise (spec 0019, A4); either way the router resolves
+  // `home/readme.txt` and the read looks identical (spec 0013).
+  reset_flags();
+  st := core.fs_list("home", index, name, kind, size);
+  while st = Ok do
+  begin
+    count := count + uint(1);
+    if name = "readme.txt" then
+    begin
+      found_readme := kind = uint(0) and size > uint(0);
+      readme_size := size;
+    end;
+    index := index + uint(1);
+    st := core.fs_list("home", index, name, kind, size);
+  end;
+  check("home listing", st = NotFound and count > uint(0) and found_readme);
+
+  total := uint(0);
+  off := uint(0);
+  each_ok := true;
+  while off < readme_size and each_ok do
+  begin
+    st := core.fs_read("home/readme.txt", off, chunk, got);
+    if st <> Ok or got <= 0 then
+      each_ok := false
+    else
+    begin
+      if off = uint(0) then
+      begin
+        first := core.substr_into(prefix, chunk, 0, 12);
+        if first <> 12 or prefix <> "igis-v2 home" then
+          each_ok := false;
+      end;
+      total := total + uint(got);
+      off := off + uint(got);
+    end;
+  end;
+  check("home read", each_ok and total = readme_size and readme_size > uint(0));
+  out.say("files: home read ");
+  out.say_int(int(total));
+  out.say("/");
+  out.say_int(int(readme_size));
   out.say("\n");
 end;
 
@@ -293,6 +344,7 @@ begin
       and child_size > uint(0));
   read_child();
   check_offsets();
+  read_home();
   check_errors();
 
   if ok then
