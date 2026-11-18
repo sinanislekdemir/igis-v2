@@ -14,8 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `3213d9e` (M6 close docs) plus this docs commit opening **M7**
-  (ADR 0041: truncate). The tree is clean; `build/home.img` is reset.
+- **Last commit:** `b6c350c` (M7.1: `core.fs_truncate`) plus this docs commit.
+  The tree is clean; `build/home.img` is reset.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -89,10 +89,18 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   without it (`home_persist: no writable home`, `home_verify: FAIL`, the
   read-only editor/browser arms). Visual golden (`37802052…e9e81c9f`) and
   `boot_desktop_qmp.py` pass on both.
-- **Next slice:** **M7.1 — `core.fs_truncate`** (spec 0019 A7, ADR 0041): shrink
-  (free blocks and pointers, zero the partial tail) and zero-extend on the home
-  filesystem, builtin 57, the proof app and host tests. The editor keeps its
-  temporary-file save; a journal/atomic replace remains deferred.
+- **Verified at that point (M7.1, independently by the parent):** **494 host
+  tests**; `run home_truncate` → `home_truncate: ok` on `-smp 4` and `-smp 1`;
+  `home_write`/`home_ops`/`editor check`/`browser check`/`files` still pass;
+  `e2fsck -fn` exits 0 after the proofs (15 files) and after reset (12/563);
+  without the disk `home_truncate: no writable home` and the read-only arms
+  pass; the persistence harness, visual golden (`37802052…e9e81c9f`) and
+  `boot_desktop_qmp.py` pass on both.
+- **Next slice:** **M7.1 is complete.** The next milestone is not yet planned;
+  the deferred table is the input (virtio-blk, a journal/atomic replace, the
+  handle model/Q51, `f32`/Q40, MMIO/DMA/Q45, nominal `TaskId`/Q43,
+  runtime-capacity buffers/Q46, stream close/Q10, guard recovery/Q47, module
+  dead-code elimination, `cargo fmt`/CI).
 
 - **M2.6.3 complete:** the headless visual-regression harness (spec 0009 "Visual proof",
   G21; ADR 0032) and the resolution of M2.1.2. `samples/apps/visual` opens a window whose
@@ -1023,7 +1031,7 @@ parent verifies each.
 
 ## M7 — file API refinements
 
-- [ ] **M7.1 `core.fs_truncate` and the shrink/zero-extend writer.**
+- [x] **M7.1 `core.fs_truncate` and the shrink/zero-extend writer.**
   `ext2w::truncate(path, size)`: shrinking frees every block at or past `size`
   (direct/single/double indirect, including empty pointer blocks), clears the
   inode pointers, zeroes the tail of the last partial block, then releases the
@@ -1036,6 +1044,15 @@ parent verifies each.
   verify zeros, shrink to 0, idempotent, error paths) and `ext2w` host tests with
   `e2fsck -fn`. The editor keeps its temporary-file + rename save (ADR 0041).
   Spec 0019 A7, ADR 0041.
+  **Done (`b6c350c`):** 494 host tests; `ext2w::truncate` shrink (frees the
+  indirect tree and data blocks, zeroes the partial tail, updates `i_blocks`
+  before freeing) and extend (capacity planned, zero-fills); builtin 57 with
+  compiler/interpreter/`Host`/router/`langhost`; `home_truncate` prints its 16
+  step lines + `home_truncate: ok` on `-smp 4`/`-smp 1`, `home_truncate: no
+  writable home` without the disk; `e2fsck -fn` exits 0 after the proofs
+  (15 files) and after reset (12/563); the persistence harness, the 38-command
+  batch (with/without the drive), the visual golden and `boot_desktop_qmp.py`
+  pass on both. The editor keeps its temporary-file save.
 
 ## Deferred (not UI; pick up when they matter)
 

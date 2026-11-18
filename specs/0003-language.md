@@ -1123,9 +1123,9 @@ destination's runtime length and `read` to the copied count, so the caller loops
 and a missing name is `NotFound`, a directory `Invalid`. `fs_size` returns the same
 inode byte size the kernel's loader uses. Every failure leaves all out-parameters
 untouched; there is no allocation and no handle. The exact error table is spec 0013,
-F14. Spec 0019 adds `core.fs_write`/`fs_remove`/`fs_mkdir`/`fs_rename` (builtins
-53–56) for the writable `/home` mount; the read primitives above are unchanged and
-writes elsewhere are `Invalid`.
+F14. Spec 0019 adds `core.fs_write`/`fs_remove`/`fs_mkdir`/`fs_rename`/`fs_truncate`
+(builtins 53–57) for the writable `/home` mount; the read primitives above are
+unchanged and writes elsewhere are `Invalid`.
 
 ### Terminal window (M2.5.5)
 
