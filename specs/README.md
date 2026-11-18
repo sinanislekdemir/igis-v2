@@ -24,7 +24,7 @@ revised as understanding improves, and their history lives in git.
 | 0015 | [The proportional font](0015-proportional-font.md) | Implemented | abi, compiler, interpreter, kernel font/gfx/window/console, langhost, samples/apps | 2026-11-17 |
 | 0016 | [Performance measurement](0016-performance.md) | Implemented | kernel window/console/gfx/clock, samples/apps/perf | 2026-11-17 |
 | 0017 | [The system menu and system control](0017-system-menu.md) | Implemented | kernel sched/smp/main, arch reboot, abi, compiler, interpreter, langhost, samples/apps | 2026-11-17 |
-| 0018 | [The image filesystem and importable library modules](0018-filesystem-and-modules.md) | Implemented | abi, compiler, interpreter, kernel ext2/repl/sched, langhost, xtask, samples/apps | 2026-11-17 |
+| 0018 | [The image filesystem and importable library modules](0018-filesystem-and-modules.md) | Implemented | abi, compiler, interpreter, kernel ext2/repl/sched, langhost, xtask, samples/apps | 2026-11-18 |
 | 0019 | [The writable home filesystem](0019-writable-home-filesystem.md) | Implemented | ext2w, kernel ata/fs/repl/sched, abi, compiler, interpreter, langhost, xtask, samples/apps | 2026-11-18 |
 
 ## Lifecycle

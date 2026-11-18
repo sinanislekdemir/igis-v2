@@ -47,6 +47,11 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   the `perf` measurement (`2c0df71`), M2.6.3 the deterministic specimen plus the
   headless golden-frame harness (`tests/golden/visual.png`), and M2.6.4 the System
   menu, About panel, `core.halt`/`core.reboot` and the halt/reboot probes.
+- **Done since M2:** M3.1–M3.5 (image tree, `/lib` modules, browser
+  navigation), M4.1–M4.3 (package-wide nominal types and the `/lib` refactor),
+  M5.1–M5.2 (calculator, minesweeper), M6.1–M6.4 (persistent writable `/home`)
+  and M7.1 (`core.fs_truncate`). Each ticket section below has its commit hashes
+  and evidence.
 - **Verified at that point (M3.4, independently by the parent):** **439 host tests**
   (abi 23, compiler 184, interpreter 150, langhost 81, 1 doctest); `cargo xtask
   build`/`image`/`image --shell` clean; boot `ext2: tree ok`. `run browser check`
