@@ -1,4 +1,4 @@
-unit reason;
+unit outcome;
 
 // Importable module source (spec 0018, M2/M3/M10; ADR 0039). It classifies a
 // child's `ExitReason`, which the sample applications used to do with a local

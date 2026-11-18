@@ -14,8 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `3ac1725` (M4.2: package-global user types, `<unit>.<Type>` and
-  `<unit>.<Type>.<Variant>`) plus this docs commit. The tree is clean.
+- **Last commit:** `a0c6ae2` (M4.3: shared helpers moved into `/lib`) plus this
+  docs commit closing M4. The tree is clean.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -62,11 +62,18 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `ext2: tree ok` with `frames: 57890 free` (`.bss` unchanged, ~36 KiB of linked
   compiler code). The agent also compared `code`/`manifest` digests of five
   samples against `e46f21e`: byte-identical.
-- **Next slice:** **M4.3 — extract the shared helpers into `/lib` and migrate the
-  apps** (the payoff ticket). A fresh subagent moves the duplicated writers
-  (`say`/`say_int`), the event/pointer inject wrappers and the `ExitReason`
-  classifier into `/lib` modules, migrates a named set of applications, and
-  reports before/after source and arena sizes.
+- **Verified at that point (M4.3, independently by the parent):** **450 host tests**;
+  40 migrated apps plus 3 modules; the 27-command batch passes on `-smp 4` and
+  `-smp 1`; the visual golden (`37802052…e9e81c9f`), `boot_desktop_qmp.py` and
+  `scripts/browser_screenshot_qmp.py` pass on both; `events`, `windows` and
+  `windows_events` were re-run on both after renaming `lib/reason` to
+  `lib/outcome` (`outcome.is_ok(reason)`), so a module name cannot shadow the
+  apps' common `reason` variable.
+- **Next slice:** **M4 is complete** (M4.1–M4.3). The next milestone is not yet
+  planned; the deferred table below is the input (writable `/home`/Q51 save,
+  `f32`/Q40, MMIO/DMA/Q45, nominal `TaskId`/Q43, runtime-capacity buffers/Q46,
+  explicit stream close/Q10, guard recovery/Q47, module dead-code elimination,
+  `cargo fmt`/CI).
 
 - **M2.6.3 complete:** the headless visual-regression harness (spec 0009 "Visual proof",
   G21; ADR 0032) and the resolution of M2.1.2. `samples/apps/visual` opens a window whose
@@ -836,13 +843,26 @@ session; the parent verifies each.
   (no artifact change). Known polish: a foreign sum-variant `case` error names
   the owning sum without its unit qualifier.
 
-- [ ] **M4.3 Extract the shared helpers into `/lib` and migrate the apps.**
+- [x] **M4.3 Extract the shared helpers into `/lib` and migrate the apps.**
   Move the duplicated application helpers into modules (event/pointer loop
-  helpers taking `Event`, window geometry taking `Rect`, reason classification
-  taking `ExitReason`, text/number writers) and migrate representative apps
-  (`files`, `ui_*`, `windows_events`, `desktop_shell`, `module_demo`), with a
-  before/after source-size and arena report; prove the same verdicts on both core
-  counts.
+  helpers taking `Event`, reason classification taking `ExitReason`, text/number
+  writers) and migrate the applications, with a before/after source-size and
+  package report; prove the same verdicts on both core counts.
+  **Done (`a0c6ae2`):** `lib/out.ig` (`say`, `say_int`), `lib/inject.ig`
+  (`pointer_to/down/up`, `inject_key`, `inject_key_mods`) and
+  `lib/outcome.ig` (`is_ok(const ExitReason)`; renamed from `reason` after the
+  commit so the module name cannot shadow an app's common `reason` variable).
+  40 applications migrated: 38 `say` and 11 `say_int` bodies deleted, 3
+  `classify_reason` bodies delegated, 5 pointer/key wrappers delegated, unused
+  staging state removed. Duplicated bodies are gone; net touched-tree source is
+  +523 B because every call gains an `out.` qualifier and the modules carry
+  comments (per file −282…+127; 40 files 463,961 → 460,666 B). Package code can
+  grow slightly because a module's functions are linked wholesale
+  (`ui_controls` 110,544 → 111,296 B); `visual` code is unchanged and its state
+  shrank (304 → 272 B). 450 host tests; the 27-command batch, visual golden
+  (`37802052…e9e81c9f`), `boot_desktop_qmp.py` and the browser screenshot pass on
+  both core counts; `events`/`windows`/`windows_events` rechecked after the
+  rename.
 
 ## Deferred (not UI; pick up when they matter)
 
@@ -856,7 +876,8 @@ session; the parent verifies each.
 | Nominal `TaskId` (Q43) | OPEN-QUESTIONS Q43 | before `stdlib` exposes task primitives |
 | Runtime-capacity buffer parameters (Q46) | OPEN-QUESTIONS Q46 | when slicing/wider stream reads need it |
 | Explicit stream close (Q10) | spec 0006 | streams v2 |
-| Compile arena: 4.13 MiB of 8 MiB used by `stdlib` with a minimal app (115 KiB source); the `ui_icons` pair needs 5.39 MiB and the `widgets` pair 6.55 MiB | spec 0008 | watch as M2.5 grows the library |
+| Compile arena: 16 MiB with `/lib` in use (the `widgets` pair needs 6.55 MiB) | spec 0008 | watch as modules grow |
+| Module dead-code elimination: importing a module links all its functions (`ui_controls` +752 B for `inject`) | compiler | when package code size matters |
 | Guard table cache exhaustion (32 tables) | spec 0002/spec 0009 | long-lived workloads with many stacks |
 | `cargo fmt` drift in three pre-existing files + CI fmt/clippy | repo | housekeeping |
 

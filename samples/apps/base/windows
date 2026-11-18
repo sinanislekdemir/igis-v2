@@ -22,7 +22,7 @@ unit windows;
 // The first failed check names itself and sets `ok` false; the last line is
 // `windows: ok` only when every check passed.
 
-uses core, syslib, lib.out, lib.reason;
+uses core, syslib, lib.out, lib.outcome;
 
 var
   ok: bool;
@@ -62,7 +62,7 @@ end;
 
 procedure classify_reason();
 begin
-  exited_ok := reason.is_ok(reason);
+  exited_ok := outcome.is_ok(reason);
 end;
 
 procedure main(args: const string[1024]);

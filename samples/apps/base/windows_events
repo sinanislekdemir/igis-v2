@@ -29,7 +29,7 @@ unit windows_events;
 // Steps 6 and 7 spawn children, whose spawn/exit log lines scroll the console;
 // all pixel checks therefore happen before step 6.
 
-uses core, syslib, lib.out, lib.reason;
+uses core, syslib, lib.out, lib.outcome;
 
 var
   failed: bool;
@@ -78,7 +78,7 @@ end;
 
 procedure classify_reason();
 begin
-  exited_ok := reason.is_ok(reason);
+  exited_ok := outcome.is_ok(reason);
 end;
 
 // Drains pollable events, presenting every window an Expose names. Never
