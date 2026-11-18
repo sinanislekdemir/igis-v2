@@ -69,11 +69,9 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `windows_events` were re-run on both after renaming `lib/reason` to
   `lib/outcome` (`outcome.is_ok(reason)`), so a module name cannot shadow the
   apps' common `reason` variable.
-- **Next slice:** **M4 is complete** (M4.1–M4.3). The next milestone is not yet
-  planned; the deferred table below is the input (writable `/home`/Q51 save,
-  `f32`/Q40, MMIO/DMA/Q45, nominal `TaskId`/Q43, runtime-capacity buffers/Q46,
-  explicit stream close/Q10, guard recovery/Q47, module dead-code elimination,
-  `cargo fmt`/CI).
+- **Next slice:** **M5.1 — the calculator application** (PLAN "M5"). Two ordinary
+  windowed applications exercise the now-complete UI and `/lib` surface; the
+  writable filesystem is the milestone after them.
 
 - **M2.6.3 complete:** the headless visual-regression harness (spec 0009 "Visual proof",
   G21; ADR 0032) and the resolution of M2.1.2. `samples/apps/visual` opens a window whose
@@ -863,6 +861,41 @@ session; the parent verifies each.
   (`37802052…e9e81c9f`), `boot_desktop_qmp.py` and the browser screenshot pass on
   both core counts; `events`/`windows`/`windows_events` rechecked after the
   rename.
+
+## M5 — two applications (calculator and minesweeper)
+
+No new system surface: both are ordinary windowed applications over the existing
+`stdlib` UI helpers, `syslib` primitives, events and `/lib` modules. They prove the
+toolkit on real programs before the writable-filesystem milestone.
+
+- [ ] **M5.1 The calculator.** `samples/apps/base/calculator`: one window
+  (content about 300×360) with a right-aligned f64 display and a 4×5 button grid
+  (`C`, `DEL`, `+/-`, `/`; `7 8 9 *`; `4 5 6 -`; `1 2 3 +`; `0 . =`), drawn with
+  `ui_button`/`ui_button_hit`/`ui_button_pressed` and `ui_focus_ring`. Typed entry
+  is a `string[32]`; `core.parse_f64_into`/`core.format_f64_short_into` convert;
+  `+ - * /` chain, division by zero shows `error`, `C` resets, `DEL` removes the
+  last byte, `+/-` toggles the sign. Keyboard: digits, `.`, operators, Enter/`=`,
+  Escape (`C`), Backspace. One complete frame before `window_present`, owner
+  `Expose` repaints, no `syslib.clear`. `check` injects pointer and key events and
+  checks display/button pixels (`calculator: ok`); `shot` holds for a screenshot;
+  `langhost` prints `calculator: host ok`. `scripts/calculator_screenshot_qmp.py`
+  writes `/home/sinan/Desktop/igis-calculator.png`. No new helper, opcode,
+  builtin, `state` or cap.
+
+- [ ] **M5.2 Minesweeper.** `samples/apps/base/minesweeper`: one window (content
+  about 300×400), a 9×9 field of 30-pixel cells, 10 mines, a header with a mine
+  counter, a restart face button and `MM:SS` elapsed time, and a status line.
+  Mines come from an app-local deterministic LCG (seeded by `core.clock()` in
+  play mode, fixed in `check`); the first reveal is never a mine. Left-click
+  reveals with a flood fill over zero-neighbour cells, right-click (the
+  `pointer_buttons` mask bit 2) toggles a flag, and a `Flag` mode button gives
+  the same action without a second button. A mine ends the game and shows the
+  board; revealing every non-mine cell wins; the face restarts. `check` uses the
+  fixed seed, injects clicks, and checks flood fill, flags, win/loss and pixels
+  (`minesweeper: ok`); `shot` holds; `langhost` prints `minesweeper: host ok`;
+  `scripts/minesweeper_screenshot_qmp.py` writes
+  `/home/sinan/Desktop/igis-minesweeper.png`. No new helper, opcode, builtin,
+  `state` or cap.
 
 ## Deferred (not UI; pick up when they matter)
 
