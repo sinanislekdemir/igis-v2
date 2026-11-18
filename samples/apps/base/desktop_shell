@@ -45,7 +45,7 @@ unit desktop_shell;
 // `core.write`. It never attaches the terminal itself: the launched `shell`
 // does (spec 0014, the one-terminal rule).
 
-uses core, stdlib, syslib;
+uses core, stdlib, syslib, lib.out;
 
 const
   MenuHeight = 22;
@@ -147,17 +147,6 @@ var
   xx: int;
   yy: int;
   ink_found: bool;
-
-procedure say(text: const string[0]);
-begin
-  core.write(text);
-end;
-
-procedure say_int(value: int);
-begin
-  used := core.format_int_into(digits, value, uint(10), uint(0));
-  core.write(digits);
-end;
 
 procedure verify(label: const string[0]; passed: bool);
 begin
@@ -295,19 +284,19 @@ begin
   status := syslib.window_info(uint(pos), win_id, win_rect, win_title);
   while status = Ok and pos < 32 do
   begin
-    say("window ");
-    say_int(win_id);
-    say(" \"");
-    say(win_title);
-    say("\" ");
-    say_int(win_rect.x);
-    say(",");
-    say_int(win_rect.y);
-    say(" ");
-    say_int(win_rect.w);
-    say("x");
-    say_int(win_rect.h);
-    say("\n");
+    out.say("window ");
+    out.say_int(win_id);
+    out.say(" \"");
+    out.say(win_title);
+    out.say("\" ");
+    out.say_int(win_rect.x);
+    out.say(",");
+    out.say_int(win_rect.y);
+    out.say(" ");
+    out.say_int(win_rect.w);
+    out.say("x");
+    out.say_int(win_rect.h);
+    out.say("\n");
     if win_title = "Terminal" then
       saw_terminal := true
     else if win_title = "System Log" then
@@ -441,16 +430,16 @@ end;
 
 procedure request_restart();
 begin
-  say("desktop_shell: restart\n");
+  out.say("desktop_shell: restart\n");
   status := core.reboot();
-  say("desktop_shell: reboot returned\n");
+  out.say("desktop_shell: reboot returned\n");
 end;
 
 procedure request_halt();
 begin
-  say("desktop_shell: halt\n");
+  out.say("desktop_shell: halt\n");
   status := core.halt();
-  say("desktop_shell: halt returned\n");
+  out.say("desktop_shell: halt returned\n");
 end;
 
 procedure activate_system_item();
@@ -549,13 +538,13 @@ begin
   begin
     about_runs := about_runs + 1;
     about_open := true;
-    say("desktop_shell: about open\n");
+    out.say("desktop_shell: about open\n");
     draw_about();
   end
   else
   begin
     about_id := 0;
-    say("desktop_shell: about failed\n");
+    out.say("desktop_shell: about failed\n");
   end;
 end;
 
@@ -592,7 +581,7 @@ begin
     status := syslib.window_close(about_id);
   about_id := 0;
   about_open := false;
-  say("desktop_shell: about closed\n");
+  out.say("desktop_shell: about closed\n");
   draw_menu_bar();
   draw_shell_window();
 end;
@@ -657,15 +646,15 @@ begin
   launches := launches + 1;
   if launch_status = Ok then
   begin
-    say("desktop_shell: launched clock task ");
-    say_int(last_task);
-    say("\n");
+    out.say("desktop_shell: launched clock task ");
+    out.say_int(last_task);
+    out.say("\n");
   end
   else
   begin
-    say("desktop_shell: launch failed: ");
-    say(diag.message);
-    say("\n");
+    out.say("desktop_shell: launch failed: ");
+    out.say(diag.message);
+    out.say("\n");
   end;
 end;
 
@@ -682,7 +671,7 @@ begin
     raise_terminal();
   if raised_id > 0 then
   begin
-    say("desktop_shell: terminal raised\n");
+    out.say("desktop_shell: terminal raised\n");
   end
   else
   begin
@@ -690,15 +679,15 @@ begin
     if launch_status = Ok then
     begin
       shell_launched := true;
-      say("desktop_shell: launched shell task ");
-      say_int(shell_task);
-      say("\n");
+      out.say("desktop_shell: launched shell task ");
+      out.say_int(shell_task);
+      out.say("\n");
     end
     else
     begin
-      say("desktop_shell: shell launch failed: ");
-      say(diag.message);
-      say("\n");
+      out.say("desktop_shell: shell launch failed: ");
+      out.say(diag.message);
+      out.say("\n");
     end;
   end;
 end;
@@ -711,15 +700,15 @@ begin
   launch_status := core.spawn("shell", "", diag, shell_task);
   if launch_status = Ok then
   begin
-    say("desktop_shell: serial shell task ");
-    say_int(shell_task);
-    say("\n");
+    out.say("desktop_shell: serial shell task ");
+    out.say_int(shell_task);
+    out.say("\n");
   end
   else
   begin
-    say("desktop_shell: shell launch failed: ");
-    say(diag.message);
-    say("\n");
+    out.say("desktop_shell: shell launch failed: ");
+    out.say(diag.message);
+    out.say("\n");
   end;
 end;
 
@@ -974,14 +963,14 @@ begin
 
   if failed then
   begin
-    say("desktop_shell: FAIL at step ");
-    say_int(fail_step);
-    say(": ");
-    say(fail_label);
-    say("\n");
+    out.say("desktop_shell: FAIL at step ");
+    out.say_int(fail_step);
+    out.say(": ");
+    out.say(fail_label);
+    out.say("\n");
   end
   else
-    say("desktop_shell: ok\n");
+    out.say("desktop_shell: ok\n");
 end;
 
 procedure normal_mode();
@@ -995,7 +984,7 @@ begin
   // If every core already holds a realtime task, the short normal-budget life
   // is still enough to show the frame.
   status := core.realtime_on();
-  say("desktop_shell: ready\n");
+  out.say("desktop_shell: ready\n");
   while true do
   begin
     core.heartbeat();
@@ -1054,20 +1043,20 @@ begin
   if args = "check" then
   begin
     if screen_w = 0 or screen_h = 0 then
-      say("desktop_shell: no graphics\n")
+      out.say("desktop_shell: no graphics\n")
     else if screen_w < 400 or screen_h < 300 then
-      say("desktop_shell: screen too small\n")
+      out.say("desktop_shell: screen too small\n")
     else
       check_mode();
   end
   else if screen_w = 0 or screen_h = 0 then
   begin
-    say("desktop_shell: no graphics\n");
+    out.say("desktop_shell: no graphics\n");
     serial_shell();
   end
   else if screen_w < 400 or screen_h < 300 then
   begin
-    say("desktop_shell: screen too small\n");
+    out.say("desktop_shell: screen too small\n");
     serial_shell();
   end
   else

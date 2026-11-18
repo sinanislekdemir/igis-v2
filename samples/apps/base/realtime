@@ -5,7 +5,7 @@ unit realtime;
 // and reports. On `-smp 1` the parent holds the only admission slot, so the
 // child's own `realtime_on` is refused with `Full`; the parent still exits `Ok`.
 
-uses core;
+uses core, lib.out;
 
 var
   st: Status;
@@ -17,18 +17,13 @@ var
   digits: string[16];
   line: string[96];
 
-procedure say(text: const string[0]);
-begin
-  core.write(text);
-end;
-
 procedure main(args: const string[1024]);
 begin
   st := core.realtime_on();
   if st = Ok then
-    say("realtime: promoted\n")
+    out.say("realtime: promoted\n")
   else
-    say("realtime: realtime full\n");
+    out.say("realtime: realtime full\n");
 
   i := 0;
   while i < 200 do
@@ -38,36 +33,36 @@ begin
   end;
   n := core.format_int_into(digits, i, uint(10), uint(0));
   line := "realtime: " + digits + " control cycles\n";
-  say(line);
+  out.say(line);
 
   st := core.spawn("beat", "", diag, id);
   if st = Ok then
   begin
-    say("realtime: beat spawned\n");
+    out.say("realtime: beat spawned\n");
     st := core.wait(id, reason);
     if st = Ok then
     begin
       case reason of
-        Ok: say("realtime: child ok\n")
-        Killed: say("realtime: child killed\n")
+        Ok: out.say("realtime: child ok\n")
+        Killed: out.say("realtime: child killed\n")
         Faulted(code):
         begin
           if code = FaultCode.WatchdogTimeout then
-            say("realtime: child watchdog\n")
+            out.say("realtime: child watchdog\n")
           else
-            say("realtime: child faulted\n");
+            out.say("realtime: child faulted\n");
         end;
       end;
     end
     else
-      say("realtime: wait failed\n");
+      out.say("realtime: wait failed\n");
   end
   else
   begin
-    say("realtime: spawn failed: ");
-    say(diag.message);
-    say("\n");
+    out.say("realtime: spawn failed: ");
+    out.say(diag.message);
+    out.say("\n");
   end;
 
-  say("realtime: bye\n");
+  out.say("realtime: bye\n");
 end;

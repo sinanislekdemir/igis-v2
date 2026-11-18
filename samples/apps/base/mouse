@@ -13,7 +13,7 @@ unit mouse;
 // cursor is composited at present time and never stored in the shadow
 // (spec 0010, I7).
 
-uses core, syslib;
+uses core, syslib, lib.out;
 
 var
   ok: bool;
@@ -24,19 +24,6 @@ var
   h: int;
   buttons: uint;
   background: uint;
-  out: string[32];
-  used: int;
-
-procedure say(line: const string[0]);
-begin
-  core.write(line);
-end;
-
-procedure say_int(value: int);
-begin
-  used := core.format_int_into(out, value, uint(10), uint(0));
-  core.write(out);
-end;
 
 // One line per step; the first failure names the step and stops the checks.
 procedure check(label: const string[0]; passed: bool);
@@ -45,16 +32,16 @@ begin
   begin
     if passed then
     begin
-      say("mouse: ");
-      say(label);
-      say(" ok\n");
+      out.say("mouse: ");
+      out.say(label);
+      out.say(" ok\n");
     end
     else
     begin
       ok := false;
-      say("mouse: FAIL ");
-      say(label);
-      say("\n");
+      out.say("mouse: FAIL ");
+      out.say(label);
+      out.say("\n");
     end;
   end;
 end;
@@ -70,9 +57,9 @@ procedure main(args: const string[1024]);
 begin
   ok := true;
   background := uint(0x204060);
-  say("mouse: source ");
-  say_int(int(syslib.pointer_source()));
-  say("\n");
+  out.say("mouse: source ");
+  out.say_int(int(syslib.pointer_source()));
+  out.say("\n");
   w := int(syslib.screen_width());
   h := int(syslib.screen_height());
   status := syslib.clear(background);
@@ -124,5 +111,5 @@ begin
   check("above cursor is background", syslib.get_pixel(41, 59) = background);
 
   if ok then
-    say("mouse: ok\n");
+    out.say("mouse: ok\n");
 end;

@@ -7,7 +7,7 @@ unit streams;
 // drains it. Finally the driver waits for the consumer, which exits on
 // `Closed` after the producer terminates.
 
-uses core;
+uses core, lib.out;
 
 var
   st: Status;
@@ -15,18 +15,13 @@ var
   diag: Diagnostic;
   reason: ExitReason;
 
-procedure say(text: const string[0]);
-begin
-  core.write(text);
-end;
-
 procedure report(what: const string[0]; why: const ExitReason);
 begin
-  say(what);
+  out.say(what);
   case why of
-    Ok: say("ok\n")
-    Killed: say("killed\n")
-    Faulted(code): say("faulted\n")
+    Ok: out.say("ok\n")
+    Killed: out.say("killed\n")
+    Faulted(code): out.say("faulted\n")
   end;
 end;
 
@@ -35,9 +30,9 @@ begin
   st := core.spawn("pipe_in", "", diag, consumer);
   if st <> Ok then
   begin
-    say("streams: spawn pipe_in failed: ");
-    say(diag.message);
-    say("\n");
+    out.say("streams: spawn pipe_in failed: ");
+    out.say(diag.message);
+    out.say("\n");
   end
   else
   begin
@@ -46,16 +41,16 @@ begin
       report("streams: producer ", reason)
     else
     begin
-      say("streams: run pipe_out failed: ");
-      say(diag.message);
-      say("\n");
+      out.say("streams: run pipe_out failed: ");
+      out.say(diag.message);
+      out.say("\n");
     end;
 
     st := core.wait(consumer, reason);
     if st = Ok then
       report("streams: consumer ", reason)
     else
-      say("streams: wait for consumer failed\n");
-    say("streams: done\n");
+      out.say("streams: wait for consumer failed\n");
+    out.say("streams: done\n");
   end;
 end;

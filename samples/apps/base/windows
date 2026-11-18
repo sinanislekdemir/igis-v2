@@ -22,7 +22,7 @@ unit windows;
 // The first failed check names itself and sets `ok` false; the last line is
 // `windows: ok` only when every check passed.
 
-uses core, syslib;
+uses core, syslib, lib.out, lib.reason;
 
 var
   ok: bool;
@@ -40,39 +40,29 @@ var
   screen_w: uint;
   baseline: int;
 
-procedure say(line: const string[0]);
-begin
-  core.write(line);
-end;
-
 procedure check(label: const string[0]; passed: bool);
 begin
   if ok then
   begin
     if passed then
     begin
-      say("windows: ");
-      say(label);
-      say(" ok\n");
+      out.say("windows: ");
+      out.say(label);
+      out.say(" ok\n");
     end
     else
     begin
       ok := false;
-      say("windows: FAIL ");
-      say(label);
-      say("\n");
+      out.say("windows: FAIL ");
+      out.say(label);
+      out.say("\n");
     end;
   end;
 end;
 
 procedure classify_reason();
 begin
-  exited_ok := false;
-  case reason of
-    Ok: exited_ok := true
-    Killed: exited_ok := false
-    Faulted(code): exited_ok := false
-  end;
+  exited_ok := reason.is_ok(reason);
 end;
 
 procedure main(args: const string[1024]);
@@ -80,7 +70,7 @@ begin
   ok := true;
   screen_w := syslib.screen_width();
   if screen_w = uint(0) then
-    say("windows: no graphics\n")
+    out.say("windows: no graphics\n")
   else
   begin
     // The kernel's terminal and system-log windows exist from boot (spec
@@ -171,6 +161,6 @@ begin
     check("frame wider than screen", status = Invalid);
 
     if ok then
-      say("windows: ok\n");
+      out.say("windows: ok\n");
   end;
 end;

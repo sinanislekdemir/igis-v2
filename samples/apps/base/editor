@@ -47,7 +47,7 @@ unit editor;
 // `langhost` and a kernel without a framebuffer model a disabled screen, so the
 // sample runs the same load/edit/line logic there and prints `editor: host ok`.
 
-uses core, stdlib, syslib;
+uses core, stdlib, syslib, lib.out;
 
 const
   WindowX = 180;
@@ -136,11 +136,6 @@ var
   scratch_bytes: bytes[4];
   scratch_text: string[8];
 
-procedure say(line: const string[0]);
-begin
-  core.write(line);
-end;
-
 // Silent check: the first failure is printed with its step number and label.
 procedure verify(label: const string[0]; passed: bool);
 begin
@@ -148,12 +143,12 @@ begin
   if not passed then
   begin
     failed := true;
-    say("editor: failed check ");
+    out.say("editor: failed check ");
     used := core.format_int_into(step_text, step, uint(10), uint(0));
-    say(step_text);
-    say(" (");
-    say(label);
-    say(")\n");
+    out.say(step_text);
+    out.say(" (");
+    out.say(label);
+    out.say(")\n");
   end;
 end;
 
@@ -1404,9 +1399,9 @@ begin
   scroll_checks();
   buffer_checks();
   if failed then
-    say("editor: host failed\n")
+    out.say("editor: host failed\n")
   else
-    say("editor: host ok\n");
+    out.say("editor: host ok\n");
 end;
 
 procedure check_mode();
@@ -1491,9 +1486,9 @@ begin
 
   st := syslib.window_close(id);
   if failed then
-    say("editor: failed\n")
+    out.say("editor: failed\n")
   else
-    say("editor: ok\n");
+    out.say("editor: ok\n");
 end;
 
 procedure interactive_mode();
@@ -1549,7 +1544,7 @@ begin
   st := open_path(path);
   draw_all();
   present_frame();
-  say("editor: ready\n");
+  out.say("editor: ready\n");
   deadline := core.clock() + uint(HoldSeconds) * uint(NanosPerSecond);
   while core.clock() < deadline and running do
   begin
@@ -1596,7 +1591,7 @@ begin
     end;
   end;
   st := syslib.window_close(id);
-  say("editor: done\n");
+  out.say("editor: done\n");
 end;
 
 procedure parse_args(args: const string[1024]);
@@ -1664,17 +1659,17 @@ begin
     host_path()
   else if screen_w < uint(WindowX + ContentW + 40) or
           screen_h < uint(WindowY + ContentH + 60) then
-    say("editor: screen too small\n")
+    out.say("editor: screen too small\n")
   else
   begin
     st := syslib.window_open(WindowX, WindowY, ContentW, ContentH, "Editor", id);
     if st <> Ok then
-      say("editor: no window\n")
+      out.say("editor: no window\n")
     else
     begin
       st := syslib.window_content_rect(id, rect);
       if st <> Ok then
-        say("editor: no content rect\n")
+        out.say("editor: no content rect\n")
       else
       begin
         compute_layout();

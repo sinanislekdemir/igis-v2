@@ -28,7 +28,7 @@ unit ui_icons;
 // `langhost` and a kernel without a framebuffer run the pure helpers and the
 // disabled-screen `Invalid` contract and print `ui_icons: host ok`.
 
-uses core, stdlib, syslib;
+uses core, stdlib, syslib, lib.out;
 
 const
   GridCols = 2;
@@ -122,11 +122,6 @@ var
   probe_x: int;
   probe_y: int;
   digits: string[16];
-
-procedure say(line: const string[0]);
-begin
-  core.write(line);
-end;
 
 procedure verify(label: const string[0]; passed: bool);
 begin
@@ -359,9 +354,9 @@ begin
         last_click_ns, now, last_click_item = hit_item) then
       begin
         opens := opens + 1;
-        say("ui_icons: open ");
-        say(labels[hit_item]);
-        say("\n");
+        out.say("ui_icons: open ");
+        out.say(labels[hit_item]);
+        out.say("\n");
         last_click_ns := uint(0);
         last_click_item := -1;
       end
@@ -740,15 +735,15 @@ procedure report_and_exit();
 begin
   if failed then
   begin
-    say("ui_icons: failed check ");
+    out.say("ui_icons: failed check ");
     at := core.format_int_into(digits, fail_step, uint(10), uint(0));
-    say(digits);
-    say(" (");
-    say(fail_label);
-    say(")\n");
+    out.say(digits);
+    out.say(" (");
+    out.say(fail_label);
+    out.say(")\n");
   end
   else
-    say("ui_icons: ok\n");
+    out.say("ui_icons: ok\n");
 end;
 
 // The four 32x32 assets, written as 32 row masks each (bit 0 = left pixel).
@@ -939,20 +934,20 @@ begin
     if failed then
       report_and_exit()
     else
-      say("ui_icons: host ok\n");
+      out.say("ui_icons: host ok\n");
   end
   else if screen_w < uint(120 + ContentW + 30) or screen_h < uint(80 + ContentH + 30) then
-    say("ui_icons: screen too small\n")
+    out.say("ui_icons: screen too small\n")
   else
   begin
     status := syslib.window_open(120, 80, ContentW, ContentH, "Desktop Icons", id);
     if status <> Ok then
-      say("ui_icons: no window\n")
+      out.say("ui_icons: no window\n")
     else
     begin
       status := syslib.window_content_rect(id, rect);
       if status <> Ok then
-        say("ui_icons: no content rect\n")
+        out.say("ui_icons: no content rect\n")
       else
       begin
         grid_x := rect.x + GridX;
@@ -964,12 +959,12 @@ begin
         if shot then
         begin
           draw_shot();
-          say("ui_icons: ready\n");
+          out.say("ui_icons: ready\n");
           flushed := core.clock();
           while core.clock() - flushed < uint(3000000000) do
             at := 0;
           status := syslib.window_close(id);
-          say("ui_icons: done\n");
+          out.say("ui_icons: done\n");
         end
         else
           kernel_proof();

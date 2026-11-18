@@ -10,7 +10,7 @@ unit text_edit;
 // The sample is deterministic and uses no graphics, so the same source runs
 // on `langhost` (the e2e test asserts this transcript byte for byte).
 
-uses core, stdlib;
+uses core, stdlib, lib.out;
 
 var
   text: string[256];
@@ -27,24 +27,19 @@ var
   ok: bool;
   failed: bool;
 
-procedure say(line: const string[0]);
-begin
-  core.write(line);
-end;
-
 procedure report(name: const string[0]; passed: bool);
 begin
   if passed then
   begin
-    say(name);
-    say(": ok\n");
+    out.say(name);
+    out.say(": ok\n");
   end
   else
   begin
     failed := true;
-    say("text_edit: FAILED ");
-    say(name);
-    say("\n");
+    out.say("text_edit: FAILED ");
+    out.say(name);
+    out.say("\n");
   end;
 end;
 
@@ -339,7 +334,7 @@ begin
   check_backspace();
   check_selection();
   if failed then
-    say("text_edit: failed\n")
+    out.say("text_edit: failed\n")
   else
-    say("text_edit: ok\n");
+    out.say("text_edit: ok\n");
 end;

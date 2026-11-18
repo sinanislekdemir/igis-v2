@@ -9,7 +9,7 @@ unit pipe_in;
 // whole lines while the stream stays a byte FIFO. The loop ends when the
 // producer terminates and the stream reports `Closed`.
 
-uses core, stdlib;
+uses core, stdlib, lib.out;
 
 var
   report: in_stream[64];
@@ -18,11 +18,6 @@ var
   formatted: int;
   total: int;
   lines: int;
-
-procedure say(text: const string[0]);
-begin
-  core.write(text);
-end;
 
 procedure show(value: int);
 begin
@@ -43,17 +38,17 @@ begin
     if st = Ok then
     begin
       core.write(line);
-      say("\n");
+      out.say("\n");
       total := total + int(core.len(line));
       lines := lines + 1;
     end;
   end;
   if st = Closed then
-    say("pipe_in: closed after ")
+    out.say("pipe_in: closed after ")
   else
-    say("pipe_in: stopped after ");
+    out.say("pipe_in: stopped after ");
   show(lines);
-  say(" lines, ");
+  out.say(" lines, ");
   show(total);
-  say(" bytes\n");
+  out.say(" bytes\n");
 end;

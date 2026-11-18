@@ -1,6 +1,6 @@
 unit shell;
 
-uses core, stdlib, syslib;
+uses core, stdlib, syslib, lib.out;
 
 var
   banner: string[32];
@@ -38,11 +38,6 @@ var
   ev: Event;
   edit_st: Status;
 
-procedure say(text: const string[0]);
-begin
-  core.write(text);
-end;
-
 // Inserts one printable byte at the cursor through the M2.4.1 helpers, so the
 // line stays valid UTF-8 and is published atomically. The echo is one cell,
 // and the cursor only ever sits at the end (see `handle_byte`).
@@ -56,7 +51,7 @@ begin
     if edit_st = Ok then
     begin
       cursor := cursor + 1;
-      say(ch);
+      out.say(ch);
     end;
   end;
 end;
@@ -72,7 +67,7 @@ var
 begin
   if b = byte(13) or b = byte(10) then
   begin
-    say("\n");
+    out.say("\n");
     submitted := true;
   end
   else if b = byte(127) or b = byte(8) then
@@ -80,11 +75,11 @@ begin
     before := int(core.len(line));
     edit_st := stdlib.str_backspace(line, cursor);
     if int(core.len(line)) < before then
-      say("\x08 \x08");
+      out.say("\x08 \x08");
   end
   else if b = byte(3) then
   begin
-    say("^C\n");
+    out.say("^C\n");
     line := "";
     cursor := 0;
     cancelled := true;
@@ -117,26 +112,26 @@ end;
 procedure report(why: const ExitReason);
 begin
   case why of
-    Ok: say("child: ok\n")
-    Killed: say("child: killed\n")
+    Ok: out.say("child: ok\n")
+    Killed: out.say("child: killed\n")
     Faulted(code):
     begin
-      say("child: faulted ");
+      out.say("child: faulted ");
       if code = FaultCode.DivideByZero then
-        say("DivideByZero")
+        out.say("DivideByZero")
       else if code = FaultCode.Overflow then
-        say("Overflow")
+        out.say("Overflow")
       else if code = FaultCode.CapacityExceeded then
-        say("CapacityExceeded")
+        out.say("CapacityExceeded")
       else if code = FaultCode.StackOverflow then
-        say("StackOverflow")
+        out.say("StackOverflow")
       else if code = FaultCode.WatchdogTimeout then
-        say("WatchdogTimeout")
+        out.say("WatchdogTimeout")
       else if code = FaultCode.IoError then
-        say("IoError")
+        out.say("IoError")
       else
-        say("other");
-      say("\n");
+        out.say("other");
+      out.say("\n");
     end;
   end;
 end;
@@ -156,12 +151,12 @@ begin
   begin
     if term <> 0 then
       st := syslib.window_close(term);
-    say("shell: no terminal window\n");
+    out.say("shell: no terminal window\n");
   end;
 
   banner := "igis-v2 shell\n";
-  say(banner);
-  say("shell: spawning child\n");
+  out.say(banner);
+  out.say("shell: spawning child\n");
 
   // `core.spawn` returns `Status` and fills the caller's `Diagnostic` record on
   // a synchronous failure (spec 0003 E1, spec 0005). `core.wait` blocks until
@@ -169,18 +164,18 @@ begin
   st := core.spawn("child", "hello", diag, id);
   if st = Ok then
   begin
-    say("shell: child task id assigned\n");
+    out.say("shell: child task id assigned\n");
     st := core.wait(id, reason);
     if st = Ok then
       report(reason)
     else
-      say("child: wait failed\n");
+      out.say("child: wait failed\n");
   end
   else
   begin
-    say("spawn failed: ");
-    say(diag.message);
-    say("\n");
+    out.say("spawn failed: ");
+    out.say(diag.message);
+    out.say("\n");
   end;
 
   // Command loop (spec 0005, ADR 0037). The console is a raw byte stream and
@@ -200,7 +195,7 @@ begin
     cursor := 0;
     submitted := false;
     cancelled := false;
-    say("shell> ");
+    out.say("shell> ");
     while not submitted and not cancelled do
     begin
       ready := -1;
@@ -236,11 +231,11 @@ begin
     end;
 
     if cmd = "help" then
-      say("shell: help, echo <text>, run <app> [args], exit\n")
+      out.say("shell: help, echo <text>, run <app> [args], exit\n")
     else if cmd = "echo" then
     begin
-      say(rest);
-      say("\n");
+      out.say(rest);
+      out.say("\n");
     end
     else if cmd = "run" then
     begin
@@ -259,7 +254,7 @@ begin
       end;
 
       if core.len(path) = uint(0) then
-        say("usage: run <app> [args]\n")
+        out.say("usage: run <app> [args]\n")
       else
       begin
         // `core.run` is spawn + wait in one primitive. It blocks the shell
@@ -271,17 +266,17 @@ begin
           // `run` also fills `diag` from the exit record (spec 0005).
           if core.len(diag.message) > uint(0) then
           begin
-            say("child: ");
-            say(diag.message);
-            say("\n");
+            out.say("child: ");
+            out.say(diag.message);
+            out.say("\n");
           end;
           report(reason)
         end
         else
         begin
-          say("run failed: ");
-          say(diag.message);
-          say("\n");
+          out.say("run failed: ");
+          out.say(diag.message);
+          out.say("\n");
         end;
       end;
     end
@@ -293,16 +288,16 @@ begin
       // with Full while this shell holds the one terminal.
       if term_status = Ok then
       begin
-        say("terminal: window ");
+        out.say("terminal: window ");
         split := core.format_int_into(rest, term, uint(10), uint(0));
-        say(rest);
-        say("\n");
+        out.say(rest);
+        out.say("\n");
 
         st := core.terminal_attach(999999);
         if st = NotFound then
-          say("terminal: unknown refused\n")
+          out.say("terminal: unknown refused\n")
         else
-          say("terminal: unknown BAD\n");
+          out.say("terminal: unknown BAD\n");
 
         st := syslib.window_content_rect(term, term_rect);
         if st = Ok then
@@ -324,29 +319,29 @@ begin
             py := py + 1;
           end;
           if found_ink and found_white then
-            say("terminal: pixels ok\n")
+            out.say("terminal: pixels ok\n")
           else
-            say("terminal: pixels BAD\n");
+            out.say("terminal: pixels BAD\n");
         end
         else
-          say("terminal: no rect\n");
+          out.say("terminal: no rect\n");
 
         st := core.run("system/terminal_probe", "", diag, reason);
         if st = Ok then
           report(reason)
         else
-          say("terminal: probe failed\n");
-        say("terminal: ok\n");
+          out.say("terminal: probe failed\n");
+        out.say("terminal: ok\n");
       end
       else
-        say("terminal: not attached\n");
+        out.say("terminal: not attached\n");
     end
     else if cmd = "exit" then
       done := true
     else
-      say("unknown\n");
+      out.say("unknown\n");
     end;
   end;
 
-  say("bye\n");
+  out.say("bye\n");
 end;

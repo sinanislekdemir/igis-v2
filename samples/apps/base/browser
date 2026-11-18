@@ -56,7 +56,7 @@ unit browser;
 // the same tree and prints `browser: host ok`. The host path never launches a
 // child.
 
-uses core, stdlib, syslib;
+uses core, stdlib, syslib, lib.out, lib.inject;
 
 const
   WindowX = 160;
@@ -176,11 +176,6 @@ var
   line_buf: string[64];
   size_buf: string[32];
 
-procedure say(line: const string[0]);
-begin
-  core.write(line);
-end;
-
 // Silent check: the first failure is printed with its step number and label.
 procedure verify(label: const string[0]; passed: bool);
 begin
@@ -188,12 +183,12 @@ begin
   if not passed then
   begin
     failed := true;
-    say("browser: failed check ");
+    out.say("browser: failed check ");
     used := core.format_int_into(step_text, step, uint(10), uint(0));
-    say(step_text);
-    say(" (");
-    say(label);
-    say(")\n");
+    out.say(step_text);
+    out.say(" (");
+    out.say(label);
+    out.say(")\n");
   end;
 end;
 
@@ -1042,38 +1037,32 @@ end;
 
 procedure pointer_to(px: int; py: int);
 begin
-  st := syslib.inject_pointer(-100000, -100000, uint(0));
-  used := int(syslib.event_flush());
-  st := syslib.inject_pointer(px, py, uint(0));
+  st := inject.pointer_to(px, py);
   drain_events();
 end;
 
 procedure pointer_down();
 begin
-  st := syslib.inject_pointer(0, 0, uint(1));
+  st := inject.pointer_down();
   drain_events();
 end;
 
 procedure pointer_up();
 begin
-  st := syslib.inject_pointer(0, 0, uint(0));
+  st := inject.pointer_up();
   drain_events();
 end;
 
 procedure inject_key_mods(key_code: int; text_byte: int; mods: int);
 begin
-  ev.kind := KeyDown;
-  ev.x := 0;
-  ev.y := 0;
-  ev.code := uint(key_code * 65536 + mods * 256 + text_byte);
-  ev.window := 0;
-  st := syslib.inject_event(ev);
+  st := inject.inject_key_mods(key_code, text_byte, mods);
   drain_events();
 end;
 
 procedure inject_key(key_code: int; text_byte: int);
 begin
-  inject_key_mods(key_code, text_byte, 0);
+  st := inject.inject_key(key_code, text_byte);
+  drain_events();
 end;
 
 // ---- shared checks --------------------------------------------------------
@@ -1190,14 +1179,14 @@ var
 begin
   // `data_checks` leaves the view in `base`.
   if report then
-    say("browser: nav dir=base\n");
+    out.say("browser: nav dir=base\n");
   err := open_name("child");
   verify("base child path", err = Ok and preview_title = "base/child");
   if report then
   begin
-    say("browser: nav preview=");
-    say(preview_title);
-    say("\n");
+    out.say("browser: nav preview=");
+    out.say(preview_title);
+    out.say("\n");
   end;
 
   go_up();
@@ -1206,7 +1195,7 @@ begin
   if expect_lost_found then
     verify("up lists lost+found", has_kind("lost+found", uint(1)));
   if report then
-    say("browser: nav dir=/\n");
+    out.say("browser: nav dir=/\n");
   go_up();
   verify("root up no-op", int(core.len(dir)) = 0 and has_kind("base", uint(1)));
 
@@ -1221,9 +1210,9 @@ begin
     stdlib.starts_with(preview, "unit system_probe;"));
   if report then
   begin
-    say("browser: nav preview=");
-    say(preview_title);
-    say("\n");
+    out.say("browser: nav preview=");
+    out.say(preview_title);
+    out.say("\n");
   end;
   go_up();
   verify("back from system", int(core.len(dir)) = 0);
@@ -1236,9 +1225,9 @@ begin
     stdlib.starts_with(preview, "igis-v2 home"));
   if report then
   begin
-    say("browser: nav preview=");
-    say(preview_title);
-    say("\n");
+    out.say("browser: nav preview=");
+    out.say(preview_title);
+    out.say("\n");
   end;
   go_up();
   verify("back from home", int(core.len(dir)) = 0);
@@ -1247,7 +1236,7 @@ begin
   verify("enter lib", err = Ok and dir = "lib");
   verify("math.ig listed", has_kind("math.ig", uint(0)));
   if report then
-    say("browser: nav lib=math.ig\n");
+    out.say("browser: nav lib=math.ig\n");
   go_up();
   verify("back from lib", int(core.len(dir)) = 0);
 
@@ -1332,9 +1321,9 @@ begin
   selection_checks();
   verify("host no window", syslib.screen_width() = uint(0));
   if failed then
-    say("browser: host failed\n")
+    out.say("browser: host failed\n")
   else
-    say("browser: host ok\n");
+    out.say("browser: host ok\n");
 end;
 
 // The kernel proof. Data, navigation and selection checks first, then one
@@ -1510,9 +1499,9 @@ begin
 
   st := syslib.window_close(id);
   if failed then
-    say("browser: failed\n")
+    out.say("browser: failed\n")
   else
-    say("browser: ok\n");
+    out.say("browser: ok\n");
 end;
 
 procedure interactive_mode();
@@ -1585,7 +1574,7 @@ begin
   end;
   draw_all();
   present_frame();
-  say("browser: ready\n");
+  out.say("browser: ready\n");
   deadline := core.clock() + uint(HoldSeconds) * uint(NanosPerSecond);
   auto_draw := true;
   while core.clock() < deadline and running do
@@ -1593,7 +1582,7 @@ begin
     drain_events();
   end;
   st := syslib.window_close(id);
-  say("browser: done\n");
+  out.say("browser: done\n");
 end;
 
 procedure main(args: const string[1024]);
@@ -1632,17 +1621,17 @@ begin
     host_path()
   else if screen_w < uint(WindowX + ContentW + 40) or
           screen_h < uint(WindowY + ContentH + 60) then
-    say("browser: screen too small\n")
+    out.say("browser: screen too small\n")
   else
   begin
     st := syslib.window_open(WindowX, WindowY, ContentW, ContentH, "Browser", id);
     if st <> Ok then
-      say("browser: no window\n")
+      out.say("browser: no window\n")
     else
     begin
       st := syslib.window_content_rect(id, rect);
       if st <> Ok then
-        say("browser: no content rect\n")
+        out.say("browser: no content rect\n")
       else
       begin
         compute_layout();

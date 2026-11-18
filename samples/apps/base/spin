@@ -5,24 +5,19 @@ unit spin;
 // quantum boundary with `Faulted(WatchdogTimeout)` after about a second of
 // non-blocked time; the shell reports `child: faulted WatchdogTimeout`.
 
-uses core;
+uses core, lib.out;
 
 var
   st: Status;
   i: int;
 
-procedure say(text: const string[0]);
-begin
-  core.write(text);
-end;
-
 procedure main(args: const string[1024]);
 begin
   st := core.realtime_on();
   if st = Ok then
-    say("spin: promoted, no heartbeats\n")
+    out.say("spin: promoted, no heartbeats\n")
   else
-    say("spin: realtime full\n");
+    out.say("spin: realtime full\n");
 
   i := 0;
   while true do

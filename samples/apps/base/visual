@@ -27,7 +27,7 @@ unit visual;
 // disabled the sample checks the disabled-screen contract and prints
 // `visual: host ok`, so the `langhost` transcript stays deterministic.
 
-uses core, syslib;
+uses core, syslib, lib.out;
 
 const
   HoldNs = 5000000000;
@@ -58,19 +58,6 @@ var
   y: int;
   i: int;
   start: uint;
-  digits: string[16];
-  used: int;
-
-procedure say(line: const string[0]);
-begin
-  core.write(line);
-end;
-
-procedure say_int(value: int);
-begin
-  used := core.format_int_into(digits, value, uint(10), uint(0));
-  core.write(digits);
-end;
 
 // Records the first failure only; the runner reports it once after the frame
 // is stable (printing between drawing steps would not hurt here because the
@@ -227,9 +214,9 @@ begin
   verify("prop is Invalid", syslib.draw_text_prop(0, 0, "A", black) = Invalid);
   verify("get_pixel is 0", syslib.get_pixel(0, 0) = uint(0));
   if failed then
-    say("visual: host FAIL\n")
+    out.say("visual: host FAIL\n")
   else
-    say("visual: host ok\n");
+    out.say("visual: host ok\n");
 end;
 
 // Opens the full-screen window, composes, checks and presents the specimen.
@@ -244,14 +231,14 @@ begin
   status := syslib.window_open(0, 0, int(screen_w) - 2, int(screen_h) - 17, "Visual Regression", id);
   if status <> Ok then
   begin
-    say("visual: no window\n");
+    out.say("visual: no window\n");
     return;
   end;
   status := syslib.window_content_rect(id, rect);
   if status <> Ok then
   begin
     status := syslib.window_close(id);
-    say("visual: no content rect\n");
+    out.say("visual: no content rect\n");
     return;
   end;
 
@@ -261,21 +248,21 @@ begin
 
   if failed then
   begin
-    say("visual: FAIL at step ");
-    say_int(fail_step);
-    say(": ");
-    say(fail_label);
-    say("\n");
+    out.say("visual: FAIL at step ");
+    out.say_int(fail_step);
+    out.say(": ");
+    out.say(fail_label);
+    out.say("\n");
     return;
   end;
 
   // Printing goes to the shell's terminal window, which this full-screen
   // window covers; the console paints only its visible parts, so these lines
   // change no pixel of the specimen.
-  say("visual: ok\n");
+  out.say("visual: ok\n");
   if hold then
   begin
-    say("visual: ready\n");
+    out.say("visual: ready\n");
     start := core.clock();
     while core.clock() < start + uint(HoldNs) do
     begin
@@ -283,7 +270,7 @@ begin
     end;
   end;
   status := syslib.window_close(id);
-  say("visual: done\n");
+  out.say("visual: done\n");
 end;
 
 procedure main(args: const string[1024]);
@@ -303,16 +290,16 @@ begin
   if args = "shot" then
   begin
     if screen_w = uint(0) or screen_h = uint(0) then
-      say("visual: no graphics\n")
+      out.say("visual: no graphics\n")
     else if int(screen_w) < MinW or int(screen_h) < MinH then
-      say("visual: screen too small\n")
+      out.say("visual: screen too small\n")
     else
       specimen(true);
   end
   else if screen_w = uint(0) or screen_h = uint(0) then
     host_check()
   else if int(screen_w) < MinW or int(screen_h) < MinH then
-    say("visual: screen too small\n")
+    out.say("visual: screen too small\n")
   else
     specimen(false);
 end;

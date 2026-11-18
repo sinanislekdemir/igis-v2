@@ -24,7 +24,7 @@ unit windows_proof_a;
 // M2 has no pointer-driven continuous drag: the four moves are the scripted
 // stand-in; a real drag loop is M2.4.
 
-uses core, syslib;
+uses core, syslib, lib.out;
 
 const
   BaseX = 40;
@@ -57,11 +57,6 @@ var
   index: int;
   limit: int;
   width: int;
-
-procedure say(text: const string[0]);
-begin
-  core.write(text);
-end;
 
 // Paints the part of the content A may own on the shadow and presents it.
 // The scan finds A's z-order position and B's frame; when B is above A and
@@ -193,7 +188,7 @@ end;
 procedure main(args: const string[1024]);
 begin
   if syslib.screen_width() = uint(0) then
-    say("windows_proof_a: no graphics\n")
+    out.say("windows_proof_a: no graphics\n")
   else
   begin
     status := syslib.window_open(BaseX, BaseY, ContentW, ContentH, "Proof A", id);

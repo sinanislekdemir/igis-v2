@@ -7,7 +7,7 @@ unit frames;
 // messages and the acknowledgement that ends the run, and the driver reports
 // both exit reasons.
 
-uses core;
+uses core, lib.out;
 
 var
   st: Status;
@@ -15,18 +15,13 @@ var
   diag: Diagnostic;
   reason: ExitReason;
 
-procedure say(text: const string[0]);
-begin
-  core.write(text);
-end;
-
 procedure report(what: const string[0]; why: const ExitReason);
 begin
-  say(what);
+  out.say(what);
   case why of
-    Ok: say("ok\n")
-    Killed: say("killed\n")
-    Faulted(code): say("faulted\n")
+    Ok: out.say("ok\n")
+    Killed: out.say("killed\n")
+    Faulted(code): out.say("faulted\n")
   end;
 end;
 
@@ -35,9 +30,9 @@ begin
   st := core.spawn("frame_in", "", diag, consumer);
   if st <> Ok then
   begin
-    say("frames: spawn frame_in failed: ");
-    say(diag.message);
-    say("\n");
+    out.say("frames: spawn frame_in failed: ");
+    out.say(diag.message);
+    out.say("\n");
   end
   else
   begin
@@ -46,16 +41,16 @@ begin
       report("frames: producer ", reason)
     else
     begin
-      say("frames: run frame_out failed: ");
-      say(diag.message);
-      say("\n");
+      out.say("frames: run frame_out failed: ");
+      out.say(diag.message);
+      out.say("\n");
     end;
 
     st := core.wait(consumer, reason);
     if st = Ok then
       report("frames: consumer ", reason)
     else
-      say("frames: wait for consumer failed\n");
-    say("frames: done\n");
+      out.say("frames: wait for consumer failed\n");
+    out.say("frames: done\n");
   end;
 end;

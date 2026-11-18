@@ -15,7 +15,7 @@ unit ui_layout;
 // palette and that disabled-screen contract and prints `ui_layout: host ok`,
 // which keeps the host test deterministic.
 
-uses core, stdlib, syslib;
+uses core, stdlib, syslib, lib.out;
 
 const
   WindowX = 120;
@@ -46,11 +46,6 @@ var
   digits: string[16];
   used: int;
 
-procedure say(line: const string[0]);
-begin
-  core.write(line);
-end;
-
 // Silent check: the console is a window over the same shadow, so a failure is
 // reported as soon as it happens but success stays quiet until the end.
 procedure verify(label: const string[0]; passed: bool);
@@ -59,12 +54,12 @@ begin
   if not passed then
   begin
     failed := true;
-    say("ui_layout: failed check ");
+    out.say("ui_layout: failed check ");
     used := core.format_int_into(digits, step, uint(10), uint(0));
-    say(digits);
-    say(" (");
-    say(label);
-    say(")\n");
+    out.say(digits);
+    out.say(" (");
+    out.say(label);
+    out.say(")\n");
   end;
 end;
 
@@ -163,9 +158,9 @@ begin
     "center text disabled",
     stdlib.ui_center_text(0, 0, 100, 16, "host", stdlib.ui_black()) = Invalid);
   if failed then
-    say("ui_layout: host failed\n")
+    out.say("ui_layout: host failed\n")
   else
-    say("ui_layout: host ok\n");
+    out.say("ui_layout: host ok\n");
 end;
 
 procedure main(args: const string[1024]);
@@ -184,17 +179,17 @@ begin
   if screen_w = uint(0) then
     host_path()
   else if screen_w < uint(WindowX + ContentW + 40) or screen_h < uint(WindowY + ContentH + 60) then
-    say("ui_layout: screen too small\n")
+    out.say("ui_layout: screen too small\n")
   else
   begin
     status := syslib.window_open(WindowX, WindowY, ContentW, ContentH, "UI Layout", id);
     if status <> Ok then
-      say("ui_layout: no window\n")
+      out.say("ui_layout: no window\n")
     else
     begin
       status := syslib.window_content_rect(id, rect);
       if status <> Ok then
-        say("ui_layout: no content rect\n")
+        out.say("ui_layout: no content rect\n")
       else
       begin
         status := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, white);
@@ -206,9 +201,9 @@ begin
         status := syslib.window_close(id);
         verify("window close", status = Ok);
         if failed then
-          say("ui_layout: failed\n")
+          out.say("ui_layout: failed\n")
         else
-          say("ui_layout: ok\n");
+          out.say("ui_layout: ok\n");
       end;
     end;
   end;

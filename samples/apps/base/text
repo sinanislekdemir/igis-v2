@@ -4,7 +4,7 @@ unit text;
 // real `main(args)` string. It trims the argument, splits it at the first
 // space, parses the tail as an `int`, and prints one fixed line per result.
 
-uses core, stdlib;
+uses core, stdlib, lib.out;
 
 var
   trimmed: string[256];
@@ -16,11 +16,6 @@ var
   count: int;
   digits: string[32];
 
-procedure say(text: const string[0]);
-begin
-  core.write(text);
-end;
-
 procedure show(value: int);
 begin
   count := core.format_int_into(digits, value, uint(10), uint(0));
@@ -30,39 +25,39 @@ end;
 procedure main(args: const string[1024]);
 begin
   count := stdlib.trim_into(trimmed, args);
-  say("text: trimmed=[");
-  say(trimmed);
-  say("] len=");
+  out.say("text: trimmed=[");
+  out.say(trimmed);
+  out.say("] len=");
   show(count);
-  say("\n");
+  out.say("\n");
 
   split := stdlib.split_once(head, tail, trimmed, byte(32));
-  say("text: split=");
+  out.say("text: split=");
   show(split);
-  say(" head=[");
-  say(head);
-  say("] tail=[");
-  say(tail);
-  say("]\n");
+  out.say(" head=[");
+  out.say(head);
+  out.say("] tail=[");
+  out.say(tail);
+  out.say("]\n");
 
   st := stdlib.parse_int_into(tail, number);
   if st = Ok then
   begin
-    say("text: tail is ");
+    out.say("text: tail is ");
     show(number);
-    say("\n");
+    out.say("\n");
   end
   else if st = Invalid then
-    say("text: tail is not an integer (Invalid)\n")
+    out.say("text: tail is not an integer (Invalid)\n")
   else
-    say("text: tail is out of range (CapacityExceeded)\n");
+    out.say("text: tail is out of range (CapacityExceeded)\n");
 
   if stdlib.starts_with(head, "4") then
-    say("text: head starts with 4\n")
+    out.say("text: head starts with 4\n")
   else
-    say("text: head does not start with 4\n");
+    out.say("text: head does not start with 4\n");
   if stdlib.contains_byte(trimmed, byte(32)) then
-    say("text: trimmed has a space\n")
+    out.say("text: trimmed has a space\n")
   else
-    say("text: trimmed has no space\n");
+    out.say("text: trimmed has no space\n");
 end;

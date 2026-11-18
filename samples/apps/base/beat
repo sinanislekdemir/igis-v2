@@ -4,24 +4,19 @@ unit beat;
 // the status (`Full` when the single-core parent already holds the only slot),
 // runs a few heartbeat cycles and exits `Ok`.
 
-uses core;
+uses core, lib.out;
 
 var
   st: Status;
   i: int;
 
-procedure say(text: const string[0]);
-begin
-  core.write(text);
-end;
-
 procedure main(args: const string[1024]);
 begin
   st := core.realtime_on();
   if st = Ok then
-    say("beat: promoted\n")
+    out.say("beat: promoted\n")
   else
-    say("beat: realtime full\n");
+    out.say("beat: realtime full\n");
 
   i := 0;
   while i < 50 do
@@ -29,5 +24,5 @@ begin
     core.heartbeat();
     i := i + 1;
   end;
-  say("beat: bye\n");
+  out.say("beat: bye\n");
 end;

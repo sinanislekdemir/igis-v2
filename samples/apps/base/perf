@@ -19,7 +19,7 @@ unit perf;
 // event-injecting samples it is meant for a shell boot (`build/igis-shell.iso`),
 // because the boot desktop is a permanent consumer of the one event queue.
 
-uses core, syslib;
+uses core, syslib, lib.out;
 
 const
   WindowX = 120;
@@ -51,7 +51,6 @@ var
   load_ids: array[int, 4];
   load_count: int;
   i: int;
-  written: int;
   screen_w: uint;
   screen_h: uint;
   black: uint;
@@ -75,19 +74,6 @@ var
   load_ev_max: uint;
   load_ev_total: uint;
   load_delivered: int;
-
-  digits: string[24];
-
-procedure say(text: const string[0]);
-begin
-  core.write(text);
-end;
-
-procedure say_int(value: int);
-begin
-  written := core.format_int_into(digits, value, uint(10), uint(0));
-  core.write(digits);
-end;
 
 // One complete frame: a white face, a border, a moving block, a progress bar
 // and a text label. Only the client content rectangle is written.
@@ -202,18 +188,18 @@ end;
 // `perf: <label> <count> total <ms> ms avg <us> us min <us> us max <us> us`.
 procedure report(label: const string[0]; total: uint; low: uint; high: uint; count: int);
 begin
-  say(label);
-  say(" ");
-  say_int(count);
-  say(" total ");
-  say_int(int(total div uint(NanosPerMilli)));
-  say(" ms avg ");
-  say_int(int((total div uint(count)) div uint(NanosPerMicro)));
-  say(" us min ");
-  say_int(int(low div uint(NanosPerMicro)));
-  say(" us max ");
-  say_int(int(high div uint(NanosPerMicro)));
-  say(" us\n");
+  out.say(label);
+  out.say(" ");
+  out.say_int(count);
+  out.say(" total ");
+  out.say_int(int(total div uint(NanosPerMilli)));
+  out.say(" ms avg ");
+  out.say_int(int((total div uint(count)) div uint(NanosPerMicro)));
+  out.say(" us min ");
+  out.say_int(int(low div uint(NanosPerMicro)));
+  out.say(" us max ");
+  out.say_int(int(high div uint(NanosPerMicro)));
+  out.say(" us\n");
 end;
 
 procedure main(args: const string[1024]);
@@ -225,22 +211,22 @@ begin
   screen_h := syslib.screen_height();
   if screen_w = uint(0) then
   begin
-    say("perf: no graphics\n");
-    say("perf: host ok\n");
+    out.say("perf: no graphics\n");
+    out.say("perf: host ok\n");
   end
   else if screen_w < uint(WindowX + ContentW + 40)
           or screen_h < uint(WindowY + ContentH + 60) then
-    say("perf: screen too small\n")
+    out.say("perf: screen too small\n")
   else
   begin
     st := syslib.window_open(WindowX, WindowY, ContentW, ContentH, "Perf", id);
     if st <> Ok then
-      say("perf: no window\n")
+      out.say("perf: no window\n")
     else
     begin
       st := syslib.window_content_rect(id, rect);
       if st <> Ok then
-        say("perf: no content rect\n")
+        out.say("perf: no content rect\n")
       else
       begin
         // Phase A: the UI alone.
@@ -248,9 +234,9 @@ begin
         measure_events(idle_ev_min, idle_ev_max, idle_ev_total, idle_delivered);
         report("perf: idle frames", idle_total, idle_min, idle_max, Frames);
         report("perf: idle events", idle_ev_total, idle_ev_min, idle_ev_max, Events);
-        say("perf: idle events delivered ");
-        say_int(idle_delivered);
-        say("\n");
+        out.say("perf: idle events delivered ");
+        out.say_int(idle_delivered);
+        out.say("\n");
 
         // Phase B: the realtime controller plus worker tasks. Spawning is
         // non-blocking (never `core.run`); every child is reaped at the end.
@@ -260,13 +246,13 @@ begin
         begin
           load_ids[load_count] := child;
           load_count := load_count + 1;
-          say("perf: load realtime spawned\n");
+          out.say("perf: load realtime spawned\n");
         end
         else
         begin
-          say("perf: load realtime failed: ");
-          say(diag.message);
-          say("\n");
+          out.say("perf: load realtime failed: ");
+          out.say(diag.message);
+          out.say("\n");
         end;
         i := 0;
         while i < LoadWorkers do
@@ -279,9 +265,9 @@ begin
           end
           else
           begin
-            say("perf: load worker failed: ");
-            say(diag.message);
-            say("\n");
+            out.say("perf: load worker failed: ");
+            out.say(diag.message);
+            out.say("\n");
           end;
           i := i + 1;
         end;
@@ -290,9 +276,9 @@ begin
         measure_events(load_ev_min, load_ev_max, load_ev_total, load_delivered);
         report("perf: load frames", load_total, load_min, load_max, Frames);
         report("perf: load events", load_ev_total, load_ev_min, load_ev_max, Events);
-        say("perf: load events delivered ");
-        say_int(load_delivered);
-        say("\n");
+        out.say("perf: load events delivered ");
+        out.say_int(load_delivered);
+        out.say("\n");
 
         i := 0;
         while i < load_count do
@@ -300,9 +286,9 @@ begin
           st := core.wait(load_ids[i], reason);
           i := i + 1;
         end;
-        say("perf: load children reaped\n");
+        out.say("perf: load children reaped\n");
         ignored := syslib.window_close(id);
-        say("perf: ok\n");
+        out.say("perf: ok\n");
       end;
     end;
   end;

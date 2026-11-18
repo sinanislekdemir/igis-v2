@@ -27,7 +27,7 @@ unit font;
 // Nothing is cleared (`syslib.clear` is not called) and the window is closed
 // at the end, so the sample is safe next to the boot desktop.
 
-uses core, syslib;
+uses core, syslib, lib.out;
 
 const
   WindowX = 80;
@@ -40,8 +40,6 @@ var
   step: int;
   fail_label: string[64];
   fail_step: int;
-  digits: string[16];
-  used: int;
   screen_w: uint;
   screen_h: uint;
   black: uint;
@@ -56,17 +54,6 @@ var
   fy: int;
   title_w: int;
   band_x: int;
-
-procedure say(text: const string[0]);
-begin
-  core.write(text);
-end;
-
-procedure say_int(value: int);
-begin
-  used := core.format_int_into(digits, value, uint(10), uint(0));
-  core.write(digits);
-end;
 
 procedure verify(label: const string[0]; passed: bool);
 begin
@@ -95,9 +82,9 @@ begin
   verify("height is 0", syslib.text_height_prop() = uint(0));
   verify("draw is Invalid", syslib.draw_text_prop(0, 0, "abc", white) = Invalid);
   if failed then
-    say("font: host FAIL\n")
+    out.say("font: host FAIL\n")
   else
-    say("font: host ok\n");
+    out.say("font: host ok\n");
 end;
 
 procedure check_mode();
@@ -123,11 +110,11 @@ begin
   verify("window open", status = Ok and id > 0);
   if status <> Ok then
   begin
-    say("font: FAIL at step ");
-    say_int(step);
-    say(": ");
-    say(fail_label);
-    say("\n");
+    out.say("font: FAIL at step ");
+    out.say_int(step);
+    out.say(": ");
+    out.say(fail_label);
+    out.say("\n");
     return;
   end;
 
@@ -207,14 +194,14 @@ begin
 
   if failed then
   begin
-    say("font: FAIL at step ");
-    say_int(fail_step);
-    say(": ");
-    say(fail_label);
-    say("\n");
+    out.say("font: FAIL at step ");
+    out.say_int(fail_step);
+    out.say(": ");
+    out.say(fail_label);
+    out.say("\n");
   end
   else
-    say("font: ok\n");
+    out.say("font: ok\n");
 end;
 
 // `run font shot`: compose one window with the full proportional specimen and
@@ -227,7 +214,7 @@ begin
   verify("shot window open", status = Ok and id > 0);
   if status <> Ok then
   begin
-    say("font: no window\n");
+    out.say("font: no window\n");
     return;
   end;
   status := syslib.window_content_rect(id, rect);
@@ -247,14 +234,14 @@ begin
   status := syslib.draw_text_prop(
     cx + 12, cy + 192, "Service chrome titles and the desktop menu bar use this font.", black);
   status := syslib.window_present(id);
-  say("font: ready\n");
+  out.say("font: ready\n");
   start := core.clock();
   while core.clock() < start + uint(5000000000) do
   begin
     core.heartbeat();
   end;
   status := syslib.window_close(id);
-  say("font: done\n");
+  out.say("font: done\n");
 end;
 
 procedure main(args: const string[1024]);
@@ -266,14 +253,14 @@ begin
   if args = "shot" then
   begin
     if screen_w = uint(0) or screen_h = uint(0) then
-      say("font: no graphics\n")
+      out.say("font: no graphics\n")
     else
       shot_mode();
   end
   else if screen_w = uint(0) or screen_h = uint(0) then
     host_check()
   else if int(screen_w) < WindowX + ContentW + 8 or int(screen_h) < WindowY + ContentH + 40 then
-    say("font: screen too small\n")
+    out.say("font: screen too small\n")
   else
     check_mode();
 end;

@@ -20,7 +20,7 @@ unit widgets;
 // helpers and the disabled-screen `Invalid` contract and print
 // `widgets: host ok`.
 
-uses core, stdlib, syslib;
+uses core, stdlib, syslib, lib.out, lib.inject;
 
 const
   ControlCount = 5;
@@ -182,11 +182,6 @@ var
   hit_icon: int;
   probe_x: int;
   probe_y: int;
-
-procedure say(line: const string[0]);
-begin
-  core.write(line);
-end;
 
 procedure verify(label: const string[0]; passed: bool);
 begin
@@ -1207,21 +1202,19 @@ end;
 // absolute screen point; the window service sees one move from a known state.
 procedure pointer_to(x: int; y: int);
 begin
-  status := syslib.inject_pointer(-100000, -100000, uint(0));
-  flushed := syslib.event_flush();
-  status := syslib.inject_pointer(x, y, uint(0));
+  status := inject.pointer_to(x, y);
   drain_events();
 end;
 
 procedure pointer_down();
 begin
-  status := syslib.inject_pointer(0, 0, uint(1));
+  status := inject.pointer_down();
   drain_events();
 end;
 
 procedure pointer_up();
 begin
-  status := syslib.inject_pointer(0, 0, uint(0));
+  status := inject.pointer_up();
   drain_events();
 end;
 
@@ -1234,12 +1227,7 @@ end;
 
 procedure inject_key(key_code: int; text_byte: int);
 begin
-  ev.kind := KeyDown;
-  ev.x := 0;
-  ev.y := 0;
-  ev.code := uint(key_code * 65536 + text_byte);
-  ev.window := 0;
-  status := syslib.inject_event(ev);
+  status := inject.inject_key(key_code, text_byte);
   drain_events();
 end;
 
@@ -1719,27 +1707,27 @@ begin
   dialog_sel_stop := 5;
   status_text := "Composed widgets demo";
   present_all();
-  say("widgets: ready\n");
+  out.say("widgets: ready\n");
   flushed := core.clock();
   while core.clock() - flushed < uint(3000000000) do
     at := 0;
   status := syslib.window_close(id);
-  say("widgets: done\n");
+  out.say("widgets: done\n");
 end;
 
 procedure report_and_exit();
 begin
   if failed then
   begin
-    say("widgets: failed check ");
+    out.say("widgets: failed check ");
     at := core.format_int_into(digits, fail_step, uint(10), uint(0));
-    say(digits);
-    say(" (");
-    say(fail_label);
-    say(")\n");
+    out.say(digits);
+    out.say(" (");
+    out.say(fail_label);
+    out.say(")\n");
   end
   else
-    say("widgets: ok\n");
+    out.say("widgets: ok\n");
 end;
 
 procedure main(args: const string[1024]);
@@ -1802,20 +1790,20 @@ begin
     if failed then
       report_and_exit()
     else
-      say("widgets: host ok\n");
+      out.say("widgets: host ok\n");
   end
   else if screen_w < uint(64 + 760 + 20) or screen_h < uint(64 + 560 + 20) then
-    say("widgets: screen too small\n")
+    out.say("widgets: screen too small\n")
   else
   begin
     status := syslib.window_open(64, 64, 760, 560, "Widgets", id);
     if status <> Ok then
-      say("widgets: no window\n")
+      out.say("widgets: no window\n")
     else
     begin
       status := syslib.window_content_rect(id, rect);
       if status <> Ok then
-        say("widgets: no content rect\n")
+        out.say("widgets: no content rect\n")
       else
       begin
         menu_x := rect.x + 8;

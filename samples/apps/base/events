@@ -21,7 +21,7 @@ unit events;
 // `get_pixel` assertions at the pointer position prove the cursor is still a
 // composited overlay and not part of the shadow (spec 0010, I7).
 
-uses core, syslib;
+uses core, syslib, lib.out, lib.reason;
 
 const
   // `Event.code` for a key event: text | modifiers << 8 | key code << 16.
@@ -41,8 +41,6 @@ var
   w: int;
   h: int;
   background: uint;
-  out: string[32];
-  used: int;
   i: int;
   drops_before: uint;
   drops_after: uint;
@@ -52,17 +50,6 @@ var
   exited_ok: bool;
   baseline: int;
 
-procedure say(line: const string[0]);
-begin
-  core.write(line);
-end;
-
-procedure say_int(value: int);
-begin
-  used := core.format_int_into(out, value, uint(10), uint(0));
-  core.write(out);
-end;
-
 // One line per step; the first failure names the step and stops the checks.
 procedure check(label: const string[0]; passed: bool);
 begin
@@ -70,16 +57,16 @@ begin
   begin
     if passed then
     begin
-      say("events: ");
-      say(label);
-      say(" ok\n");
+      out.say("events: ");
+      out.say(label);
+      out.say(" ok\n");
     end
     else
     begin
       ok := false;
-      say("events: FAIL ");
-      say(label);
-      say("\n");
+      out.say("events: FAIL ");
+      out.say(label);
+      out.say("\n");
     end;
   end;
 end;
@@ -97,12 +84,7 @@ end;
 // `ExitReason` is a sum type, so `Ok` is matched with `case`, not `=`.
 procedure classify_reason();
 begin
-  exited_ok := false;
-  case reason of
-    Ok: exited_ok := true
-    Killed: exited_ok := false
-    Faulted(code): exited_ok := false
-  end;
+  exited_ok := reason.is_ok(reason);
 end;
 
 procedure main(args: const string[1024]);
@@ -215,5 +197,5 @@ begin
   check("cursor interior is background", syslib.get_pixel(47, 16) = background);
 
   if ok then
-    say("events: ok\n");
+    out.say("events: ok\n");
 end;

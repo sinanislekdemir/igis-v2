@@ -13,7 +13,7 @@ unit desktop;
 // bootloader actually returned. The one window has a fixed size and is simply
 // clipped on a smaller screen.
 
-uses core, syslib;
+uses core, syslib, lib.out;
 
 const
   WX = 120;         // window origin
@@ -40,11 +40,6 @@ var
   y: int;
   clock_x: int;
 
-procedure say(line: const string[0]);
-begin
-  core.write(line);
-end;
-
 // Checks one expected pixel. Only the first mismatch is reported, so the
 // output names the first thing that is wrong.
 procedure check(x: int; y: int; want: uint; label: const string[0]);
@@ -57,9 +52,9 @@ begin
     if got <> want then
     begin
       ok := false;
-      say("desktop: FAIL ");
-      say(label);
-      say("\n");
+      out.say("desktop: FAIL ");
+      out.say(label);
+      out.say("\n");
     end;
   end;
 end;
@@ -167,5 +162,5 @@ begin
   check(WX + 6, WY + 6, black, "close box");
 
   if ok then
-    say("desktop: ok\n");
+    out.say("desktop: ok\n");
 end;

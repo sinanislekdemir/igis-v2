@@ -26,7 +26,7 @@ unit windows_demo;
 // admission is refused (every core already has a realtime task), it falls back
 // to a short normal-class hold that still leaves the screen up for a moment.
 
-uses core, syslib;
+uses core, syslib, lib.out;
 
 const
   HoldNs = 15000000000;
@@ -55,11 +55,6 @@ var
   digits: string[16];
   used: int;
 
-procedure say(line: const string[0]);
-begin
-  core.write(line);
-end;
-
 // Silent check: the console shares the shadow, so printing between composition
 // steps would scroll the windows. The first failure is reported after the
 // composition.
@@ -73,12 +68,12 @@ begin
       failed := true;
       fail_step := step;
     end;
-    say("windows_demo: failed check ");
+    out.say("windows_demo: failed check ");
     used := core.format_int_into(digits, step, uint(10), uint(0));
-    say(digits);
-    say(" (");
-    say(label);
-    say(")\n");
+    out.say(digits);
+    out.say(" (");
+    out.say(label);
+    out.say(")\n");
   end;
 end;
 
@@ -153,9 +148,9 @@ begin
   screen_w := syslib.screen_width();
   screen_h := syslib.screen_height();
   if screen_w = uint(0) then
-    say("windows_demo: no graphics\n")
+    out.say("windows_demo: no graphics\n")
   else if screen_w < uint(900) or screen_h < uint(700) then
-    say("windows_demo: screen too small\n")
+    out.say("windows_demo: screen too small\n")
   else
   begin
     // Compose and check without printing between steps.
@@ -173,10 +168,10 @@ begin
 
     // The console shares the shadow: report, then repaint the whole frame.
     if failed then
-      say("windows_demo: checks FAILED\n")
+      out.say("windows_demo: checks FAILED\n")
     else
-      say("windows_demo: checks ok\n");
-    say("windows_demo: ready\n");
+      out.say("windows_demo: checks ok\n");
+    out.say("windows_demo: ready\n");
     repaint();
 
     // Hold the frame for the screenshot. Realtime gives us the time; a normal
@@ -198,6 +193,6 @@ begin
     end;
 
     if ok and not failed then
-      say("windows_demo: ok\n");
+      out.say("windows_demo: ok\n");
   end;
 end;

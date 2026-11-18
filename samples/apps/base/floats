@@ -10,7 +10,7 @@ unit floats;
 //   run floats 3.25       table, then `value=3.250`
 //   run floats nope       table, then `Invalid`
 
-uses core, stdlib;
+uses core, stdlib, lib.out;
 
 var
   text: string[64];
@@ -21,26 +21,21 @@ var
   n: int;
   zero: f64;
 
-procedure say(line: const string[0]);
-begin
-  core.write(line);
-end;
-
 procedure show(label: const string[0]; v: f64; digits: uint);
 begin
-  say(label);
-  say("=");
+  out.say(label);
+  out.say("=");
   n := core.format_f64_into(text, v, digits);
   if n >= 0 then
-    say(text)
+    out.say(text)
   else
   begin
     // A negative result is a `Status` code: -4 Invalid, -6 CapacityExceeded.
-    say("status ");
+    out.say("status ");
     n := core.format_int_into(text, n, uint(10), uint(0));
-    say(text);
+    out.say(text);
   end;
-  say("\n");
+  out.say("\n");
 end;
 
 // A destination too small for any useful result: `42.5` with one fraction
@@ -48,28 +43,28 @@ end;
 // written.
 procedure show_tiny();
 begin
-  say("tiny=");
+  out.say("tiny=");
   n := core.format_f64_into(tiny, 42.5, uint(1));
   n := core.format_int_into(text, n, uint(10), uint(0));
-  say(text);
-  say("\n");
+  out.say(text);
+  out.say("\n");
 end;
 
 // The shortest round-trip form (Q41): no width argument, no magnitude bound.
 procedure show_short(label: const string[0]; v: f64);
 begin
-  say(label);
-  say("=");
+  out.say(label);
+  out.say("=");
   n := core.format_f64_short_into(text, v);
   if n >= 0 then
-    say(text)
+    out.say(text)
   else
   begin
-    say("status ");
+    out.say("status ");
     n := core.format_int_into(text, n, uint(10), uint(0));
-    say(text);
+    out.say(text);
   end;
-  say("\n");
+  out.say("\n");
 end;
 
 procedure main(args: const string[1024]);
@@ -99,15 +94,15 @@ begin
 
   if core.len(args) > uint(0) then
   begin
-    say("parse=[");
-    say(args);
-    say("] ");
+    out.say("parse=[");
+    out.say(args);
+    out.say("] ");
     st := stdlib.parse_f64_into(args, parsed);
     if st = Ok then
       show("value", parsed, uint(3))
     else
-      say("Invalid\n");
+      out.say("Invalid\n");
   end
   else
-    say("no argument\n");
+    out.say("no argument\n");
 end;

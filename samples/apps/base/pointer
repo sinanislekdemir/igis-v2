@@ -8,13 +8,12 @@ unit pointer;
 // It samples for about ten seconds and then exits `Ok`. Output is one line per
 // change: `pointer: x y buttons`.
 
-uses core, syslib;
+uses core, syslib, lib.out;
 
 const
   RunMs = 10000;
 
 var
-  out: string[32];
   x: int;
   y: int;
   buttons: uint;
@@ -26,27 +25,21 @@ var
   elapsed_ms: uint;
   used: int;
 
-procedure say_int(value: int);
-begin
-  used := core.format_int_into(out, value, uint(10), uint(0));
-  core.write(out);
-end;
-
 procedure report();
 begin
   core.write("pointer: ");
-  say_int(x);
+  out.say_int(x);
   core.write(" ");
-  say_int(y);
+  out.say_int(y);
   core.write(" ");
-  say_int(int(buttons));
+  out.say_int(int(buttons));
   core.write("\n");
 end;
 
 procedure main(args: const string[1024]);
 begin
   core.write("pointer: source ");
-  say_int(int(syslib.pointer_source()));
+  out.say_int(int(syslib.pointer_source()));
   core.write("\n");
 
   x := syslib.pointer_x();

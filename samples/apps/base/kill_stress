@@ -26,7 +26,7 @@ unit kill_stress;
 // the boot self-check `kill: records ok` (task::kill_self_check), which parks a
 // record for a claimed task and asserts `block` makes it runnable again.
 
-uses core, syslib;
+uses core, syslib, lib.out;
 
 const
   Iterations = 300;
@@ -57,25 +57,12 @@ var
   ok_count: int;
   failed: bool;
   failure: string[64];
-  digits: string[16];
-  used: int;
   started: uint;
   elapsed_ms: uint;
   // The host has no scheduler and no blocking, so it names the console mode
   // only; a graphics-disabled kernel boot takes the same path, while the
   // kernel cycles all three wait kinds.
   host_like: bool;
-
-procedure say(text: const string[0]);
-begin
-  core.write(text);
-end;
-
-procedure say_int(value: int);
-begin
-  used := core.format_int_into(digits, value, uint(10), uint(0));
-  core.write(digits);
-end;
 
 procedure spin_until(deadline: uint);
 begin
@@ -177,24 +164,24 @@ begin
   elapsed_ms := (core.clock() - started) div uint(1000000);
   if failed then
   begin
-    say("kill_stress: FAIL ");
-    say(failure);
-    say(" at iteration ");
-    say_int(i);
-    say("\n");
+    out.say("kill_stress: FAIL ");
+    out.say(failure);
+    out.say(" at iteration ");
+    out.say_int(i);
+    out.say("\n");
   end
   else
   begin
-    say("kill_stress: ok (");
-    say_int(iterations);
-    say(" iterations, ");
-    say_int(killed_count);
-    say(" killed, ");
-    say_int(ok_count);
-    say(" exited, ");
-    say_int(int(spins));
-    say(" spins, ");
-    say_int(int(elapsed_ms));
-    say(" ms)\n");
+    out.say("kill_stress: ok (");
+    out.say_int(iterations);
+    out.say(" iterations, ");
+    out.say_int(killed_count);
+    out.say(" killed, ");
+    out.say_int(ok_count);
+    out.say(" exited, ");
+    out.say_int(int(spins));
+    out.say(" spins, ");
+    out.say_int(int(elapsed_ms));
+    out.say(" ms)\n");
   end;
 end;

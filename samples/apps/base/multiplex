@@ -21,7 +21,7 @@ unit multiplex;
 // read is authoritative if another task consumed the source in between (here
 // there is exactly one consumer, so the values are deterministic).
 
-uses core, stdlib, syslib;
+uses core, stdlib, syslib, lib.out;
 
 const
   KeyCode = 88 * 65536; // 'X'
@@ -46,27 +46,22 @@ var
   stream_index: int;
   flushed: uint;
 
-procedure say(text: const string[0]);
-begin
-  core.write(text);
-end;
-
 procedure check(step: const string[0]; passed: bool);
 begin
   if ok then
   begin
     if passed then
     begin
-      say("multiplex: ");
-      say(step);
-      say(" ok\n");
+      out.say("multiplex: ");
+      out.say(step);
+      out.say(" ok\n");
     end
     else
     begin
       ok := false;
-      say("multiplex: FAIL ");
-      say(step);
-      say("\n");
+      out.say("multiplex: FAIL ");
+      out.say(step);
+      out.say("\n");
     end;
   end;
 end;
@@ -163,7 +158,7 @@ begin
   // read returns them (`tick\n`, so at least the four command bytes).
   if full then
   begin
-    say("multiplex: waiting for console\n");
+    out.say("multiplex: waiting for console\n");
     sources[0] := uint(0);
     count := 1;
     ready := -1;
@@ -183,5 +178,5 @@ begin
   classify();
   check("sender exited Ok", st = Ok and exited_ok);
   if ok then
-    say("multiplex: ok\n");
+    out.say("multiplex: ok\n");
 end;

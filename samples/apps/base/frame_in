@@ -10,7 +10,7 @@ unit frame_in;
 // so the caller never observes a partial value. The last receive blocks until
 // the producer terminates, which closes the stream.
 
-uses core, stdlib;
+uses core, stdlib, lib.out;
 
 var
   frames: in_stream[64];
@@ -21,11 +21,6 @@ var
   n: int;
   st: Status;
 
-procedure say(text: const string[0]);
-begin
-  core.write(text);
-end;
-
 procedure show(number: int);
 begin
   n := core.format_int_into(digits, number, uint(10), uint(0));
@@ -34,14 +29,14 @@ end;
 
 procedure report_value(name: const string[0]; status: Status; number: int);
 begin
-  say(name);
+  out.say(name);
   if status = Ok then
   begin
     show(number);
-    say("\n");
+    out.say("\n");
   end
   else
-    say("failed\n");
+    out.say("failed\n");
 end;
 
 procedure main(args: const string[1024]);
@@ -58,34 +53,34 @@ begin
   st := stdlib.recv_frame_into(frames, frame);
   if st = Ok then
   begin
-    say("frame_in: frame=[");
+    out.say("frame_in: frame=[");
     core.write(frame);
-    say("] len=");
+    out.say("] len=");
     show(int(core.len(frame)));
-    say("\n");
+    out.say("\n");
   end
   else
-    say("frame_in: frame failed\n");
+    out.say("frame_in: frame failed\n");
 
   st := stdlib.recv_frame_into(frames, frame);
   if st = CapacityExceeded then
-    say("frame_in: 300-byte length rejected (CapacityExceeded)\n")
+    out.say("frame_in: 300-byte length rejected (CapacityExceeded)\n")
   else
-    say("frame_in: unexpected status for a 300-byte length\n");
-  say("frame_in: frame length still ");
+    out.say("frame_in: unexpected status for a 300-byte length\n");
+  out.say("frame_in: frame length still ");
   show(int(core.len(frame)));
-  say("\n");
+  out.say("\n");
 
   // Only now may the producer exit: everything it sent has been consumed.
   st := core.send(frames_ack, "ack");
-  say("frame_in: acked, waiting for close\n");
+  out.say("frame_in: acked, waiting for close\n");
 
   st := stdlib.recv_exact(frames, frame, 1);
   if st = Closed then
-    say("frame_in: closed\n")
+    out.say("frame_in: closed\n")
   else
-    say("frame_in: expected Closed\n");
-  say("frame_in: frame length still ");
+    out.say("frame_in: expected Closed\n");
+  out.say("frame_in: frame length still ");
   show(int(core.len(frame)));
-  say("\n");
+  out.say("\n");
 end;

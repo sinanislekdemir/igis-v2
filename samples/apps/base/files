@@ -16,7 +16,7 @@ unit files;
 // 256 bytes is a compile error, so it cannot be exercised here; the compiler
 // test covers it.
 
-uses core;
+uses core, lib.out;
 
 var
   ok: bool;
@@ -42,23 +42,10 @@ var
   first: int;
   chunk: bytes[256];
   prefix: string[16];
-  digits: string[32];
-  used: int;
   deep: string[64];
   long_name: string[80];
   long_stage: bytes[80];
   i: int;
-
-procedure say(text: const string[0]);
-begin
-  core.write(text);
-end;
-
-procedure say_int(value: int);
-begin
-  used := core.format_int_into(digits, value, uint(10), uint(0));
-  core.write(digits);
-end;
 
 // One line per step; the first failure names the step and stops the checks.
 procedure check(label: const string[0]; passed: bool);
@@ -67,16 +54,16 @@ begin
   begin
     if passed then
     begin
-      say("files: ");
-      say(label);
-      say(" ok\n");
+      out.say("files: ");
+      out.say(label);
+      out.say(" ok\n");
     end
     else
     begin
       ok := false;
-      say("files: FAIL ");
-      say(label);
-      say("\n");
+      out.say("files: FAIL ");
+      out.say(label);
+      out.say("\n");
     end;
   end;
 end;
@@ -126,9 +113,9 @@ begin
     each_ok and st = NotFound and found_base and found_home and found_lib
       and found_system
       and ((found_lost and count = uint(5)) or (not found_lost and count = uint(4))));
-  say("files: root entries=");
-  say_int(int(count));
-  say("\n");
+  out.say("files: root entries=");
+  out.say_int(int(count));
+  out.say("\n");
 end;
 
 procedure list_dir(path: const string[0]);
@@ -190,11 +177,11 @@ begin
     end;
   end;
   check("chunked read", each_ok and total = child_size and off = child_size);
-  say("files: read ");
-  say_int(int(total));
-  say("/");
-  say_int(int(child_size));
-  say("\n");
+  out.say("files: read ");
+  out.say_int(int(total));
+  out.say("/");
+  out.say_int(int(child_size));
+  out.say("\n");
 end;
 
 procedure check_offsets();
@@ -309,7 +296,7 @@ begin
   check_errors();
 
   if ok then
-    say("files: ok\n")
+    out.say("files: ok\n")
   else
-    say("files: FAILED\n");
+    out.say("files: FAILED\n");
 end;

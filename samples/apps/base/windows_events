@@ -29,7 +29,7 @@ unit windows_events;
 // Steps 6 and 7 spawn children, whose spawn/exit log lines scroll the console;
 // all pixel checks therefore happen before step 6.
 
-uses core, syslib;
+uses core, syslib, lib.out, lib.reason;
 
 var
   failed: bool;
@@ -63,11 +63,6 @@ var
   polls: int;
   baseline: int;
 
-procedure say(line: const string[0]);
-begin
-  core.write(line);
-end;
-
 procedure verify(label: const string[0]; passed: bool);
 begin
   step := step + 1;
@@ -83,12 +78,7 @@ end;
 
 procedure classify_reason();
 begin
-  exited_ok := false;
-  case reason of
-    Ok: exited_ok := true
-    Killed: exited_ok := false
-    Faulted(code): exited_ok := false
-  end;
+  exited_ok := reason.is_ok(reason);
 end;
 
 // Drains pollable events, presenting every window an Expose names. Never
@@ -141,9 +131,9 @@ begin
   screen_w := syslib.screen_width();
   screen_h := syslib.screen_height();
   if screen_w = uint(0) then
-    say("windows_events: no graphics\n")
+    out.say("windows_events: no graphics\n")
   else if screen_w < uint(560) or screen_h < uint(420) then
-    say("windows_events: screen too small\n")
+    out.say("windows_events: screen too small\n")
   else
   begin
     // The kernel's terminal and system-log windows exist from boot (spec
@@ -330,11 +320,11 @@ begin
     if failed then
     begin
       used := core.format_int_into(text, fail_step, uint(10), uint(0));
-      say("windows_events: FAIL at step ");
-      say(text);
-      say("\n");
+      out.say("windows_events: FAIL at step ");
+      out.say(text);
+      out.say("\n");
     end
     else
-      say("windows_events: ok\n");
+      out.say("windows_events: ok\n");
   end;
 end;

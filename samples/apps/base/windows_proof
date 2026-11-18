@@ -40,7 +40,7 @@ unit windows_proof;
 // The drag is a scripted sequence of owner `window_move` calls; pointer-driven
 // continuous dragging is M2.4 and is not implemented here.
 
-uses core, syslib;
+uses core, syslib, lib.out;
 
 const
   WaitMs = 5000;
@@ -89,22 +89,9 @@ var
   reason_ok: bool;
   idx_a: int;
   idx_b: int;
-  digits: string[16];
-  used: int;
   shot: bool;
   started: uint;
   flushed: uint;
-
-procedure say(text: const string[0]);
-begin
-  core.write(text);
-end;
-
-procedure say_int(value: int);
-begin
-  used := core.format_int_into(digits, value, uint(10), uint(0));
-  core.write(digits);
-end;
 
 procedure verify(label: const string[0]; passed: bool);
 begin
@@ -324,9 +311,9 @@ begin
   screen_w := syslib.screen_width();
   screen_h := syslib.screen_height();
   if screen_w = uint(0) then
-    say("windows_proof: no graphics\n")
+    out.say("windows_proof: no graphics\n")
   else if screen_w < uint(960) or screen_h < uint(760) then
-    say("windows_proof: screen too small\n")
+    out.say("windows_proof: screen too small\n")
   else
   begin
     shot := args = "shot";
@@ -463,7 +450,7 @@ begin
       // normal proof proceeds straight to teardown.
       if shot then
       begin
-        say("windows_proof: ready\n");
+        out.say("windows_proof: ready\n");
         status := core.realtime_on();
         started := core.clock();
         if status = Ok then
@@ -516,13 +503,13 @@ begin
 
     if failed then
     begin
-      say("windows_proof: FAIL at step ");
-      say_int(fail_step);
-      say(": ");
-      say(fail_label);
-      say("\n");
+      out.say("windows_proof: FAIL at step ");
+      out.say_int(fail_step);
+      out.say(": ");
+      out.say(fail_label);
+      out.say("\n");
     end
     else
-      say("windows_proof: ok\n");
+      out.say("windows_proof: ok\n");
   end;
 end;

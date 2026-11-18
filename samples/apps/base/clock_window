@@ -26,7 +26,7 @@ unit clock_window;
 // the sample checks the pure time decomposition, the formatting and the
 // direction table there and prints `clock_window: host ok`.
 
-uses core, stdlib, syslib;
+uses core, stdlib, syslib, lib.out;
 
 const
   WindowX = 340;
@@ -110,11 +110,6 @@ var
   ev: Event;
   draining: bool;
 
-procedure say(line: const string[0]);
-begin
-  core.write(line);
-end;
-
 // Silent check: the first failure is printed with its step number.
 procedure verify(label: const string[0]; passed: bool);
 begin
@@ -122,12 +117,12 @@ begin
   if not passed then
   begin
     failed := true;
-    say("clock_window: failed check ");
+    out.say("clock_window: failed check ");
     written := core.format_int_into(step_text, step, uint(10), uint(0));
-    say(step_text);
-    say(" (");
-    say(label);
-    say(")\n");
+    out.say(step_text);
+    out.say(" (");
+    out.say(label);
+    out.say(")\n");
   end;
 end;
 
@@ -449,9 +444,9 @@ begin
   check_pixels();
   ignored := syslib.window_close(id);
   if failed then
-    say("clock_window: failed\n")
+    out.say("clock_window: failed\n")
   else
-    say("clock_window: ok\n");
+    out.say("clock_window: ok\n");
 end;
 
 // Drain the machine-wide queue without blocking. A whole-content `Expose` for
@@ -488,7 +483,7 @@ begin
   split(now_s, hour, minute, second);
   draw_clock(hour, minute, second);
   present_clock();
-  say("clock_window: ready\n");
+  out.say("clock_window: ready\n");
   while now_s <= end_s do
   begin
     now_s := int(core.clock() div uint(NanosPerSecond));
@@ -502,7 +497,7 @@ begin
     drain_events();
   end;
   ignored := syslib.window_close(id);
-  say("clock_window: done\n");
+  out.say("clock_window: done\n");
 end;
 
 // The disabled-screen path: time decomposition, formatting and the direction
@@ -550,9 +545,9 @@ begin
   verify("minute six", px > -300 and px < 300 and py < -16000);
 
   if failed then
-    say("clock_window: host failed\n")
+    out.say("clock_window: host failed\n")
   else
-    say("clock_window: host ok\n");
+    out.say("clock_window: host ok\n");
 end;
 
 procedure main(args: const string[1024]);
@@ -568,17 +563,17 @@ begin
   if screen_w = uint(0) then
     host_path()
   else if screen_w < uint(WindowX + ContentW + 40) or screen_h < uint(WindowY + ContentH + 60) then
-    say("clock_window: screen too small\n")
+    out.say("clock_window: screen too small\n")
   else
   begin
     status := syslib.window_open(WindowX, WindowY, ContentW, ContentH, "Clock", id);
     if status <> Ok then
-      say("clock_window: no window\n")
+      out.say("clock_window: no window\n")
     else
     begin
       status := syslib.window_content_rect(id, rect);
       if status <> Ok then
-        say("clock_window: no content rect\n")
+        out.say("clock_window: no content rect\n")
       else
       begin
         cx := rect.x + ContentW div 2;
