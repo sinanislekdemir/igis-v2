@@ -14,8 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `a0c6ae2` (M4.3: shared helpers moved into `/lib`) plus this
-  docs commit closing M4. The tree is clean.
+- **Last commit:** `d57041a` (M5.1: the calculator) plus this docs and Ctrl+Q
+  follow-up. The tree is clean.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -69,9 +69,16 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `windows_events` were re-run on both after renaming `lib/reason` to
   `lib/outcome` (`outcome.is_ok(reason)`), so a module name cannot shadow the
   apps' common `reason` variable.
-- **Next slice:** **M5.1 — the calculator application** (PLAN "M5"). Two ordinary
-  windowed applications exercise the now-complete UI and `/lib` surface; the
-  writable filesystem is the milestone after them.
+- **Verified at that point (M5.1, independently by the parent):** **451 host tests**;
+  `run calculator check` → `calculator: ok` on `-smp 4` and `-smp 1`, `langhost`
+  → `calculator: host ok`; a QMP `send-key` Ctrl+Q exits the interactive task
+  (`task 5: exit Ok`) and returns the shell; the 28-command batch passes on both;
+  visual golden (`37802052…e9e81c9f`), `boot_desktop_qmp.py` and
+  `scripts/calculator_screenshot_qmp.py` (1024×768, ~36.5 KB) pass on both.
+- **Next slice:** **M5.2 — minesweeper** (PLAN "M5"): 9×9/10 mines, deterministic
+  LCG, safe first reveal, flood fill, right-click and `Flag`-mode flags, face
+  restart, mine counter and timer, check/shot/host paths and a screenshot harness.
+  The writable filesystem (Q51) is the milestone after it.
 
 - **M2.6.3 complete:** the headless visual-regression harness (spec 0009 "Visual proof",
   G21; ADR 0032) and the resolution of M2.1.2. `samples/apps/visual` opens a window whose
@@ -868,19 +875,26 @@ No new system surface: both are ordinary windowed applications over the existing
 `stdlib` UI helpers, `syslib` primitives, events and `/lib` modules. They prove the
 toolkit on real programs before the writable-filesystem milestone.
 
-- [ ] **M5.1 The calculator.** `samples/apps/base/calculator`: one window
-  (content about 300×360) with a right-aligned f64 display and a 4×5 button grid
+- [x] **M5.1 The calculator.** `samples/apps/base/calculator`: one window
+  (content 300×360) with a right-aligned f64 display and a 4×5 button grid
   (`C`, `DEL`, `+/-`, `/`; `7 8 9 *`; `4 5 6 -`; `1 2 3 +`; `0 . =`), drawn with
   `ui_button`/`ui_button_hit`/`ui_button_pressed` and `ui_focus_ring`. Typed entry
   is a `string[32]`; `core.parse_f64_into`/`core.format_f64_short_into` convert;
   `+ - * /` chain, division by zero shows `error`, `C` resets, `DEL` removes the
   last byte, `+/-` toggles the sign. Keyboard: digits, `.`, operators, Enter/`=`,
-  Escape (`C`), Backspace. One complete frame before `window_present`, owner
-  `Expose` repaints, no `syslib.clear`. `check` injects pointer and key events and
-  checks display/button pixels (`calculator: ok`); `shot` holds for a screenshot;
-  `langhost` prints `calculator: host ok`. `scripts/calculator_screenshot_qmp.py`
-  writes `/home/sinan/Desktop/igis-calculator.png`. No new helper, opcode,
-  builtin, `state` or cap.
+  Escape (`C`), Backspace, and Ctrl+Q quits (added after review so `run
+  calculator` does not block the shell forever). One complete frame before
+  `window_present`, owner `Expose` repaints, no `syslib.clear`. `check` injects
+  pointer and key events and checks display/button pixels (`calculator: ok`);
+  `shot` holds for a screenshot; `langhost` prints `calculator: host ok`.
+  `scripts/calculator_screenshot_qmp.py` writes
+  `/home/sinan/Desktop/igis-calculator.png`. No new helper, opcode, builtin,
+  `state` or cap.
+  **Done (`d57041a` + the Ctrl+Q follow-up):** 31,312 B source, task package
+  116,328 B code (29 frames) / 480 B state / 21,872 B stack; 451 host tests;
+  `calculator: ok` on `-smp 4`/`-smp 1`, `calculator: host ok`; Ctrl+Q ends the
+  task (QMP `send-key`); the 28-command batch, visual golden, `boot_desktop_qmp.py`
+  and the calculator screenshot pass on both.
 
 - [ ] **M5.2 Minesweeper.** `samples/apps/base/minesweeper`: one window (content
   about 300×400), a 9×9 field of 30-pixel cells, 10 mines, a header with a mine

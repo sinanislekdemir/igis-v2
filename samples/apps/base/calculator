@@ -95,6 +95,7 @@ var
   display: string[64];
   focus: int;
   pressed: int;
+  running: bool;
 
   // Scratch: parsing, formatting and text conversion.
   value: f64;
@@ -642,9 +643,16 @@ procedure handle_key();
 var
   b: byte;
   kc: int;
+  mods: int;
 begin
   kc := stdlib.ui_key_code(ev.code);
+  mods := stdlib.ui_key_modifiers(ev.code);
   b := stdlib.ui_key_text(ev.code);
+  if (mods div 2) mod 2 = 1 and kc = 0x71 then
+  begin
+    running := false;
+    return;
+  end;
   if kc = KeyEnter then
     press_equals()
   else if kc = KeyEscape then
@@ -711,7 +719,7 @@ procedure interactive();
 begin
   draw_frame();
   present_frame();
-  while true do
+  while running do
   begin
     status := syslib.next_event(ev);
     if status = Ok then
@@ -735,6 +743,7 @@ begin
       end;
     end;
   end;
+  status := syslib.window_close(id);
 end;
 
 // ---- check mode ---------------------------------------------------------
@@ -1124,6 +1133,7 @@ begin
   error := false;
   focus := 0;
   pressed := -1;
+  running := true;
   accum := 0.0;
   reset_all();
 
