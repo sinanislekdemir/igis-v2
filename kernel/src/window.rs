@@ -895,7 +895,9 @@ impl Table {
     /// presses and desktop presses are left to the client.
     fn press(&mut self, x: i64, y: i64) -> PressAction {
         if self.drag.is_some() {
-            return PressAction::None;
+            // A second press during a drag is swallowed like the first, so it
+            // cannot reach a client and raise another window mid-drag (W22).
+            return PressAction::Consumed;
         }
         let Some(id) = self.hit_test(x, y) else {
             return PressAction::None;
@@ -2350,14 +2352,15 @@ pub fn drag_self_check() -> Result<(), u32> {
         return Err(6);
     }
 
-    // 2. A second press while the drag is active is ignored: the drag is
-    //    unchanged and no new grab replaces it.
+    // 2. A second press while the drag is active is ignored (consumed, so it
+    //    cannot reach a client): the drag is unchanged and no new grab replaces
+    //    it.
     let other = table
         .open(SCREEN_W, SCREEN_H, 8, 600, 500, 100, 50, b"other")
         .map_err(|_| 7u32)?;
     let other_frame = table.frame_rect(other).map_err(|_| 8u32)?;
     match table.press(other_frame.x + 40, other_frame.y + 8) {
-        PressAction::None => {}
+        PressAction::Consumed => {}
         _ => return Err(9),
     }
     match table.drag {

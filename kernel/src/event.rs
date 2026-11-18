@@ -79,10 +79,12 @@ pub fn push(event: Event) {
 /// Enqueues the pointer transitions between two machine-wide states.
 ///
 /// A move is one `PointerMove`; a button change is one `PointerDown` with the
-/// newly pressed bits and one `PointerUp` with the released bits. The calls are
-/// made while the graphics lock is held so two cores cannot enqueue each
-/// other's deltas out of order; the queue lock never takes the graphics lock,
-/// so the order `graphics → events` has no cycle.
+/// newly pressed bits and one `PointerUp` with the released bits. The caller
+/// runs the whole transaction under the pointer-order lock, so two cores cannot
+/// enqueue each other's deltas out of order. `suppress_down` drops the
+/// `PointerDown` when the window service consumed the press (spec 0011, W24):
+/// the record is never queued, so a task woken by the publication cannot see a
+/// title-bar or close-box click.
 pub fn push_pointer(
     old_x: i64,
     old_y: i64,
@@ -90,6 +92,7 @@ pub fn push_pointer(
     new_x: i64,
     new_y: i64,
     new_buttons: u64,
+    suppress_down: bool,
 ) {
     if old_x != new_x || old_y != new_y {
         push(Event {
@@ -101,7 +104,7 @@ pub fn push_pointer(
         });
     }
     let pressed = new_buttons & !old_buttons;
-    if pressed != 0 {
+    if pressed != 0 && !suppress_down {
         push(Event {
             kind: EventKind::PointerDown,
             x: new_x,
@@ -159,40 +162,6 @@ pub fn poll(dst: &mut [u8]) -> Status {
     };
     dst.copy_from_slice(&event);
     Status::Ok
-}
-
-/// Removes the newest queued `PointerDown` at `(x, y)` (spec 0011, W24).
-///
-/// The window service consumes a title-bar or close-box press after the
-/// pointer path has already queued its `PointerDown` (the producer runs under
-/// the graphics lock, the service hook after it). Removing that one event keeps
-/// the client from seeing a press the service handled. Matching is by kind,
-/// position and an unaddressed record; exactly one event is removed, so
-/// unrelated events keep their order. Returns whether an event was removed.
-pub fn consume_pointer_down(x: i64, y: i64) -> bool {
-    let mut queue = QUEUE.lock();
-    for back in (0..queue.len).rev() {
-        let index = (queue.head + back) % CAPACITY;
-        let Some(event) = layout::event::read(&queue.events[index]) else {
-            continue;
-        };
-        if event.kind != EventKind::PointerDown || event.window != 0 {
-            continue;
-        }
-        if event.x != x || event.y != y {
-            continue;
-        }
-        // Shift the newer entries down over the removed slot; `head` is
-        // unchanged and one event leaves the queue.
-        for shift in back..queue.len - 1 {
-            let from = (queue.head + shift + 1) % CAPACITY;
-            let to = (queue.head + shift) % CAPACITY;
-            queue.events[to] = queue.events[from];
-        }
-        queue.len -= 1;
-        return true;
-    }
-    false
 }
 
 /// True when at least one event is queued.

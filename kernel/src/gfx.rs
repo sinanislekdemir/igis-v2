@@ -47,6 +47,17 @@ pub const POINTER_SOURCE_TABLET: u32 = 2;
 static POINTER_SOURCE: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(POINTER_SOURCE_NONE);
 
+/// Serialises the whole pointer transaction: the state update under [`SCREEN`],
+/// the service-owned window interaction (`window::pointer_event`) and the event
+/// publication. This is the outermost pointer lock and is taken only by
+/// [`update_pointer`] and [`set_pointer_absolute`], so its order is
+/// `POINTER_ORDER → SCREEN` and `POINTER_ORDER → WINDOW → SCREEN`.
+///
+/// Without it, a blocked `next_event` task could be woken by the queued
+/// `PointerDown` and consume the press before the producer learns that the
+/// window service handled it (spec 0011, W24).
+static POINTER_ORDER: SpinLock<()> = SpinLock::new(());
+
 /// Largest accepted colour value: the top byte of `0x00RRGGBB` must be zero.
 pub const MAX_COLOR: u32 = 0x00FF_FFFF;
 
@@ -726,44 +737,46 @@ pub fn update_pointer(dx: i64, dy: i64, buttons: u32) -> Status {
     if buttons > POINTER_BUTTONS_MASK {
         return Status::Invalid;
     }
-    let mut guard = SCREEN.lock();
-    let Some(screen) = guard.as_mut() else {
-        return Status::Invalid;
-    };
-    let old = screen.cursor_rect();
-    let old_x = i64::from(screen.pointer.x);
-    let old_y = i64::from(screen.pointer.y);
-    let old_buttons = u64::from(screen.pointer.buttons);
-    let (width, height) = (screen.width as i64, screen.height as i64);
-    let (x, y) = apply_motion(
-        screen.pointer.x as i64,
-        screen.pointer.y as i64,
-        dx,
-        dy,
-        width,
-        height,
-    );
-    screen.pointer.x = x as i32;
-    screen.pointer.y = y as i32;
-    screen.pointer.buttons = buttons as u8;
-    screen.pointer.visible = true;
+    // One serialised pointer transaction: state update + cursor, then the
+    // service window hook (after the graphics lock is dropped), then event
+    // publication. The order makes a handled press invisible to clients.
+    let _order = POINTER_ORDER.lock();
+    let (old_x, old_y, old_buttons, x, y) = {
+        let mut guard = SCREEN.lock();
+        let Some(screen) = guard.as_mut() else {
+            return Status::Invalid;
+        };
+        let old = screen.cursor_rect();
+        let old_x = i64::from(screen.pointer.x);
+        let old_y = i64::from(screen.pointer.y);
+        let old_buttons = u64::from(screen.pointer.buttons);
+        let (width, height) = (screen.width as i64, screen.height as i64);
+        let (x, y) = apply_motion(
+            screen.pointer.x as i64,
+            screen.pointer.y as i64,
+            dx,
+            dy,
+            width,
+            height,
+        );
+        screen.pointer.x = x as i32;
+        screen.pointer.y = y as i32;
+        screen.pointer.buttons = buttons as u8;
+        screen.pointer.visible = true;
 
-    let new = screen.cursor_rect();
-    if old != new {
-        if let Some((x, y, w, h)) = old {
+        let new = screen.cursor_rect();
+        if old != new {
+            if let Some((x, y, w, h)) = old {
+                screen.present(x, y, w, h);
+            }
+        }
+        if let Some((x, y, w, h)) = new {
             screen.present(x, y, w, h);
         }
-    }
-    if let Some((x, y, w, h)) = new {
-        screen.present(x, y, w, h);
-    }
-    // The pointer moved and/or its buttons changed: publish the transitions
-    // to the machine-wide queue while the graphics lock still orders them
-    // (spec 0010, I19).
-    crate::event::push_pointer(old_x, old_y, old_buttons, x, y, u64::from(buttons));
+        (old_x, old_y, old_buttons, x, y)
+    };
     // Service-owned window interaction (spec 0011, W22/W23) runs only after
     // the graphics lock is dropped: the repair takes window -> graphics.
-    drop(guard);
     let consumed = crate::window::pointer_event(
         old_x,
         old_y,
@@ -772,9 +785,17 @@ pub fn update_pointer(dx: i64, dy: i64, buttons: u32) -> Status {
         y,
         u64::from(buttons),
     );
-    if consumed {
-        crate::event::consume_pointer_down(x, y);
-    }
+    // Publish after the service decision, suppressing the press it handled, so
+    // no task woken by the publication can observe a consumed click (W24).
+    crate::event::push_pointer(
+        old_x,
+        old_y,
+        old_buttons,
+        x,
+        y,
+        u64::from(buttons),
+        consumed,
+    );
     Status::Ok
 }
 
@@ -817,64 +838,67 @@ pub fn set_pointer_absolute(x: i64, y: i64, buttons: u32) -> Status {
     if buttons > POINTER_BUTTONS_MASK {
         return Status::Invalid;
     }
-    let mut guard = SCREEN.lock();
-    let Some(screen) = guard.as_mut() else {
-        return Status::Invalid;
-    };
-    let max_x = (screen.width as i64 - 1).max(0);
-    let max_y = (screen.height as i64 - 1).max(0);
-    let x = x.clamp(0, max_x) as i32;
-    let y = y.clamp(0, max_y) as i32;
-    let buttons = buttons as u8;
+    // Same single pointer transaction as `update_pointer` (spec 0011, W24).
+    let _order = POINTER_ORDER.lock();
+    let (old_x, old_y, old_buttons, x, y) = {
+        let mut guard = SCREEN.lock();
+        let Some(screen) = guard.as_mut() else {
+            return Status::Invalid;
+        };
+        let max_x = (screen.width as i64 - 1).max(0);
+        let max_y = (screen.height as i64 - 1).max(0);
+        let x = x.clamp(0, max_x) as i32;
+        let y = y.clamp(0, max_y) as i32;
+        let buttons = buttons as u8;
 
-    if screen.pointer.visible
-        && screen.pointer.x == x
-        && screen.pointer.y == y
-        && screen.pointer.buttons == buttons
-    {
-        return Status::Ok;
-    }
+        if screen.pointer.visible
+            && screen.pointer.x == x
+            && screen.pointer.y == y
+            && screen.pointer.buttons == buttons
+        {
+            return Status::Ok;
+        }
 
-    let old = screen.cursor_rect();
-    let old_x = i64::from(screen.pointer.x);
-    let old_y = i64::from(screen.pointer.y);
-    let old_buttons = u64::from(screen.pointer.buttons);
-    screen.pointer.x = x;
-    screen.pointer.y = y;
-    screen.pointer.buttons = buttons;
-    screen.pointer.visible = true;
+        let old = screen.cursor_rect();
+        let old_x = i64::from(screen.pointer.x);
+        let old_y = i64::from(screen.pointer.y);
+        let old_buttons = u64::from(screen.pointer.buttons);
+        screen.pointer.x = x;
+        screen.pointer.y = y;
+        screen.pointer.buttons = buttons;
+        screen.pointer.visible = true;
 
-    let new = screen.cursor_rect();
-    if old != new {
-        if let Some((x, y, w, h)) = old {
+        let new = screen.cursor_rect();
+        if old != new {
+            if let Some((x, y, w, h)) = old {
+                screen.present(x, y, w, h);
+            }
+        }
+        if let Some((x, y, w, h)) = new {
             screen.present(x, y, w, h);
         }
-    }
-    if let Some((x, y, w, h)) = new {
-        screen.present(x, y, w, h);
-    }
-    crate::event::push_pointer(
-        old_x,
-        old_y,
-        old_buttons,
-        i64::from(x),
-        i64::from(y),
-        u64::from(buttons),
-    );
+        (old_x, old_y, old_buttons, i64::from(x), i64::from(y))
+    };
     // Window drag/close interaction, after the graphics lock is dropped
     // (spec 0011, W22/W23).
-    drop(guard);
     let consumed = crate::window::pointer_event(
         old_x,
         old_y,
         old_buttons,
-        i64::from(x),
-        i64::from(y),
+        x,
+        y,
         u64::from(buttons),
     );
-    if consumed {
-        crate::event::consume_pointer_down(i64::from(x), i64::from(y));
-    }
+    // Publish after the service decision; a consumed press is never queued.
+    crate::event::push_pointer(
+        old_x,
+        old_y,
+        old_buttons,
+        x,
+        y,
+        u64::from(buttons),
+        consumed,
+    );
     Status::Ok
 }
 

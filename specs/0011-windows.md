@@ -174,10 +174,11 @@ an `int`; `0` is never a valid id.
   records the same damage and repair as `window_move`, so the owner is exposed and the
   desktop is restored underneath. Implicit capture applies: the pointer may leave the
   title bar. Release (button 1 clear) ends the drag and later motion does not move the
-  window; a second press during the drag is ignored; a dragged window that closes or
-  whose owner terminates cancels the drag. Owner `0` windows drag exactly like task
-  windows, because the service move bypasses the owner check only for this path (W23's
-  close box keeps the ownership rule). Resize is not part of this requirement.
+  window; a second press during the drag is consumed and ignored (no raise, no new grab);
+  a dragged window that closes or whose owner terminates cancels the drag. Owner `0`
+  windows drag exactly like task windows, because the service move bypasses the owner
+  check only for this path (W23's close box keeps the ownership rule). Resize is not part
+  of this requirement.
 - **W23 (MUST):** A left-button press inside a window's 11 × 11 close box at
   `(frame.x + 4, frame.y + 3)` requests termination of the owning task through
   `task::request_kill`; the task's windows then disappear through `Task::reclaim` →
@@ -186,13 +187,15 @@ an `int`; `0` is never a valid id.
   like a title-bar press. This is immediate termination with the same data-loss semantics
   as `core.kill`; there is no graceful save-on-close handshake (deferred, ADR 0042).
 - **W24 (MUST):** A press the service handles under W22/W23 MUST NOT be delivered to a
-  client as a `PointerDown`. The pointer path already queued the event before the service
-  hook runs (producers run under the graphics lock), so the service removes exactly that
-  one queued `PointerDown` (matching kind, position and the unaddressed record); unrelated
-  events keep their order and no queue entry is starved. Content-area presses, desktop
-  presses and key events are unchanged and still route at poll time (W16). The service
-  hook runs from both pointer paths after the graphics lock is dropped, so injected
-  `syslib.inject_pointer` events get the same synchronous behaviour as a device.
+  client as a `PointerDown`, **even under an SMP poll race**. The two pointer paths
+  serialise the whole transaction with one dedicated pointer-order lock: update the
+  pointer state under the graphics lock, drop it, run the service hook, and only then
+  publish the event records with the `PointerDown` suppressed when the hook consumed the
+  press. The suppressed record is never enqueued, so a task woken by publication cannot
+  observe it. `PointerMove`/`PointerUp` records still publish in order. Content-area
+  presses, desktop presses and key events are unchanged and still route at poll time
+  (W16). The hook runs from both pointer paths after the graphics lock is dropped, so
+  injected `syslib.inject_pointer` events get the same synchronous behaviour as a device.
 
 ## Design
 
@@ -411,8 +414,8 @@ The kernel host routes on `poll_event`, where no graphics lock is held:
 
 | Path | Takes | Then |
 |------|-------|------|
-| pointer producer (`gfx`) | graphics | nothing (enqueues only) |
-| pointer service hook (`gfx` → `window::pointer_event`) | nothing (graphics dropped first) | window → graphics for a drag repair; `request_kill`/`wake_input` only **after** the window unlock; then the event queue to consume one press |
+| pointer producer (`gfx`) | pointer-order | graphics (state/cursor), released before the hook; then window → graphics; then the event queue (press suppressed when handled) |
+| pointer service hook (`gfx` → `window::pointer_event`) | pointer-order already held | window → graphics for a drag repair; `request_kill`/`wake_input` only **after** the window unlock |
 | keyboard/console producer | console, graphics per cell | nothing |
 | poll-time routing | nothing | window (`take_expose`/`route_click`); routing a click repairs: window → graphics; input waiters are woken **after** the window lock is dropped |
 | window wrappers (`open`/`move`/`rect` reads) | graphics (screen size, released) | window → graphics for the repair; input wake after the unlock |
@@ -515,13 +518,17 @@ builtin, `Host` method, `syslib` primitive, `stdlib` helper or `EventKind`, and 
 application-visible surface: a client opens a window as before and the service intercepts
 the press.
 
-- **Hook and lock order.** `gfx::update_pointer` and `gfx::set_pointer_absolute` publish
-  the pointer transition and then **drop the graphics lock** before calling
-  `window::pointer_event(old_x, old_y, old_buttons, x, y, buttons)`. The hook reads the
-  screen size (graphics, released), takes the table lock, runs the pure table methods and
-  repairs under `WINDOW → SCREEN`, then drops the table lock. It never holds the table
-  lock across `task::request_kill` or `task::wake_input`: the kill is issued after the
-  unlock, and the wake follows the existing wrapper pattern. Injected
+- **Hook and lock order.** `gfx::update_pointer` and `gfx::set_pointer_absolute` take one
+  dedicated pointer-order lock for the whole transaction: update the pointer state and
+  cursor under the graphics lock, **drop the graphics lock**, call
+  `window::pointer_event(old_x, old_y, old_buttons, x, y, buttons)`, then publish the
+  event records (with a consumed press suppressed) and release the pointer-order lock.
+  The hook reads the screen size (graphics, released), takes the table lock, runs the
+  pure table methods and repairs under `WINDOW → SCREEN`, then drops the table lock. It
+  never holds the table lock across `task::request_kill` or `task::wake_input`: the kill
+  is issued after the unlock, and the wake follows the existing wrapper pattern. The
+  order is `POINTER_ORDER → SCREEN` and `POINTER_ORDER → WINDOW → SCREEN`; only these two
+  paths take the pointer-order lock, so there is no cycle. Injected
   `syslib.inject_pointer` goes through the same two functions, so the proof is synchronous
   and deterministic.
 - **Press classification.** On a left-button press (bit 0, `0 → 1`) with no drag active,
@@ -535,19 +542,23 @@ the press.
   check (`Table::relocate`); the public `syslib.window_move` stays owner-only. A release or
   a vanished window clears the drag. `remove_at` also clears a drag whose id disappears, so
   `close`, `close_task` and `Task::reclaim` cancel it in the same pass that removes the
-  window. A press while `Drag` is set is ignored.
+  window. A press while `Drag` is set is consumed and ignored (no raise, no new drag), so
+  it cannot reach a client and raise another window mid-drag.
 - **Close box.** A task-owned close box returns `PressAction::Kill(owner)`; the hook drops
   the table lock and calls `task::request_kill(owner)`. The task terminates at its next
   safe point, `Task::reclaim` runs the ordinary `window::close_task`, and the focus
   fallback (W6) applies. Owner `0` returns `Consumed` and does nothing. There is no
   save-on-close and no close-request event; data loss is the same as `core.kill` (ADR
   0042, accepted limitation).
-- **Consumed press.** The pointer producer has already queued its `PointerDown` when the
-  service hook runs, so a handled press calls `event::consume_pointer_down(x, y)`, which
-  removes the newest matching unaddressed `PointerDown` from the bounded queue (one
-  event, order preserved, no starvation). A client therefore sees no click for a
-  title-bar or close-box press; the subsequent `PointerMove`/`PointerUp` records are not
-  the click and stay queued.
+- **Consumed press.** A handled press is suppressed **before publication**: after the
+  service hook returns `consumed`, `event::push_pointer(..., suppress_down = true)` omits
+  the `PointerDown` record entirely (the `PointerMove`/`PointerUp` records still publish
+  in order). The two pointer paths hold one dedicated `POINTER_ORDER` spin lock across the
+  state update, the hook and publication, so no task woken by the publication can poll a
+  press the service handled — even on SMP. A client therefore sees no click for a
+  title-bar or close-box press. The lock is the outermost pointer lock and gives
+  `POINTER_ORDER → SCREEN` and `POINTER_ORDER → WINDOW → SCREEN`; only the two pointer
+  paths take it.
 - **Damage and expose.** `drag_move` uses the same `relocate` path as `window_move`: the
   old frame is erased to the desktop in the parts no live window covers, the new frame is
   filled under the moved window, chrome is redrawn, and every intersecting window gets its
@@ -573,7 +584,7 @@ graphics it prints `windows_drag: host ok`.
 
 Resize remains deferred (open question 4): this slice drags whole windows only.
 
-### Interfaces
+## Interfaces
 
 ### Language surface
 
@@ -742,4 +753,5 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | 2026-11-16 | M2.3.4 (spec 0012, ADR 0025): read-only `syslib.window_info` (builtin 40, no new opcode) returning a topmost-first id, frame and 64-byte title snapshot; owner `0` admitted as the kernel owner (task ids start at 1) and kernel windows are ordinary windows; the kernel's terminal and system-log windows use the same public functions. The three samples that assumed an empty window baseline record `window_focus()` at start and compare against it. |
 | 2026-11-17 | M2.3.5 implemented: `samples/apps/windows_proof` plus the `windows_proof_a`/`windows_proof_b` children prove two side-by-side windows owned by separate tasks, a focus switch and raise by real injected pointer clicks (state asserted, because the queue is machine-wide), a four-step scripted owner drag with old-area restoration, and an `Expose`/`window_present` repaint after another task moves over and away (including the covered-content check and the visible-part-only draw that M2's missing per-task clip requires). The parent-owned `Proof Control` frame origin is the persistent command channel; teardown is a stage-4 close-and-exit acknowledged by `core.wait`. `run windows_proof shot` and `scripts/windows_proof_screenshot_qmp.py` capture the composed frame. The two prerequisites the proof exposed are fixed separately: a fair claim cursor (spec 0007, Sch12) and the console's stale-parts retry (spec 0012, D3). Pointer-driven continuous dragging remains M2.4. |
 | 2026-11-17 | M2.6.2 implemented (W21, ADR 0031): a repair coalesces erase and chrome damage before painting (empty/contained dropped, touching/overlapping merged; different erase coverage limits never merged) and presents the coalesced rectangles instead of one bounding box of all damage. `window::damage_self_check` proves the merge rules, the erase coverage rule and the coverage invariant on scratch state and measures a diagonal move: 4 rectangles / 510 874 px as a bounding box become 2 rectangles / 55 348 px (89 % less present area); boot prints `window: damage ok (present 4 -> 2 rects, 510874 -> 55348 px)`. Expose marking still uses the exact original damage. Open question 2 is resolved. |
-| 2026-11-18 | M8.1 implemented (W22–W24, ADR 0042): service-owned pointer drag from the title bar (raise/focus, grab offset, clamp, release, ignored second press, cancellation on close) and close-box termination of the owner task via `task::request_kill` and `Task::reclaim`; owner-0 close boxes are inert. The hook runs from both `gfx` pointer paths after the graphics lock is dropped, keeps `WINDOW → SCREEN` and never holds the table lock across `request_kill`/`wake_input`; a handled press removes its queued `PointerDown`. `window::drag_self_check` prints `window: drag ok`, and `samples/apps/base/windows_drag` (+ `windows_drag_victim`) proves both interactions headlessly. Resize remains deferred (open question 4). |
+| 2026-11-18 | M8.1 implemented (W22–W24, ADR 0042): service-owned pointer drag from the title bar (raise/focus, grab offset, clamp, release, ignored second press, cancellation on close) and close-box termination of the owner task via `task::request_kill` and `Task::reclaim`; owner-0 close boxes are inert. The hook runs from both `gfx` pointer paths after the graphics lock is dropped, keeps `WINDOW → SCREEN` and never holds the table lock across `request_kill`/`wake_input`; a handled press is suppressed before event publication. `window::drag_self_check` prints `window: drag ok`, and `samples/apps/base/windows_drag` (+ `windows_drag_victim`) proves both interactions headlessly. Resize remains deferred (open question 4). |
+| 2026-11-18 | M8.1 follow-up: W24 strengthened against an SMP poll race. The two pointer paths serialise the whole transaction with a dedicated `POINTER_ORDER` lock (`POINTER_ORDER → SCREEN`, `POINTER_ORDER → WINDOW → SCREEN`), run the service hook after dropping the graphics lock, and publish the events afterwards with `push_pointer(..., suppress_down)` omitting a consumed press; `event::consume_pointer_down` is deleted, so a handled `PointerDown` is never enqueued and a woken client cannot observe it. A second press during a drag is now `Consumed` (swallowed) instead of delivered. |
