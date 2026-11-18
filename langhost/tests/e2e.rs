@@ -2546,6 +2546,61 @@ fn the_home_ops_sample_creates_renames_and_removes_on_the_host() {
     assert_eq!(result.reason, ExitReason::Ok);
 }
 
+/// The M6.4 persistence write half (spec 0019, V2/A6): `home_persist` creates
+/// the directory, writes the payload and renames it over `langhost`'s temporary
+/// home directory, so the write/mkdir/rename path runs end to end on the host.
+#[test]
+fn the_home_persist_sample_writes_and_renames_on_the_host() {
+    let path = app_path("home_persist");
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "home_persist").expect("the sample compiles");
+    let result =
+        langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies and runs");
+    let output = String::from_utf8(result.output).expect("UTF-8 output");
+    assert!(output.contains("home_persist: dir ok\n"), "{output}");
+    assert!(output.contains("home_persist: rename ok\n"), "{output}");
+    assert!(output.contains("home_persist: target contents ok\n"), "{output}");
+    assert!(output.ends_with("home_persist: ok\n"), "{output}");
+    assert_eq!(result.reason, ExitReason::Ok);
+}
+
+/// The M6.4 persistence read half (spec 0019, V2/A6): a wrapper runs
+/// `home_persist` and then `home_verify` as two children of the same host, so
+/// both see the same temporary home directory. That is the host-side analogue
+/// of the two-boot kernel proof; the real image persistence is owned by
+/// `scripts/home_persistence_qmp.py`.
+#[test]
+fn the_home_verify_sample_reads_the_persisted_file_on_the_host() {
+    let source = br#"
+unit persist_sequence;
+uses core, lib.out;
+
+var
+  diag: Diagnostic;
+  reason: ExitReason;
+  st: Status;
+
+procedure main(args: const string[1024]);
+begin
+  st := core.run("home_persist", "", diag, reason);
+  if st <> Ok then
+    out.say("persist_sequence: run home_persist failed\n");
+  st := core.run("home_verify", "", diag, reason);
+  if st <> Ok then
+    out.say("persist_sequence: run home_verify failed\n");
+end;
+"#;
+    let package = langhost::compile(source, "persist_sequence").expect("the wrapper compiles");
+    let result =
+        langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies and runs");
+    let output = String::from_utf8(result.output).expect("UTF-8 output");
+    assert!(output.contains("home_persist: ok\n"), "{output}");
+    assert!(output.contains("home_verify: directory ok\n"), "{output}");
+    assert!(output.contains("home_verify: contents ok\n"), "{output}");
+    assert!(output.ends_with("home_verify: ok\n"), "{output}");
+    assert_eq!(result.reason, ExitReason::Ok);
+}
+
 /// A host with a screen that implements the proportional font's metrics and
 /// records the drawing call (spec 0015). The widths are a small stand-in table:
 /// `i` 3, `M` 11, other printable bytes 6, non-ASCII 8.
