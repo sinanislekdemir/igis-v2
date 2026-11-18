@@ -23,9 +23,17 @@ constraints learned there.
 - **Execution model:** one interpreter loop per core; tasks are claimed from a global
   runnable set and are never pinned to a core (ADR 0011).
 - **Long-term goal:** a general personal system. The first milestone proves the thesis
-  with a booting kernel, source applications, read-only ext2 delivery, and a REPL that
-  can drive a device.
-- **Status:** implementation. Specs 0001–0019 are accepted (0015–0019 implemented). The kernel boots under
+  with a booting kernel, source applications, a read-only application image and a
+  persistent writable `/home`, and a REPL that can drive a device.
+- **Status:** implementation. Specs 0001–0019 are accepted (0015–0019 implemented),
+  **494 host tests**, ABI v1 at **75** opcodes, M5/M6/M7.1 complete. The application
+  image is a read-only ext2 tree (`lib`, `base`, `home`, `system`) mounted as a GRUB
+  module; `/home` is a separate 8 MiB ext2 image on an ATA disk, mounted read-write
+  through `ext2w` and one path router (persistent; `e2fsck -fn` clean). The read
+  builtins are 41–43 and the write builtins are 53–57
+  (`fs_write`/`fs_remove`/`fs_mkdir`/`fs_rename`/`fs_truncate`, `home/` only). Boot is
+  `system/entrypoint` → `base/shell`; the language compiles source with
+  `compile_with_imports` (`/lib` modules, package-wide nominal types). The kernel boots under
   GRUB/multiboot2 into long mode, prints through a framebuffer console mirrored to serial,
   has a GDT/TSS and an exception path with a double-fault IST, runs a 1 kHz APIC timer
   driving a global nanosecond clock, and owns a bitmap frame allocator. The full vertical
@@ -496,10 +504,10 @@ constraints learned there.
   `scripts/widgets_screenshot_qmp.py` writes `/home/sinan/Desktop/igis-widgets.png`.
   The application file API now runs (M2.5.1, spec 0013, ADR 0027): `core.fs_list`,
   `core.fs_read` and `core.fs_size` are host builtins 41–43 with no new opcode,
-  exposing the read-only image root to applications. Paths use the shared
-  `core.spawn` syntax (`abi::fs::validate_path`); listing accepts only `""`/`"."`,
-  reads and sizes accept one root component, and a separator is `Invalid`
-  (subdirectories unsupported). `fs_list` returns entry `index` in directory order
+  exposing the application image to applications in that slice (the root-only view; spec 0018/0019 later added the tree and the writable `/home`). Paths use the shared
+  `core.spawn` syntax (`abi::fs::validate_path`); in that slice listing accepted only
+  `""`/`"."`, reads and sizes accepted one root component, and a separator was
+  `Invalid` (subdirectories unsupported; spec 0018 later added the tree). `fs_list` returns entry `index` in directory order
   (kind `0` file / `1` directory / `2` other, inode size, at most a 64-byte name),
   `fs_read` copies at most 256 bytes at a byte offset into a compiler-checked
   `bytes[256]` (`Ok`/0 at EOF, destination length and `read` published together), and
@@ -564,9 +572,10 @@ window with a path/`entries`/`read-only` line, a 26-row app-drawn root listing (
 folder/file/other 8×8 marker, the name, the right-aligned inode size, an accent
 selection band), a `ui_scrollbar`, a 2048-byte preview pane with line clipping and a
 status line. `core.fs_list` is read from index 0 until `NotFound` into 64 fixed
-`string[64]`/`uint` arrays; `.`/`..` are already excluded. `lost+found` is listed as a
-folder (kind 1) and opening or launching it is refused with a clear status because
-M2.5.1 has no subdirectory traversal; a kind-2 entry is shown but not openable. A
+`string[64]`/`uint` arrays; `.`/`..` are already excluded. In that slice `lost+found`
+was listed as a folder (kind 1) and opening or launching it was refused because
+M2.5.1 had no subdirectory traversal; a kind-2 entry is shown but not openable.
+(M3.4 later added navigation and M6.3 create/remove; see the decisions table.) A
 regular file preview is `core.fs_size` plus 256-byte `core.fs_read` chunks into a staged
 `bytes[2048]` and one strict-UTF-8 `core.substr_into`, so a missing name, a directory,
 an unsupported path, a file over the cap and invalid UTF-8 each set the status and leave
@@ -743,10 +752,11 @@ self-injects the input event and takes the console bytes typed by
 adds the console arm, both `-smp 4` and `-smp 1`. The image now stages 64 sources, so the
 browser's listing capacity rose from 64 to 96. ABI v1 stays at 75 opcodes (two builtins,
 no opcode) and `stdlib` stays at 125 functions. **M2 is complete.**
-**403 host tests**
+At the M2 close, **403 host tests**
 (abi 22, compiler 158, interpreter 147, langhost 76, including doctests); ABI v1 stays
 at 75 opcodes. M2 is complete; the deferred backlog and the accepted M2 limitations are
-the next milestone's input.
+the next milestone's input. The current totals and milestone state are in the
+"Current state" block above; this narrative is the historical record.
 
 **M3 has started (spec 0018, ADR 0038).** The application image is now a real
 directory tree: `lib` (importable modules), `base` (base applications), `home`
@@ -765,12 +775,12 @@ the predeclared nominal types and user-declared types (`<unit>.<Type>`,
 helpers now live in `lib/out` (`say`/`say_int`), `lib/inject` (pointer/key event
 injection) and `lib/outcome` (`is_ok(ExitReason)`), with 40 applications migrated.
 **M5 is complete:** the calculator (M5.1) and minesweeper (M5.2) are real windowed
-applications over the existing UI/`/lib` surface. **M6 has started:** M6.1 mounts a
+applications over the existing UI/`/lib` surface. **M6 is complete:** M6.1 mounted a
 dedicated 8 MiB ext2 home image from an ATA disk read-only through one path router
-(`ext2w`); M6.2 (done) adds the writer and `core.fs_write`; M6.3 (done) adds
-`remove`/`mkdir`/`rename` and the editor save; M6.4 (done) proves reboot
-persistence and closes M6: the system now has a real, persistent ext2 `/home`.
-M7.1 adds `core.fs_truncate` (builtin 57) for in-place shrink/zero-extend.
+(`ext2w`); M6.2 added the writer and `core.fs_write`; M6.3 added
+`remove`/`mkdir`/`rename` and the editor save; M6.4 proved reboot persistence and
+closed M6: the system now has a real, persistent ext2 `/home`. M7.1 (done) adds
+`core.fs_truncate` (builtin 57) for in-place shrink/zero-extend.
 
 ## Ground rules
 
@@ -812,7 +822,8 @@ fresh.
 ├── compiler/          # lexer, parser, type check, codegen, manifest
 ├── interpreter/       # package verifier, machine, Host trait
 ├── langhost/          # host runner: compile, verify, run
-├── kernel/            # entry, multiboot2, console, frame allocator, clock, ext2, REPL
+├── ext2w/             # host-testable read/write ext2 over SectorDevice
+├── kernel/            # entry, multiboot2, console, frame allocator, clock, ext2/router, ATA, REPL
 ├── stdlib/            # standard library source, embedded into the compiler
 ├── samples/lang/      # example programs
 ├── samples/apps/      # source applications staged into the ext2 image
@@ -832,6 +843,7 @@ platform/<machine>/ # machine-specific: memory map, device layout, boot protocol
 kernel/             # arch-agnostic core
 compiler/           # lex, parse, type/capacity check, bytecode and manifest emission
 interpreter/        # bytecode execution, safe points, builtin dispatch
+ext2w/              # ext2 read/write over a sector device (host-tested)
 core/               # native primitives (Rust): console, streams, time, text
 stdlib/             # standard library written in the application language
 syslib/             # privileged hardware primitives (ports, MMIO, DMA)
@@ -862,11 +874,11 @@ The kernel is cross-built for `x86_64-unknown-none`; `xtask` itself builds for t
 | Command | Purpose |
 |---------|---------|
 | `cargo xtask build` | build the kernel ELF (release) |
-| `cargo xtask image` | build and assemble `build/igis.iso` with GRUB |
-| `cargo xtask run` | image + QEMU with a display, serial on stdio |
+| `cargo xtask image` | build and assemble `build/igis.iso` with GRUB and ensure `build/home.img` |
+| `cargo xtask run` | image + QEMU with a display and the home disk, serial on stdio |
 | `cargo xtask run --headless` | image + QEMU with no display (serial only) |
 | `cargo xtask clean` | remove build artifacts |
-| `cargo test -p abi -p compiler -p interpreter -p langhost` | host language tests (the kernel crates have no test harness) |
+| `cargo test -p abi -p compiler -p interpreter -p langhost -p ext2w` | host language and filesystem tests (the kernel crates have no test harness) |
 | `cargo run -p langhost -- samples/lang/hello.ig` | compile and run one unit on the host |
 
 `.cargo/config.toml` pins the linker script, `code-model=kernel`, and the static
@@ -973,11 +985,11 @@ host tools are unaffected.
 | Dialogs are 10 `stdlib` helpers with no widget object, event pump or `state`: `ui_message` word-wraps in a fixed box; alert slots are 0 default / 1 cancel and input-dialog slots 0 field / 1 default / 2 cancel; the title-bar close box returns the cancel slot; `ui_dialog_key` returns 0 none / 1 default / 2 cancel / 3 focus next / 4 focus previous, with Enter always the default and Escape cancel only when `has_cancel`; the default button gets a solid double border and the focus ring stays inside it; the input dialog only draws the caller's buffer (editing stays the M2.4.1 helpers) | spec 0003 ("UI dialogs"), M2.4.4 |
 | Icons are 16 `stdlib` helpers with no widget object, event pump or `state`: a 32×32 bitmap is `array[uint, 32]` row masks (row 0 top, bit 0 left), drawn one run per maximal set-bit run; the app keeps the assets; grid cells are caller geometry with a row-major hit test over `count` valid cells; double-click is same-target and at most 400 ms inclusive (the app remembers the time/target and a drag cancels it); drag is grab-offset plus pointer-follow with the app clamping to its content; a selection band is inclusive (`abs + 1`) and selects live icons whose cells intersect (touching edges excluded); `ui_icon_drop` returns -2 over the trash, the cell index or -1 | spec 0003 ("UI icons and desktop"), M2.4.5 |
 | The M2.4.6 widgets demo is one app and one event loop (`samples/apps/widgets`): it composes the existing menu bar/pull-down, button, checkbox, text field, scrollbar, list, icon strip, alert and input dialog, owns every state scalar, and treats a dialog as a modal mode of the same loop (keys and pointer events go to it while it is open; Enter is always default, Escape cancels, and the input buffer reaches the field only on OK). Check mode injects pointer/key events and checks pixels; `widgets shot` holds the composed frame for the QMP harness. No new helper, opcode, builtin or `state`; the library stays at 125 functions | spec 0003 ("Standard library"), spec 0010, M2.4.6 |
-| Application files are three stateless root-only host builtins with no opcode: `fs_list`/`fs_read`/`fs_size` (41–43), a shared `core.spawn` path validator, a 64-byte name, 256-byte chunks and out-parameters published only on `Ok`; no handle, no writable path, no subdirectory traversal (`lost+found` is kind 1 and unreadable) | spec 0013, ADR 0027, M2.5.1 |
+| Application files are stateless `core` host builtins over one path router: read `fs_list`/`fs_read`/`fs_size` (41–43) and write `fs_write`/`fs_remove`/`fs_mkdir`/`fs_rename`/`fs_truncate` (53–57, `home/` only); no handle, paths are relative (≤256 B, ≤8 components), the application image is read-only and `/home` is a persistent ext2 disk | spec 0013, spec 0018, spec 0019, ADR 0027/0040/0041 |
 | `/home` is a real, persistent ext2 filesystem on a dedicated 8 MiB ATA disk, written by a new `ext2w` crate behind one path router; `core.fs_write`/`fs_remove`/`fs_mkdir`/`fs_rename`/`fs_truncate` (53–57) are the only write primitives and only under `home/`; no journal, `e2fsck -fn` is the consistency proof (spec 0019, ADR 0040/0041, M6/M7.1) |
 | The clock window is an ordinary windowed app with no new API: a 260×280 content, an integer midpoint-circle face and Bresenham hands driven by a built-once 6° fixed-point direction table, an `HH:MM:SS` readout, a fixed `10:08:30` pixel check, and a live `shot` mode that derives seconds from `core.clock()` in a bounded poll/redraw loop (no `next_event`, no `syslib.clear`), repaints the whole content on an owner `Expose`, and presents once per complete frame; the client never assumes a blank screen | spec 0003, spec 0010, spec 0011, M2.5.2 |
-| The editor is an ordinary windowed app over the read-only file API: one `string[8192]` document loaded through `fs_size` + 256-byte `fs_read` chunks and one strict-UTF-8 `substr_into`, one app-local atomic mutator (`ed_replace`, boundary-checked prefix/insert/suffix staging with one publish) because the `str_*` mutators stay at 256 bytes, the read-only `str_*` helpers reused on the larger buffer, and saving disabled (the File menu's Save row is disabled and Ctrl+S reports "read-only") until a writable filesystem exists | spec 0003 ("Application buffers above 256 bytes"), spec 0013, M2.5.3 |
-| The file browser is one windowed app over the same root API: `fs_list` until `NotFound` into 64 fixed entries, an app-drawn list with marker/name/size and an accent selection (the eight-item `ui_list` cannot model the root), `ui_scrollbar`, a 2048-byte preview through `fs_size` + 256-byte `fs_read` chunks and one strict-UTF-8 `substr_into` (a failure leaves the old preview), and Enter/double-click to preview; a directory or kind-2 entry is shown but refused, and Ctrl+L is a blocking launcher (`spawn` then `wait`) of a regular source app | spec 0013 ("The file browser"), spec 0003, M2.5.4 |
+| The editor is an ordinary windowed app: one `string[8192]` document loaded through `fs_size` + 256-byte `fs_read` chunks and one strict-UTF-8 `substr_into`, one app-local atomic mutator (`ed_replace`) because the `str_*` mutators stay at 256 bytes, and Save enabled (File menu and `Ctrl+S`): a `home/` document is written to `<target>.tmp` and renamed over it, a `base/` document is saved as `home/<basename>`; a failure leaves the document/path intact | spec 0003, spec 0013, spec 0019, M2.5.3/M6.3 |
+| The file browser is one windowed app that navigates one directory at a time (`Enter`/double-click descends, `Backspace`/`Ctrl+Up` truncates the path; 96-entry listing), previews a file at any depth through `fs_size` + 256-byte `fs_read` chunks and one strict-UTF-8 `substr_into`, launches a regular file by its full path (`spawn`+`wait`), and creates/removes entries under `home` with `N`/`Delete` | spec 0013, spec 0018, spec 0019, M3.4/M6.3 |
 | The terminal is one machine-wide grid bound to a task-owned window: `core.terminal_attach(window_id) -> Status` (builtin 44, no opcode) with the kernel supplying the caller's task id; the first attach releases the owner-0 boot Terminal, a repeated attach by the owner is `Ok`, another live task is `Full`, and a vanished window detaches to serial-only. Exposes are pulled by id (terminal) and owner `0` (log); a moved window is followed by generation; the lock order stays `CONSOLE → WINDOW → SCREEN` and console input is the raw byte ring | spec 0014, ADR 0028, ADR 0037, M2.5.5 |
 | The proportional font is a kernel-owned 12-pixel bitmap: 95 printable-ASCII glyphs as 10-column ASCII art plus explicit advances (`i` 3, `m` 7, `W` 10, `M` 11, tabular digits 6), rendered on first use into a fixed `SpinLock<[Option<Glyph>; 95]>` cache of row bitmasks/ink bounds. Line box 12, baseline row 9, caps 2–9, descenders 10–11. Builtins 45–47 (`text_width_prop` 1→1, `text_height_prop` 0→1, `draw_text_prop` 4→1), no opcode; bytes outside `0x20..=0x7E` advance 8 and keep an 8×8 cell (blank at `>= 0x80`); disabled graphics give 0/0/`Invalid`. `draw_text`, the console and `stdlib.ui_*` stay 8×8; the service title bar and desktop menu bar/clock use the prop face | spec 0015, ADR 0030, M2.6.1 |
 | The console paints a cell or a whole grid with `window::paint_visible_parts`, which holds the window table lock across the paint (`CONSOLE → WINDOW → SCREEN`) instead of computing parts and retrying on the generation; a window opened/raised/moved afterwards runs its own repair above the console, and the generation still follows a moved terminal on the next pump | spec 0012 D3/D17, M2.6.1 |
@@ -996,8 +1008,9 @@ host tools are unaffected.
 ## Open questions
 
 See [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) for the remaining parked items: tuning
-constants, the deferred debug/DMA/streams work and the float follow-ups. Boot, platform,
-scheduler, REPL and language decisions are settled.
+constants, the deferred debug/DMA/streams work, the float follow-ups, virtio-blk, a
+journal/atomic replace and the file handle model (Q51). Boot, platform, scheduler, REPL,
+language and filesystem decisions are settled.
 When an item is resolved, record the answer in its spec or a new ADR and remove it there.
 
 ## Status log
@@ -1100,5 +1113,5 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-18 | M6.1 home disk mounted read-only through a router (spec 0019 H1–H5/W1–W2/A4, ADR 0040). New `ext2w` crate (`no_std`, `#![forbid(unsafe_code)]`, allocation-free, `abi` only): a `SectorDevice` trait (`sector_count`, 512-byte `read_sector`/`write_sector`), a 4-block 1 KiB cache, full mount validation (ext2 magic, 1 KiB blocks, revision 1, group descriptors, inode size, bitmaps, inode table, bounds), and `find`/`list`/`read_at`/`read_file`/`file_size`; 6 host tests build a 1 MiB image with `mke2fs -d` in a temporary file and cover mount, listing, `readme.txt`, `NotFound`, directory-read `Invalid` and a corrupt magic. `kernel/src/ata.rs` is a primary-master ATA PIO driver (LBA28, 512-byte sectors, bounded BSY/DRQ polling with a 400 ns delay, reset on timeout, no DMA/interrupts) behind `SectorDevice`; `arch/x86_64/src/port.rs` adds `insw`/`outsw`. `kernel/src/fs.rs` is the one router: `home`/`home/*` use the home mount when present (else the app image's `home`), everything else the read-only app image; `/` lists the app root and `home` lists the home root; the boot source read, `repl::load`, `core.spawn` and `KernelHost::fs_*` all go through it (lock rule documented: `HOME → ATA ports only`). `xtask` builds `build/home.img` (8 MiB, `mke2fs -b 1024 -d samples/home`) only when missing, adds `--reset-home`, and `run` attaches `-drive file=build/home.img,format=raw,if=ide` unless `--no-home`; `samples/home/readme.txt` is the initial tree and `base/files` now lists `home` and reads `home/readme.txt` (238 B). Boot with the drive: `ata: primary master, LBA28, 16384 sectors` / `ext2w: mounted, 1024 byte blocks, 8192 KiB` / `ext2w: home ok`; without: `ata: no primary master` / `ext2w: no home disk`; an all-zero image: `ext2w: home failed (Invalid)` and a read-only boot. **458 host tests** (abi 23, compiler 195, interpreter 151, langhost 83, ext2w 6); `cargo xtask build`/`image`/`image --shell` clean; the 29-command batch passes in all four combinations (`-smp 4`/`-smp 1` × drive/no drive); `e2fsck -fn build/home.img` exits 0; visual golden (`37802052…e9e81c9f`) and `boot_desktop_qmp.py` pass on both. No write API or builtin yet; the clean-state/mount-count rule lands with the writer. |
 | 2026-11-18 | M6.2 the ext2 writer and `core.fs_write` (spec 0019 W1–W7/A1–A3, ADR 0040). `ext2w` becomes a writer on the same `SectorDevice`: a writable mount marks the filesystem clean (`s_state = 1`, `s_errors = 0`, no mount-count increment, one superblock write), allocation scans a group bitmap and updates bitmap → group descriptor → superblock counts, inodes are created as `S_IFREG | 0644` with links 1, directory entries reuse free space or allocate a block, and `write_at` plans capacity before mutating (a full disk is `CapacityExceeded` with no partial tree), grows direct/single/double indirect pointers, read-modify-writes partial blocks, zero-fills a gap past the old end, and writes data → inode → directory entry through the write-through cache. `core.fs_write(path, offset, data, var written)` is builtin 53 (`fs_write_call` in codegen to keep `codegen::call`'s frame small), `abi::fs::validate_writable` accepts only `home`/`home/…`, the interpreter checks the destination regions and leaves `written` untouched on failure, `Host::fs_write` defaults to `Invalid`, and the kernel router creates a missing file only at offset 0. `langhost` now mounts a temporary home directory (seeded from the image tree) so the primitive is host-testable. `samples/apps/base/home_write` writes, reads back, appends, writes a gap, checks the error paths (outside home, missing parent, nonzero offset, directory) and prints nine step lines + `home_write: ok`; without the disk it prints `home_write: no writable home`. **474 host tests** (abi 24, compiler 196, interpreter 154 incl. doctest, langhost 84, ext2w 15; +16); `cargo xtask build`/`image`/`image --shell` clean; `home_write: ok` on `-smp 4`/`-smp 1` and on `langhost`; `e2fsck -fn` exits 0 after the writes (12 → 13 files, 563 → 564 blocks) and after `--reset-home`; the 30-command batch with/without the drive, visual golden (`37802052…e9e81c9f`) and `boot_desktop_qmp.py` pass on both. No remove/mkdir/rename/truncate, no editor save; ABI v1 stays at 75 opcodes. |
 | 2026-11-18 | M6.3 `remove`, `mkdir`, `rename` and the applications (spec 0019 W3–W6/A1–A3/E1–E2, ADR 0040). `ext2w` frees data blocks (direct/single/double indirect) and inodes with the bitmap → group descriptor → superblock reversal, removes a directory entry with predecessor-record merge and direct/single-indirect tail compaction, creates a directory (`S_IFDIR | 0755`, links 2, `.`/`..`, parent link bump, `bg_used_dirs_count`), and renames within/across directories (regular-file replacement, `..` rewrite, cycle/directory-target refusal; `Inode.links` and `bg_used_dirs_count` are now preserved). New builtins 54–56: `core.fs_remove(path)`, `core.fs_mkdir(path)`, `core.fs_rename(from, to)` (ABI v1 stays at 75), `home`-only, `Host` defaults `Invalid`, kernel router through `HOME`, `langhost` temp-home implementations. The editor's File-menu Save is enabled and `Ctrl+S` writes `<target>.tmp` then renames it over the document (a `base/` document is saved as `home/<basename>` and the path switches; a failure leaves the document/path intact); the browser adds `N` (create `home/newdir`) and `Delete`/`D` (remove a selected regular file or empty directory under `home`) with a refreshed listing and status. `samples/apps/base/home_ops` proves mkdir/write/rename/replace/remove/list/error paths and prints `home_ops: ok`. **484 host tests** (abi 24, compiler 197, interpreter 159 incl. doctest, langhost 85, ext2w 19; +10); `cargo xtask build`/`image`/`image --shell` clean; `home_ops: ok`, `editor: ok`, `browser: ok`, `files: ok` on `-smp 4`/`-smp 1` with the drive; `home_ops: no writable home` and the read-only editor/browser arms without it; `e2fsck -fn` exits 0 after the proofs (12 → 13 files) and after reset (12); the 31-verdict batch with/without the drive, visual golden (`37802052…e9e81c9f`) and `boot_desktop_qmp.py` pass on both. No truncate, no journal, no persistence proof yet. |
-| 2026-11-18 | M6.4 home persistence across a reboot (spec 0019 V2–V4; M6 close). `samples/apps/base/home_persist` creates `home/persist`, writes `a.txt` with a fixed 34-byte payload and renames it to `b.txt`; `samples/apps/base/home_verify` checks the directory, the absent old name and the exact `b.txt` size/contents. `scripts/home_persistence_qmp.py` boots the shell image with `build/home.img`, runs `home_persist`, quits QEMU, boots a **second** QEMU with the same image, runs `home_verify`, then runs `e2fsck -fn`; `--cores`, `--reset` (via `cargo xtask image --reset-home`) and `--keep` control it. **486 host tests** (langhost +2); `--cores 4 --reset --keep` and a second `--cores 1 --keep` cycle: `home_persist: ok` → `home_verify: ok` (size/contents), fsck exit 0 (14/2048 files, 565/8192 blocks), idempotent at 14/565; `debugfs -R "cat /persist/b.txt"` shows the exact payload; reset returns 12/563 with fsck 0. Targeted runs on both counts: with the drive `home_persist`/`home_verify`/`home_ops`/`editor`/`browser`/`files` pass; without it `home_persist: no writable home`, `home_verify: FAIL`, and the read-only editor/browser arms pass. Visual golden (`37802052…e9e81c9f`) and `boot_desktop_qmp.py` pass on both. Spec 0019 is Implemented; the application image remains read-only, ABI v1 stays at 75, no truncate/journal. |
+| 2026-11-18 | M6.4 home persistence across a reboot (spec 0019 V2–V4; M6 close). `samples/apps/base/home_persist` creates `home/persist`, writes `a.txt` with a fixed 34-byte payload and renames it to `b.txt`; `samples/apps/base/home_verify` checks the directory, the absent old name and the exact `b.txt` size/contents. `scripts/home_persistence_qmp.py` boots the shell image with `build/home.img`, runs `home_persist`, quits QEMU, boots a **second** QEMU with the same image, runs `home_verify`, then runs `e2fsck -fn`; `--cores`, `--reset` (via `cargo xtask image --reset-home`) and `--keep` control it. **486 host tests** (langhost +2); `--cores 4 --reset --keep` and a second `--cores 1 --keep` cycle: `home_persist: ok` → `home_verify: ok` (size/contents), fsck exit 0 (14/2048 files, 565/8192 blocks), idempotent at 14/565; `debugfs -R "cat /persist/b.txt"` shows the exact payload; reset returns 12/563 with fsck 0. Targeted runs on both counts: with the drive `home_persist`/`home_verify`/`home_ops`/`editor`/`browser`/`files` pass; without it `home_persist: no writable home`, `home_verify: FAIL`, and the read-only editor/browser arms pass. Visual golden (`37802052…e9e81c9f`) and `boot_desktop_qmp.py` pass on both. Spec 0019 is Implemented; the application image remains read-only, ABI v1 stays at 75, no truncate at that point (M7.1 later added `core.fs_truncate`) and no journal. |
 | 2026-11-18 | M7.1 `core.fs_truncate` (spec 0019 A7, ADR 0041). `ext2w::truncate(path, size)` shrinks by zeroing the tail of the last kept partial block, clearing the inode-level and indirect pointers past the new block count, writing the inode (size + `i_blocks`) and only then freeing the data blocks/empty pointer blocks and the bitmaps/counters (a crash leaks blocks, never double-allocation); it extends after planning capacity (a full disk is `CapacityExceeded` with no change), zeroes the old partial tail and every new block, then writes the size; a directory is `Invalid`, a missing path `NotFound`, the current size an `Ok` no-op. New builtin 57 `core.fs_truncate(path, size) -> Status` (ABI v1 stays at 75) with compiler (`fs_truncate_call`), interpreter (writable-path check, no out-parameters), `Host::fs_truncate` default `Invalid`, kernel router through `HOME`, and the `langhost` temp-home `set_len`. `samples/apps/base/home_truncate` proves write 3000 → shrink 1000 (size/content) → extend 4000 (kept bytes + zeros from 1000) → 0 → idempotent → error paths, printing 16 step lines + `home_truncate: ok`; without the disk `home_truncate: no writable home`. The editor deliberately keeps its temporary-file + rename save (ADR 0041). **494 host tests** (abi 24, compiler 198, interpreter 159 incl. doctest, langhost 88, ext2w 25; +8); `cargo xtask build`/`image`/`image --shell` clean; `home_truncate: ok` on `-smp 4`/`-smp 1`; `e2fsck -fn` exits 0 after the proofs (15 files) and after reset (12/563); the persistence harness (`--cores 4 --reset`), the 38-command batch with/without the drive, visual golden (`37802052…e9e81c9f`) and `boot_desktop_qmp.py` pass on both. No editor/browser change, no journal, no opcode change. |

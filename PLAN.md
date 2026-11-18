@@ -14,7 +14,13 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `b6c350c` (M7.1: `core.fs_truncate`) plus this docs commit.
+- **Current state:** **494 host tests**; specs 0001–0019 (0018 and 0019
+  Implemented); ABI v1 at 75 opcodes; M5, M6 and M7.1 complete. The application
+  image is a read-only ext2 tree (`lib`, `base`, `home`, `system`); `/home` is a
+  separate 8 MiB ext2 image on an ATA disk, read-write through `ext2w` and one
+  router, persistent across reboots. Write builtins are 53–57. The next milestone
+  is not planned.
+- **Last commit:** `906d8d4` (M7.1 docs) plus this synchronization commit.
   The tree is clean; `build/home.img` is reset.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
@@ -1059,6 +1065,9 @@ parent verifies each.
 | Item | Where | Trigger |
 |---|---|---|
 | `f32` (Q40) | OPEN-QUESTIONS Q40 | when single precision is needed |
+| virtio-blk behind `SectorDevice` | spec 0019 | when the ATA path is measured |
+| A journal or an atomic-replace primitive | spec 0019 | when the editor must save without `<target>.tmp` |
+| A file handle / open-once model (Q51) | OPEN-QUESTIONS Q51 | if the per-call path walk measures badly |
 | Recovery from a hardware guard hit (Q47) | OPEN-QUESTIONS Q47 | when a task must survive a kernel-bug guard hit |
 | MMIO/DMA/block handles (Q45/Q9) | OPEN-QUESTIONS | first real block device or MMIO peripheral |
 | Debug/introspection primitive (Q8) | OPEN-QUESTIONS Q8 | when the desktop needs task/system info |
@@ -1072,11 +1081,22 @@ parent verifies each.
 
 ## How a ticket is verified (headless first)
 
-1. Host tests for the language/compiler/interpreter surface.
-2. Kernel transcript with a self-check the app prints (`desktop: ok` style), using
-   `syslib.get_pixel` for drawing and `syslib.inject_event` for input.
-3. `-smp 4` and `--cores 1` both.
-4. Regression set: `streams`, `frames`, `text`, `realtime`, `deep`, `cores`, `utf8`.
-5. The golden-frame harness (`scripts/visual_regression.py`) for the actual framebuffer
-   pixels: `samples/apps/visual` is deterministic and the committed golden must match on
-   `-smp 4` and `-smp 1`; `--tamper` proves the compare rejects a changed pixel.
+1. Host tests: `cargo test -p abi -p compiler -p interpreter -p langhost -p ext2w`
+   (the filesystem crate is host-tested against an `mke2fs` image).
+2. Kernel transcript with a self-check the app prints (`files: ok` style), using
+   `syslib.get_pixel` for drawing and `syslib.inject_event` for input; filesystem
+   tickets also run `e2fsck -fn build/home.img` after the proof.
+3. `-smp 4` and `-smp 1` both; filesystem tickets run with the home drive and with
+   `--no-home`.
+4. Regression batch: `files`, `module_demo`, the home apps, `editor`/`browser`/
+   `calculator`/`minesweeper`, the UI set, `widgets`, `clock_window`, `windows*`,
+   `desktop_shell check`, `terminal`, `events`, `streams`, `frames`, `deep`,
+   `utf8`, `realtime`, `cores`, `kill_stress`, `multiplex`, `font`, `perf`,
+   `f64parse`, `text`, `text_edit`.
+5. `scripts/visual_regression.py` for the framebuffer: `samples/apps/visual` is
+   deterministic and the committed golden must match on both core counts;
+   `--tamper` proves the compare rejects a changed pixel. `scripts/boot_desktop_qmp.py`
+   proves the boot desktop → `terminal: ok`, and the per-app screenshot harnesses
+   (`calculator`, `minesweeper`, `browser`, ...) are run when the app changes.
+6. Leave `build/home.img` reset (`cargo xtask image --reset-home`) and fsck-clean
+   after a filesystem session.
