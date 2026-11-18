@@ -15,7 +15,7 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 ## Resume point (update this when a session ends)
 
 - **Current state:** **505 host tests**; specs 0001–0019 (0018 and 0019
-  Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1–M8.5 complete**. The
+  Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1–M8.6 complete**. The
   application image is a read-only ext2 tree (`lib`, `base`, `home`, `system`);
   `/home` is a separate 8 MiB ext2 image on an ATA disk, read-write through
   `ext2w` and one router, persistent across reboots. Write builtins are 53–57.
@@ -31,9 +31,17 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   to the new origin before the repair (`gfx::copy_rect`, kernel-internal, no `syslib`
   binding) and omits the new-frame desktop erase, and every windowed app re-reads
   `window_content_rect` on an owner `Expose` before drawing or hit-testing (spec 0011
-  W28, ADR 0046).
-- **Last commit:** `4a0a3d4` (File Browser layout follow-up) plus this docs commit.
-  The tree is clean; `build/home.img` is reset.
+  W28, ADR 0046). M8.6 makes queued input **window-addressed** (spec 0010 I34, spec
+  0011 W29, ADR 0047): `poll_event` delivers a record only to the task that owns its
+  window target (an addressed window, the region claimant, the topmost hit window or
+  the focused window) and a non-owner gets `WouldBlock` without consuming it, so the
+  boot desktop no longer steals a launched application's clicks and keys. The modal
+  grab still takes precedence, a region press stays unchanged, and readiness uses the
+  same rule; `window: target ok` is the boot self-check and
+  `scripts/input_routing_qmp.py` proves Browser, About and Calculator input with the
+  desktop alive.
+- **Last commit:** `3598fda` (M8.6) plus this docs commit. The tree is clean;
+  `build/home.img` is reset.
 - **Next:** M8 is complete. Pick from the deferred backlog in
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) / the "Deferred" table below, or extend the
   desktop (a task switcher, submenus and interactive resize were deliberately left out).
@@ -69,8 +77,9 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   and evidence.
 - **Done since M7.1:** M8.1 (window drag and close box), M8.2 (owner close requests),
   M8.3 (Apps application menu and the modal popup input grab, `94187ed`), M8.4
-  (persistent menu-bar pointer-region claim, `1304df8`) and M8.5 (topmost content
-  snapshot plus the client content-rect refresh, `f478f9b`; M8 close).
+  (persistent menu-bar pointer-region claim, `1304df8`), M8.5 (topmost content
+  snapshot plus the client content-rect refresh, `f478f9b`) and M8.6 (window-addressed
+  input delivery, `3598fda`; M8 close).
 - **Verified at that point (M3.4, independently by the parent):** **439 host tests**
   (abi 23, compiler 184, interpreter 150, langhost 81, 1 doctest); `cargo xtask
   build`/`image`/`image --shell` clean; boot `ext2: tree ok`. `run browser check`
@@ -1415,6 +1424,74 @@ parent verifies each.
   (stale preview 2, old path run < 340), writing
   `/home/sinan/Desktop/igis-browser-drag.png`; it passes on `--cores 4` and `--cores 1`,
   and `browser check` still passes.
+
+- [x] **M8.6 Window-addressed input delivery (the boot desktop must not steal app input).**
+  Two user reports:
+  - The File Browser does not react to clicks or keys while the boot desktop runs;
+    the serial shows `task 3 blocked on input` / `task 4 blocked on input` in pairs.
+    Root cause: the one machine-wide queue is consumed by whichever task polls
+    first. The boot desktop (`desktop_shell`, realtime, task 3) wakes with every
+    event, consumes input addressed to the Browser's window, and ignores it. The
+    M8.3/M8.4 grabs only protect an open menu and the bar; ordinary app
+    content/key input remains racy. This is spec 0010 I31's accepted competition,
+    and it makes every app launched from the desktop unreliable.
+  - Closing about can end the desktop with `task 3: exit Ok` (the own-window
+    Close path). The current `about_close_qmp.py` passes on HEAD, so the report
+    is likely the same mis-delivery/stale state (a click meant for About reaching
+    another window) or an older ISO; re-prove it with the Browser live and fix
+    any remaining path.
+  **Fix:** deliver queued input to the task that owns its target, not to the
+  first poller.
+  - `window` gains `hit_test_owner(x,y)`, `owner_of(id)`, `focus_owner()` and one
+    target rule: a `PointerDown` targets the region-claim owner at the point if
+    the bar claims it, else the topmost hit window's owner; `PointerMove` /
+    `PointerUp` / `KeyDown` / `KeyUp` target the focused window's owner; an
+    event with a non-zero `window` targets that window's owner. Owner `0`
+    (kernel windows) or no target (`None`) leaves the event to the ordinary
+    window-less competition, as before.
+  - `KernelHost::poll_event` peeks the head (the existing `event::peek`), and a
+    non-target task returns `WouldBlock` **without consuming**; the target
+    consumes and takes the ordinary routing path (a pointer-down still raises,
+    focuses and stamps the window; moves/keys name the focus). The modal grab
+    still takes precedence; the region claim is the first pointer-down target.
+    `task::input_queue_ready` uses the same rule for `input_ready`, the
+    post-block re-check and `next_any` source 1, so non-owners do not spin.
+  - The queue is still one FIFO: an event targeted at an unresponsive owner can
+    head-of-line block later events; this is the W18 liveness tradeoff and is
+    documented. Close/Expose are still owner-specific flags served before the
+    queue.
+  - **Proof:** a new QMP `input_routing_qmp.py` (or an extension) on the boot
+    desktop: launch Browser, click a list row and double-click a directory (the
+    path/count pixels must change) **with the desktop alive**; launch Browser,
+    open About, click its close box, require `desktop_shell: about closed` and
+    the desktop still responsive (no `task 3: exit Ok`); launch Calculator and
+    click a button **without closing the desktop** (the M8.5 `drag_content_qmp`
+    workaround can then be removed). Boot self-check `window: target ok` on a
+    scratch table (hit/down/focus/addressed/owner-0/no-target).
+  - **Docs:** ADR 0047 (window-addressed input), spec 0010 I31 amended + new
+    I34 (I32/I33 already name the IRQ12 bring-up), spec 0011 W29, spec 0012 D19
+    note, PLAN/AGENTS. No new opcode/builtin.
+  **Done (`3598fda`):** `window::input_target` is the one target rule (addressed
+  window owner; region claimant then topmost hit owner for a `PointerDown`; focus
+  owner for moves/keys; owner-0/empty/unknown → none). `KernelHost::poll_event`
+  peeks and a non-owner gets `WouldBlock` without consuming; the modal grab still
+  takes precedence and skips the target gate, and a region press is delivered
+  unchanged. `task::input_queue_ready` uses the same rule for readiness, the
+  post-block re-check and `next_any` source 1. `window: target ok` prints on
+  `-smp 4`/`-smp 1`; `scripts/input_routing_qmp.py` proves Browser click (10,844
+  px) and Enter navigation (path 274 px) with the desktop alive, About's close
+  box plus an Escape close with the Browser live and no `task 3: exit Ok`, and a
+  Calculator `7` click (display 22 px) without closing the desktop.
+  `drag_content_qmp.py` drops the close-the-desktop workaround. The About symptom
+  did not reproduce on `8b23ad8`; the routing regression is the guard. `events`
+  and `multiplex` now own a small window because window-less keys/moves belong to
+  the focus. **505 host tests** (no new host harness; kernel-internal rule);
+  `cargo xtask build`/`image`/`image --shell` clean; the full regression batch,
+  `apps_menu_qmp.py`, `about_close_qmp.py`, `drag_content_qmp.py`,
+  `browser_drag_qmp.py`, `system_menu_qmp.py`, `boot_desktop_qmp.py`,
+  `tablet_qmp.py` 7/7 and the visual golden `37802052…e9e81c9f` pass on both
+  core counts. No opcode, builtin, `Host`, `stdlib` or `Event` layout change
+  (ABI v1 stays 75; `stdlib` 125 functions).
 
 ## Deferred (not UI; pick up when they matter)
 
