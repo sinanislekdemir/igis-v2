@@ -14,14 +14,14 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Current state:** **495 host tests**; specs 0001–0019 (0018 and 0019
-  Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1 complete**. The
+- **Current state:** **497 host tests**; specs 0001–0019 (0018 and 0019
+  Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1–M8.2 complete**. The
   application image is a read-only ext2 tree (`lib`, `base`, `home`, `system`);
   `/home` is a separate 8 MiB ext2 image on an ATA disk, read-write through
   `ext2w` and one router, persistent across reboots. Write builtins are 53–57.
-  Windows are draggable by the title bar and the close box terminates the owner
-  task (M8.1).
-- **Last commit:** `d4a8f93` (M8.1 follow-up) plus this docs commit.
+  Windows are draggable by the title bar, and the close box posts an owner-only
+  `EventKind.Close` request (M8.2) — a dialog closes itself and the task survives.
+- **Last commit:** `195f8d4` (M8.2) plus this docs commit.
   The tree is clean; `build/home.img` is reset.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
@@ -108,7 +108,7 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   without the disk `home_truncate: no writable home` and the read-only arms
   pass; the persistence harness, visual golden (`37802052…e9e81c9f`) and
   `boot_desktop_qmp.py` pass on both.
-- **Next slice:** **M8.1 is complete.** Interactive resize (spec 0011 open
+- **Next slice:** **M8.2 is complete.** Interactive resize (spec 0011 open
   question 4) is the obvious next window-management slice but is not yet
   planned; the deferred table is the input (virtio-blk, a journal/atomic replace,
   the handle model/Q51, `f32`/Q40, MMIO/DMA/Q45, nominal `TaskId`/Q43,
@@ -1122,6 +1122,70 @@ parent verifies each.
   `text_edit`, `files`, `module_demo`, `kill_stress`; visual golden
   `37802052…e9e81c9f` and `boot_desktop_qmp.py` pass on both; `e2fsck -fn` is
   clean (no home writes). Resize remains deferred.
+
+- [x] **M8.2 The close box requests a close; it never kills the owner.**
+  Regression: closing the desktop's `About igis-v2` window killed task 3 (the
+  boot `desktop_shell`, realtime), so the entrypoint exited, the system printed
+  the idle summary and halted (`About` is a desktop-owned window, and M8.1's
+  W23 killed the owner of any task window). A dialog must close itself, not its
+  application.
+  - **Semantics:** a left-button press in the close box sets a per-window
+    `close_pending` flag instead of calling `task::request_kill`; the press is
+    still consumed (W24). The owner receives the new predeclared
+    `EventKind.Close` (ordinal 6, `window = id`, other fields 0) through
+    `poll_event`/`next_event`, owner-only and topmost-first, ahead of `Expose`;
+    the window stays until the owner closes it. Owner-`0` close boxes stay
+    inert. No timeout and no automatic kill for an ignored request.
+  - **Surface:** `EventKind.Close` in `abi`, the compiler's predeclared enum and
+    spec 0010/0011; no new opcode, builtin, `Host` method, `syslib` primitive,
+    `stdlib` helper or opcode-count change.
+  - **Delivery:** the window flag is served by the kernel host
+    (`window::take_close`/`has_close`) and counts as input readiness
+    (`input_ready`, the scheduler's post-block recheck and `next_any` source 1);
+    the pointer hook wakes `WaitFor::Input` after dropping the window lock.
+  - **Applications:** user-facing windows handle `Close` by closing their own
+    window and exiting (`calculator`, `minesweeper`, `editor`, `browser`,
+    `clock_window`, `shell`, `widgets`); `desktop_shell` closes only the `About`
+    panel on its Close and keeps running, and exits on its own `Desktop` window's
+    Close. Proof/demo windows may ignore it and exit on their own.
+  - **Proof:** `windows_drag` becomes a close-request proof (an owned second
+    window gets `Close`, the app closes only it and stays alive; the child victim
+    handles `Close`, closes and exits `Ok`), and `desktop_shell check` clicks the
+    About close box, requires the `Close` event (no client `PointerDown`), closes
+    About and verifies the desktop still opens About again — the exact freeze.
+    A QMP harness should reproduce the boot-desktop scenario (open System/About,
+    click its close box, then use Terminal) and prove the system does not halt.
+  - **Docs:** spec 0011 W23/W25 and the M8.1 section, spec 0010 event kinds,
+    ADR 0043 (close requests; amends 0042's close clause; ADR 0042 stays
+    accepted and is annotated, per the immutability rule), PLAN/AGENTS.
+  Not part of this ticket: save-on-close, close timeouts, resize.
+  **Done (`195f8d4`):** **497 host tests**; `EventKind.Close` (ordinal 6) is
+  predeclared in `abi` and the compiler, and `Event`'s layout is unchanged. A
+  close-box press sets `close_pending` and returns `PressAction::Close`; the
+  service consults `take_close`/`has_close` (owner-only, topmost-first) before
+  `Expose` and before the queue, writes `{ Close, 0, 0, 0, id }`, counts it in
+  `input_ready`, the scheduler's post-block re-check and `next_any` source 1,
+  and wakes `WaitFor::Input` after the window unlock. Owner-0 close boxes stay
+  inert and an ignored request leaves the window. `window::close_self_check`
+  prints `window: close ok` beside `window: drag ok`. `desktop_shell` closes
+  only About on its `Close` and keeps running (the freeze), and exits on its
+  own Desktop window; `calculator`, `minesweeper`, `editor`, `browser`,
+  `clock_window`, `shell` and `widgets` close their own window and exit;
+  proof/demo windows may ignore the request. `run windows_drag check` proves a
+  same-task dialog plus a victim that closes itself and exits `Ok` (not
+  `Killed`), and `run desktop_shell check` injects a real About close-box press,
+  gets exactly the `Close` event, closes About and reopens it. The 13-command
+  batch (`windows_drag`, `desktop_shell`, the six user apps, `terminal`,
+  `widgets`, `windows`, `windows_events`, `windows_demo`, `events`) passes on
+  `-smp 4` and `-smp 1`; `windows_proof` passes in its own boot on both;
+  `scripts/about_close_qmp.py` boots `build/igis.iso`, opens System → About,
+  clicks its close box, sees `desktop_shell: about closed`, then launches the
+  terminal (`terminal: ok`) with no idle summary/halt; `boot_desktop_qmp.py`,
+  `system_menu_qmp.py` (its About row moved to y = 24 because a title-bar press
+  at y = 30 is now the M8.1 service drag) and the visual golden
+  `37802052…e9e81c9f` pass on both; a calculator and a shell terminal closed
+  interactively through their close boxes exit `Ok`; `e2fsck -fn` is clean
+  (no home writes). Resize remains deferred.
 
 ## Deferred (not UI; pick up when they matter)
 
