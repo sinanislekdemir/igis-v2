@@ -117,6 +117,11 @@ pub struct VarDecl<'a> {
 /// `map[int, string[8], 4]`.
 #[derive(Debug, Clone, Copy)]
 pub struct TypeRef<'a> {
+    /// Qualifying unit of a module type (`math` in `math.Point`), or `None`
+    /// when the name is unqualified (spec 0003, "Cross-unit types"). The
+    /// application's types are application-local, so a qualifier always names
+    /// a `/lib` module (or `stdlib`).
+    pub owner: Option<&'a str>,
     /// Type name, before resolution.
     pub name: &'a str,
     /// Capacity expression for `string`/`bytes`.

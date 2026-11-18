@@ -520,7 +520,21 @@ impl<'a, 'b> Parser<'a, 'b> {
     /// than a stack fault.
     fn type_ref_inner(&mut self) -> Result<TypeRef<'a>, Diagnostic> {
         let token = self.peek();
-        let name = self.ident("a type name")?;
+        let first = self.ident("a type name")?;
+        let mut owner = None;
+        let mut name = first;
+        // A module's type is named `<unit>.<Type>` (spec 0003, "Cross-unit
+        // types"); the built-in parametric and buffer types stay unqualified
+        // and reserved. Only one qualifier is legal: there is no
+        // `a.b.Type` type name.
+        if !matches!(
+            first,
+            "array" | "ring" | "map" | "string" | "bytes" | "in_stream" | "out_stream"
+        ) && self.eat(&TokenKind::Dot)
+        {
+            owner = Some(first);
+            name = self.ident("a type name after `.`")?;
+        }
         let mut cap = None;
         let mut elem = None;
         let mut value = None;
@@ -572,6 +586,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             self.expect(&TokenKind::RBracket, "`]`")?;
         }
         Ok(TypeRef {
+            owner,
             name,
             cap,
             elem,

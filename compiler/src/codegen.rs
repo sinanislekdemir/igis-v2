@@ -89,9 +89,10 @@ struct Const<'a> {
     value: i64,
 }
 
-/// One enum type known to this compilation: the predeclared `Status` and
-/// `FaultCode` first, then every `type` declaration in source order. The index
-/// in this table is the compiler-local enum id carried by [`Kind::Enum`].
+/// One enum type known to this compilation: the predeclared `Status`,
+/// `FaultCode` and `EventKind` first, then every user `type` declaration in
+/// package order (spec 0008, "Types"; ADR 0039). The index in this table is
+/// the package-wide enum id carried by [`Kind::Enum`].
 #[derive(Debug, Clone, Copy)]
 struct EnumDef<'a> {
     name: &'a str,
@@ -100,6 +101,9 @@ struct EnumDef<'a> {
     /// enum). `FaultCode` sets this false because several of its names collide
     /// with `Status`; it is named qualified (`FaultCode.IoError`).
     global_variants: bool,
+    /// Unit that declared the type: a unit id, or [`PREDECLARED_UNIT`] for the
+    /// fixed types every unit may name unqualified.
+    owner: u16,
 }
 
 /// One record field after layout: name, resolved type and byte offset from the
@@ -111,14 +115,32 @@ struct RecordField<'a> {
     off: u32,
 }
 
+/// How far a record or sum's by-value layout has been computed.
+///
+/// Layout is a separate pass over the package-wide table, because ids are
+/// assigned before any field type is resolved (ADR 0039, C2). `Visiting` is
+/// the cycle detector: a type that is reached again before it is `Done`
+/// contains itself by value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    /// Not laid out yet.
+    Pending,
+    /// Layout in progress; a second visit is a by-value cycle.
+    Visiting,
+    /// Layout is complete and `size` is final.
+    Done,
+}
+
 /// One nominal record type known to this compilation. The index in this table
-/// is the compiler-local record id carried by [`Kind::Record`].
+/// is the package-wide record id carried by [`Kind::Record`].
 #[derive(Debug, Clone, Copy)]
 struct RecordDef<'a> {
     name: &'a str,
     fields: &'a [RecordField<'a>],
-    /// Size in bytes, already rounded to 8.
+    /// Size in bytes, already rounded to 8. Valid once [`Layout::Done`].
     size: u32,
+    owner: u16,
+    layout: Layout,
 }
 
 /// One sum-type variant after checking: its name and optional payload type.
@@ -129,7 +151,7 @@ struct SumVariantDef<'a> {
 }
 
 /// One nominal sum type known to this compilation. The index in this table is
-/// the compiler-local sum id carried by [`Kind::Sum`].
+/// the package-wide sum id carried by [`Kind::Sum`].
 ///
 /// Layout (spec 0003, "Sum types"): an 8-byte tag at offset 0 and the payload
 /// area at offset 8, sized by the largest variant payload and rounded to 8.
@@ -137,8 +159,10 @@ struct SumVariantDef<'a> {
 struct SumDef<'a> {
     name: &'a str,
     variants: &'a [SumVariantDef<'a>],
-    /// Size in bytes, already rounded to 8.
+    /// Size in bytes, already rounded to 8. Valid once [`Layout::Done`].
     size: u32,
+    owner: u16,
+    layout: Layout,
 }
 
 /// One fixed-size array type known to this compilation. The index in this
@@ -210,24 +234,28 @@ struct MapDef {
     size: u32,
 }
 
-/// Compiler-local id of the predeclared `Diagnostic` record.
+/// Owner marker of a predeclared type: it is visible unqualified in every unit
+/// and cannot be named with a unit qualifier (spec 0008, "Types"; ADR 0039).
+const PREDECLARED_UNIT: u16 = u16::MAX;
+
+/// Package-wide id of the predeclared `Diagnostic` record.
 const DIAGNOSTIC_RECORD: u16 = 0;
 
-/// Compiler-local id of the predeclared `ExitReason` sum type.
+/// Package-wide id of the predeclared `ExitReason` sum type.
 const EXIT_REASON_SUM: u16 = 0;
 
-/// Compiler-local id of the predeclared `FaultCode` enum. It follows `Status`.
+/// Package-wide id of the predeclared `FaultCode` enum. It follows `Status`.
 const FAULT_CODE_ENUM: u16 = 1;
 
-/// Compiler-local id of the predeclared `EventKind` enum. It follows
-/// `Status` and `FaultCode` (spec 0010, I19).
+/// Package-wide id of the predeclared `EventKind` enum. It follows `Status`
+/// and `FaultCode` (spec 0010, I19).
 const EVENT_KIND_ENUM: u16 = 2;
 
-/// Compiler-local id of the predeclared `Event` record (spec 0010, I19). The
+/// Package-wide id of the predeclared `Event` record (spec 0010, I19). The
 /// predeclared `Diagnostic` is record 0.
 const EVENT_RECORD: u16 = 1;
 
-/// Compiler-local id of the predeclared `Rect` record (spec 0011, W3). It
+/// Package-wide id of the predeclared `Rect` record (spec 0011, W3). It
 /// follows `Diagnostic` (0) and `Event` (1).
 const RECT_RECORD: u16 = 2;
 
@@ -489,37 +517,121 @@ impl<'a, 'b> ConstantPool<'a, 'b> {
     }
 }
 
-/// True when a type can cross the library/application unit boundary.
-///
-/// Scalars, buffers and the predeclared nominal types have identity that is
-/// identical in every unit, because `abi::layout` fixes their ids and each unit
-/// builds the same predeclared table prefix (spec 0008, "Types"; ADR 0039):
-/// `Status` (`STATUS_ENUM`), `FaultCode` (`FAULT_CODE_ENUM`), `EventKind`
-/// (`EVENT_KIND_ENUM`), `Diagnostic` (`DIAGNOSTIC_RECORD`), `Event`
-/// (`EVENT_RECORD`), `Rect` (`RECT_RECORD`) and `ExitReason` (`EXIT_REASON_SUM`).
-/// User-declared records, sums and enums keep
-/// compiler-local ids and cannot cross until the package-wide type table of
-/// M4.2. Array, ring and map ids are shared by the one interning table, but
-/// their element and key/value types must themselves be safe.
-fn cross_unit_type_ok(ty: Type, arrays: &[ArrayDef], rings: &[RingDef], maps: &[MapDef]) -> bool {
-    match ty.kind {
-        // `Diagnostic` (0), `Event` (1) and `Rect` (2); user records follow.
-        Kind::Record(id) => id <= RECT_RECORD,
-        // `ExitReason` (0); user sums follow.
-        Kind::Sum(id) => id == EXIT_REASON_SUM,
-        // `Status` (0), `FaultCode` (1) and `EventKind` (2); user enums follow.
-        Kind::Enum(id) => id <= EVENT_KIND_ENUM,
-        Kind::Array(id) => arrays
-            .get(id as usize)
-            .is_some_and(|array| cross_unit_type_ok(array.elem, arrays, rings, maps)),
-        Kind::Ring(id) => rings
-            .get(id as usize)
-            .is_some_and(|ring| cross_unit_type_ok(ring.elem, arrays, rings, maps)),
-        Kind::Map(id) => maps.get(id as usize).is_some_and(|map| {
-            cross_unit_type_ok(map.key, arrays, rings, maps)
-                && cross_unit_type_ok(map.value, arrays, rings, maps)
-        }),
-        _ => true,
+/// One unit of a package, as a type qualifier (`math.Point`). The application
+/// is never listed: its types are application-local (ADR 0039, C2).
+#[derive(Debug, Clone, Copy)]
+struct UnitName<'a> {
+    name: &'a str,
+    /// Line-table unit id: `1` for the embedded `stdlib`, `2..` for `/lib`
+    /// modules in discovery order (spec 0008, "Line table").
+    id: u16,
+}
+
+/// The package's type namespace from one unit's point of view (spec 0003,
+/// "Cross-unit types").
+#[derive(Debug, Clone, Copy)]
+struct TypeScope<'a> {
+    /// The compiling unit's id (0 application, 1 stdlib, 2.. modules).
+    unit: u16,
+    /// Units that may qualify a type name. The application is absent, so
+    /// `app.Something` can never resolve.
+    units: &'a [UnitName<'a>],
+    /// The application's unit name, so qualifying it gets its own message.
+    application: &'a str,
+}
+
+/// A named nominal type after name resolution.
+#[derive(Debug, Clone, Copy)]
+enum Named {
+    Enum(u16),
+    Record(u16),
+    Sum(u16),
+}
+
+/// Why a `<unit>.<Type>` qualifier cannot be resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Qualifier {
+    /// The qualifier names the application, whose types are application-local.
+    Application,
+    /// The qualifier names no unit in the package.
+    Unknown,
+    /// The qualifier names a unit; the value is its unit id.
+    Unit(u16),
+}
+
+impl<'a> TypeScope<'a> {
+    /// Resolves a qualifier to a unit id without considering type names.
+    fn qualifier(&self, name: &str) -> Qualifier {
+        if name == self.application {
+            return Qualifier::Application;
+        }
+        match self.units.iter().find(|unit| unit.name == name) {
+            Some(unit) => Qualifier::Unit(unit.id),
+            None => Qualifier::Unknown,
+        }
+    }
+
+    /// Resolves a written type name to a nominal type id: unqualified in this
+    /// unit (its own declarations plus the predeclared types) or qualified by
+    /// a `/lib` unit name (spec 0003, "Cross-unit types").
+    fn named(
+        &self,
+        owner: Option<&str>,
+        name: &str,
+        enums: &[EnumDef<'_>],
+        records: &[RecordDef<'_>],
+        sums: &[SumDef<'_>],
+    ) -> Option<Named> {
+        let lookup = match owner {
+            None => NamedLookup::Visible(self.unit),
+            Some(qualifier) => match self.qualifier(qualifier) {
+                Qualifier::Unit(id) => NamedLookup::Owned(id),
+                _ => return None,
+            },
+        };
+        lookup
+            .enum_id(enums, name)
+            .map(Named::Enum)
+            .or_else(|| lookup.record_id(records, name).map(Named::Record))
+            .or_else(|| lookup.sum_id(sums, name).map(Named::Sum))
+    }
+}
+
+/// How a nominal type lookup selects table entries.
+#[derive(Debug, Clone, Copy)]
+enum NamedLookup {
+    /// A unit's own declarations plus the predeclared types.
+    Visible(u16),
+    /// Exactly one unit's declarations.
+    Owned(u16),
+}
+
+impl NamedLookup {
+    fn enum_id(self, enums: &[EnumDef<'_>], name: &str) -> Option<u16> {
+        enums
+            .iter()
+            .position(|entry| entry.name == name && self.matches(entry.owner))
+            .and_then(|index| u16::try_from(index).ok())
+    }
+
+    fn record_id(self, records: &[RecordDef<'_>], name: &str) -> Option<u16> {
+        records
+            .iter()
+            .position(|entry| entry.name == name && self.matches(entry.owner))
+            .and_then(|index| u16::try_from(index).ok())
+    }
+
+    fn sum_id(self, sums: &[SumDef<'_>], name: &str) -> Option<u16> {
+        sums.iter()
+            .position(|entry| entry.name == name && self.matches(entry.owner))
+            .and_then(|index| u16::try_from(index).ok())
+    }
+
+    fn matches(self, owner: u16) -> bool {
+        match self {
+            NamedLookup::Visible(unit) => owner == PREDECLARED_UNIT || owner == unit,
+            NamedLookup::Owned(unit) => owner == unit,
+        }
     }
 }
 
@@ -535,27 +647,19 @@ fn find_sig<'a>(sigs: &[Sig<'a>], name: &str) -> Option<usize> {
     sigs.iter().position(|s| s.name == name)
 }
 
-/// Finds an enum type by name.
-fn find_enum(enums: &[EnumDef<'_>], name: &str) -> Option<u16> {
-    enums
-        .iter()
-        .position(|e| e.name == name)
-        .and_then(|index| u16::try_from(index).ok())
+/// Finds an enum type visible unqualified from `unit`.
+fn find_enum(enums: &[EnumDef<'_>], unit: u16, name: &str) -> Option<u16> {
+    NamedLookup::Visible(unit).enum_id(enums, name)
 }
 
-/// Finds a record type by name.
-fn find_record(records: &[RecordDef<'_>], name: &str) -> Option<u16> {
-    records
-        .iter()
-        .position(|record| record.name == name)
-        .and_then(|index| u16::try_from(index).ok())
+/// Finds a record type visible unqualified from `unit`.
+fn find_record(records: &[RecordDef<'_>], unit: u16, name: &str) -> Option<u16> {
+    NamedLookup::Visible(unit).record_id(records, name)
 }
 
-/// Finds a sum type by name.
-fn find_sum(sums: &[SumDef<'_>], name: &str) -> Option<u16> {
-    sums.iter()
-        .position(|sum| sum.name == name)
-        .and_then(|index| u16::try_from(index).ok())
+/// Finds a sum type visible unqualified from `unit`.
+fn find_sum(sums: &[SumDef<'_>], unit: u16, name: &str) -> Option<u16> {
+    NamedLookup::Visible(unit).sum_id(sums, name)
 }
 
 /// Finds an array type by its compiler-local id, returning its layout.
@@ -823,9 +927,11 @@ fn variant_of<'a>(sum: &SumDef<'a>, name: &str) -> Option<SumVariantDef<'a>> {
         .copied()
 }
 
-/// True when any sum type already uses `name` as a variant.
-fn has_sum_variant(sums: &[SumDef<'_>], name: &str) -> bool {
+/// True when any sum type visible from `unit` already uses `name` as a
+/// variant.
+fn has_sum_variant(sums: &[SumDef<'_>], unit: u16, name: &str) -> bool {
     sums.iter()
+        .filter(|sum| sum.owner == PREDECLARED_UNIT || sum.owner == unit)
         .any(|sum| sum.variants.iter().any(|variant| variant.name == name))
 }
 
@@ -846,13 +952,17 @@ fn field_of<'a>(records: &[RecordDef<'a>], ty: Type, name: &str) -> Option<Recor
         .copied()
 }
 
-/// Finds a variant in any enum, returning its enum id and ordinal.
+/// Finds a variant in any enum visible from `unit`, returning its enum id and
+/// ordinal.
 ///
 /// Only enums whose variants are global constants take part; `FaultCode` is
-/// named qualified because its variant names overlap `Status`.
-fn find_variant(enums: &[EnumDef<'_>], name: &str) -> Option<(u16, u32)> {
+/// named qualified because its variant names overlap `Status`. A module's
+/// variants are bare only inside that module (spec 0003, "Cross-unit types").
+fn find_variant(enums: &[EnumDef<'_>], unit: u16, name: &str) -> Option<(u16, u32)> {
     for (index, enumeration) in enums.iter().enumerate() {
-        if !enumeration.global_variants {
+        if !enumeration.global_variants
+            || (enumeration.owner != PREDECLARED_UNIT && enumeration.owner != unit)
+        {
             continue;
         }
         if let Some(ordinal) = enumeration
@@ -866,13 +976,15 @@ fn find_variant(enums: &[EnumDef<'_>], name: &str) -> Option<(u16, u32)> {
     None
 }
 
-/// Finds a qualified enum variant, `TypeName.Variant`.
+/// Finds a qualified enum variant, `TypeName.Variant`, in the enums visible
+/// unqualified from `unit`.
 fn find_qualified_variant(
     enums: &[EnumDef<'_>],
+    unit: u16,
     type_name: &str,
     name: &str,
 ) -> Option<(u16, u32)> {
-    let id = find_enum(enums, type_name)?;
+    let id = find_enum(enums, unit, type_name)?;
     let ordinal = enums[id as usize]
         .variants
         .iter()
@@ -880,9 +992,30 @@ fn find_qualified_variant(
     Some((id, ordinal as u32))
 }
 
-/// True when any enum already uses `name` as a variant.
-fn has_variant(enums: &[EnumDef<'_>], name: &str) -> bool {
-    find_variant(enums, name).is_some()
+/// Finds `<unit>.<Type>.<Variant>`: an enum variant in another unit's enum.
+fn find_owned_variant(
+    enums: &[EnumDef<'_>],
+    owner: u16,
+    type_name: &str,
+    name: &str,
+) -> Option<(u16, u32)> {
+    let id = NamedLookup::Owned(owner).enum_id(enums, type_name)?;
+    let ordinal = enums[id as usize]
+        .variants
+        .iter()
+        .position(|variant| *variant == name)?;
+    Some((id, ordinal as u32))
+}
+
+/// True when any enum visible from `unit` already uses `name` as a variant.
+fn has_variant(enums: &[EnumDef<'_>], unit: u16, name: &str) -> bool {
+    find_variant(enums, unit, name).is_some()
+}
+
+/// True for every built-in type word, including the scalar keywords, which
+/// can never carry a unit qualifier (`math.int` is not a type) or be declared.
+fn is_reserved_type_word(name: &str) -> bool {
+    is_builtin_type_name(name) || matches!(name, "int" | "uint" | "byte" | "bool" | "f64")
 }
 
 /// True for the built-in type names an enum may not shadow.
@@ -904,14 +1037,15 @@ fn is_builtin_type_name(name: &str) -> bool {
     )
 }
 
-/// Builds one unit's symbol tables: constants, enums, records, sums, state and
-/// signatures. Type ids are local to the unit, except the predeclared nominal
-/// types whose ids `abi::layout` fixes and every unit therefore agrees on
-/// (spec 0008, "Types"; ADR 0039), so units can be compiled side by side
-/// without a shared declaration namespace.
+/// One unit's resolved symbol tables. The package-wide nominal type tables
+/// are shared by every unit, so a unit holds slices of the same arrays (spec
+/// 0008, "Types"; ADR 0039).
 #[derive(Clone, Copy)]
 struct UnitTables<'a> {
     name: &'a str,
+    /// This unit's type namespace: its own declarations plus the predeclared
+    /// types unqualified, and `<unit>.<Type>` for any `/lib` unit.
+    scope: TypeScope<'a>,
     consts: &'a [Const<'a>],
     enums: &'a [EnumDef<'a>],
     records: &'a [RecordDef<'a>],
@@ -954,24 +1088,145 @@ pub(crate) fn check_uses(unit: &Unit<'_>, path: &str, role: UnitRole) -> Result<
     Ok(())
 }
 
-/// Builds one parsed unit's tables.
-fn build_tables<'a>(
+/// A declared record or sum, kept so its layout can be computed once every
+/// unit's names are registered (ADR 0039, C2). `TypeDeclInfo` is `Copy`, so a
+/// layout walk takes it out of the registry and no borrow outlives the call.
+#[derive(Clone, Copy)]
+struct TypeDeclInfo<'a> {
+    /// The declaration itself: a record's fields or a sum's variants.
+    decl: &'a TypeDecl<'a>,
+    /// The declaring unit's namespace, so its field types resolve exactly as
+    /// they would inside the declaring unit.
+    scope: TypeScope<'a>,
+    /// The declaring unit's name and path, for diagnostics.
+    unit_name: &'a str,
+    path: &'a str,
+    /// The declaring unit's constants, for capacities and counts.
+    consts: &'a [Const<'a>],
+}
+
+/// The package-wide nominal type tables (spec 0008, "Types"; ADR 0039).
+///
+/// The predeclared types occupy fixed ids and come first; user declarations
+/// follow in `stdlib` → module discovery → application order and declaration
+/// order inside a unit, so two compiles of the same sources produce
+/// byte-identical packages. The index in each table is the package-wide type
+/// id carried by `Kind::Enum`, `Kind::Record` and `Kind::Sum`.
+struct TypePool<'a, 'b> {
+    enums: SliceVec<'a, 'b, EnumDef<'a>>,
+    records: SliceVec<'a, 'b, RecordDef<'a>>,
+    sums: SliceVec<'a, 'b, SumDef<'a>>,
+    /// Declaration info by record id; `None` for the predeclared prefix.
+    record_decls: SliceVec<'a, 'b, Option<TypeDeclInfo<'a>>>,
+    /// Declaration info by sum id; `None` for the predeclared prefix.
+    sum_decls: SliceVec<'a, 'b, Option<TypeDeclInfo<'a>>>,
+}
+
+impl<'a, 'b> TypePool<'a, 'b> {
+    /// Creates the tables with the fixed predeclared prefix.
+    fn new(path: &'a str, unit: &'a str, bump: &'b Bump<'a>) -> Result<Self, Diagnostic> {
+        let mut enums =
+            SliceVec::<EnumDef<'a>>::new(bump).map_err(|_| arena_full(path, unit, 1, 1))?;
+        enums
+            .push(EnumDef {
+                name: "Status",
+                variants: &STATUS_VARIANTS,
+                global_variants: true,
+                owner: PREDECLARED_UNIT,
+            })
+            .map_err(|_| arena_full(path, unit, 1, 1))?;
+        enums
+            .push(EnumDef {
+                name: "FaultCode",
+                variants: &FAULT_CODE_VARIANTS,
+                global_variants: false,
+                owner: PREDECLARED_UNIT,
+            })
+            .map_err(|_| arena_full(path, unit, 1, 1))?;
+        enums
+            .push(EnumDef {
+                name: "EventKind",
+                variants: &EVENT_KIND_VARIANTS,
+                global_variants: true,
+                owner: PREDECLARED_UNIT,
+            })
+            .map_err(|_| arena_full(path, unit, 1, 1))?;
+
+        let mut records =
+            SliceVec::<RecordDef<'a>>::new(bump).map_err(|_| arena_full(path, unit, 1, 1))?;
+        records
+            .push(RecordDef {
+                name: "Diagnostic",
+                fields: &DIAGNOSTIC_FIELDS,
+                size: layout::diagnostic::SIZE,
+                owner: PREDECLARED_UNIT,
+                layout: Layout::Done,
+            })
+            .map_err(|_| arena_full(path, unit, 1, 1))?;
+        records
+            .push(RecordDef {
+                name: "Event",
+                fields: &EVENT_FIELDS,
+                size: layout::event::SIZE,
+                owner: PREDECLARED_UNIT,
+                layout: Layout::Done,
+            })
+            .map_err(|_| arena_full(path, unit, 1, 1))?;
+        records
+            .push(RecordDef {
+                name: "Rect",
+                fields: &RECT_FIELDS,
+                size: layout::rect::SIZE,
+                owner: PREDECLARED_UNIT,
+                layout: Layout::Done,
+            })
+            .map_err(|_| arena_full(path, unit, 1, 1))?;
+
+        let mut sums =
+            SliceVec::<SumDef<'a>>::new(bump).map_err(|_| arena_full(path, unit, 1, 1))?;
+        sums.push(SumDef {
+            name: "ExitReason",
+            variants: &EXIT_REASON_VARIANTS,
+            size: layout::exit_reason::SIZE,
+            owner: PREDECLARED_UNIT,
+            layout: Layout::Done,
+        })
+        .map_err(|_| arena_full(path, unit, 1, 1))?;
+
+        let mut record_decls = SliceVec::<Option<TypeDeclInfo<'a>>>::new(bump)
+            .map_err(|_| arena_full(path, unit, 1, 1))?;
+        for _ in 0..3 {
+            record_decls
+                .push(None)
+                .map_err(|_| arena_full(path, unit, 1, 1))?;
+        }
+        let mut sum_decls = SliceVec::<Option<TypeDeclInfo<'a>>>::new(bump)
+            .map_err(|_| arena_full(path, unit, 1, 1))?;
+        sum_decls
+            .push(None)
+            .map_err(|_| arena_full(path, unit, 1, 1))?;
+        Ok(TypePool {
+            enums,
+            records,
+            sums,
+            record_decls,
+            sum_decls,
+        })
+    }
+}
+
+/// Builds one unit's constants. They are independent of the type tables, so
+/// every unit's constants are known before names are registered (a capacity
+/// may size a field, and a type name may not collide with a constant).
+fn build_consts<'a>(
     unit: &Unit<'a>,
     path: &'a str,
-    allow_streams: bool,
     bump: &Bump<'a>,
-    arrays: &mut SliceVec<'a, '_, ArrayDef>,
-    rings: &mut SliceVec<'a, '_, RingDef>,
-    maps: &mut SliceVec<'a, '_, MapDef>,
-) -> Result<UnitTables<'a>, Diagnostic> {
+) -> Result<&'a [Const<'a>], Diagnostic> {
     let name = unit.name;
     if name.is_empty() {
         return Err(diag(path, "", 1, 1, format_args!("unit has no name")));
     }
-
-    // Constants come first: they may size a record field's buffer, and their
-    // values depend on nothing but other constants. The type table is built
-    // next and rejects a type name that collides with a constant.
     let mut consts = SliceVec::<Const<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
     for decl in unit.consts {
         if find_const(consts.as_slice(), decl.name).is_some() {
@@ -991,78 +1246,51 @@ fn build_tables<'a>(
             })
             .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
     }
+    Ok(consts.into_slice())
+}
 
-    // The predeclared `Status` comes first, so its id is `STATUS_ENUM` and its
-    // ordinals match `abi::Status`. `FaultCode` follows, with the ordinals of
-    // `abi::FaultCode`; its variant names are qualified because some collide
-    // with `Status`. User `type` declarations follow in source order; the index
-    // in this table is the compiler-local enum id.
-    let mut enums = SliceVec::<EnumDef<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
-    enums
-        .push(EnumDef {
-            name: "Status",
-            variants: &STATUS_VARIANTS,
-            global_variants: true,
-        })
-        .map_err(|_| arena_full(path, name, 1, 1))?;
-    enums
-        .push(EnumDef {
-            name: "FaultCode",
-            variants: &FAULT_CODE_VARIANTS,
-            global_variants: false,
-        })
-        .map_err(|_| arena_full(path, name, 1, 1))?;
-    // The predeclared `EventKind` follows; its variants are global constants so
-    // an application can write `ev.kind = KeyDown` and compare against them.
-    enums
-        .push(EnumDef {
-            name: "EventKind",
-            variants: &EVENT_KIND_VARIANTS,
-            global_variants: true,
-        })
-        .map_err(|_| arena_full(path, name, 1, 1))?;
+/// True when a sum type visible from `unit` already uses `name` as a variant.
+///
+/// A declared-but-not-laid-out sum keeps its variants in the AST until layout
+/// runs, so the registry is consulted as well as the table (ADR 0039, C2).
+fn pool_has_sum_variant(pool: &TypePool<'_, '_>, unit: u16, name: &str) -> bool {
+    for (index, sum) in pool.sums.as_slice().iter().enumerate() {
+        if sum.owner != PREDECLARED_UNIT && sum.owner != unit {
+            continue;
+        }
+        if sum.variants.iter().any(|variant| variant.name == name) {
+            return true;
+        }
+        if sum.layout == Layout::Pending {
+            if let Some(info) = pool.sum_decls.get(index).flatten() {
+                if let TypeKind::Sum(variants) = info.decl.kind {
+                    if variants.iter().any(|variant| variant.name == name) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
 
-    // The predeclared `Diagnostic` is the first record entry; its layout is
-    // fixed by `abi::layout`, so the kernel and the compiler cannot disagree.
-    let mut records =
-        SliceVec::<RecordDef<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
-    records
-        .push(RecordDef {
-            name: "Diagnostic",
-            fields: &DIAGNOSTIC_FIELDS,
-            size: layout::diagnostic::SIZE,
-        })
-        .map_err(|_| arena_full(path, name, 1, 1))?;
-    // The predeclared `Event` is the second record entry; its layout is fixed
-    // by `abi::layout::event` (spec 0010, I19).
-    records
-        .push(RecordDef {
-            name: "Event",
-            fields: &EVENT_FIELDS,
-            size: layout::event::SIZE,
-        })
-        .map_err(|_| arena_full(path, name, 1, 1))?;
-    // The predeclared `Rect` is the third record entry; the window service
-    // returns geometry through it (spec 0011, W3).
-    records
-        .push(RecordDef {
-            name: "Rect",
-            fields: &RECT_FIELDS,
-            size: layout::rect::SIZE,
-        })
-        .map_err(|_| arena_full(path, name, 1, 1))?;
-
-    // The predeclared `ExitReason` is the first sum type
-    // (`Ok | Killed | Faulted(code: FaultCode)`); its tag/payload layout is
-    // `abi::layout::exit_reason`.
-    let mut sums = SliceVec::<SumDef<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
-    sums.push(SumDef {
-        name: "ExitReason",
-        variants: &EXIT_REASON_VARIANTS,
-        size: layout::exit_reason::SIZE,
-    })
-    .map_err(|_| arena_full(path, name, 1, 1))?;
-
+/// Registers one unit's `type` declarations in the package-wide tables, in
+/// declaration order, checking the unit's own name space.
+///
+/// Only names are registered here. Layout runs once every unit's names exist,
+/// so a unit may reference a type declared later in the same unit and a module
+/// may reference another module's type (ADR 0039, C2). Two modules may declare
+/// the same name; the unit qualifier distinguishes them (spec 0003,
+/// "Cross-unit types").
+fn declare_types<'a, 'b>(
+    pool: &mut TypePool<'a, 'b>,
+    unit: &Unit<'a>,
+    path: &'a str,
+    scope: TypeScope<'a>,
+    consts: &'a [Const<'a>],
+) -> Result<(), Diagnostic> {
+    let name = unit.name;
+    let unit_id = scope.unit;
     for decl in unit.types {
         if matches!(
             decl.name,
@@ -1091,10 +1319,15 @@ fn build_tables<'a>(
                 ),
             ));
         }
-        if find_enum(enums.as_slice(), decl.name).is_some()
-            || find_record(records.as_slice(), decl.name).is_some()
-            || find_sum(sums.as_slice(), decl.name).is_some()
-            || find_const(consts.as_slice(), decl.name).is_some()
+        // A type name is unique per unit and may not collide with a constant
+        // or with any variant visible from the unit; other units' names are
+        // not in this namespace.
+        if find_enum(pool.enums.as_slice(), unit_id, decl.name).is_some()
+            || find_record(pool.records.as_slice(), unit_id, decl.name).is_some()
+            || find_sum(pool.sums.as_slice(), unit_id, decl.name).is_some()
+            || find_const(consts, decl.name).is_some()
+            || has_variant(pool.enums.as_slice(), unit_id, decl.name)
+            || pool_has_sum_variant(pool, unit_id, decl.name)
         {
             return Err(diag(
                 path,
@@ -1107,10 +1340,13 @@ fn build_tables<'a>(
         match decl.kind {
             TypeKind::Enum(variants) => {
                 for (index, variant) in variants.iter().enumerate() {
-                    if has_variant(enums.as_slice(), variant)
+                    if has_variant(pool.enums.as_slice(), unit_id, variant)
                         || variants[..index].contains(variant)
-                        || find_const(consts.as_slice(), variant).is_some()
-                        || has_sum_variant(sums.as_slice(), variant)
+                        || find_const(consts, variant).is_some()
+                        || pool_has_sum_variant(pool, unit_id, variant)
+                        || find_enum(pool.enums.as_slice(), unit_id, variant).is_some()
+                        || find_record(pool.records.as_slice(), unit_id, variant).is_some()
+                        || find_sum(pool.sums.as_slice(), unit_id, variant).is_some()
                     {
                         return Err(diag(
                             path,
@@ -1123,26 +1359,18 @@ fn build_tables<'a>(
                         ));
                     }
                 }
-                enums
+                pool.enums
                     .push(EnumDef {
                         name: decl.name,
                         variants,
                         global_variants: true,
+                        owner: unit_id,
                     })
                     .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
             }
             TypeKind::Record(fields) => {
-                // Records are nominal and every field type must already be
-                // declared: declaration before use keeps layout a single pass.
-                let mut laid_out = SliceVec::<RecordField<'a>>::new(bump)
-                    .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
-                let mut size = 0u32;
-                for field in fields {
-                    if laid_out
-                        .as_slice()
-                        .iter()
-                        .any(|existing| existing.name == field.name)
-                    {
+                for (index, field) in fields.iter().enumerate() {
+                    if fields[..index].iter().any(|other| other.name == field.name) {
                         return Err(diag(
                             path,
                             name,
@@ -1151,87 +1379,40 @@ fn build_tables<'a>(
                             format_args!("duplicate field `{}`", field.name),
                         ));
                     }
-                    let ty = resolve_type(
-                        &field.ty,
-                        consts.as_slice(),
-                        enums.as_slice(),
-                        records.as_slice(),
-                        sums.as_slice(),
-                        arrays,
-                        rings,
-                        maps,
-                        path,
-                        name,
-                    )?;
-                    if ty.is_buffer() && ty.cap == 0 {
-                        return Err(diag(
-                            path,
-                            name,
-                            field.line,
-                            field.column,
-                            format_args!(
-                                "buffer field `{}` needs a capacity of at least 1",
-                                field.name
-                            ),
-                        ));
-                    }
-                    if ty.is_record() && ty.cap == 0 {
-                        return Err(diag(
-                            path,
-                            name,
-                            field.line,
-                            field.column,
-                            format_args!("record field `{}` is empty", field.name),
-                        ));
-                    }
-                    let off = align8(size);
-                    size = off.checked_add(ty.size()).ok_or_else(|| {
-                        diag(
-                            path,
-                            name,
-                            field.line,
-                            field.column,
-                            format_args!("record `{}` is too large", decl.name),
-                        )
-                    })?;
-                    laid_out
-                        .push(RecordField {
-                            name: field.name,
-                            ty,
-                            off,
-                        })
-                        .map_err(|_| arena_full(path, name, field.line, field.column))?;
                 }
-                let size = align8(size);
-                if size > MAX_CAPACITY {
-                    return Err(diag(
+                u16::try_from(pool.records.len()).map_err(|_| {
+                    diag(
                         path,
                         name,
                         decl.line,
                         decl.column,
-                        format_args!("record `{}` exceeds the {MAX_CAPACITY}-byte cap", decl.name),
-                    ));
-                }
-                records
+                        format_args!("too many distinct record types"),
+                    )
+                })?;
+                pool.records
                     .push(RecordDef {
                         name: decl.name,
-                        fields: laid_out.into_slice(),
-                        size,
+                        fields: &[],
+                        size: 0,
+                        owner: unit_id,
+                        layout: Layout::Pending,
                     })
+                    .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
+                pool.record_decls
+                    .push(Some(TypeDeclInfo {
+                        decl,
+                        scope,
+                        unit_name: name,
+                        path,
+                        consts,
+                    }))
                     .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
             }
             TypeKind::Sum(variants) => {
-                // Sum types are nominal. Each variant has at most one payload,
-                // which must already be declared; the layout is an 8-byte tag
-                // followed by the largest payload, rounded to 8 (spec 0003).
-                let mut laid_out = SliceVec::<SumVariantDef<'a>>::new(bump)
-                    .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
-                let mut largest = 0u32;
-                for variant in variants {
-                    if laid_out
-                        .as_slice()
+                for (index, variant) in variants.iter().enumerate() {
+                    if variants[..index]
                         .iter()
-                        .any(|existing| existing.name == variant.name)
+                        .any(|other| other.name == variant.name)
                     {
                         return Err(diag(
                             path,
@@ -1241,11 +1422,12 @@ fn build_tables<'a>(
                             format_args!("duplicate variant `{}`", variant.name),
                         ));
                     }
-                    if has_variant(enums.as_slice(), variant.name)
-                        || has_sum_variant(sums.as_slice(), variant.name)
-                        || find_const(consts.as_slice(), variant.name).is_some()
-                        || find_enum(enums.as_slice(), variant.name).is_some()
-                        || find_record(records.as_slice(), variant.name).is_some()
+                    if has_variant(pool.enums.as_slice(), unit_id, variant.name)
+                        || pool_has_sum_variant(pool, unit_id, variant.name)
+                        || find_const(consts, variant.name).is_some()
+                        || find_enum(pool.enums.as_slice(), unit_id, variant.name).is_some()
+                        || find_record(pool.records.as_slice(), unit_id, variant.name).is_some()
+                        || find_sum(pool.sums.as_slice(), unit_id, variant.name).is_some()
                     {
                         return Err(diag(
                             path,
@@ -1258,93 +1440,381 @@ fn build_tables<'a>(
                             ),
                         ));
                     }
-                    let payload = match &variant.payload {
-                        Some((field, ty)) => {
-                            let ty = resolve_type(
-                                ty,
-                                consts.as_slice(),
-                                enums.as_slice(),
-                                records.as_slice(),
-                                sums.as_slice(),
-                                arrays,
-                                rings,
-                                maps,
-                                path,
-                                name,
-                            )?;
-                            if ty.is_buffer() && ty.cap == 0 {
-                                return Err(diag(
-                                    path,
-                                    name,
-                                    variant.line,
-                                    variant.column,
-                                    format_args!(
-                                        "payload `{field}` needs a capacity of at least 1"
-                                    ),
-                                ));
-                            }
-                            largest = largest.max(ty.size());
-                            Some(ty)
-                        }
-                        None => None,
-                    };
-                    laid_out
-                        .push(SumVariantDef {
-                            name: variant.name,
-                            payload,
-                        })
-                        .map_err(|_| arena_full(path, name, variant.line, variant.column))?;
                 }
-                let size = 8u32.checked_add(largest).ok_or_else(|| {
+                u16::try_from(pool.sums.len()).map_err(|_| {
                     diag(
                         path,
                         name,
                         decl.line,
                         decl.column,
-                        format_args!("sum type `{}` is too large", decl.name),
+                        format_args!("too many distinct sum types"),
                     )
                 })?;
-                if size > MAX_CAPACITY {
-                    return Err(diag(
+                pool.sums
+                    .push(SumDef {
+                        name: decl.name,
+                        variants: &[],
+                        size: 0,
+                        owner: unit_id,
+                        layout: Layout::Pending,
+                    })
+                    .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
+                pool.sum_decls
+                    .push(Some(TypeDeclInfo {
+                        decl,
+                        scope,
+                        unit_name: name,
                         path,
-                        name,
-                        decl.line,
-                        decl.column,
-                        format_args!(
-                            "sum type `{}` exceeds the {MAX_CAPACITY}-byte cap",
-                            decl.name
-                        ),
-                    ));
-                }
-                sums.push(SumDef {
-                    name: decl.name,
-                    variants: laid_out.into_slice(),
-                    size: align8(size),
-                })
-                .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
+                        consts,
+                    }))
+                    .map_err(|_| arena_full(path, name, decl.line, decl.column))?;
             }
         }
     }
+    Ok(())
+}
 
-    // Constants are declared before the type table is built, so a constant
-    // that collides with a type or variant is rejected here, once the type
-    // names exist.
-    for decl in unit.consts {
-        if find_enum(enums.as_slice(), decl.name).is_some()
-            || find_record(records.as_slice(), decl.name).is_some()
-            || find_sum(sums.as_slice(), decl.name).is_some()
-            || has_variant(enums.as_slice(), decl.name)
-            || has_sum_variant(sums.as_slice(), decl.name)
-        {
+/// The by-value cycle diagnostic for a record or sum that is already being
+/// laid out (ADR 0039, C2).
+fn cycle_diag<'a>(pool: &TypePool<'a, '_>, id: u16, record: bool) -> Diagnostic {
+    let (decl, unit_name, path) = if record {
+        match pool.record_decls.get(id as usize).flatten() {
+            Some(info) => (Some(info.decl), info.unit_name, info.path),
+            None => (None, "", ""),
+        }
+    } else {
+        match pool.sum_decls.get(id as usize).flatten() {
+            Some(info) => (Some(info.decl), info.unit_name, info.path),
+            None => (None, "", ""),
+        }
+    };
+    match decl {
+        Some(decl) => diag(
+            path,
+            unit_name,
+            decl.line,
+            decl.column,
+            format_args!(
+                "type `{unit_name}.{}` contains itself by value; a record or sum cannot contain itself, directly or through another type",
+                decl.name
+            ),
+        ),
+        None => diag(
+            path,
+            unit_name,
+            1,
+            1,
+            format_args!("a record or sum contains itself by value"),
+        ),
+    }
+}
+
+/// Makes sure every nominal type a written type refers to has its layout, so
+/// the read-only [`resolve_type`] can read final sizes. Nominal types in
+/// `array`/`ring`/`map` element, key and value positions count (ADR 0039, C2).
+fn ensure_type_deps<'a, 'b>(
+    pool: &mut TypePool<'a, 'b>,
+    arrays: &mut SliceVec<'a, 'b, ArrayDef>,
+    rings: &mut SliceVec<'a, 'b, RingDef>,
+    maps: &mut SliceVec<'a, 'b, MapDef>,
+    bump: &'b Bump<'a>,
+    scope: TypeScope<'a>,
+    ty: &TypeRef<'a>,
+) -> Result<(), Diagnostic> {
+    if let Some(elem) = ty.elem {
+        ensure_type_deps(pool, arrays, rings, maps, bump, scope, elem)?;
+    }
+    if let Some(value) = ty.value {
+        ensure_type_deps(pool, arrays, rings, maps, bump, scope, value)?;
+    }
+    let named = {
+        let enums = pool.enums.as_slice();
+        let records = pool.records.as_slice();
+        let sums = pool.sums.as_slice();
+        scope.named(ty.owner, ty.name, enums, records, sums)
+    };
+    match named {
+        Some(Named::Record(id)) => ensure_record(pool, arrays, rings, maps, bump, id),
+        Some(Named::Sum(id)) => ensure_sum(pool, arrays, rings, maps, bump, id),
+        _ => Ok(()),
+    }
+}
+
+/// Lays out one record: resolves every field type, assigns declaration-order
+/// offsets (each field aligned to 8) and stores the final size. The layout is
+/// computed once in the package-wide table, so `Type::cap` is the same size in
+/// every unit.
+fn ensure_record<'a, 'b>(
+    pool: &mut TypePool<'a, 'b>,
+    arrays: &mut SliceVec<'a, 'b, ArrayDef>,
+    rings: &mut SliceVec<'a, 'b, RingDef>,
+    maps: &mut SliceVec<'a, 'b, MapDef>,
+    bump: &'b Bump<'a>,
+    id: u16,
+) -> Result<(), Diagnostic> {
+    let Some(def) = pool.records.get(id as usize) else {
+        return Err(diag("", "", 1, 1, format_args!("unknown record type")));
+    };
+    match def.layout {
+        Layout::Done => return Ok(()),
+        Layout::Visiting => return Err(cycle_diag(pool, id, true)),
+        Layout::Pending => {}
+    }
+    pool.records.as_mut_slice()[id as usize].layout = Layout::Visiting;
+    let Some(info) = pool.record_decls.get(id as usize).flatten() else {
+        return Err(diag(
+            "",
+            "",
+            1,
+            1,
+            format_args!("record `{}` has no declaration", def.name),
+        ));
+    };
+    let TypeKind::Record(fields) = info.decl.kind else {
+        return Err(diag(
+            info.path,
+            info.unit_name,
+            info.decl.line,
+            info.decl.column,
+            format_args!("`{}` is not a record declaration", info.decl.name),
+        ));
+    };
+    let mut laid_out = SliceVec::<RecordField<'a>>::new(bump)
+        .map_err(|_| arena_full(info.path, info.unit_name, info.decl.line, info.decl.column))?;
+    let mut size = 0u32;
+    for field in fields {
+        ensure_type_deps(pool, arrays, rings, maps, bump, info.scope, &field.ty)?;
+        let ty = resolve_type(
+            &field.ty,
+            info.consts,
+            pool.enums.as_slice(),
+            pool.records.as_slice(),
+            pool.sums.as_slice(),
+            arrays,
+            rings,
+            maps,
+            info.scope,
+            info.path,
+            info.unit_name,
+        )?;
+        if ty.is_buffer() && ty.cap == 0 {
             return Err(diag(
-                path,
-                name,
-                decl.line,
-                decl.column,
-                format_args!("duplicate declaration of `{}`", decl.name),
+                info.path,
+                info.unit_name,
+                field.line,
+                field.column,
+                format_args!(
+                    "buffer field `{}` needs a capacity of at least 1",
+                    field.name
+                ),
             ));
         }
+        if ty.is_record() && ty.cap == 0 {
+            return Err(diag(
+                info.path,
+                info.unit_name,
+                field.line,
+                field.column,
+                format_args!("record field `{}` is empty", field.name),
+            ));
+        }
+        let off = align8(size);
+        size = off.checked_add(ty.size()).ok_or_else(|| {
+            diag(
+                info.path,
+                info.unit_name,
+                field.line,
+                field.column,
+                format_args!("record `{}` is too large", info.decl.name),
+            )
+        })?;
+        laid_out
+            .push(RecordField {
+                name: field.name,
+                ty,
+                off,
+            })
+            .map_err(|_| arena_full(info.path, info.unit_name, field.line, field.column))?;
     }
+    let size = align8(size);
+    if size > MAX_CAPACITY {
+        return Err(diag(
+            info.path,
+            info.unit_name,
+            info.decl.line,
+            info.decl.column,
+            format_args!(
+                "record `{}` exceeds the {MAX_CAPACITY}-byte cap",
+                info.decl.name
+            ),
+        ));
+    }
+    let slot = &mut pool.records.as_mut_slice()[id as usize];
+    slot.fields = laid_out.into_slice();
+    slot.size = size;
+    slot.layout = Layout::Done;
+    Ok(())
+}
+
+/// Lays out one sum type: an 8-byte tag at offset 0 plus the largest variant
+/// payload, rounded to 8 (spec 0003, "Sum types").
+fn ensure_sum<'a, 'b>(
+    pool: &mut TypePool<'a, 'b>,
+    arrays: &mut SliceVec<'a, 'b, ArrayDef>,
+    rings: &mut SliceVec<'a, 'b, RingDef>,
+    maps: &mut SliceVec<'a, 'b, MapDef>,
+    bump: &'b Bump<'a>,
+    id: u16,
+) -> Result<(), Diagnostic> {
+    let Some(def) = pool.sums.get(id as usize) else {
+        return Err(diag("", "", 1, 1, format_args!("unknown sum type")));
+    };
+    match def.layout {
+        Layout::Done => return Ok(()),
+        Layout::Visiting => return Err(cycle_diag(pool, id, false)),
+        Layout::Pending => {}
+    }
+    pool.sums.as_mut_slice()[id as usize].layout = Layout::Visiting;
+    let Some(info) = pool.sum_decls.get(id as usize).flatten() else {
+        return Err(diag(
+            "",
+            "",
+            1,
+            1,
+            format_args!("sum type `{}` has no declaration", def.name),
+        ));
+    };
+    let TypeKind::Sum(variants) = info.decl.kind else {
+        return Err(diag(
+            info.path,
+            info.unit_name,
+            info.decl.line,
+            info.decl.column,
+            format_args!("`{}` is not a sum declaration", info.decl.name),
+        ));
+    };
+    let mut laid_out = SliceVec::<SumVariantDef<'a>>::new(bump)
+        .map_err(|_| arena_full(info.path, info.unit_name, info.decl.line, info.decl.column))?;
+    let mut largest = 0u32;
+    for variant in variants {
+        let payload = match &variant.payload {
+            Some((field, ty)) => {
+                ensure_type_deps(pool, arrays, rings, maps, bump, info.scope, ty)?;
+                let ty = resolve_type(
+                    ty,
+                    info.consts,
+                    pool.enums.as_slice(),
+                    pool.records.as_slice(),
+                    pool.sums.as_slice(),
+                    arrays,
+                    rings,
+                    maps,
+                    info.scope,
+                    info.path,
+                    info.unit_name,
+                )?;
+                if ty.is_buffer() && ty.cap == 0 {
+                    return Err(diag(
+                        info.path,
+                        info.unit_name,
+                        variant.line,
+                        variant.column,
+                        format_args!("payload `{field}` needs a capacity of at least 1"),
+                    ));
+                }
+                largest = largest.max(ty.size());
+                Some(ty)
+            }
+            None => None,
+        };
+        laid_out
+            .push(SumVariantDef {
+                name: variant.name,
+                payload,
+            })
+            .map_err(|_| arena_full(info.path, info.unit_name, variant.line, variant.column))?;
+    }
+    let size = 8u32.checked_add(largest).ok_or_else(|| {
+        diag(
+            info.path,
+            info.unit_name,
+            info.decl.line,
+            info.decl.column,
+            format_args!("sum type `{}` is too large", info.decl.name),
+        )
+    })?;
+    if size > MAX_CAPACITY {
+        return Err(diag(
+            info.path,
+            info.unit_name,
+            info.decl.line,
+            info.decl.column,
+            format_args!(
+                "sum type `{}` exceeds the {MAX_CAPACITY}-byte cap",
+                info.decl.name
+            ),
+        ));
+    }
+    let slot = &mut pool.sums.as_mut_slice()[id as usize];
+    slot.variants = laid_out.into_slice();
+    slot.size = align8(size);
+    slot.layout = Layout::Done;
+    Ok(())
+}
+
+/// Lays out every record and sum one unit declares, in declaration order.
+/// A referenced type from another unit is laid out on demand, so unit order
+/// never constrains a type reference.
+fn layout_unit_types<'a, 'b>(
+    pool: &mut TypePool<'a, 'b>,
+    unit: &Unit<'a>,
+    scope: TypeScope<'a>,
+    arrays: &mut SliceVec<'a, 'b, ArrayDef>,
+    rings: &mut SliceVec<'a, 'b, RingDef>,
+    maps: &mut SliceVec<'a, 'b, MapDef>,
+    bump: &'b Bump<'a>,
+) -> Result<(), Diagnostic> {
+    for decl in unit.types {
+        let id = match decl.kind {
+            TypeKind::Enum(_) => continue,
+            TypeKind::Record(_) => {
+                NamedLookup::Owned(scope.unit).record_id(pool.records.as_slice(), decl.name)
+            }
+            TypeKind::Sum(_) => {
+                NamedLookup::Owned(scope.unit).sum_id(pool.sums.as_slice(), decl.name)
+            }
+        };
+        let Some(id) = id else { continue };
+        match decl.kind {
+            TypeKind::Record(_) => ensure_record(pool, arrays, rings, maps, bump, id)?,
+            TypeKind::Sum(_) => ensure_sum(pool, arrays, rings, maps, bump, id)?,
+            TypeKind::Enum(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// Builds one unit's state region and signatures, resolving every type against
+/// the package-wide tables and the unit's own name space.
+/// Builds one unit's state region and signatures, resolving every type against
+/// the package-wide tables and the unit's own name space.
+#[allow(clippy::too_many_arguments)]
+fn build_unit_tables<'a, 'b>(
+    unit: &Unit<'a>,
+    path: &'a str,
+    scope: TypeScope<'a>,
+    consts: &'a [Const<'a>],
+    enums: &'a [EnumDef<'a>],
+    records: &'a [RecordDef<'a>],
+    sums: &'a [SumDef<'a>],
+    allow_streams: bool,
+    arrays: &mut SliceVec<'a, 'b, ArrayDef>,
+    rings: &mut SliceVec<'a, 'b, RingDef>,
+    maps: &mut SliceVec<'a, 'b, MapDef>,
+    bump: &'b Bump<'a>,
+) -> Result<UnitTables<'a>, Diagnostic> {
+    let name = unit.name;
+    let unit_id = scope.unit;
 
     let mut state_vars =
         SliceVec::<StateVar<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
@@ -1376,13 +1846,13 @@ fn build_tables<'a>(
         .ok_or_else(|| diag(path, name, 1, 1, format_args!("state region is too large")))?;
     let mut state_size = state_prefix;
     for decl in unit.vars {
-        if find_const(consts.as_slice(), decl.name).is_some()
+        if find_const(consts, decl.name).is_some()
             || find_state(state_vars.as_slice(), decl.name).is_some()
-            || find_enum(enums.as_slice(), decl.name).is_some()
-            || find_record(records.as_slice(), decl.name).is_some()
-            || find_sum(sums.as_slice(), decl.name).is_some()
-            || has_variant(enums.as_slice(), decl.name)
-            || has_sum_variant(sums.as_slice(), decl.name)
+            || find_enum(enums, unit_id, decl.name).is_some()
+            || find_record(records, unit_id, decl.name).is_some()
+            || find_sum(sums, unit_id, decl.name).is_some()
+            || has_variant(enums, unit_id, decl.name)
+            || has_sum_variant(sums, unit_id, decl.name)
         {
             return Err(diag(
                 path,
@@ -1394,14 +1864,15 @@ fn build_tables<'a>(
         }
         let ty = resolve_type_with(
             &decl.ty,
-            consts.as_slice(),
-            enums.as_slice(),
-            records.as_slice(),
-            sums.as_slice(),
+            consts,
+            enums,
+            records,
+            sums,
             arrays,
             rings,
             maps,
             allow_streams,
+            scope,
             path,
             name,
         )?;
@@ -1490,14 +1961,14 @@ fn build_tables<'a>(
 
     let mut sigs = SliceVec::<Sig<'a>>::new(bump).map_err(|_| arena_full(path, name, 1, 1))?;
     for proc in unit.procs {
-        if find_const(consts.as_slice(), proc.name).is_some()
+        if find_const(consts, proc.name).is_some()
             || find_state(state_vars.as_slice(), proc.name).is_some()
             || find_sig(sigs.as_slice(), proc.name).is_some()
-            || find_enum(enums.as_slice(), proc.name).is_some()
-            || find_record(records.as_slice(), proc.name).is_some()
-            || find_sum(sums.as_slice(), proc.name).is_some()
-            || has_variant(enums.as_slice(), proc.name)
-            || has_sum_variant(sums.as_slice(), proc.name)
+            || find_enum(enums, unit_id, proc.name).is_some()
+            || find_record(records, unit_id, proc.name).is_some()
+            || find_sum(sums, unit_id, proc.name).is_some()
+            || has_variant(enums, unit_id, proc.name)
+            || has_sum_variant(sums, unit_id, proc.name)
         {
             return Err(diag(
                 path,
@@ -1529,16 +2000,7 @@ fn build_tables<'a>(
                 ));
             }
             let ty = resolve_type_with(
-                &param.ty,
-                consts.as_slice(),
-                enums.as_slice(),
-                records.as_slice(),
-                sums.as_slice(),
-                arrays,
-                rings,
-                maps,
-                true,
-                path,
+                &param.ty, consts, enums, records, sums, arrays, rings, maps, true, scope, path,
                 name,
             )?;
             if ty.is_stream() && param.mode != ParamMode::Const {
@@ -1591,16 +2053,7 @@ fn build_tables<'a>(
         let ret = match &proc.ret {
             Some(ty) => {
                 let resolved = resolve_type(
-                    ty,
-                    consts.as_slice(),
-                    enums.as_slice(),
-                    records.as_slice(),
-                    sums.as_slice(),
-                    arrays,
-                    rings,
-                    maps,
-                    path,
-                    name,
+                    ty, consts, enums, records, sums, arrays, rings, maps, scope, path, name,
                 )?;
                 if !resolved.is_scalar() {
                     return Err(diag(
@@ -1630,10 +2083,11 @@ fn build_tables<'a>(
 
     Ok(UnitTables {
         name,
-        consts: consts.into_slice(),
-        enums: enums.into_slice(),
-        records: records.into_slice(),
-        sums: sums.into_slice(),
+        scope,
+        consts,
+        enums,
+        records,
+        sums,
         state_vars: state_vars.into_slice(),
         state_size,
         endpoints: endpoints.into_slice(),
@@ -1671,6 +2125,7 @@ fn compile_procs<'a, 'b>(
             tables.sigs,
             tables.consts,
             state_vars,
+            tables.scope,
             tables.enums,
             tables.records,
             tables.sums,
@@ -1897,54 +2352,194 @@ fn assemble_units<'a>(
         .map_err(|_| arena_full(application_path, application.name, 1, 1))?;
     let mut maps = SliceVec::<MapDef>::new(bump)
         .map_err(|_| arena_full(application_path, application.name, 1, 1))?;
-    let app = build_tables(
-        application,
-        application_path,
-        is_application,
-        bump,
-        &mut arrays,
-        &mut rings,
-        &mut maps,
-    )?;
     let (library_path, library_unit) = match library {
         Some((path, unit)) => (path, Some(unit)),
         None => (application_path, None),
     };
+    if let Some(unit) = library_unit {
+        check_uses(unit, library_path, UnitRole::Library)?;
+    }
+    // A module may not declare state or a stream endpoint (spec 0018, M6); its
+    // tables carry an empty state region. The diagnostic names the module's
+    // line.
+    for module in modules {
+        check_uses(module.unit, module.path, UnitRole::Module)?;
+    }
+
+    // Unit ids and names for type qualification (ADR 0039, C2): the embedded
+    // `stdlib` is unit 1 and the `/lib` modules are `2..` in discovery order.
+    // The application is unit 0 but is never a qualifier, so a module can
+    // never name `app.Something`.
+    let mut units = SliceVec::<UnitName<'a>>::new(bump)
+        .map_err(|_| arena_full(application_path, application.name, 1, 1))?;
+    if library_unit.is_some() {
+        units
+            .push(UnitName {
+                name: "stdlib",
+                id: 1,
+            })
+            .map_err(|_| arena_full(application_path, application.name, 1, 1))?;
+    }
+    for (index, module) in modules.iter().enumerate() {
+        let id = u16::try_from(2 + index).map_err(|_| {
+            diag(
+                module.path,
+                module.unit.name,
+                1,
+                1,
+                format_args!("too many modules"),
+            )
+        })?;
+        units
+            .push(UnitName {
+                name: module.unit.name,
+                id,
+            })
+            .map_err(|_| arena_full(module.path, module.unit.name, 1, 1))?;
+    }
+    let units: &'a [UnitName<'a>] = units.into_slice();
+    let unit_scope = |unit: u16| TypeScope {
+        unit,
+        units,
+        application: application.name,
+    };
+
+    // Constants are independent of the type tables, so every unit's are built
+    // first: a capacity may size a field, and a type name may not collide with
+    // a constant.
+    let app_consts = build_consts(application, application_path, bump)?;
+    let library_consts = match library_unit {
+        Some(unit) => Some(build_consts(unit, library_path, bump)?),
+        None => None,
+    };
+    let mut module_consts = SliceVec::<&'a [Const<'a>]>::new(bump)
+        .map_err(|_| arena_full(application_path, application.name, 1, 1))?;
+    for module in modules {
+        module_consts
+            .push(build_consts(module.unit, module.path, bump)?)
+            .map_err(|_| arena_full(module.path, module.unit.name, 1, 1))?;
+    }
+    let module_consts = module_consts.into_slice();
+
+    // Package-wide type declarations in `stdlib` → module discovery →
+    // application order, declaration order inside each unit, after the fixed
+    // predeclared prefix (spec 0008, "Types"; ADR 0039, C2).
+    let mut pool = TypePool::new(application_path, application.name, bump)?;
+    if let Some(unit) = library_unit {
+        declare_types(
+            &mut pool,
+            unit,
+            library_path,
+            unit_scope(1),
+            library_consts.expect("library tables imply constants"),
+        )?;
+    }
+    for (index, module) in modules.iter().enumerate() {
+        declare_types(
+            &mut pool,
+            module.unit,
+            module.path,
+            unit_scope(2 + index as u16),
+            module_consts[index],
+        )?;
+    }
+    declare_types(
+        &mut pool,
+        application,
+        application_path,
+        unit_scope(0),
+        app_consts,
+    )?;
+
+    // Layout follows once every name exists, so a unit may reference a type
+    // declared later in the same unit or a type from any `/lib` unit.
+    if let Some(unit) = library_unit {
+        layout_unit_types(
+            &mut pool,
+            unit,
+            unit_scope(1),
+            &mut arrays,
+            &mut rings,
+            &mut maps,
+            bump,
+        )?;
+    }
+    for (index, module) in modules.iter().enumerate() {
+        layout_unit_types(
+            &mut pool,
+            module.unit,
+            unit_scope(2 + index as u16),
+            &mut arrays,
+            &mut rings,
+            &mut maps,
+            bump,
+        )?;
+    }
+    layout_unit_types(
+        &mut pool,
+        application,
+        unit_scope(0),
+        &mut arrays,
+        &mut rings,
+        &mut maps,
+        bump,
+    )?;
+    let enums: &'a [EnumDef<'a>] = pool.enums.into_slice();
+    let records: &'a [RecordDef<'a>] = pool.records.into_slice();
+    let sums: &'a [SumDef<'a>] = pool.sums.into_slice();
+
     // A library unit may not declare a stream endpoint: the endpoint name is
     // application-wide and the handle belongs in the application's state
     // prefix. `const in_stream`/`out_stream` parameters are allowed for
     // framing helpers.
+    let app = build_unit_tables(
+        application,
+        application_path,
+        unit_scope(0),
+        app_consts,
+        enums,
+        records,
+        sums,
+        is_application,
+        &mut arrays,
+        &mut rings,
+        &mut maps,
+        bump,
+    )?;
     let lib = match library_unit {
-        Some(unit) => {
-            check_uses(unit, library_path, UnitRole::Library)?;
-            Some(build_tables(
-                unit,
-                library_path,
-                false,
-                bump,
-                &mut arrays,
-                &mut rings,
-                &mut maps,
-            )?)
-        }
+        Some(unit) => Some(build_unit_tables(
+            unit,
+            library_path,
+            unit_scope(1),
+            library_consts.expect("library tables imply constants"),
+            enums,
+            records,
+            sums,
+            false,
+            &mut arrays,
+            &mut rings,
+            &mut maps,
+            bump,
+        )?),
         None => None,
     };
-    // A module may not declare state or a stream endpoint either (spec 0018,
-    // M6), so its tables carry an empty state region; the check lives in
-    // `compile_with_imports` so the diagnostic names the module's line.
     let mut module_tables = SliceVec::<UnitTables<'a>>::new(bump)
         .map_err(|_| arena_full(application_path, application.name, 1, 1))?;
-    for module in modules {
-        check_uses(module.unit, module.path, UnitRole::Module)?;
+    for (index, module) in modules.iter().enumerate() {
         module_tables
-            .push(build_tables(
+            .push(build_unit_tables(
                 module.unit,
                 module.path,
+                unit_scope(2 + index as u16),
+                module_consts[index],
+                enums,
+                records,
+                sums,
                 false,
-                bump,
                 &mut arrays,
                 &mut rings,
                 &mut maps,
+                bump,
             )?)
             .map_err(|_| arena_full(module.path, module.unit.name, 1, 1))?;
     }
@@ -2212,6 +2807,103 @@ fn assemble_units<'a>(
     )
 }
 
+/// Renders a written type name for a diagnostic, including its unit qualifier
+/// (`math.Point`).
+struct WrittenType<'a>(&'a TypeRef<'a>);
+
+impl fmt::Display for WrittenType<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0.owner {
+            Some(owner) => write!(f, "{owner}.{}", self.0.name),
+            None => f.write_str(self.0.name),
+        }
+    }
+}
+
+/// Resolves a written type name to a nominal type id: unqualified in the
+/// compiling unit, or `<unit>.<Type>` for a `/lib` unit in the package (spec
+/// 0003, "Cross-unit types"). `Ok(None)` means the name is not a nominal type,
+/// so the caller tries the scalar and buffer names.
+fn resolve_named<'a>(
+    ty: &TypeRef<'a>,
+    scope: TypeScope<'a>,
+    enums: &[EnumDef<'a>],
+    records: &[RecordDef<'a>],
+    sums: &[SumDef<'a>],
+    path: &'a str,
+    unit: &'a str,
+) -> Result<Option<Named>, Diagnostic> {
+    let Some(qualifier) = ty.owner else {
+        return Ok(NamedLookup::Visible(scope.unit)
+            .enum_id(enums, ty.name)
+            .map(Named::Enum)
+            .or_else(|| {
+                NamedLookup::Visible(scope.unit)
+                    .record_id(records, ty.name)
+                    .map(Named::Record)
+            })
+            .or_else(|| {
+                NamedLookup::Visible(scope.unit)
+                    .sum_id(sums, ty.name)
+                    .map(Named::Sum)
+            }));
+    };
+    if is_reserved_type_word(ty.name) {
+        return Err(diag(
+            path,
+            unit,
+            ty.line,
+            ty.column,
+            format_args!(
+                "`{}` is a built-in type and cannot be qualified by a unit",
+                ty.name
+            ),
+        ));
+    }
+    let owner = match scope.qualifier(qualifier) {
+        Qualifier::Unit(owner) => owner,
+        Qualifier::Application => {
+            return Err(diag(
+                path,
+                unit,
+                ty.line,
+                ty.column,
+                format_args!(
+                    "`{qualifier}` is the application, whose types are application-local; only a `/lib` module's type can be named from another unit"
+                ),
+            ))
+        }
+        Qualifier::Unknown => {
+            return Err(diag(
+                path,
+                unit,
+                ty.line,
+                ty.column,
+                format_args!(
+                    "unknown unit `{qualifier}`; only `/lib` modules and `stdlib` can qualify a type name"
+                ),
+            ))
+        }
+    };
+    let lookup = NamedLookup::Owned(owner);
+    if let Some(id) = lookup.enum_id(enums, ty.name) {
+        return Ok(Some(Named::Enum(id)));
+    }
+    if let Some(id) = lookup.record_id(records, ty.name) {
+        return Ok(Some(Named::Record(id)));
+    }
+    if let Some(id) = lookup.sum_id(sums, ty.name) {
+        return Ok(Some(Named::Sum(id)));
+    }
+    Err(diag(
+        path,
+        unit,
+        ty.line,
+        ty.column,
+        format_args!("`{qualifier}` has no type `{}`", ty.name),
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve_type<'a>(
     ty: &TypeRef<'a>,
@@ -2222,11 +2914,12 @@ fn resolve_type<'a>(
     arrays: &mut SliceVec<'a, '_, ArrayDef>,
     rings: &mut SliceVec<'a, '_, RingDef>,
     maps: &mut SliceVec<'a, '_, MapDef>,
+    scope: TypeScope<'a>,
     path: &'a str,
     unit: &'a str,
 ) -> Result<Type, Diagnostic> {
     resolve_type_with(
-        ty, consts, enums, records, sums, arrays, rings, maps, false, path, unit,
+        ty, consts, enums, records, sums, arrays, rings, maps, false, scope, path, unit,
     )
 }
 
@@ -2244,9 +2937,22 @@ fn resolve_type_with<'a>(
     rings: &mut SliceVec<'a, '_, RingDef>,
     maps: &mut SliceVec<'a, '_, MapDef>,
     allow_stream: bool,
+    scope: TypeScope<'a>,
     path: &'a str,
     unit: &'a str,
 ) -> Result<Type, Diagnostic> {
+    if ty.owner.is_some() && is_reserved_type_word(ty.name) {
+        return Err(diag(
+            path,
+            unit,
+            ty.line,
+            ty.column,
+            format_args!(
+                "`{}` is a built-in type and cannot be qualified by a unit",
+                ty.name
+            ),
+        ));
+    }
     if ty.name == "in_stream" || ty.name == "out_stream" {
         if !allow_stream {
             return Err(diag(
@@ -2315,7 +3021,7 @@ fn resolve_type_with<'a>(
             ));
         };
         let key = resolve_type(
-            key_ref, consts, enums, records, sums, arrays, rings, maps, path, unit,
+            key_ref, consts, enums, records, sums, arrays, rings, maps, scope, path, unit,
         )?;
         if !matches!(key.kind, Kind::Int | Kind::String | Kind::Bytes) {
             return Err(diag(
@@ -2336,7 +3042,7 @@ fn resolve_type_with<'a>(
             ));
         }
         let value = resolve_type(
-            value_ref, consts, enums, records, sums, arrays, rings, maps, path, unit,
+            value_ref, consts, enums, records, sums, arrays, rings, maps, scope, path, unit,
         )?;
         if value.is_buffer() && value.cap == 0 {
             return Err(diag(
@@ -2403,7 +3109,7 @@ fn resolve_type_with<'a>(
             ));
         };
         let elem = resolve_type(
-            elem_ref, consts, enums, records, sums, arrays, rings, maps, path, unit,
+            elem_ref, consts, enums, records, sums, arrays, rings, maps, scope, path, unit,
         )?;
         if elem.is_buffer() && elem.cap == 0 {
             return Err(diag(
@@ -2456,43 +3162,27 @@ fn resolve_type_with<'a>(
             format_args!("`{}` is not a parametric type", ty.name),
         ));
     }
-    if let Some(id) = find_enum(enums, ty.name) {
+    if let Some(named) = resolve_named(ty, scope, enums, records, sums, path, unit)? {
+        let written = WrittenType(ty);
+        let word = match named {
+            Named::Enum(_) => "enum",
+            Named::Record(_) => "record",
+            Named::Sum(_) => "sum",
+        };
         if ty.cap.is_some() {
             return Err(diag(
                 path,
                 unit,
                 ty.line,
                 ty.column,
-                format_args!("enum type `{}` does not take a capacity", ty.name),
+                format_args!("{word} type `{written}` does not take a capacity"),
             ));
         }
-        return Ok(Type::enumeration(id));
-    }
-    if let Some(id) = find_record(records, ty.name) {
-        if ty.cap.is_some() {
-            return Err(diag(
-                path,
-                unit,
-                ty.line,
-                ty.column,
-                format_args!("record type `{}` does not take a capacity", ty.name),
-            ));
-        }
-        let size = records[id as usize].size;
-        return Ok(Type::record(id, size));
-    }
-    if let Some(id) = find_sum(sums, ty.name) {
-        if ty.cap.is_some() {
-            return Err(diag(
-                path,
-                unit,
-                ty.line,
-                ty.column,
-                format_args!("sum type `{}` does not take a capacity", ty.name),
-            ));
-        }
-        let size = sums[id as usize].size;
-        return Ok(Type::sum(id, size));
+        return Ok(match named {
+            Named::Enum(id) => Type::enumeration(id),
+            Named::Record(id) => Type::record(id, records[id as usize].size),
+            Named::Sum(id) => Type::sum(id, sums[id as usize].size),
+        });
     }
     let kind = match ty.name {
         "int" => Kind::Int,
@@ -2697,6 +3387,9 @@ struct FnCompiler<'a, 'b, 'p> {
     sigs: &'b [Sig<'a>],
     consts: &'b [Const<'a>],
     state_vars: &'b [StateVar<'a>],
+    /// This unit's type namespace (its own types, the predeclared types and
+    /// `<unit>.<Type>` for the package's `/lib` units).
+    scope: TypeScope<'a>,
     enums: &'b [EnumDef<'a>],
     records: &'b [RecordDef<'a>],
     sums: &'b [SumDef<'a>],
@@ -2736,6 +3429,9 @@ struct FnCompiler<'a, 'b, 'p> {
 /// only the enum id, so codegen resolves the name through this table.
 struct TypeName<'a, 'b, 'c> {
     ty: Type,
+    /// The compiling unit's namespace, so a type from another unit is shown
+    /// with its qualifier (`math.Point`) while a local one stays bare.
+    scope: TypeScope<'a>,
     enums: &'b [EnumDef<'a>],
     records: &'b [RecordDef<'a>],
     sums: &'b [SumDef<'a>],
@@ -2744,19 +3440,33 @@ struct TypeName<'a, 'b, 'c> {
     maps: &'c [MapDef],
 }
 
+impl TypeName<'_, '_, '_> {
+    /// Writes a nominal type's name, qualified when it belongs to another
+    /// unit (spec 0003, "Cross-unit types").
+    fn write_named(&self, f: &mut fmt::Formatter<'_>, owner: u16, name: &str) -> fmt::Result {
+        if owner == PREDECLARED_UNIT || owner == self.scope.unit {
+            return f.write_str(name);
+        }
+        match self.scope.units.iter().find(|unit| unit.id == owner) {
+            Some(unit) => write!(f, "{}.{}", unit.name, name),
+            None => f.write_str(name),
+        }
+    }
+}
+
 impl fmt::Display for TypeName<'_, '_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.ty.kind {
             Kind::Enum(id) => match self.enums.get(id as usize) {
-                Some(enumeration) => f.write_str(enumeration.name),
+                Some(enumeration) => self.write_named(f, enumeration.owner, enumeration.name),
                 None => f.write_str("enum"),
             },
             Kind::Record(id) => match self.records.get(id as usize) {
-                Some(record) => f.write_str(record.name),
+                Some(record) => self.write_named(f, record.owner, record.name),
                 None => f.write_str("record"),
             },
             Kind::Sum(id) => match self.sums.get(id as usize) {
-                Some(sum) => f.write_str(sum.name),
+                Some(sum) => self.write_named(f, sum.owner, sum.name),
                 None => f.write_str("sum"),
             },
             Kind::Array(id) => match self.arrays.get(id as usize) {
@@ -2765,6 +3475,7 @@ impl fmt::Display for TypeName<'_, '_, '_> {
                     "array[{}, {}]",
                     TypeName {
                         ty: array.elem,
+                        scope: self.scope,
                         enums: self.enums,
                         records: self.records,
                         sums: self.sums,
@@ -2782,6 +3493,7 @@ impl fmt::Display for TypeName<'_, '_, '_> {
                     "ring[{}, {}]",
                     TypeName {
                         ty: ring.elem,
+                        scope: self.scope,
                         enums: self.enums,
                         records: self.records,
                         sums: self.sums,
@@ -2799,6 +3511,7 @@ impl fmt::Display for TypeName<'_, '_, '_> {
                     "map[{}, {}, {}]",
                     TypeName {
                         ty: map.key,
+                        scope: self.scope,
                         enums: self.enums,
                         records: self.records,
                         sums: self.sums,
@@ -2808,6 +3521,7 @@ impl fmt::Display for TypeName<'_, '_, '_> {
                     },
                     TypeName {
                         ty: map.value,
+                        scope: self.scope,
                         enums: self.enums,
                         records: self.records,
                         sums: self.sums,
@@ -2849,6 +3563,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
     fn type_name(&self, ty: Type) -> TypeName<'a, '_, '_> {
         TypeName {
             ty,
+            scope: self.scope,
             enums: self.enums,
             records: self.records,
             sums: self.sums,
@@ -2865,6 +3580,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         sigs: &'b [Sig<'a>],
         consts: &'b [Const<'a>],
         state_vars: &'b [StateVar<'a>],
+        scope: TypeScope<'a>,
         enums: &'b [EnumDef<'a>],
         records: &'b [RecordDef<'a>],
         sums: &'b [SumDef<'a>],
@@ -2891,6 +3607,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             sigs,
             consts,
             state_vars,
+            scope,
             enums,
             records,
             sums,
@@ -3046,6 +3763,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 &mut *self.arrays,
                 &mut *self.rings,
                 &mut *self.maps,
+                self.scope,
                 self.path,
                 self.unit,
             )?;
@@ -3938,28 +4656,28 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 format_args!("cannot assign to constant `{name}`"),
             ));
         }
-        if find_enum(self.enums, name).is_some() {
+        if find_enum(self.enums, self.scope.unit, name).is_some() {
             return Err(self.err(
                 line,
                 column,
                 format_args!("cannot assign to enum type `{name}`"),
             ));
         }
-        if find_record(self.records, name).is_some() {
+        if find_record(self.records, self.scope.unit, name).is_some() {
             return Err(self.err(
                 line,
                 column,
                 format_args!("cannot assign to record type `{name}`"),
             ));
         }
-        if find_sum(self.sums, name).is_some() {
+        if find_sum(self.sums, self.scope.unit, name).is_some() {
             return Err(self.err(
                 line,
                 column,
                 format_args!("cannot assign to sum type `{name}`"),
             ));
         }
-        if let Some((_, ordinal)) = find_variant(self.enums, name) {
+        if let Some((_, ordinal)) = find_variant(self.enums, self.scope.unit, name) {
             return Err(self.err(
                 line,
                 column,
@@ -3976,9 +4694,13 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         Err(self.err(line, column, format_args!("unknown identifier `{name}`")))
     }
 
-    /// Finds which sum type declares `name` as a variant.
+    /// Finds which sum type visible from this unit declares `name` as a
+    /// variant.
     fn sum_variant_owner(&self, name: &str) -> Option<(&'a str, SumVariantDef<'a>)> {
         for sum in self.sums {
+            if sum.owner != PREDECLARED_UNIT && sum.owner != self.scope.unit {
+                continue;
+            }
             if let Some(variant) = variant_of(sum, name) {
                 return Some((sum.name, variant));
             }
@@ -4028,16 +4750,16 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 column,
                 format_args!("`{base_name}` is a constant, not a value"),
             ));
-        } else if find_enum(self.enums, base_name).is_some()
-            || find_record(self.records, base_name).is_some()
-            || find_sum(self.sums, base_name).is_some()
+        } else if find_enum(self.enums, self.scope.unit, base_name).is_some()
+            || find_record(self.records, self.scope.unit, base_name).is_some()
+            || find_sum(self.sums, self.scope.unit, base_name).is_some()
         {
             return Err(self.err(
                 line,
                 column,
                 format_args!("`{base_name}` is a type, not a value"),
             ));
-        } else if find_variant(self.enums, base_name).is_some() {
+        } else if find_variant(self.enums, self.scope.unit, base_name).is_some() {
             return Err(self.err(
                 line,
                 column,
@@ -4294,7 +5016,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         what: &str,
     ) -> Result<Type, Diagnostic> {
         if let ExprKind::Cast(name, _) = expr.kind {
-            if find_record(self.records, name).is_some() {
+            if find_record(self.records, self.scope.unit, name).is_some() {
                 return Err(self.err_at(
                     expr,
                     format_args!(
@@ -4302,7 +5024,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     ),
                 ));
             }
-            if find_sum(self.sums, name).is_some() {
+            if find_sum(self.sums, self.scope.unit, name).is_some() {
                 return Err(self.err_at(
                     expr,
                     format_args!(
@@ -4765,7 +5487,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                     format_args!("procedure `{}` does not return a value", call.target),
                 )),
             },
-            ExprKind::Cast(name, inner) => self.cast(name, inner, expr),
+            ExprKind::Cast(name, inner) => self.cast(name, inner, expr.line, expr.column),
             ExprKind::Unary(op, inner) => self.unary(op, inner, expr),
             ExprKind::Binary(op, left, right) => self.binary(op, left, right, expr),
         }
@@ -4850,6 +5572,68 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         Ok(Some(Type::scalar(Kind::Bool)))
     }
 
+    /// Resolves `<unit>.<Type>.<Variant>` to an enum constant (spec 0003,
+    /// "Cross-unit types"). `Ok(None)` means `unit` is not a unit name, so the
+    /// designator is ordinary storage (`p.inner.x`).
+    fn qualified_constant(
+        &self,
+        unit_name: &str,
+        type_name: &str,
+        variant: &str,
+        expr: &'a Expr<'a>,
+    ) -> Result<Option<(u16, u32)>, Diagnostic> {
+        // Storage wins: a variable named like a unit is still a variable.
+        if self.slot(unit_name).is_some()
+            || find_state(self.state_vars, unit_name).is_some()
+            || find_const(self.consts, unit_name).is_some()
+            || find_variant(self.enums, self.scope.unit, unit_name).is_some()
+        {
+            return Ok(None);
+        }
+        let owner = match self.scope.qualifier(unit_name) {
+            Qualifier::Unit(owner) => owner,
+            Qualifier::Application => {
+                return Err(self.err_at(
+                    expr,
+                    format_args!(
+                        "`{unit_name}` is the application, whose types are application-local; only a `/lib` module's type can be named from another unit"
+                    ),
+                ))
+            }
+            Qualifier::Unknown => return Ok(None),
+        };
+        if NamedLookup::Owned(owner)
+            .enum_id(self.enums, type_name)
+            .is_none()
+        {
+            if NamedLookup::Owned(owner)
+                .record_id(self.records, type_name)
+                .is_some()
+                || NamedLookup::Owned(owner)
+                    .sum_id(self.sums, type_name)
+                    .is_some()
+            {
+                return Err(self.err_at(
+                    expr,
+                    format_args!(
+                        "`{unit_name}.{type_name}` is not an enum type; only an enum has named constants"
+                    ),
+                ));
+            }
+            return Err(self.err_at(
+                expr,
+                format_args!("`{unit_name}` has no type `{type_name}`"),
+            ));
+        }
+        match find_owned_variant(self.enums, owner, type_name, variant) {
+            Some((id, ordinal)) => Ok(Some((id, ordinal))),
+            None => Err(self.err_at(
+                expr,
+                format_args!("`{unit_name}.{type_name}` has no variant `{variant}`"),
+            )),
+        }
+    }
+
     /// Reads a designator as a scalar value.
     ///
     /// A bare name resolves to a constant, an enum variant, a local or a state
@@ -4868,10 +5652,24 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             return self.load_scalar(base, expr);
         }
         // A qualified enum variant, `TypeName.Variant`. `FaultCode` requires
-        // this form because its names overlap `Status`.
+        // this form because its names overlap `Status`. A module's enum
+        // constant is three parts, `<unit>.<Type>.<Variant>`; it is only a
+        // constant when `base` is a unit name rather than a variable, so a
+        // nested field access (`p.inner.x`) still resolves as storage.
         if path.len() == 1 {
             if let Access::Field(name) = path[0] {
-                if let Some((id, ordinal)) = find_qualified_variant(self.enums, base, name) {
+                if let Some((id, ordinal)) =
+                    find_qualified_variant(self.enums, self.scope.unit, base, name)
+                {
+                    self.const_i64(ordinal as i64)?;
+                    return Ok(Type::enumeration(id));
+                }
+            }
+        } else if path.len() == 2 {
+            if let (Access::Field(type_name), Access::Field(variant)) = (path[0], path[1]) {
+                if let Some((id, ordinal)) =
+                    self.qualified_constant(base, type_name, variant, expr)?
+                {
                     self.const_i64(ordinal as i64)?;
                     return Ok(Type::enumeration(id));
                 }
@@ -5098,7 +5896,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         }
         // A variant is a global constant of its enum type with its ordinal as
         // the value (spec 0003, "Enums").
-        if let Some((id, ordinal)) = find_variant(self.enums, name) {
+        if let Some((id, ordinal)) = find_variant(self.enums, self.scope.unit, name) {
             self.const_i64(ordinal as i64)?;
             return Ok(Type::enumeration(id));
         }
@@ -5110,16 +5908,84 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         Err(self.err_at(expr, suggestion))
     }
 
+    /// Resolves a written type name in this unit's namespace: unqualified for
+    /// its own and the predeclared types, or `<unit>.<Type>` for a `/lib` unit
+    /// (spec 0003, "Cross-unit types"). `Ok(None)` means the name is not a
+    /// nominal type.
+    fn written_type(
+        &self,
+        name: &str,
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Named>, Diagnostic> {
+        let (owner, type_name) = match name.split_once('.') {
+            Some((owner, rest)) => (Some(owner), rest),
+            None => (None, name),
+        };
+        let Some(qualifier) = owner else {
+            return Ok(NamedLookup::Visible(self.scope.unit)
+                .enum_id(self.enums, type_name)
+                .map(Named::Enum)
+                .or_else(|| {
+                    NamedLookup::Visible(self.scope.unit)
+                        .record_id(self.records, type_name)
+                        .map(Named::Record)
+                })
+                .or_else(|| {
+                    NamedLookup::Visible(self.scope.unit)
+                        .sum_id(self.sums, type_name)
+                        .map(Named::Sum)
+                }));
+        };
+        if is_reserved_type_word(type_name) {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`{type_name}` is a built-in type and cannot be qualified by a unit"),
+            ));
+        }
+        match self.scope.qualifier(qualifier) {
+            Qualifier::Unit(owner) => {
+                let lookup = NamedLookup::Owned(owner);
+                if let Some(id) = lookup.enum_id(self.enums, type_name) {
+                    return Ok(Some(Named::Enum(id)));
+                }
+                if let Some(id) = lookup.record_id(self.records, type_name) {
+                    return Ok(Some(Named::Record(id)));
+                }
+                if let Some(id) = lookup.sum_id(self.sums, type_name) {
+                    return Ok(Some(Named::Sum(id)));
+                }
+                Ok(None)
+            }
+            Qualifier::Application => Err(self.err(
+                line,
+                column,
+                format_args!(
+                    "`{qualifier}` is the application, whose types are application-local; only a `/lib` module's type can be named from another unit"
+                ),
+            )),
+            Qualifier::Unknown => Err(self.err(
+                line,
+                column,
+                format_args!(
+                    "unknown unit `{qualifier}`; only `/lib` modules and `stdlib` can qualify a type name"
+                ),
+            )),
+        }
+    }
+
     fn cast(
         &mut self,
         name: &'a str,
         inner: &'a Expr<'a>,
-        expr: &'a Expr<'a>,
+        line: u32,
+        column: u32,
     ) -> Result<Type, Diagnostic> {
         // An enum name is a checked construction from an `int` ordinal:
         // `Status(int_value)` fault(Overflow) outside `0..variant_count`
-        // (spec 0003, "Enums").
-        if let Some(id) = find_enum(self.enums, name) {
+        // (spec 0003, "Enums"). A module's enum is named `<unit>.<Type>`.
+        if let Some(Named::Enum(id)) = self.written_type(name, line, column)? {
             let source = self.expr_scalar(inner)?;
             let target = Type::enumeration(id);
             if source == target {
@@ -5127,8 +5993,9 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             }
             if source.kind != Kind::Int {
                 let found = self.type_name(source);
-                return Err(self.err_at(
-                    expr,
+                return Err(self.err(
+                    line,
+                    column,
                     format_args!(
                         "`{name}(x)` needs an `int` ordinal, found `{found}`; convert the value with `int(x)` first"
                     ),
@@ -5145,21 +6012,26 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         // A record or sum name in `Name(x)` position is not a constructor:
         // records are built by assigning fields and sums by writing a variant
         // (spec 0003).
-        if find_record(self.records, name).is_some() {
-            return Err(self.err_at(
-                expr,
-                format_args!(
-                    "`{name}(x)` is not a record constructor; declare a variable and assign its fields"
-                ),
-            ));
-        }
-        if find_sum(self.sums, name).is_some() {
-            return Err(self.err_at(
-                expr,
-                format_args!(
-                    "`{name}(x)` is not a sum constructor; write `Variant` or `Variant(payload)`"
-                ),
-            ));
+        match self.written_type(name, line, column)? {
+            Some(Named::Record(_)) => {
+                return Err(self.err(
+                    line,
+                    column,
+                    format_args!(
+                        "`{name}(x)` is not a record constructor; declare a variable and assign its fields"
+                    ),
+                ))
+            }
+            Some(Named::Sum(_)) => {
+                return Err(self.err(
+                    line,
+                    column,
+                    format_args!(
+                        "`{name}(x)` is not a sum constructor; write `Variant` or `Variant(payload)`"
+                    ),
+                ))
+            }
+            _ => {}
         }
         let target = match name {
             "int" => Kind::Int,
@@ -5170,8 +6042,9 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         };
         let source = self.expr_scalar(inner)?;
         if !source.is_scalar() {
-            return Err(self.err_at(
-                expr,
+            return Err(self.err(
+                line,
+                column,
                 format_args!("buffer conversions are not casts; they are `stdlib` functions"),
             ));
         }
@@ -5183,8 +6056,9 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 return Ok(Type::scalar(Kind::Int));
             }
             let found = self.type_name(source);
-            return Err(self.err_at(
-                expr,
+            return Err(self.err(
+                line,
+                column,
                 format_args!(
                     "cannot convert `{found}` to `{}`; convert it with `int(x)` first",
                     target.name()
@@ -5192,8 +6066,9 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             ));
         }
         if source.kind == Kind::Bool {
-            return Err(self.err_at(
-                expr,
+            return Err(self.err(
+                line,
+                column,
                 format_args!("cannot convert `bool` to `{}`", target.name()),
             ));
         }
@@ -5202,10 +6077,10 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         }
         let from = source
             .value_kind()
-            .ok_or_else(|| self.err_at(expr, format_args!("unsupported conversion")))?;
+            .ok_or_else(|| self.err(line, column, format_args!("unsupported conversion")))?;
         let to = Type::scalar(target)
             .value_kind()
-            .ok_or_else(|| self.err_at(expr, format_args!("unsupported conversion")))?;
+            .ok_or_else(|| self.err(line, column, format_args!("unsupported conversion")))?;
         self.word(opcodes::CONVERT, from, to, 0)?;
         Ok(Type::scalar(target))
     }
@@ -7115,10 +7990,56 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 Ok(Some(Type::enumeration(STATUS_ENUM)))
             }
             target => {
+                // A qualified enum cast, `math.Color(ordinal)` (spec 0003,
+                // "Cross-unit types"). The parser cannot tell a cast from a
+                // call for a dotted name, so a name that resolves to another
+                // unit's enum type is a checked construction here; a record or
+                // sum name gets the same "not a constructor" diagnostic an
+                // unqualified cast would.
+                if let Some((qualifier, _)) = target.split_once('.') {
+                    if matches!(self.scope.qualifier(qualifier), Qualifier::Unit(_)) {
+                        match self.written_type(target, line, column)? {
+                            Some(Named::Enum(_)) => {
+                                if args.len() != 1 {
+                                    return Err(self.err(
+                                        line,
+                                        column,
+                                        format_args!(
+                                            "`{target}(x)` expects 1 argument, got {}",
+                                            args.len()
+                                        ),
+                                    ));
+                                }
+                                return Ok(Some(self.cast(
+                                    target, args[0], line, column,
+                                )?));
+                            }
+                            Some(Named::Record(_)) => {
+                                return Err(self.err(
+                                    line,
+                                    column,
+                                    format_args!(
+                                        "`{target}(x)` is not a record constructor; declare a variable and assign its fields"
+                                    ),
+                                ))
+                            }
+                            Some(Named::Sum(_)) => {
+                                return Err(self.err(
+                                    line,
+                                    column,
+                                    format_args!(
+                                        "`{target}(x)` is not a sum constructor; write `Variant` or `Variant(payload)`"
+                                    ),
+                                ))
+                            }
+                            None => {}
+                        }
+                    }
+                }
                 // Qualified calls resolve through the import table: `stdlib.*`
                 // and `<module>.*` reach other units; an unqualified name
                 // resolves only in the current unit (spec 0018, M7).
-                let (signature, function_index, cross_unit) = if let Some((qualifier, name)) =
+                let (signature, function_index) = if let Some((qualifier, name)) =
                     target.split_once('.')
                 {
                     match self.imports.iter().find(|entry| entry.name == qualifier) {
@@ -7136,7 +8057,6 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                                 call_base
                                     .checked_add(u32::try_from(index).unwrap_or(u32::MAX))
                                     .ok_or_else(|| self.internal("function index overflows"))?,
-                                true,
                             )
                         }
                         None if qualifier == "stdlib" => {
@@ -7165,37 +8085,11 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                         self.call_base
                             .checked_add(u32::try_from(index).unwrap_or(u32::MAX))
                             .ok_or_else(|| self.internal("function index overflows"))?,
-                        false,
                     )
                 };
-                // Type ids are compiler-local per unit, except the predeclared
-                // nominal types, whose fixed ids are identical in every unit
-                // (spec 0008, "Types"; ADR 0039). A cross-unit parameter or
-                // result that names a user record, sum or enum still has no
-                // shared identity. Scalars, buffers, the six predeclared types
-                // and arrays/rings/maps of them are safe; the array, ring and
-                // map tables themselves are shared by every unit.
-                if cross_unit {
-                    let arrays = self.arrays.as_slice();
-                    let rings = self.rings.as_slice();
-                    let maps = self.maps.as_slice();
-                    let incompatible = signature
-                        .params
-                        .iter()
-                        .any(|param| !cross_unit_type_ok(param.ty, arrays, rings, maps))
-                        || signature
-                            .ret
-                            .is_some_and(|ty| !cross_unit_type_ok(ty, arrays, rings, maps));
-                    if incompatible {
-                        return Err(self.err(
-                            line,
-                            column,
-                            format_args!(
-                                "`{target}` uses a user-declared record, sum or enum across units; only the predeclared types can cross a unit boundary"
-                            ),
-                        ));
-                    }
-                }
+                // Type ids are package-wide (spec 0008, "Types"; ADR 0039),
+                // so a user record, sum or enum in a cross-unit signature is
+                // the same type on both sides and needs no extra check.
                 let params = signature.params;
                 if args.len() != params.len() {
                     return Err(self.err(
@@ -8224,7 +9118,10 @@ mod tests {
     #[test]
     fn predeclared_layouts_match_the_shared_layout() {
         assert_layout(&DIAGNOSTIC_FIELDS, layout::diagnostic::SIZE);
-        assert_eq!(find_record(&predeclared_records(), "Diagnostic"), Some(0));
+        assert_eq!(
+            find_record(&predeclared_records(), PREDECLARED_UNIT, "Diagnostic"),
+            Some(0)
+        );
 
         // `ExitReason` is a sum: 8-byte tag at 0, the `FaultCode` payload at 8,
         // and a size fixed by `abi::layout` (spec 0003, "Sum types").
@@ -8236,9 +9133,14 @@ mod tests {
             name: "ExitReason",
             variants: &EXIT_REASON_VARIANTS,
             size: layout::exit_reason::SIZE,
+            owner: PREDECLARED_UNIT,
+            layout: Layout::Done,
         };
         assert_eq!(sum.size, 8 + Type::enumeration(FAULT_CODE_ENUM).size());
-        assert_eq!(find_sum(&predeclared_sums(), "ExitReason"), Some(0));
+        assert_eq!(
+            find_sum(&predeclared_sums(), PREDECLARED_UNIT, "ExitReason"),
+            Some(0)
+        );
         assert_eq!(
             variant_of(&sum, "Faulted").and_then(|variant| variant.payload),
             Some(Type::enumeration(FAULT_CODE_ENUM))
@@ -8258,6 +9160,8 @@ mod tests {
             name: "Diagnostic",
             fields: &DIAGNOSTIC_FIELDS,
             size: layout::diagnostic::SIZE,
+            owner: PREDECLARED_UNIT,
+            layout: Layout::Done,
         }]
     }
 
@@ -8266,6 +9170,8 @@ mod tests {
             name: "ExitReason",
             variants: &EXIT_REASON_VARIANTS,
             size: layout::exit_reason::SIZE,
+            owner: PREDECLARED_UNIT,
+            layout: Layout::Done,
         }]
     }
 }

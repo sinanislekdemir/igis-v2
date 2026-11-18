@@ -1,15 +1,23 @@
 unit module_demo;
 
-// In-kernel proof of the `/lib` module path (spec 0018, M1–M13; M3.3) and of
-// predeclared nominal types crossing a unit boundary (ADR 0039, M4.1).
+// In-kernel proof of the `/lib` module path (spec 0018, M1–M13; M3.3), of
+// predeclared nominal types crossing a unit boundary (ADR 0039, M4.1) and of
+// package-global user types with unit-qualified names (ADR 0039, M4.2).
 //
 // `lib.math` is `samples/apps/lib/math.ig` and `lib.probe` is
 // `samples/apps/lib/probe.ig`, resolved by the kernel's
 // `compiler::SourceReader` over the mounted image at load time. The modules'
 // helpers are called as `math.*` and `probe.*`; the application itself declares
-// no top-level `var` state, no stream endpoint and no new syntax.
+// no stream endpoint and no new syntax.
 
 uses core, lib.math, lib.probe;
+
+// The module's record, sum and enum cross into the application's `state` (ADR
+// 0039, C2). Their type names are qualified by the module's unit.
+var
+  p: probe.Point;
+  s: probe.Shape;
+  c: probe.Color;
 
 procedure check(what: const string[0]; passed: bool; ok: var bool);
 begin
@@ -30,6 +38,9 @@ var
   ordinal: FaultCode;
   diag: Diagnostic;
   ev: Event;
+  q: probe.Point;
+  sum: probe.Point;
+  box: Rect;
 begin
   ok := true;
 
@@ -87,8 +98,43 @@ begin
   ev.kind := PointerMove;
   check("probe event PointerMove", not probe.event_is_key(ev), ok);
 
+  // A module record crosses the boundary (M4.2): `probe.Point` in the
+  // application's state and in a local, a `var` out-parameter, and a whole
+  // record copy.
+  p.x := 1;
+  p.y := 2;
+  q.x := 3;
+  q.y := 4;
+  check("probe point_add status", probe.point_add(p, q, sum) = Ok, ok);
+  check("probe point_add x", sum.x = 4, ok);
+  check("probe point_add y", sum.y = 6, ok);
+  p := sum;
+  check("probe point copy", p.x = 4 and p.y = 6, ok);
+
+  // A module sum: construction stays unqualified because the destination names
+  // the type, and `case` resolves the variants through the scrutinee.
+  s := Circle(3);
+  check("probe shape circle", probe.shape_area(s) = 27, ok);
+  box.w := 4;
+  box.h := 5;
+  s := RectShape(box);
+  check("probe shape rect", probe.shape_area(s) = 20, ok);
+
+  // A module enum: `probe.Color.Red` outside the module, and the checked cast
+  // `probe.Color(ordinal)`.
+  c := probe.Color.Red;
+  check("probe color red", int(c) = 0, ok);
+  c := probe.Color(1);
+  check("probe color cast", int(c) = 1, ok);
+  check("probe color constant", c = probe.Color.Green, ok);
+  c := probe.next_color(c);
+  check("probe color next", c = probe.Color.Blue, ok);
+  c := probe.next_color(c);
+  check("probe color wrap", c = probe.Color.Red, ok);
+
   if ok then
   begin
+    core.write("module_demo: types ok\n");
     core.write("module_demo: lib types ok\n");
     core.write("module_demo: ok\n");
   end;

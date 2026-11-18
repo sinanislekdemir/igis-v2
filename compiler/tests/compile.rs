@@ -3071,20 +3071,63 @@ end;
 }
 
 #[test]
-fn a_record_type_must_be_declared_before_use() {
+fn a_record_may_reference_a_type_declared_later() {
+    // Type ids are assigned before layout (ADR 0039, C2), so a type may
+    // reference one declared later in the same unit; the layout walk resolves
+    // the forward reference.
     let source = br#"
 unit t;
 
 type Outer = record inner: Inner; end;
 type Inner = record x: int; end;
 
+var
+  outer: Outer;
+
+procedure main(args: const string[1024]);
+begin
+  outer.inner.x := 7;
+end;
+"#;
+    compile(source, "t.ig").expect("forward references are legal");
+}
+
+#[test]
+fn a_by_value_cycle_is_rejected_in_one_unit() {
+    let source = br#"
+unit t;
+
+type Node = record next: Node; end;
+
+var
+  node: Node;
+
 procedure main(args: const string[1024]);
 begin
 end;
 "#;
-    let error = compile(source, "t.ig").expect_err("no forward references");
+    let error = compile(source, "t.ig").expect_err("a record cannot contain itself");
     assert!(
-        error.message.contains("unknown type `Inner`"),
+        error.message.contains("contains itself by value"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_by_value_cycle_through_an_array_is_rejected() {
+    let source = br#"
+unit t;
+
+type Node = record children: array[Node, 2]; end;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile(source, "t.ig").expect_err("an array is a by-value container");
+    assert!(
+        error.message.contains("contains itself by value"),
         "{}",
         error.message
     );
@@ -7481,7 +7524,11 @@ end;
 }
 
 #[test]
-fn aggregate_types_are_still_rejected_across_the_unit_boundary() {
+fn user_records_cross_the_unit_boundary() {
+    // ADR 0039 (C2): a module's record is a package-global nominal type named
+    // `types.Pair` from the application. The application declares its own
+    // `Pair` with the same name: type names are unique per unit, not per
+    // package.
     let types = br#"
 unit types;
 
@@ -7491,6 +7538,11 @@ function total(p: const Pair): int;
 begin
   return p.left + p.right;
 end;
+
+procedure set_left(p: var Pair; value: int);
+begin
+  p.left := value;
+end;
 "#;
     let app = br#"
 unit types_app;
@@ -7499,33 +7551,52 @@ uses lib.types;
 type Pair = record left: int; right: int; end;
 
 var
-  p: Pair;
+  local: Pair;
+  p: types.Pair;
   n: int;
 
 procedure main(args: const string[1024]);
 begin
+  local.left := 1;
+  local.right := 2;
+  p.left := 3;
+  p.right := 4;
   n := types.total(p);
+  types.set_left(p, 7);
 end;
 "#;
-    let error = compile_imports(app, "types_app.ig", &[("lib/types.ig", types)])
-        .expect_err("a user record may not cross units");
-    assert!(error.message.contains("across units"), "{}", error.message);
+    compile_imports(app, "types_app.ig", &[("lib/types.ig", types)])
+        .expect("a module's record crosses the boundary");
+
+    // Same name, different unit: the application's `Pair` is not the module's
+    // `types.Pair`, so passing one for the other is a type mismatch and the
+    // diagnostic qualifies each name.
+    let mismatch = br#"
+unit types_bad;
+uses lib.types;
+
+type Pair = record left: int; right: int; end;
+
+var
+  local: Pair;
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := types.total(local);
+end;
+"#;
+    let error = compile_imports(mismatch, "types_bad.ig", &[("lib/types.ig", types)])
+        .expect_err("the two `Pair` types are distinct");
     assert!(
-        error.message.contains("user-declared record, sum or enum"),
-        "{}",
-        error.message
-    );
-    assert!(
-        error.message.contains("predeclared types"),
+        error.message.contains("expects `types.Pair`, found `Pair`"),
         "{}",
         error.message
     );
 }
 
 #[test]
-fn user_sums_and_enums_are_still_rejected_across_the_unit_boundary() {
-    // The second half of ADR 0039's rule: only the predeclared nominal types
-    // cross until package-wide user type ids land (M4.2).
+fn user_sums_cross_the_unit_boundary() {
     let sums = br#"
 unit sums;
 
@@ -7540,56 +7611,389 @@ end;
 unit sums_app;
 uses lib.sums;
 
-type Token = Numeric(value: int) | Empty;
-
 var
-  t: Token;
+  t: sums.Token;
   n: int;
 
 procedure main(args: const string[1024]);
 begin
+  t := Numeric(5);
+  case t of
+    Numeric(value): n := value
+    Empty: n := 0
+  end;
+  t := Empty;
   n := sums.score(t);
 end;
 "#;
-    let error = compile_imports(app, "sums_app.ig", &[("lib/sums.ig", sums)])
-        .expect_err("a user sum may not cross units");
-    assert!(error.message.contains("across units"), "{}", error.message);
-    assert!(
-        error.message.contains("user-declared record, sum or enum"),
-        "{}",
-        error.message
-    );
+    compile_imports(app, "sums_app.ig", &[("lib/sums.ig", sums)])
+        .expect("a module's sum crosses the boundary");
+}
 
-    let enums = br#"
+#[test]
+fn user_enums_cross_the_unit_boundary() {
+    let colors = br#"
 unit colors;
 
 type Color = (Red, Green, Blue);
 
 function rank(c: Color): int;
 begin
-  return 0;
+  return int(c);
 end;
 "#;
     let app = br#"
 unit colors_app;
 uses lib.colors;
 
-type Color = (Red, Green, Blue);
-
 var
-  c: Color;
+  c: colors.Color;
   n: int;
 
 procedure main(args: const string[1024]);
 begin
+  c := colors.Color.Red;
+  c := colors.Color(1);
   n := colors.rank(c);
+  if c = colors.Color.Green then
+    n := n + 1;
 end;
 "#;
-    let error = compile_imports(app, "colors_app.ig", &[("lib/colors.ig", enums)])
-        .expect_err("a user enum may not cross units");
-    assert!(error.message.contains("across units"), "{}", error.message);
+    compile_imports(app, "colors_app.ig", &[("lib/colors.ig", colors)])
+        .expect("a module's enum crosses the boundary");
+
+    // One part of M4.2's name rule: a module's variant is not a bare constant
+    // in another unit, and a colour name from `Status` is still visible.
+    let bare = br#"
+unit colors_bare;
+uses lib.colors;
+
+var
+  c: colors.Color;
+
+procedure main(args: const string[1024]);
+begin
+  c := Red;
+end;
+"#;
+    let error = compile_imports(bare, "colors_bare.ig", &[("lib/colors.ig", colors)])
+        .expect_err("a module's variant is not bare in another unit");
     assert!(
-        error.message.contains("user-declared record, sum or enum"),
+        error.message.contains("unknown identifier `Red`"),
+        "{}",
+        error.message
+    );
+
+    let arity = br#"
+unit colors_arity;
+uses lib.colors;
+
+var
+  c: colors.Color;
+
+procedure main(args: const string[1024]);
+begin
+  c := colors.Color(1, 2);
+end;
+"#;
+    let error = compile_imports(arity, "colors_arity.ig", &[("lib/colors.ig", colors)])
+        .expect_err("an enum cast takes one ordinal");
+    assert!(
+        error.message.contains("expects 1 argument"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn two_modules_may_declare_the_same_type_name() {
+    // Type names are unique per unit; the qualifier distinguishes them
+    // (ADR 0039, decision 5).
+    let a = br#"
+unit a;
+
+type Point = record x: int; end;
+
+function get_x(p: const Point): int;
+begin
+  return p.x;
+end;
+"#;
+    let b = br#"
+unit b;
+
+type Point = record y: int; end;
+
+function get_y(p: const Point): int;
+begin
+  return p.y;
+end;
+"#;
+    let app = br#"
+unit two_points;
+uses lib.a, lib.b;
+
+var
+  first: a.Point;
+  second: b.Point;
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  first.x := 1;
+  second.y := 2;
+  n := a.get_x(first) + b.get_y(second);
+end;
+"#;
+    compile_imports(app, "two_points.ig", &[("lib/a.ig", a), ("lib/b.ig", b)])
+        .expect("two modules may both declare `Point`");
+
+    // Naming the wrong module's type is still a type mismatch, and the
+    // diagnostic says which unit owns each.
+    let mismatch = br#"
+unit two_points_bad;
+uses lib.a, lib.b;
+
+var
+  first: a.Point;
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  n := b.get_y(first);
+end;
+"#;
+    let error = compile_imports(
+        mismatch,
+        "two_points_bad.ig",
+        &[("lib/a.ig", a), ("lib/b.ig", b)],
+    )
+    .expect_err("the two `Point` types are distinct");
+    assert!(
+        error.message.contains("expects `b.Point`, found `a.Point`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn an_array_of_a_module_type_crosses_the_unit_boundary() {
+    let shapes = br#"
+unit shapes;
+
+type Point = record x: int; y: int; end;
+
+function total_x(points: const array[Point, 4]): int;
+var
+  i: int;
+  total: int;
+begin
+  total := 0;
+  i := 0;
+  while i < 4 do
+  begin
+    total := total + points[i].x;
+    i := i + 1;
+  end;
+  return total;
+end;
+"#;
+    let app = br#"
+unit shapes_app;
+uses lib.shapes;
+
+var
+  points: array[shapes.Point, 4];
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  points[0].x := 1;
+  points[1].x := 2;
+  points[2].x := 3;
+  points[3].x := 4;
+  n := shapes.total_x(points);
+end;
+"#;
+    compile_imports(app, "shapes_app.ig", &[("lib/shapes.ig", shapes)])
+        .expect("an array of a module's record crosses the boundary");
+}
+
+#[test]
+fn a_module_may_not_name_an_application_type() {
+    // The dependency direction stays module → application-free (ADR 0039,
+    // decision 3): a module's types are package-global, the application's are
+    // application-local.
+    let types = br#"
+unit types;
+
+function area(p: const app_demo.Point): int;
+begin
+  return p.x;
+end;
+"#;
+    let app = br#"
+unit app_demo;
+uses lib.types;
+
+type Point = record x: int; end;
+
+var
+  p: Point;
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  p.x := 1;
+  n := types.area(p);
+end;
+"#;
+    let error = compile_imports(app, "app_demo.ig", &[("lib/types.ig", types)])
+        .expect_err("the application's types are application-local");
+    assert!(
+        error.message.contains("application-local"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_qualified_type_name_needs_a_package_unit() {
+    let app = br#"
+unit unknown_unit;
+uses lib.math;
+
+var
+  p: missing.Point;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile_imports(app, "unknown_unit.ig", &[("lib/math.ig", LIB_MATH)])
+        .expect_err("`missing` is not a unit");
+    assert!(
+        error.message.contains("unknown unit `missing`"),
+        "{}",
+        error.message
+    );
+
+    let app = br#"
+unit unknown_type;
+uses lib.math;
+
+var
+  p: math.Point;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile_imports(app, "unknown_type.ig", &[("lib/math.ig", LIB_MATH)])
+        .expect_err("`math` declares no `Point`");
+    assert!(
+        error.message.contains("`math` has no type `Point`"),
+        "{}",
+        error.message
+    );
+
+    // A built-in type word is reserved and can never be qualified.
+    let app = br#"
+unit qualified_builtin;
+uses lib.math;
+
+var
+  n: math.int;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile_imports(app, "qualified_builtin.ig", &[("lib/math.ig", LIB_MATH)])
+        .expect_err("a built-in type cannot be qualified");
+    assert!(
+        error
+            .message
+            .contains("built-in type and cannot be qualified"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn two_modules_may_reference_each_others_types_without_a_call_cycle() {
+    // `a` imports `b`; `b` does not import `a`, but both are in the package,
+    // so `b` may still name `a.Point` (ADR 0039, decision 3). No by-value
+    // cycle exists because every record holds scalars.
+    let a = br#"
+unit a;
+uses lib.b;
+
+type Point = record x: int; end;
+
+function from_b(p: const b.Point): int;
+begin
+  return p.y;
+end;
+"#;
+    let b = br#"
+unit b;
+
+type Point = record y: int; end;
+
+function from_a(p: const a.Point): int;
+begin
+  return p.x;
+end;
+"#;
+    let app = br#"
+unit mutual;
+uses lib.a, lib.b;
+
+var
+  first: a.Point;
+  second: b.Point;
+  n: int;
+
+procedure main(args: const string[1024]);
+begin
+  first.x := 1;
+  second.y := 2;
+  n := a.from_b(second) + b.from_a(first);
+end;
+"#;
+    compile_imports(app, "mutual.ig", &[("lib/a.ig", a), ("lib/b.ig", b)])
+        .expect("modules may reference each other's types without a call cycle");
+}
+
+#[test]
+fn a_cross_unit_by_value_cycle_is_rejected() {
+    let a = br#"
+unit a;
+uses lib.b;
+
+type A = record other: b.B; end;
+"#;
+    let b = br#"
+unit b;
+
+type B = record other: a.A; end;
+"#;
+    let app = br#"
+unit cycle_app;
+uses lib.a;
+
+var
+  value: a.A;
+
+procedure main(args: const string[1024]);
+begin
+end;
+"#;
+    let error = compile_imports(app, "cycle_app.ig", &[("lib/a.ig", a), ("lib/b.ig", b)])
+        .expect_err("a record cycle across units is a layout cycle");
+    assert!(
+        error.message.contains("contains itself by value"),
         "{}",
         error.message
     );

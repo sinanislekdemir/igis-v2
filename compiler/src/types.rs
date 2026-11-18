@@ -36,20 +36,22 @@ pub enum Kind {
     String,
     /// Raw bytes with a fixed capacity.
     Bytes,
-    /// A nominal enum type, by compiler-local enum id. The value is the
-    /// variant ordinal in one 8-byte slot (spec 0003). The predeclared
-    /// `Status` and `FaultCode` occupy fixed ids in every unit.
+    /// A nominal enum type, by package-wide enum id. The value is the variant
+    /// ordinal in one 8-byte slot (spec 0003). The predeclared `Status`,
+    /// `FaultCode` and `EventKind` occupy the first ids in every compilation;
+    /// user enums follow in package order (spec 0008, "Types"; ADR 0039). The
+    /// id never reaches the artifact.
     Enum(u16),
-    /// A nominal record type, by compiler-local record id. The layout (field
+    /// A nominal record type, by package-wide record id. The layout (field
     /// offsets and size) lives in the compiler's record table; [`Type::cap`]
     /// carries the size in bytes so frame and state layout need no extra
     /// table lookup. The predeclared `Diagnostic`, `Event` and `Rect` occupy
-    /// fixed ids in every unit.
+    /// the first ids in every compilation; user records follow (ADR 0039).
     Record(u16),
-    /// A nominal sum type, by compiler-local sum id. The layout (variant
+    /// A nominal sum type, by package-wide sum id. The layout (variant
     /// payloads and size) lives in the compiler's sum table; [`Type::cap`]
-    /// carries the size in bytes. The predeclared `ExitReason` occupies the
-    /// first id in every unit.
+    /// carries the size in bytes. The predeclared `ExitReason` is id 0 and
+    /// user sums follow (ADR 0039).
     Sum(u16),
     /// A fixed-size array, by compiler-local array id. The element type and
     /// count live in the compiler's array table; [`Type::cap`] carries the
@@ -146,7 +148,7 @@ impl Type {
         Type { kind, cap: 0 }
     }
 
-    /// An enum type by compiler-local id.
+    /// An enum type by package-wide id.
     pub const fn enumeration(id: u16) -> Self {
         Type {
             kind: Kind::Enum(id),
