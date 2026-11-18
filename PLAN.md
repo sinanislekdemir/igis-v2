@@ -14,8 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `ce01077` (M5.2: minesweeper) plus the Ctrl+Q key-shape fix
-  and this docs commit closing M5. The tree is clean.
+- **Last commit:** `866b976` (M6.1: ATA home disk, `ext2w` read path and the
+  router) plus this docs commit. The tree is clean.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -78,9 +78,17 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   uppercase letter codes, so `calculator`, `editor`, `browser` and `minesweeper`
   now accept both shapes and QMP `send-key` exits each (`task 6..9: exit Ok`).
   This also fixed a pre-existing bug in the editor/browser shortcuts.
-- **Next slice:** **M6.1 — ATA disk, home image, `ext2w` read path and the
-  router** (spec 0019, ADR 0040). The writable primitives arrive in M6.2/M6.3 and
-  the persistence proof in M6.4.
+- **Verified at that point (M6.1, independently by the parent):** **458 host tests**
+  (6 new `ext2w` tests). Boot with the drive (`ext2w: home ok`, `ext2: tree ok`)
+  and without (`ext2w: no home disk`) on `-smp 4` and `-smp 1`; an all-zero image
+  prints `ext2w: home failed` and `/home` falls back read-only. The 29-command
+  batch passes in all four combinations; `e2fsck -fn build/home.img` exits 0;
+  visual golden (`37802052…e9e81c9f`) and `boot_desktop_qmp.py` pass on both.
+- **Next slice:** **M6.2 — the ext2 writer and `core.fs_write`** (spec 0019
+  W1–W7, A1–A3): allocation/free, inode and block-pointer growth, offset writes
+  with gap zero-fill, implicit create, the write-through cache, builtin 53, and
+  the host `e2fsck` proof. Then M6.3 (`remove`/`mkdir`/`rename` and the apps) and
+  M6.4 (reboot persistence).
 
 - **M2.6.3 complete:** the headless visual-regression harness (spec 0009 "Visual proof",
   G21; ADR 0032) and the resolution of M2.1.2. `samples/apps/visual` opens a window whose
@@ -927,7 +935,7 @@ Normative: spec 0019, ADR 0040. Goal: a real, persistent ext2 `/home` on a
 dedicated disk, reached through one path router. One ticket per session; the
 parent verifies each.
 
-- [ ] **M6.1 ATA disk, home image, `ext2w` read path and the router.**
+- [x] **M6.1 ATA disk, home image, `ext2w` read path and the router.**
   New `ext2w` crate (`no_std`, `SectorDevice`, allocation-free) with a read-only
   mount (superblock/group/inode validation, lookup, `list`, `read_at`,
   `read_file`, `file_size`) and host tests against an `mke2fs` image in a
@@ -943,6 +951,17 @@ parent verifies each.
   and the self-check `ext2w: home ok` (read `readme.txt`, list the root; no write
   yet). Prove with the drive attached and without it, both core counts, and the
   existing regression set.
+  **Done (`866b976`):** 458 host tests (6 new `ext2w` tests against an `mke2fs`
+  image); `ext2w` (mount/validation/lookup/list/read), `kernel/src/ata.rs` (ATA
+  PIO primary master, LBA28, bounded polling), `kernel/src/fs.rs` router
+  (`home` → home mount or the app image's `home`), `build/home.img` (8 MiB, from
+  `samples/home/`), `xtask` `--reset-home`/`--no-home` and the IDE drive. Boot
+  with the drive prints `ata: …` / `ext2w: mounted` / `ext2w: home ok`; without
+  it `ata: no primary master` / `ext2w: no home disk`; an invalid image prints
+  `ext2w: home failed` and the system boots read-only. The 29-command batch
+  passes in all four combinations (`-smp 4`/`-smp 1` × drive/no drive);
+  `run files` exercises the home listing and a 238-byte `home/readme.txt` read;
+  `e2fsck -fn` exits 0; visual golden and `boot_desktop_qmp.py` pass on both.
 
 - [ ] **M6.2 The ext2 writer and `core.fs_write`.**
   `ext2w` gains block/inode allocation and free, inode and superblock/group count
