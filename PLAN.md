@@ -14,15 +14,21 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Current state:** **497 host tests**; specs 0001–0019 (0018 and 0019
-  Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1–M8.2 complete**. The
+- **Current state:** **501 host tests**; specs 0001–0019 (0018 and 0019
+  Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1–M8.3 complete**. The
   application image is a read-only ext2 tree (`lib`, `base`, `home`, `system`);
   `/home` is a separate 8 MiB ext2 image on an ATA disk, read-write through
   `ext2w` and one router, persistent across reboots. Write builtins are 53–57.
   Windows are draggable by the title bar, and the close box posts an owner-only
   `EventKind.Close` request (M8.2) — a dialog closes itself and the task survives.
-- **Last commit:** `195f8d4` (M8.2) plus this docs commit.
+  The desktop's `Apps` label is a real six-item application pull-down (M8.3), and a
+  machine-wide modal popup input grab (`syslib.popup_grab`/`popup_release`, builtins
+  58/59, no opcode) makes both pull-downs reachable over other windows.
+- **Last commit:** `94187ed` (M8.3) plus this docs commit.
   The tree is clean; `build/home.img` is reset.
+- **Next:** no M8 ticket is open. Pick from the deferred backlog in
+  [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) / the "Deferred" table below, or extend the
+  desktop (a task switcher and submenus were deliberately left out of M8.3).
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -53,6 +59,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   M5.1–M5.2 (calculator, minesweeper), M6.1–M6.4 (persistent writable `/home`)
   and M7.1 (`core.fs_truncate`). Each ticket section below has its commit hashes
   and evidence.
+- **Done since M7.1:** M8.1 (window drag and close box), M8.2 (owner close requests)
+  and M8.3 (Apps application menu and the modal popup input grab, `94187ed`).
 - **Verified at that point (M3.4, independently by the parent):** **439 host tests**
   (abi 23, compiler 184, interpreter 150, langhost 81, 1 doctest); `cargo xtask
   build`/`image`/`image --shell` clean; boot `ext2: tree ok`. `run browser check`
@@ -1186,6 +1194,82 @@ parent verifies each.
   `37802052…e9e81c9f` pass on both; a calculator and a shell terminal closed
   interactively through their close boxes exit `Ok`; `e2fsck -fn` is clean
   (no home writes). Resize remains deferred.
+
+- [x] **M8.3 Apps application menu and the modal popup input grab.**
+  The desktop's `Apps` item launches `clock` directly. Turn it into a real
+  application-selection pull-down: `Calculator`, `Minesweeper`, `Text Editor`,
+  `File Browser`, `Clock` (`clock_window`), `Widgets`, each launched with a
+  non-blocking `core.spawn` (never `core.run`); the desktop's own window help text
+  and the check-mode assertions follow.
+  - **Why a grab:** app-drawn menus have no window. A click in the pull-down
+    over another window is routed to that window (and with M8.1 a title-bar row
+    is consumed as a drag), so the lower items—and the lower System rows—never
+    reach the desktop. Fix it with a machine-wide **modal popup input grab**:
+  - **Surface:** `syslib.popup_grab(x, y, w, h) -> Status` and
+    `syslib.popup_release() -> Status` as host builtins 58/59 (no opcode, ABI v1
+    stays at 75). One grab machine-wide, owned by the calling task; `Full` for
+    another owner, a repeat by the owner updates the rectangle; `Invalid` for a
+    non-positive rect; `popup_release` is owner-only and `NotFound` otherwise.
+    `Host` defaults `Invalid` so `langhost` and a service-less host stay safe.
+  - **Semantics:** while a grab is active, every queued pointer/key event is
+    delivered only to the owner (producers keep `window = 0`; no hit-test, no
+    raise) and non-owners' `poll_event`/`next_event`/`next_any` see no input
+    readiness for the queue (their own `Close`/`Expose` still works). The window
+    service ignores pointer presses (no drag, no close box) while grabbed. The
+    owner decides inside/outside from its rectangle; dismissing on an outside
+    click is its policy. `popup_release` and `Task::reclaim` clear the grab and
+    wake all input waiters, so queued events are deliverable again. Lock order
+    stays acyclic (grab state lives in the window table; the queue never takes
+    the table).
+  - **Desktop:** both the Apps and System pull-downs take the grab on open (the
+    rect is the pull-down frame) and release it on close; the menu handlers run
+    for any pointer event while grabbed. `F9` toggles Apps, `F10` System, the
+    open menu takes Up/Down/Enter/Escape and Left/Right switches between the two
+    pull-downs; opening one closes the other. Normal mode logs
+    `desktop_shell: apps menu open/closed` and `desktop_shell: launched <label>`.
+    Check mode verifies both menus' open/close/grab, the Apps items and one real
+    non-blocking launch (spawn then reap so no child is left), and that an
+    outside click closes the menu.
+  - **Proof:** `scripts/apps_menu_qmp.py` boots `build/igis.iso`, opens Apps with
+    a QMP click, captures `/home/sinan/Desktop/igis-apps-menu.png`, selects
+    `Clock` (row 4, over the kernel Terminal window—the regression), waits for
+    `clock_window: ready`/`done`, then opens System and closes it with an outside
+    click; no idle summary or halt. `desktop_shell check` and
+    `windows_drag`/`mouse`/`tablet` regressions stay green (the grab must not
+    steal input when no menu is open).
+  - **Docs:** ADR 0044 (modal popup grab; rejected alternatives: app-drawn menu
+    over windows, borderless window, service-owned menu), spec 0011 (grab
+    requirement, routing, lock table, failure modes), spec 0010 (input routing
+    while grabbed), spec 0003 (`syslib.popup_grab`/`popup_release`), spec 0008
+    (builtins 58/59), spec 0012 (Apps menu and D10/D11 update), PLAN/AGENTS.
+  Not part of this ticket: submenus, dynamic filesystem app discovery, task
+  switching/window list menus, save-state.
+  **Done (`94187ed`):** **501 host tests** (abi 25, compiler 200, interpreter 165,
+  langhost 89, ext2w 22, including doctests; +4: one compiler signature/encoding test
+  and three interpreter cases for the grab); ABI v1 stays at 75 (builtins 58/59, no
+  opcode).
+  `window::grab_self_check` prints `window: grab ok` beside `rules/paint/route/drag/
+  close` on both core counts. `desktop_shell check` covers the six-item Apps table,
+  both menus' grab/open/close (`grab_status` is `Ok`, a release afterwards is
+  `NotFound`), Down/Up, one real non-blocking launch (Clock's deterministic check,
+  reaped with `core.wait`; a kill right after `spawn` races the compile window, so the
+  natural exit is used), the outside-click dismissal, F9/F10 toggling, Left/Right
+  switching and the accent/frame/label-ink pixels; `desktop_shell: ok` on `-smp 4`
+  and `-smp 1`. `scripts/apps_menu_qmp.py build/igis.iso --cores 4` captures
+  `/home/sinan/Desktop/igis-apps-menu.png` (1024×768), clicks `Clock` at
+  `(140, 94)` over the kernel Terminal, and the transcript shows
+  `desktop_shell: apps menu open` → `desktop_shell: launched Clock task 4` →
+  `clock_window: ok`, then `desktop_shell: launched shell task 5` → `terminal: ok`,
+  with no idle summary or halt; `--cores 1 --no-capture` shows the same contiguous
+  lines. (Empty-args `clock_window` is its deterministic check and prints
+  `clock_window: ok`; `ready`/`done` belong to its `shot` mode, so the harness gates on
+  the app's own exit.) `windows_drag`, `events`, `windows`, `windows_events`, `mouse`
+  (own boot, `-smp 4`), `scripts/tablet_qmp.py` 7/7, `windows_proof` (own boot,
+  `-smp 1`), `scripts/about_close_qmp.py`, `scripts/system_menu_qmp.py`,
+  `scripts/boot_desktop_qmp.py`, the visual golden `37802052…e9e81c9f` and the desktop
+  Clock/About screenshots all pass; `e2fsck -fn build/home.img` is clean (no home
+  writes). `cargo xtask build`/`image`/`image --shell` are clean. No `stdlib` helper
+  (125) and no capability change: the grab is a UI focus mechanism (ADR 0044).
 
 ## Deferred (not UI; pick up when they matter)
 
