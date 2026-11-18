@@ -1365,6 +1365,58 @@ impl Table {
         None
     }
 
+    /// The owner of a live window id, if any (spec 0011, W29).
+    fn owner_of(&self, id: u64) -> Option<u64> {
+        self.position(id)
+            .map(|pos| self.windows[self.order[pos]].owner)
+    }
+
+    /// The owner of the topmost window containing `(x, y)`, if it is a task
+    /// window (spec 0011, W29). A hit on an owner-`0` kernel window has no
+    /// task target, so the event stays window-less and free-for-all.
+    fn hit_test_owner(&self, x: i64, y: i64) -> Option<u64> {
+        let owner = self.owner_of(self.hit_test(x, y)?)?;
+        (owner != 0).then_some(owner)
+    }
+
+    /// The owner of the focused window, if it is a task window (W29).
+    fn focus_owner(&self) -> Option<u64> {
+        let owner = self.owner_of(self.focus)?;
+        (owner != 0).then_some(owner)
+    }
+
+    /// The task that may dequeue `event` from the machine-wide queue
+    /// (spec 0011, W29; ADR 0047). `None` keeps the ordinary window-less
+    /// competition.
+    ///
+    /// The rule is one value for routing and readiness:
+    ///
+    /// - an event that already names a window (`window != 0`) belongs to that
+    ///   window's owner; a vanished window or a kernel window has no task
+    ///   target;
+    /// - otherwise a `PointerDown` belongs to the persistent region claimant
+    ///   at the point (the menu bar, W27), else to the topmost window's owner;
+    /// - every other pointer and key event belongs to the focused window's
+    ///   owner;
+    /// - a window-less `Expose`/`Close` is a malformed injection and has no
+    ///   target (the real ones are pending flags served before the queue).
+    fn input_target(&self, event: &abi::Event) -> Option<u64> {
+        if event.window != 0 {
+            let owner = self.owner_of(event.window as u64)?;
+            return (owner != 0).then_some(owner);
+        }
+        match event.kind {
+            abi::EventKind::PointerDown => self
+                .region_owner_at(event.x, event.y)
+                .or_else(|| self.hit_test_owner(event.x, event.y)),
+            abi::EventKind::PointerMove
+            | abi::EventKind::PointerUp
+            | abi::EventKind::KeyDown
+            | abi::EventKind::KeyUp => self.focus_owner(),
+            abi::EventKind::Expose | abi::EventKind::Close => None,
+        }
+    }
+
     /// Presents a window's content rectangle, clipped to its visible parts
     /// (spec 0011, W17). The caller must own the window.
     fn present(&self, owner: u64, id: u64) -> Status {
@@ -1777,6 +1829,18 @@ pub fn region_release(owner: u64) -> Status {
 /// service uses the same geometry to suppress a new press.
 pub fn region_owner_at(x: i64, y: i64) -> Option<u64> {
     TABLE.lock().region_owner_at(x, y)
+}
+
+/// The task that may dequeue `event` from the machine-wide queue (spec 0011,
+/// W29; ADR 0047). `None` means the event has no window target and keeps the
+/// ordinary window-less competition.
+///
+/// Kernel-internal: `KernelHost::poll_event` gates on it and
+/// `task::input_queue_ready` uses it for readiness, so the block/wake rule and
+/// the consume rule cannot drift. The window lock is taken after the queue
+/// lock is released (the callers peek first), so the two never nest.
+pub fn input_target(event: &abi::Event) -> Option<u64> {
+    TABLE.lock().input_target(event)
 }
 
 /// Takes the topmost pending whole-content `Expose` owned by `owner`, if any
@@ -3097,6 +3161,130 @@ pub fn region_self_check() -> Result<(), u32> {
     }
     if table.close_task(7) || table.region_owner_at(170, 10) != Some(8) {
         return Err(19);
+    }
+
+    Ok(())
+}
+
+/// Boot self-check: the window-addressed input target on a scratch table
+/// (spec 0011, W29; ADR 0047). Pure: no allocation, no global table, no screen.
+pub fn target_self_check() -> Result<(), u32> {
+    const SCREEN_W: i64 = 1024;
+    const SCREEN_H: i64 = 768;
+    let mut table = Table::new();
+    let one = table
+        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"one")
+        .map_err(|_| 1u32)?;
+    let two = table
+        .open(SCREEN_W, SCREEN_H, 8, 150, 150, 100, 50, b"two")
+        .map_err(|_| 2u32)?;
+
+    // A helper event with the fields the target rule reads.
+    let event = |kind: abi::EventKind, x: i64, y: i64, window: i64| abi::Event {
+        kind,
+        x,
+        y,
+        code: 0,
+        window,
+    };
+
+    // 1. Ownership and hit-testing: B is topmost and focused; a point that
+    //    only A covers belongs to A, an empty point has no owner.
+    if table.owner_of(one) != Some(7)
+        || table.owner_of(two) != Some(8)
+        || table.owner_of(0).is_some()
+        || table.owner_of(99).is_some()
+        || table.focus_owner() != Some(8)
+        || table.hit_test_owner(110, 110) != Some(7)
+        || table.hit_test_owner(160, 160) != Some(8)
+        || table.hit_test_owner(900, 700).is_some()
+    {
+        return Err(3);
+    }
+
+    // 2. The pointer-down target is the topmost hit owner; moves, releases and
+    //    keys target the focused owner. A desktop press has no target.
+    if table.input_target(&event(abi::EventKind::PointerDown, 160, 160, 0)) != Some(8)
+        || table.input_target(&event(abi::EventKind::PointerDown, 110, 110, 0)) != Some(7)
+        || table.input_target(&event(abi::EventKind::PointerDown, 900, 700, 0)).is_some()
+        || table.input_target(&event(abi::EventKind::PointerMove, 10, 10, 0)) != Some(8)
+        || table.input_target(&event(abi::EventKind::PointerUp, 10, 10, 0)) != Some(8)
+        || table.input_target(&event(abi::EventKind::KeyDown, 0, 0, 0)) != Some(8)
+        || table.input_target(&event(abi::EventKind::KeyUp, 0, 0, 0)) != Some(8)
+    {
+        return Err(4);
+    }
+
+    // 3. An addressed event belongs to its window's owner, whatever its kind
+    //    and coordinates; an unknown address has no target, and a window-less
+    //    Expose/Close is malformed and has none either.
+    if table.input_target(&event(abi::EventKind::KeyDown, 900, 700, one as i64)) != Some(7)
+        || table.input_target(&event(abi::EventKind::PointerDown, 10, 10, two as i64)) != Some(8)
+        || table.input_target(&event(abi::EventKind::Close, 0, 0, 99)) != None
+        || table.input_target(&event(abi::EventKind::Expose, 0, 0, 0)).is_some()
+        || table.input_target(&event(abi::EventKind::Close, 0, 0, 0)).is_some()
+    {
+        return Err(5);
+    }
+
+    // 4. A non-owner is denied the target: only the owner may dequeue. An
+    //    untargeted event keeps the ordinary competition.
+    let addressed = event(abi::EventKind::KeyDown, 0, 0, one as i64);
+    if table.input_target(&addressed) == Some(8)
+        || table.input_target(&addressed) != Some(7)
+        || table.input_target(&event(abi::EventKind::KeyDown, 0, 0, 0)) != Some(8)
+    {
+        return Err(6);
+    }
+
+    // 5. A kernel window (owner 0) has no task target: a press on it, or keys
+    //    while it is focused, are free-for-all. An addressed event to it is
+    //    likewise untargeted, because no task owns the window.
+    let kernel = table
+        .open(SCREEN_W, SCREEN_H, 0, 400, 400, 100, 50, b"kernel")
+        .map_err(|_| 7u32)?;
+    if table.owner_of(kernel) != Some(0)
+        || table.focus_owner().is_some()
+        || table.hit_test_owner(410, 410).is_some()
+        || table.input_target(&event(abi::EventKind::PointerDown, 410, 410, 0)).is_some()
+        || table.input_target(&event(abi::EventKind::KeyDown, 0, 0, 0)).is_some()
+        || table.input_target(&event(abi::EventKind::KeyDown, 0, 0, kernel as i64)).is_some()
+    {
+        return Err(8);
+    }
+
+    // 6. Closing it falls back to B and the focus target returns.
+    if table.close(0, kernel) != Status::Ok || table.focus_owner() != Some(8) {
+        return Err(9);
+    }
+
+    // 7. The persistent region claim (W27) owns a window-less press inside its
+    //    rectangle even when a window lies underneath, and takes precedence
+    //    over the hit test; moves and keys still target the focus, and an
+    //    addressed event keeps its own window's owner.
+    if table.claim_region(9, 0, 0, SCREEN_W, 22) != Status::Ok {
+        return Err(10);
+    }
+    if table.input_target(&event(abi::EventKind::PointerDown, 10, 10, 0)) != Some(9)
+        || table.input_target(&event(abi::EventKind::PointerDown, 160, 160, 0)) != Some(8)
+        || table.input_target(&event(abi::EventKind::PointerDown, 900, 700, 0)).is_some()
+        || table.input_target(&event(abi::EventKind::PointerMove, 10, 10, 0)) != Some(8)
+        || table.input_target(&event(abi::EventKind::KeyDown, 0, 0, 0)) != Some(8)
+        || table.input_target(&event(abi::EventKind::PointerDown, 10, 10, one as i64)) != Some(7)
+    {
+        return Err(11);
+    }
+
+    // 8. Removing the claimant returns the press to the hit test; releasing
+    //    the claim leaves no trace.
+    if table.claim_region(7, 0, 0, SCREEN_W, 22) != Status::Full {
+        return Err(12);
+    }
+    if !table.close_task(9) || table.region_owner_at(10, 10).is_some() {
+        return Err(13);
+    }
+    if table.input_target(&event(abi::EventKind::PointerDown, 10, 10, 0)).is_some() {
+        return Err(14);
     }
 
     Ok(())

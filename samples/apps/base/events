@@ -49,6 +49,7 @@ var
   now: uint;
   exited_ok: bool;
   baseline: int;
+  win: int;
 
 // One line per step; the first failure names the step and stops the checks.
 procedure check(label: const string[0]; passed: bool);
@@ -94,12 +95,6 @@ begin
   w := int(syslib.screen_width());
   h := int(syslib.screen_height());
 
-  // The kernel owns a terminal and a system-log window from boot (spec 0012),
-  // so the focused window is not 0 even before this app opens one. Pointer
-  // and key events are routed to that focus (spec 0011, W16); the expected
-  // value is recorded instead of assuming an empty desktop.
-  baseline := syslib.window_focus();
-
   // A known empty queue.
   flushed := syslib.event_flush();
   drops_before := syslib.event_drops();
@@ -117,6 +112,24 @@ begin
       and ev.x = 123
       and ev.y = 456
       and ev.window = 7);
+
+  // Window-addressed input (M8.6, spec 0011 W29; ADR 0047): a window-less
+  // pointer move or key belongs to the focused window's owner, so this proof
+  // owns the focus instead of competing for it. The open posts one owner
+  // `Expose`; consume it before the queue checks. A disabled window service
+  // (the host) leaves `win` 0 and the events untargeted, as before.
+  win := 0;
+  status := syslib.window_open(700, 420, 120, 60, "Events", win);
+  if status = Ok then
+  begin
+    status := syslib.next_event(ev);
+    check(
+      "open expose is owner-only",
+      status = Ok and ev.kind = Expose and ev.window = win);
+  end;
+  baseline := syslib.window_focus();
+  if win > 0 then
+    check("window owns the focus", baseline = win);
 
   // 2. Pointer transitions are queued by the pointer path itself. The point
   // is (40, 10): the menu-bar row, above every window (kernel windows start
@@ -195,6 +208,9 @@ begin
   check("pointer position", x = 40 and y = 10);
   check("cursor hotspot is background", syslib.get_pixel(40, 10) = background);
   check("cursor interior is background", syslib.get_pixel(47, 16) = background);
+
+  if win > 0 then
+    status := syslib.window_close(win);
 
   if ok then
     out.say("events: ok\n");

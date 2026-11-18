@@ -5,19 +5,16 @@ This is the M8.5 regression harness (spec 0011, W28; ADR 0046). It runs on the
 real boot desktop with QEMU's absolute tablet:
 
 1. Boot `build/igis.iso`, open `Apps` and launch `Calculator` (frame origin
-   (180, 100), content 300x360).
-2. Close the desktop's own `Desktop` window with its close box. A close-box
-   press is an owner close request (W23), so the desktop exits normally; this
-   leaves the calculator as the only consumer of the one machine-wide event
-   queue. Without that step a content click is a coin flip between the desktop
-   and the app (spec 0010 I31 / ADR 0029), which would make the proof flaky on
-   `-smp 4` and fail on `-smp 1`.
-3. Drag the calculator by its title bar from (330, 108) to (580, 308), i.e. a
+   (180, 100), content 300x360). The desktop stays alive: since M8.6 queued
+   input is delivered to the task that owns its window target (spec 0011, W29;
+   ADR 0047), so a content click can no longer be stolen by the desktop and
+   no close-the-desktop workaround is needed.
+2. Drag the calculator by its title bar from (330, 108) to (580, 308), i.e. a
    frame origin of (430, 300). Capture the screen and verify programmatically
    that the calculator's display frame and panel border are present at the new
    content origin and gone from the old one. A window whose content did not
    follow would leave the underlay there.
-4. Click the `7` button at the new content origin + (42, 138) and require the
+3. Click the `7` button at the new content origin + (42, 138) and require the
    display-interior pixels to change. A client that kept the stale content
    rectangle would miss the button and the display would stay `0`.
 
@@ -70,10 +67,6 @@ DISPLAY_H = 40
 
 # Button index 4 (`7`) is row 1, column 0: content + (42, 138).
 BUTTON_SEVEN = (42, 138)
-
-# The desktop's own `Desktop` window opens at (600, 72); its close box is
-# frame + (4..15, 3..14), so (609, 83) is its centre (W23).
-DESKTOP_CLOSE_BOX = (609, 83)
 
 # Colours in the calculator content.
 WHITE = (255, 255, 255)
@@ -243,17 +236,7 @@ def run(args):
         )
         # Give the child its first claim (window_open and the first frame).
         time.sleep(1.0)
-        print("[harness] Calculator launched")
-
-        # Remove the desktop as an event consumer: close its own window with
-        # its close box. The service posts an owner close request (W23), the
-        # desktop exits normally, and its task-exit line acknowledges it.
-        click(qmp, *DESKTOP_CLOSE_BOX, width, height)
-        exit_line, cursor = serial.wait_for(
-            r"task \d+: exit Ok", timeout=args.timeout, start=cursor
-        )
-        print(f"[harness] desktop window closed: {exit_line.string.strip()}")
-        time.sleep(0.3)
+        print("[harness] Calculator launched (desktop alive)")
 
         # Drag by the title bar from the initial origin to (430, 300).
         start = (FRAME_START[0] + TITLE_GRAB[0], FRAME_START[1] + TITLE_GRAB[1])
@@ -322,9 +305,10 @@ def run(args):
             print("[harness] FAIL: the calculator content did not follow the move")
             return 1
 
-        # Click `7` at the new content origin. Only the calculator is an input
-        # consumer now, so the press is routed to its refreshed rectangle; the
-        # display must change from `0` to `7`.
+        # Click `7` at the new content origin. The press targets the topmost
+        # window there (W29), so it is routed to the calculator's refreshed
+        # rectangle even with the desktop live; the display must change from
+        # `0` to `7`.
         button = (content_x + BUTTON_SEVEN[0], content_y + BUTTON_SEVEN[1])
         print(f"[harness] clicking `7` at {button}")
         click(qmp, button[0], button[1], width, height)

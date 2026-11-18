@@ -6,7 +6,7 @@
   `syslib`; M2.2 of the desktop milestone
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0021, 0022, 0023
+- **ADRs:** 0021, 0022, 0023, 0047
 - **Updated:** 2026-11-18
 
 ## Context
@@ -250,21 +250,50 @@ events", "The event queue") record how they were implemented.
   The producer publishes the event first and then wakes, and the scheduler re-checks the
   queue after recording the block, so an event that arrives in the window between the
   empty read and the block is not lost.
-- **I31 (MUST):** The queue is one machine-wide FIFO: two tasks that call `next_event`
-  compete for the same queued events and each queued event is delivered once. Window
-  routing is applied to the record when it is polled (never to a shared queue entry), and
-  an `Expose` or `Close` is not a queue entry at all: each is a per-window pending flag,
-  readable only by that window's owner (`Close` added by spec 0011 W25). A non-zero
-  `window` on a queued event (an injection) is passed through unchanged. The one exception
-  is the modal popup input grab (spec 0011, W26): while a task holds it, only that task
-  dequeues; every other task's poll returns `WouldBlock` and consumes nothing, and its
-  input readiness is false (its own `Expose`/`Close` still count). The queued events are
-  not lost or filtered — they wait for the owner or for the release. The persistent
-  pointer-region claim (spec 0011, W27) is a second, narrower exception that applies only
-  while no grab is active and only to a head-of-queue `PointerDown` with `window = 0`
-  inside the claimed rectangle: it belongs to the claim owner, and every other task's poll
-  returns `WouldBlock` without consuming it. A queue entry is still delivered once, to
-  exactly one task.
+- **I31 (MUST):** The queue is one machine-wide FIFO and each queued event is delivered
+  once. Window routing is applied to the record when it is polled (never to a shared queue
+  entry), and an `Expose` or `Close` is not a queue entry at all: each is a per-window
+  pending flag, readable only by that window's owner (`Close` added by spec 0011 W25). A
+  non-zero `window` on a queued event (an injection) is passed through unchanged. Since
+  M8.6 an event with a **window target** is delivered only to that target's owner (I34);
+  the ordinary first-poller competition remains only for a window-less event with no
+  target. The modal popup input grab (spec 0011, W26) is the stronger exception: while a
+  task holds it, only that task dequeues; every other task's poll returns `WouldBlock` and
+  consumes nothing, and its input readiness is false (its own `Expose`/`Close` still
+  count). The queued events are not lost or filtered — they wait for the owner or for the
+  release. The persistent pointer-region claim (spec 0011, W27) is folded into the target
+  rule: a head-of-queue `PointerDown` with `window = 0` inside the claimed rectangle
+  targets the claim owner, and every other task's poll returns `WouldBlock` without
+  consuming it.
+- **I34 (MUST):** Queued input is **window-addressed** (M8.6; ADR 0047). One
+  kernel-internal rule, `window::input_target`, gives the target of a queued record, and
+  both consumption and readiness use it:
+
+  - an event with a non-zero `window` targets that window's owner; a vanished window or
+    a window owned by the kernel (owner `0`) has no task target;
+  - a `PointerDown` with `window = 0` targets the persistent pointer-region claimant at
+    its point if one covers it (W27), else the topmost window's owner; a hit on an
+    owner-`0` kernel window, an empty desktop or no window has no target;
+  - `PointerMove`/`PointerUp`/`KeyDown`/`KeyUp` with `window = 0` target the focused
+    window's owner; no focus or a kernel window has no target;
+  - a window-less `Expose`/`Close` has no target; the real ones are the owner-only
+    pending flags served before the queue (W12/W25).
+
+  `poll_event`/`next_event` inspect the queue head without consuming it and return
+  `WouldBlock` when the target is another task, leaving the record for its owner. The
+  target owner consumes it normally: a pointer-down is still hit-tested, raised, focused
+  and stamped, moves and keys still name the focus, and an addressed record still passes
+  through. A press inside a region claim is delivered to its owner unchanged (`window =
+  0`, no hit-test, no raise; W27). While the modal grab is held, W26 takes precedence: its
+  owner receives every queued event unchanged and every other task sees no input
+  readiness, regardless of the focus, and the target gate is not applied. `input_ready`,
+  the scheduler's post-block `Input` re-check and `next_any` source `1` use the same
+  target, so a non-owner does not spin on a record it cannot consume; readiness remains a
+  snapshot and the following read is authoritative. The peek releases the queue lock
+  before the window lock is taken, so the two never nest. The queue is still one FIFO: a
+  targeted record can head-of-line block later records if its owner never polls (the W18
+  liveness policy), while `Close`/`Expose` pending flags still reach their owners. There
+  is no new opcode, builtin, `Host` method or `Event` layout change.
 
 ### Absolute pointer (M2.2.6)
 
@@ -750,3 +779,4 @@ drains the ring (and, only while IRQ12 is inactive, the controller) and decodes 
 | 2026-11-18 | `EventKind.Close` (ordinal 6, spec 0011 W25/M8.2): a close-box press posts an owner-only close request instead of killing the task. The kernel host serves a pending `Close` before a pending `Expose` and before the queue (`window::take_close`/`has_close`, topmost-first), writes `window = id` with `x = y = code = 0`, counts it as input readiness (`input_ready`, the post-block `Input` re-check and `next_any` source 1), and the event layout is unchanged. An injected non-zero `window` still passes through; a queued `Close` with `window = 0` is not re-addressed. |
 | 2026-11-18 | M8.3 routing exception (spec 0011 W26, ADR 0044): while a task holds the modal popup input grab, `next_event`/`poll_event` return queued events only to that task, unchanged (`window = 0`, no hit-test or raise). A non-owner returns `WouldBlock` without consuming the queue, and `input_ready`/the scheduler's post-block re-check/`next_any` source 1 report the queue only for the owner (`window::grab_allows`). The owner's own `Close`/`Expose` are still served first, and a release or the owner's termination wakes every input waiter. No `Event` layout, opcode or builtin change beyond the two `syslib.popup_*` calls. |
 | 2026-11-18 | M8.4 routing exception (spec 0011 W27, ADR 0045): `event::peek` reads the queue head without consuming it, and a head-of-queue `PointerDown` with `window = 0` inside a persistent pointer-region claim is delivered only to the claim owner; every other task gets `WouldBlock` with the queue untouched. The modal grab still takes precedence while active (its owner receives all queued events and the region gate is skipped). Moves, releases, keys and presses outside the rectangle route normally. `task::input_queue_ready` applies the grab and region rules to `input_ready`, the scheduler's post-block `Input` re-check and `next_any` source 1; release and termination wake input waiters. No `Event` layout, opcode or builtin change beyond the two `syslib.region_*` calls. |
+| 2026-11-18 | M8.6 window-addressed delivery (I31 amended, I34 added; spec 0011 W29; ADR 0047): one kernel-internal `window::input_target` rule decides who may dequeue each queued record — an addressed record by its window's owner, a window-less `PointerDown` by the region claimant or the topmost hit window's owner, moves/keys by the focused window's owner, and no target for a kernel window, an empty desktop or an unowned pending kind. `poll_event` peeks and a non-owner gets `WouldBlock` without consuming; the owner takes the ordinary routing path, and a region press stays unchanged (W27). The modal grab still takes precedence (W26) and skips the target gate. `task::input_queue_ready` uses the same target for `input_ready`, the post-block re-check and `next_any` source 1. `window: target ok` is the boot self-check; `scripts/input_routing_qmp.py` proves a desktop-launched Browser's click/Enter, the About close box with the Browser live, and a Calculator button click with the desktop alive. `events`/`multiplex` now own a small window because window-less input belongs to the focus. No opcode, builtin, `Host`, `stdlib` or `Event` layout change. |

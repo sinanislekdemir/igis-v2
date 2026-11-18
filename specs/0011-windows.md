@@ -5,7 +5,7 @@
   `syslib`; M2.3 of the desktop milestone
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0020, 0024, 0042, 0043, 0044, 0045, 0046
+- **ADRs:** 0020, 0024, 0042, 0043, 0044, 0045, 0046, 0047
 - **Updated:** 2026-11-18
 
 ## Context
@@ -287,6 +287,35 @@ an `int`; `0` is never a valid id.
   repaint. The snapshot is not a canvas — the service retains no content, and the owner
   MUST still re-read `window_content_rect` and redraw at the new origin (W12/W17). A client
   that never processes the `Expose` keeps the copied snapshot (W18).
+- **W29 (MUST):** Queued input is delivered to the task that owns its **window target**
+  (M8.6; ADR 0047; spec 0010 I34). One kernel-internal rule,
+  `window::input_target(event) -> Option<u64>`, is used by both consumption and
+  readiness:
+  - an event with a non-zero `window` targets that window's owner; a vanished window or
+    an owner-`0` kernel window has no task target;
+  - a window-less `PointerDown` targets the persistent pointer-region claimant at its
+    point (the menu bar, W27) if one covers it, else the topmost window's owner; a hit
+    on an owner-`0` kernel window, the desktop or no window has no target;
+  - a window-less `PointerMove`/`PointerUp`/`KeyDown`/`KeyUp` targets the focused
+    window's owner; no focus or an owner-`0` focus has no target;
+  - a window-less `Expose`/`Close` has no target; the real ones are the owner-only
+    pending flags served before the queue (W12/W25).
+
+  `poll_event`/`next_event` inspect the queue head without consuming it, and a task
+  that is not the target returns `WouldBlock` with the record left in place. The target
+  (or any task, for an untargeted record) consumes it and then takes the ordinary
+  routing path of W16: a pointer-down is hit-tested, raised, focused and stamped; moves
+  and keys name the focus; an addressed record is passed through. A press inside a
+  persistent region claim is delivered to its claimant unchanged (`window = 0`, no
+  hit-test, no raise; W27). While the modal popup grab is held, W26 takes precedence:
+  its owner receives every queued event unchanged and every other task's poll returns
+  `WouldBlock`, whatever the focus is, and the target gate is not applied. The same
+  target drives `input_ready`, the scheduler's post-block `Input` re-check and `next_any`
+  source `1`, so a non-owner does not spin. The queue remains one FIFO: a record targeted
+  at an owner that never polls can head-of-line block later records (the W18 liveness
+  policy); `Close`/`Expose` flags are not queue records and still reach their owners. No
+  new opcode, builtin, `Host` method, `stdlib` helper or `Event` layout is added; the
+  boot self-check is `window: target ok` on a scratch table.
 
 ## Design
 
@@ -518,19 +547,28 @@ The kernel host routes on `poll_event`, where no graphics lock is held:
    (`kind = Expose`, `window = id`, `x = y = code = 0`). A foreign task can never take
    another task's expose or close request, because the table is searched by owner; there
    is no per-task queue to steal from.
-3. **Queue next.** `event::poll` supplies one queued event. If it already carries a
+3. **Queue target next.** The host `peek`s at the head and applies the W29 target rule
+   (`window::input_target`): an addressed record targets its window's owner, a
+   window-less `PointerDown` the region claimant or the topmost window's owner, other
+   pointer/key records the focused window's owner, and an owner-`0`/empty/unknown target
+   none. A task that is not the target gets `WouldBlock` and the record stays queued;
+   the target (or any task, when there is no target) consumes it.
+4. **Queue routing.** `event::poll` supplies the consumed record. If it already carries a
    non-zero `window` (an injected `Expose` or `Close`, or any explicitly addressed
    injection) it is passed through unchanged. A `PointerDown` is hit-tested against the
-   topmost window **frame**: a hit raises and focuses that window (the W7 affordance)
-   before the event is handed over, and the event names it; a miss stays 0. Every other
-   pointer or key event names `window_focus()` (0 when no window exists).
+   topmost window **frame** unless it lies inside a persistent region claim (W27, below):
+   a hit raises and focuses that window (the W7 affordance) before the event is handed
+   over, and the event names it; a miss stays 0. Every other pointer or key event names
+   `window_focus()` (0 when no window exists).
 
-A persistent region claim (W27) inserts one check before the queue is dequeued: when no
-modal grab is active, the host `peek`s at the head and, if it is a `PointerDown` with
-`window = 0` inside the claimed rectangle, only the claim owner may consume it (unchanged,
-with no hit-test or raise); every other task gets `WouldBlock` and the event stays queued.
-This is a head-of-queue rule, not a filter: once the owner takes the press the queue
-advances normally.
+A persistent region claim (W27) is part of that target rule: a head-of-queue
+`PointerDown` with `window = 0` inside the claimed rectangle targets the claim owner, so
+only that owner may consume it (unchanged, with no hit-test or raise); every other task
+gets `WouldBlock` and the event stays queued. This is a head-of-queue rule, not a filter:
+once the owner takes the press the queue advances normally. The modal grab (W26) is
+checked before the target gate and keeps its stronger precedence: its owner receives
+every queued event unchanged, whatever the focus, and every other task gets
+`WouldBlock`.
 
 #### Lock order (the only nesting is window → graphics)
 
@@ -539,7 +577,8 @@ advances normally.
 | pointer producer (`gfx`) | pointer-order | graphics (state/cursor), released before the hook; then window → graphics; then the event queue (press suppressed when handled) |
 | pointer service hook (`gfx` → `window::pointer_event`) | pointer-order already held | window → graphics for a drag repair; `wake_input` only **after** the window unlock (a drag repair or a posted close request) |
 | keyboard/console producer | console, graphics per cell | nothing |
-| poll-time routing | nothing | window (`take_close`/`take_expose`/`grab_active`/`region_owner_at`); queue (`peek`/`poll`), never nested with window; routing a click repairs: window → graphics; input waiters are woken **after** the window lock is dropped |
+| poll-time routing | nothing | queue (`peek`, released), then window (`take_close`/`take_expose`/`grab_active`/`input_target`/`region_owner_at`), then queue (`poll`); the peek and the window lock are never nested; routing a click repairs: window → graphics; input waiters are woken **after** the window lock is dropped |
+| input readiness (`input_queue_ready`) | nothing | queue (`peek`, released), then window (`grab_active`/`input_target`); the slot locks are taken later by `wake_input` |
 | window wrappers (`open`/`move`/`rect` reads) | graphics (screen size, released) | window → graphics for the repair; input wake after the unlock |
 | region-claim wrappers (`region_claim`/`region_release`) | graphics (screen size, released) | window; `region_release` wakes input waiters after the unlock |
 | repair | window | graphics (dither, chrome, present) |
@@ -1057,6 +1096,13 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | Claim owner terminates while holding a claim | `Task::reclaim` releases the claim and wakes input waiters |
 | Graphics disabled | `region_claim` is `Invalid` like the other service calls; `region_release` of a nonexistent claim is `NotFound` |
 | A claim owner never releases | Only presses inside its rectangle are reserved for it; every other event routes normally and there is no timeout (accepted, ADR 0045) |
+| A queued event targets another task's window | The non-owner's poll returns `WouldBlock` and consumes nothing; the record waits for its owner (W29) |
+| A queued key targets the focused window | Only the focused window's owner can dequeue it; a task that owns no window does not receive window-less keys (W29) |
+| A queued press hits an owner-`0` kernel window, the desktop or no window | No task target; the ordinary first-poller competition applies, as before (W29) |
+| An addressed event names a closed window | No task target; it falls back to the ordinary competition and is delivered unchanged (W29) |
+| The modal grab is held while the focus belongs to another task | The grab still takes precedence: its owner dequeues every event unchanged and the target gate is not applied (W26/W29) |
+| A targeted record's owner never polls | It waits at the head of the FIFO and can block later records; `Close`/`Expose` flags still reach their owners (W18/W29) |
+| A non-owner probes input readiness for a targeted head | `input_ready`, the post-block `Input` re-check and `next_any` source `1` report it as not ready, so it does not spin (W29) |
 
 ## Alternatives considered
 
@@ -1077,6 +1123,8 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | Let the service own and redraw the content | That is the per-window canvas in disguise, and clients would still hit-test the stale origin (ADR 0046) |
 | A lifetime-long modal grab for the desktop | It would hide the queue from every other task; the desktop would be the only event consumer and no client could read input (ADR 0045) |
 | Make the menu bar a window | It would gain service chrome, a z-order record and a second drawing surface for something the shell already draws; the opening click would be treated as an ordinary window hit-test |
+| Keep first-poller delivery and rely only on the grab/claim | Ordinary content and key input has no reservation, so the boot desktop steals application input; the user-reported Browser failure is exactly this race |
+| Per-window queues or a forwarding window-manager task | Allocation or a per-task table, a second producer path and an extra liveness dependency; the one FIFO with a poll-time target is enough (ADR 0047) |
 
 ## Open questions
 
@@ -1106,3 +1154,4 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | 2026-11-18 | M8.3 implemented (W26 added; ADR 0044): one machine-wide modal popup input grab in the window table, exposed as `syslib.popup_grab`/`popup_release` (builtins 58/59, no opcode; ABI v1 stays 75). The pointer service ignores presses while a grab is held; `KernelHost::poll_event` gives non-owners `WouldBlock` without consuming the queue and passes producer events (`window = 0`, no hit-test/raise) to the owner; `input_ready`, the scheduler's post-block re-check and `next_any` source 1 use the one `grab_allows(task)` rule; release and `close_task` wake input waiters. `window::grab_self_check` prints `window: grab ok`. The desktop's Apps menu (Calculator, Minesweeper, Text Editor, File Browser, Clock, Widgets) and the existing System menu take the grab on open; `scripts/apps_menu_qmp.py` launches Clock from a row over the kernel Terminal; `desktop_shell check` covers both menus, the grab, one launch and the outside-click dismissal. |
 | 2026-11-18 | M8.4 implemented (W27 added; ADR 0045): one machine-wide persistent pointer-region claim in the window table, exposed as `syslib.region_claim`/`region_release` (builtins 60/61, no opcode; ABI v1 stays 75). A queued `PointerDown` with `window = 0` inside the rectangle is dequeued only by the claim owner (a non-owner gets `WouldBlock` without consuming it); the modal grab still takes precedence. The pointer service starts no drag and posts no close request for a new press inside the claim, while moves/releases still follow an in-progress drag. `task::input_queue_ready` folds the grab and region rules into `input_ready`, the scheduler's post-block re-check and `next_any` source 1. Release and `close_task` wake input waiters. `window::region_self_check` prints `window: region ok`; the desktop claims the 22-pixel bar at startup and releases it on exit; `scripts/apps_menu_qmp.py` now launches `File Browser`, opens/dismisses Apps while it is live, then reaches `terminal: ok` (it fails on M8.3 on `-smp 4`). |
 | 2026-11-18 | M8.5 implemented (W12/W17 clarified, W28 added; ADR 0046): a topmost move copies the window's content rectangle to the new origin in the shadow before the repair (internal `gfx::copy_rect`, overlap-safe, clipped, no `syslib` binding) and records no new-frame desktop erase, so the content follows the frame immediately; non-topmost moves keep both erases and rely on the client. Every windowed app re-reads `window_content_rect` on an owner `Expose` and recomputes cached geometry (Calculator, Minesweeper, Editor, Browser, Clock Window, Widgets; the desktop shell's own draw already did). `windows_drag` proves the copied mark before its pump and a changed repaint marker at the new origin after it; `scripts/drag_content_qmp.py` drags Calculator, checks the panel/display at the new origin and requires a `7` click to change the display. No opcode, builtin or `stdlib` change (ABI v1 stays 75). |
+| 2026-11-18 | M8.6 implemented (W29 added; ADR 0047): queued input is window-addressed. `Table::input_target` (hit, focus, region precedence, addressed, owner-0/no-target) is the one rule; `KernelHost::poll_event` peeks and a non-owner gets `WouldBlock` without consuming, while the target takes the ordinary routing path (a region press stays unchanged); the modal grab still takes precedence and skips the target gate. `task::input_queue_ready` uses the same target for readiness, the post-block re-check and `next_any` source 1. `window::target_self_check` prints `window: target ok`; `scripts/input_routing_qmp.py` proves Browser click/Enter navigation, About's close box and a Calculator button with the desktop alive, and `scripts/drag_content_qmp.py` drops the close-the-desktop workaround. `events`/`multiplex` own a small window because window-less keys/moves belong to the focus. No opcode, builtin, `Host`, `stdlib` or `Event` layout change. |

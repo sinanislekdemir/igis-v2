@@ -5,7 +5,7 @@
   `interpreter`, `abi`; `samples/apps`; M2.3.4 of the desktop milestone
 - **Supersedes:** the full-screen console of spec 0009 G14 (superseded in part)
 - **Superseded by:** none
-- **ADRs:** 0020, 0024, 0025, 0029, 0030, 0046
+- **ADRs:** 0020, 0024, 0025, 0029, 0030, 0046, 0047
 - **Updated:** 2026-11-18
 
 ## Context
@@ -190,17 +190,19 @@ resize. Those are M2.4/M2.5.
   heartbeats, and pumps events; it never exits and never waits on a child. The text
   shell is started by the `Terminal` item (D11), and the desktop never attaches the
   terminal itself. If `entrypoint` is absent or fails to load, `shell` boots unchanged;
-  if graphics are disabled, D16's serial-shell spawn runs. The desktop is a permanent
-  consumer of the one machine-wide event queue (spec 0010 I31), so an application that
-  also calls `next_event` competes with it; the event-injecting regression suite runs on
-  the shell-entry image (`cargo xtask image --shell`), which has no `entrypoint` and is
-  exactly the pre-M2.5.6 boot. The shell's terminal (`core.write` and its own
-  `core.read_input` echo) is independent of the queue, though the shell's input loop
-  also consumes key events when it is waiting at the prompt. A harness that must
-  deliver a content click to a boot-desktop application deterministically may close the
-  desktop's own window with its close box first (W23): the desktop exits normally, its
-  task-exit line acknowledges it, and the application becomes the only queue consumer.
-  `scripts/drag_content_qmp.py` does this before its Calculator drag/click proof.
+  if graphics are disabled, D16's serial-shell spawn runs. The desktop blocks in
+  `next_event` for its whole life, but since M8.6 queued input is window-addressed
+  (spec 0010 I34, spec 0011 W29; ADR 0047): the desktop receives only events targeted at
+  its own windows and window-less events with no target (the menu bar is the region
+  claim, W27; a desktop-background press stays untargeted), not an application's clicks
+  or keys. It still consumes a window-less event that no window targets before a client
+  does, which is the remaining shared-queue competition. The event-injecting regression
+  suite may therefore still run on the shell-entry image (`cargo xtask image --shell`),
+  which has no `entrypoint` and is exactly the pre-M2.5.6 boot, for determinism; a
+  boot-desktop application now receives its own input. Closing the desktop's own window
+  with its close box still exits the desktop normally (D12); no harness needs that
+  workaround, and `scripts/drag_content_qmp.py` keeps the desktop alive for its
+  Calculator drag/click proof.
 - **D20 (MUST):** The `Apps` item is the application-selection pull-down (M8.3). It has
   one 16-pixel row per item, in this order: `Calculator` → `calculator`, `Minesweeper` →
   `minesweeper`, `Text Editor` → `editor`, `File Browser` → `browser`, `Clock` →
@@ -421,3 +423,4 @@ while that id is its own; otherwise it presents what the service last left.
 | 2026-11-18 | D20 added and D10/D11 rewritten (M8.3): the `Apps` label becomes an application-selection pull-down (Calculator, Minesweeper, Text Editor, File Browser, Clock, Widgets) whose rows launch with non-blocking `core.spawn` and whose open/close takes/releases the modal popup input grab (spec 0011, W26; ADR 0044). Both pull-downs now take the grab, so a row over another window — and the System menu's rows below `y = 26` — reach the shell instead of the covered window or its title-bar drag. F9/F10 toggle Apps/System, Up/Down/Enter/Escape drive the open menu and Left/Right switch. D13's check mode covers both menus, the grab, one real launch and the outside click; `scripts/apps_menu_qmp.py` proves the boot-desktop Clock click over the Terminal. No opcode or `stdlib` helper is added (ABI v1 stays 75). |
 | 2026-11-18 | D20 extended (M8.4, spec 0011 W27, ADR 0045): the desktop claims the persistent pointer-region `(0, 0, screen_w, MenuHeight)` at startup in normal and check mode and releases it on exit. The grab only starts after a menu opens, so the claim protects the bar press that opens it while applications are blocked in `next_event`; check mode accepts `Ok` or `Full` (the boot desktop may already own the bar) and releases only its own claim. `scripts/apps_menu_qmp.py` now launches `File Browser`, opens and dismisses a second Apps menu while it is live, then clicks `Terminal` and requires `terminal: ok`; the sequence fails on M8.3 on `-smp 4` and passes on M8.4. No opcode or `stdlib` helper is added (ABI v1 stays 75). |
 | 2026-11-18 | M8.5 (spec 0011 W28, ADR 0046): D12 records that the shell's own-window repaint re-reads `window_content_rect` on every `Expose` (its `draw_shell_window`/`draw_about` already did), so a dragged "Desktop" window redraws at the new origin after the service copies its content snapshot. No shell behaviour, opcode or `stdlib` helper changes. |
+| 2026-11-18 | D19 amended for M8.6 (spec 0010 I34, spec 0011 W29; ADR 0047): the desktop no longer receives an application's window-addressed clicks or keys even though it blocks in `next_event`. Only window-less events with no target (and the menu bar's region press) still compete with other tasks. The shell-image determinism note stays available, the close-the-desktop workaround is removed, and `scripts/input_routing_qmp.py` proves Browser navigation, About's close box and a Calculator click with the desktop alive. No D-level surface change. |

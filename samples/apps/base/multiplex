@@ -45,6 +45,7 @@ var
   exited_ok: bool;
   stream_index: int;
   flushed: uint;
+  own: int;
 
 procedure check(step: const string[0]; passed: bool);
 begin
@@ -95,6 +96,17 @@ begin
 
   // Discard key events produced while the shell read the command line.
   flushed := syslib.event_flush();
+
+  // Window-addressed input (M8.6, spec 0011 W29; ADR 0047): a window-less key
+  // belongs to the focused window's owner, so this proof owns the focus. The
+  // open posts one owner `Expose`; drain it so the empty-input probe below is
+  // genuinely empty. A disabled window service (the host) leaves `own` 0 and
+  // the event untargeted.
+  own := 0;
+  st := syslib.window_open(700, 420, 120, 60, "Multiplex", own);
+  if st = Ok then
+    st := syslib.next_event(ev);
+
   st := core.spawn("multiplex_sender", "sender", diag, child);
   check("spawn sender", st = Ok and child > 0);
 
@@ -177,6 +189,8 @@ begin
   st := core.wait(child, reason);
   classify();
   check("sender exited Ok", st = Ok and exited_ok);
+  if own > 0 then
+    st := syslib.window_close(own);
   if ok then
     out.say("multiplex: ok\n");
 end;

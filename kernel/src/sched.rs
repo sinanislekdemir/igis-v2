@@ -349,26 +349,28 @@ impl Host for KernelHost {
         if !crate::window::grab_allows(self.current) {
             return Status::WouldBlock;
         }
-        // The persistent pointer-region claim (spec 0011, W27): a queued
-        // `PointerDown` inside a claimed rectangle belongs to the claim owner.
-        // Inspect the head without consuming it, so a non-owner's `WouldBlock`
-        // leaves the press for the owner. The owner dequeues it unchanged — no
-        // hit-test and no raise — so its coordinate handler sees `window = 0`.
-        // Moves, releases, keys and presses outside the rectangle fall through
-        // to the ordinary routing path. The modal grab takes precedence: while
-        // it is active its owner receives every queued event unchanged, so the
-        // region gate is not applied.
+        // Window-addressed delivery (spec 0011, W29; ADR 0047). The queue is
+        // still one FIFO, but a queued event belongs to the task that owns its
+        // target; a non-owner sees the head, does not consume it, and gets
+        // `WouldBlock`. A window-less event with no target keeps the ordinary
+        // competition. The peek releases the queue lock before the window lock
+        // is taken, so the two never nest. The owner's normal routing below
+        // still runs (a down raises/focuses/stamps, moves and keys name the
+        // focus, an addressed record passes through); a press inside a
+        // persistent region claim is delivered unchanged (W27).
+        //
+        // The modal grab takes precedence (W26): while it is held its owner
+        // receives every queued event unchanged, whatever the focus is, so the
+        // target gate is not applied.
         if !crate::window::grab_active() {
             let mut head = [0u8; abi::layout::event::SIZE as usize];
             if crate::event::peek(&mut head) == Status::Ok {
                 if let Some(queued) = abi::layout::event::read(&head) {
-                    if queued.kind == abi::EventKind::PointerDown && queued.window == 0 {
-                        if let Some(owner) = crate::window::region_owner_at(queued.x, queued.y) {
-                            if owner != self.current {
-                                return Status::WouldBlock;
-                            }
-                            return crate::event::poll(event);
-                        }
+                    if self
+                        .input_target(&queued)
+                        .is_some_and(|owner| owner != self.current)
+                    {
+                        return Status::WouldBlock;
                     }
                 }
             }
@@ -383,8 +385,13 @@ impl Host for KernelHost {
         if routed.window == 0 && !crate::window::grab_active() {
             match routed.kind {
                 abi::EventKind::PointerDown => {
-                    if let Some(id) = crate::window::route_click(routed.x, routed.y) {
-                        routed.window = id as i64;
+                    // A press in a persistent region claim was delivered to
+                    // its owner unchanged (W27): no hit-test, no raise, so the
+                    // app-drawn bar sees `window = 0` and its coordinates.
+                    if crate::window::region_owner_at(routed.x, routed.y).is_none() {
+                        if let Some(id) = crate::window::route_click(routed.x, routed.y) {
+                            routed.window = id as i64;
+                        }
                     }
                 }
                 abi::EventKind::Expose => {}
@@ -685,6 +692,16 @@ impl Host for KernelHost {
             }
             status => status,
         }
+    }
+}
+
+impl KernelHost {
+    /// The task that owns `event`'s window target (spec 0011, W29; ADR 0047).
+    /// `None` means no window target, so the ordinary first-poller rule
+    /// applies. One kernel-internal rule serves both `poll_event` and
+    /// `task::input_queue_ready`; it is not a language-visible primitive.
+    fn input_target(&self, event: &abi::Event) -> Option<u64> {
+        crate::window::input_target(event)
     }
 }
 

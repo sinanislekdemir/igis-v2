@@ -237,6 +237,16 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
             arch_x86_64::halt();
         }
     }
+    // Window-addressed input delivery (spec 0011, W29; ADR 0047): the hit,
+    // focus, region-precedence, addressed, owner-0, no-target and non-owner
+    // cases on a scratch table.
+    match window::target_self_check() {
+        Ok(()) => println!("window: target ok"),
+        Err(step) => {
+            println!("window: target FAIL at step {step}");
+            arch_x86_64::halt();
+        }
+    }
 
     // The pointer device and the software cursor (spec 0010). This needs the
     // shadow (screen size, cursor compositing) and the console (boot log), and
