@@ -833,22 +833,22 @@ begin
 
   if ctrl then
   begin
-    if key = 0x73 then
+    if key = 0x73 or key = 0x53 then
     begin
       try_save();
       return;
     end;
-    if key = 0x71 then
+    if key = 0x71 or key = 0x51 then
     begin
       running := false;
       return;
     end;
-    if key = 0x6F then
+    if key = 0x6F or key = 0x4F then
     begin
       st := open_path(path);
       return;
     end;
-    if key = 0x61 then
+    if key = 0x61 or key = 0x41 then
     begin
       used := stdlib.str_selection_all(text, anchor, caret);
       ensure_visible();

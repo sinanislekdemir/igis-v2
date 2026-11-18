@@ -14,8 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Last commit:** `d57041a` (M5.1: the calculator) plus this docs and Ctrl+Q
-  follow-up. The tree is clean.
+- **Last commit:** `ce01077` (M5.2: minesweeper) plus the Ctrl+Q key-shape fix
+  and this docs commit closing M5. The tree is clean.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -69,16 +69,20 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `windows_events` were re-run on both after renaming `lib/reason` to
   `lib/outcome` (`outcome.is_ok(reason)`), so a module name cannot shadow the
   apps' common `reason` variable.
-- **Verified at that point (M5.1, independently by the parent):** **451 host tests**;
-  `run calculator check` → `calculator: ok` on `-smp 4` and `-smp 1`, `langhost`
-  → `calculator: host ok`; a QMP `send-key` Ctrl+Q exits the interactive task
-  (`task 5: exit Ok`) and returns the shell; the 28-command batch passes on both;
+- **Verified at that point (M5.2, independently by the parent):** **452 host tests**;
+  `run minesweeper check` → `minesweeper: ok` on `-smp 4` and `-smp 1`;
+  `langhost` → `minesweeper: host ok`; the 29-command batch passes on both;
   visual golden (`37802052…e9e81c9f`), `boot_desktop_qmp.py` and
-  `scripts/calculator_screenshot_qmp.py` (1024×768, ~36.5 KB) pass on both.
-- **Next slice:** **M5.2 — minesweeper** (PLAN "M5"): 9×9/10 mines, deterministic
-  LCG, safe first reveal, flood fill, right-click and `Flag`-mode flags, face
-  restart, mine counter and timer, check/shot/host paths and a screenshot harness.
-  The writable filesystem (Q51) is the milestone after it.
+  `scripts/minesweeper_screenshot_qmp.py` (1024×768, ~36.9 KB) pass on both.
+  Ctrl+Q was re-tested with a correct serial offset: the real decoder reports
+  uppercase letter codes, so `calculator`, `editor`, `browser` and `minesweeper`
+  now accept both shapes and QMP `send-key` exits each (`task 6..9: exit Ok`).
+  This also fixed a pre-existing bug in the editor/browser shortcuts.
+- **Next slice:** **the writable filesystem (Q51)**. M5 is complete; the owner
+  decision is the scope: a RAM overlay for `/home` (session-only, no disk writes,
+  `fs_write`/`fs_remove` over an in-memory layer) versus a real ext2 writer
+  (block/inode allocation, persistence, fsck-free but much larger). Spec/ADR
+  first, then tickets.
 
 - **M2.6.3 complete:** the headless visual-regression harness (spec 0009 "Visual proof",
   G21; ADR 0032) and the resolution of M2.1.2. `samples/apps/visual` opens a window whose
@@ -896,8 +900,8 @@ toolkit on real programs before the writable-filesystem milestone.
   task (QMP `send-key`); the 28-command batch, visual golden, `boot_desktop_qmp.py`
   and the calculator screenshot pass on both.
 
-- [ ] **M5.2 Minesweeper.** `samples/apps/base/minesweeper`: one window (content
-  about 300×400), a 9×9 field of 30-pixel cells, 10 mines, a header with a mine
+- [x] **M5.2 Minesweeper.** `samples/apps/base/minesweeper`: one window (content
+  300×400), a 9×9 field of 30-pixel cells, 10 mines, a header with a mine
   counter, a restart face button and `MM:SS` elapsed time, and a status line.
   Mines come from an app-local deterministic LCG (seeded by `core.clock()` in
   play mode, fixed in `check`); the first reveal is never a mine. Left-click
@@ -910,6 +914,14 @@ toolkit on real programs before the writable-filesystem milestone.
   `scripts/minesweeper_screenshot_qmp.py` writes
   `/home/sinan/Desktop/igis-minesweeper.png`. No new helper, opcode, builtin,
   `state` or cap.
+  **Done (`ce01077` + the Ctrl+Q key-shape fix):** 36,198 B source, package
+  125,568 B code (31 frames) / 3,720 B state / 23,008 B stack; 452 host tests;
+  `minesweeper: ok` and `minesweeper: host ok`; 29-command batch, visual golden,
+  `boot_desktop_qmp.py` and the screenshot pass on both counts. The ticket
+  surfaced a pre-existing shortcut bug: the keyboard decoder reports letter key
+  codes uppercase (`Q` = 0x51), while `calculator`/`editor`/`browser` compared
+  the lower-case forms (0x71, 0x73/0x4F, 0x6C); all now accept both, and QMP
+  `send-key` Ctrl+Q exits each app (`task 6..9: exit Ok`).
 
 ## Deferred (not UI; pick up when they matter)
 

@@ -648,7 +648,7 @@ begin
   kc := stdlib.ui_key_code(ev.code);
   mods := stdlib.ui_key_modifiers(ev.code);
   b := stdlib.ui_key_text(ev.code);
-  if (mods div 2) mod 2 = 1 and kc = 0x71 then
+  if (mods div 2) mod 2 = 1 and (kc = 0x71 or kc = 0x51) then
   begin
     running := false;
     return;

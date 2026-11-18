@@ -631,12 +631,12 @@ begin
 
   if ctrl then
   begin
-    if key = 0x6C then
+    if key = 0x6C or key = 0x4C then
     begin
       launch_selected();
       return;
     end;
-    if key = 0x71 then
+    if key = 0x71 or key = 0x51 then
     begin
       running := false;
       return;
