@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove the `/lib` file-open dialog on the real editor (M9.3).
+"""Prove the `/lib` file-open dialog on the real editor (M9.3, M9.4).
 
 This harness boots `build/igis-shell.iso` with the absolute USB tablet, runs
 the interactive editor (it opens `base/child`) and drives the M9.3 dialog:
@@ -10,17 +10,24 @@ the interactive editor (it opens `base/child`) and drives the M9.3 dialog:
    descends, the `math.ig` row is clicked and `Open` is clicked. The editor
    must load `lib/math.ig`: the text and path regions change and the dialog
    window is gone.
-3. Ctrl+O opens the dialog again; Escape cancels. The editor text must be
-   unchanged and the dialog gone.
-4. Ctrl+Q exits the editor `Ok`, the shell prompt returns, and no budget fault
+3. Ctrl+O again (the dialog starts in `lib`), Backspace to the root, the `base`
+   row, Enter, the `calculator` row and `Open`; the editor must load the
+   32,516-byte `base/calculator` source. This is the M9.4 proof: the dialog was
+   already returning the path, while the editor's old 8 KiB document buffer
+   refused it. The text region must change substantially and the path line must
+   show the longer `base/calculator`.
+4. Ctrl+O again; Escape cancels. The calculator document must be unchanged and
+   the dialog gone.
+5. Ctrl+Q exits the editor `Ok`, the shell prompt returns, and no budget fault
    or idle summary is printed.
 
 The dialog is an ordinary task-owned window from `samples/apps/lib/file_dialog.ig`;
 nothing here is kernel-specific. The final frames are written to
-`/home/sinan/Desktop/igis-file-dialog.png` (dialog open) and
+`/home/sinan/Desktop/igis-file-dialog.png` (dialog open),
 `/home/sinan/Desktop/igis-file-dialog-open.png` (the editor after `lib/math.ig`
-loaded). Pillow reads the captures for pixel diffs only; images are never
-displayed.
+loaded) and `/home/sinan/Desktop/igis-file-dialog-large.png` (after
+`base/calculator` loaded). Pillow reads the captures for pixel diffs only;
+images are never displayed.
 
 Usage:
     cargo xtask image --shell
@@ -44,6 +51,7 @@ from tablet_qmp import Qmp, Serial  # noqa: E402
 
 DIALOG_OUTPUT = "/home/sinan/Desktop/igis-file-dialog.png"
 OPENED_OUTPUT = "/home/sinan/Desktop/igis-file-dialog-open.png"
+LARGE_OUTPUT = "/home/sinan/Desktop/igis-file-dialog-large.png"
 
 # `samples/apps/base/editor` opens content 640x480 at frame origin (180, 90), so
 # the content origin is (181, 106). Text/Dialog constants mirror the samples.
@@ -98,7 +106,7 @@ class Tablet:
 
     def click(self, x, y):
         self.move(x, y)
-        time.sleep(0.1)
+        time.sleep(0.25)
         self.qmp.command(
             "input-send-event",
             {
@@ -106,7 +114,10 @@ class Tablet:
                 + [{"type": "btn", "data": {"down": True, "button": "left"}}]
             },
         )
-        time.sleep(0.1)
+        # The guest polls one interrupt-IN report at a time, so hold the button
+        # long enough for a busy dialog to consume the press before the release
+        # replaces it (a lost press swallows the click).
+        time.sleep(0.35)
         self.qmp.command(
             "input-send-event",
             {
@@ -114,7 +125,7 @@ class Tablet:
                 + [{"type": "btn", "data": {"down": False, "button": "left"}}]
             },
         )
-        time.sleep(0.15)
+        time.sleep(0.3)
 
 
 def send_key(qmp, qcode):
@@ -216,6 +227,17 @@ def black_pixels(image, region):
     )
 
 
+def non_white_pixels(image, region):
+    """Pixels with any ink, including the syntax palette and the accent band."""
+    x0, y0, w, h = region
+    return sum(
+        1
+        for y in range(y0, y0 + h)
+        for x in range(x0, x0 + w)
+        if image.getpixel((x, y)) != (255, 255, 255)
+    )
+
+
 def ink_bbox(image, region):
     """Bounding box of exact black pixels in `(x, y, w, h)`, or None."""
     x0, y0, w, h = region
@@ -246,21 +268,23 @@ def halted(serial):
     )
 
 
-def lib_math_row(iso):
-    """The `lib` listing row of `math.ig` in the staged image.
+def staged_row(iso, directory, name, fallback):
+    """The `directory` listing row of `name` in the staged image.
 
     `mke2fs -d` keeps the source entries in name order (debugfs confirms
-    `file_dialog.ig, inject.ig, math.ig, ...`), so the sorted staging directory
-    is the image order. Fall back to the observed row if the tree is absent.
+    `file_dialog.ig, inject.ig, math.ig, ...` for `lib` and
+    `bad_name, ..., calculator, ...` for `base`), so the sorted staging
+    directory is the image order. Fall back to the observed row if the tree is
+    absent.
     """
     build = os.path.dirname(os.path.abspath(iso))
     for staging in ("apps-shell-root", "apps-root"):
-        lib = os.path.join(build, staging, "lib")
-        if os.path.isdir(lib):
-            names = sorted(os.listdir(lib))
-            if "math.ig" in names:
-                return names.index("math.ig"), names
-    return 2, []
+        path = os.path.join(build, staging, directory)
+        if os.path.isdir(path):
+            names = sorted(os.listdir(path))
+            if name in names:
+                return names.index(name), names
+    return fallback, []
 
 
 EXIT_RE = re.compile(
@@ -275,15 +299,19 @@ def run(args):
 
     dialog_output = os.path.abspath(args.output)
     opened_output = os.path.abspath(args.opened_output)
+    large_output = os.path.abspath(args.large_output)
     if not args.no_capture:
         os.makedirs(os.path.dirname(dialog_output) or ".", exist_ok=True)
         os.makedirs(os.path.dirname(opened_output) or ".", exist_ok=True)
+        os.makedirs(os.path.dirname(large_output) or ".", exist_ok=True)
 
     scratch = tempfile.mkdtemp(prefix="igis-file-dialog-")
     before_path = os.path.join(scratch, "before.png")
     dialog_path = os.path.join(scratch, "dialog.png")
     dialog2_path = os.path.join(scratch, "dialog2.png")
+    dialog3_path = os.path.join(scratch, "dialog3.png")
     opened_path = os.path.join(scratch, "opened.png")
+    large_path = os.path.join(scratch, "large.png")
     cancelled_path = os.path.join(scratch, "cancelled.png")
 
     socket_path = os.path.join(
@@ -352,11 +380,14 @@ def run(args):
         def row_center(index):
             return list_x + 40, list_y + 1 + index * LINE_H + 8
 
-        math_row, lib_names = lib_math_row(iso)
+        math_row, lib_names = staged_row(iso, "lib", "math.ig", 2)
+        calculator_row, base_names = staged_row(iso, "base", "calculator", 6)
         print(
             f"[harness] dialog frame ({dialog_x}, {dialog_y}), content "
             f"({content_x}, {content_y}); lib row {math_row} "
-            f"({', '.join(lib_names) if lib_names else 'staging absent'})"
+            f"({', '.join(lib_names) if lib_names else 'staging absent'}); "
+            f"base calculator row {calculator_row} "
+            f"({len(base_names)} entries)"
         )
 
         process.stdin.write(b"run editor\n")
@@ -453,7 +484,108 @@ def run(args):
             print("[harness] FAIL: the editor path is not the chosen file")
             return 1
 
-        # 3. Ctrl+O again, Escape cancels; the document is untouched.
+        # 3. Ctrl+O (starts in `lib`), root -> `base` (row 1, after lost+found)
+        #    -> `calculator` -> Open. The M9.4 editor must open the 32,516-byte
+        #    source that the old 8 KiB buffer refused.
+        send_combo(qmp, "ctrl", "o")
+        time.sleep(0.8)
+        send_key(qmp, "backspace")
+        time.sleep(0.3)
+        tablet.click(*row_center(1))
+        time.sleep(0.2)
+        send_key(qmp, "ret")
+        time.sleep(0.4)
+        tablet.click(*row_center(calculator_row))
+        time.sleep(0.2)
+        tablet.move(10, 10)
+        time.sleep(0.2)
+        capture(qmp, dialog3_path)
+        with Image.open(dialog3_path) as handle:
+            dialog3 = handle.convert("RGB")
+        dialog3_path_text = ink_bbox(
+            dialog3, (content_x + 8, content_y + 4, 400, 8)
+        )
+        dialog3_selected = [
+            index
+            for index in range(calculator_row + 1)
+            if pixel(dialog3, list_x + 300, row_center(index)[1]) == (0, 0, 128)
+        ]
+        print(
+            f"[harness] calculator dialog path bbox {dialog3_path_text}; "
+            f"selected rows {dialog3_selected} (expected [{calculator_row}])"
+        )
+        if calculator_row not in dialog3_selected:
+            print("[harness] FAIL: the calculator row is not selected")
+            return 1
+        large_dialog, large_dialog_bbox = differing_pixels(
+            dialog3, opened, dialog_region
+        )
+        large_chrome_ok = (
+            pixel(dialog3, dialog_x, dialog_y + 100) == (0, 0, 0)
+            and pixel(dialog3, list_x, list_y) == (0, 0, 0)
+            and pixel(dialog3, open_x, button_y) == (0, 0, 0)
+            and pixel(dialog3, cancel_x, button_y) == (0, 0, 0)
+        )
+        print(
+            f"[harness] calculator dialog diff {large_dialog} px "
+            f"{large_dialog_bbox}; chrome "
+            f"{'ok' if large_chrome_ok else 'FAILED'}"
+        )
+        if large_dialog < 10000 or not large_chrome_ok:
+            print("[harness] FAIL: the dialog did not reopen for base/calculator")
+            return 1
+        tablet.click(open_x + BUTTON_W // 2, button_y + BUTTON_H // 2)
+        time.sleep(2.0)
+        tablet.move(10, 10)
+        time.sleep(0.2)
+        capture(qmp, large_path)
+        with Image.open(large_path) as handle:
+            large = handle.convert("RGB")
+
+        large_gone, large_gone_bbox = differing_pixels(
+            dialog3, large, dialog_region
+        )
+        large_text, large_text_bbox = differing_pixels(
+            large, opened, EDITOR_TEXT_REGION
+        )
+        large_path_changed, large_path_bbox = differing_pixels(
+            large, opened, EDITOR_PATH_REGION
+        )
+        large_path_ink = black_pixels(large, EDITOR_PATH_REGION)
+        large_path_text = ink_bbox(large, EDITOR_PATH_TEXT)
+        large_text_ink = non_white_pixels(large, EDITOR_TEXT_REGION)
+        print(
+            f"[harness] Calculator: dialog closure diff {large_gone} px "
+            f"{large_gone_bbox}; text {large_text} px {large_text_bbox} "
+            f"(draw {large_text_ink}); path {large_path_changed} px "
+            f"{large_path_bbox} (ink {large_path_ink}), "
+            f"text bbox {large_path_text}"
+        )
+        if large_gone < 10000:
+            print("[harness] FAIL: the dialog did not close on calculator Open")
+            return 1
+        if large_text < 5000:
+            print("[harness] FAIL: base/calculator did not replace the document")
+            return 1
+        # The calculator's first 26 lines are its header comment, so the page is
+        # drawn mostly in the comment gray (not black): any non-white ink proves
+        # the document is on screen, and a full page has far more than 20k.
+        if large_text_ink < 20000:
+            print("[harness] FAIL: the calculator document is not drawn")
+            return 1
+        if large_path_changed < 30:
+            print("[harness] FAIL: the editor path did not change to calculator")
+            return 1
+        # `base/calculator` is fifteen 8-pixel cells (the old `lib/math.ig` path
+        # is eleven), so a 110-pixel ink bbox proves the whole chosen path.
+        if (
+            large_path_text is None
+            or large_path_text[2] - large_path_text[0] < 110
+        ):
+            print("[harness] FAIL: the editor path is not base/calculator")
+            return 1
+
+        # 4. Ctrl+O again; Escape cancels and the calculator is untouched.
         send_combo(qmp, "ctrl", "o")
         time.sleep(0.8)
         tablet.move(10, 10)
@@ -473,7 +605,7 @@ def run(args):
             dialog2, cancelled, dialog_region
         )
         text_kept, kept_bbox = differing_pixels(
-            opened, cancelled, EDITOR_TEXT_REGION
+            large, cancelled, EDITOR_TEXT_REGION
         )
         print(
             f"[harness] Cancel: dialog closure diff {cancel_gone} px "
@@ -486,7 +618,7 @@ def run(args):
             print("[harness] FAIL: Escape changed the editor document")
             return 1
 
-        # 4. Ctrl+Q exits the editor; the shell prompt returns.
+        # 5. Ctrl+Q exits the editor; the shell prompt returns.
         send_combo(qmp, "ctrl", "q")
         exit_match, exit_cursor = serial.wait_for(
             r"task\s+\d+: exit (Ok|Killed|Faulted\([^)]*\)) after \d+ claims",
@@ -516,7 +648,8 @@ def run(args):
 
             shutil.copyfile(dialog_path, dialog_output)
             shutil.copyfile(opened_path, opened_output)
-            for path in (dialog_output, opened_output):
+            shutil.copyfile(large_path, large_output)
+            for path in (dialog_output, opened_output, large_output):
                 size = os.path.getsize(path)
                 dimensions = image_dimensions(path)
                 if dimensions is None:
@@ -531,8 +664,9 @@ def run(args):
                     )
 
         print(
-            "[harness] PASS: dialog opened with chrome, lib/math.ig loaded, "
-            "Escape cancelled without changing the document, editor exited Ok"
+            "[harness] PASS: dialog opened with chrome, lib/math.ig and "
+            "base/calculator loaded, Escape cancelled without changing the "
+            "document, editor exited Ok"
         )
         return 0
     finally:
@@ -557,6 +691,7 @@ def main():
     parser.add_argument("iso", help="path to build/igis-shell.iso")
     parser.add_argument("--output", default=DIALOG_OUTPUT)
     parser.add_argument("--opened-output", default=OPENED_OUTPUT)
+    parser.add_argument("--large-output", default=LARGE_OUTPUT)
     parser.add_argument("--no-capture", action="store_true")
     parser.add_argument("--cores", default="4")
     parser.add_argument("--timeout", type=float, default=180.0)

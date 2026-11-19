@@ -8,25 +8,30 @@ unit editor;
 //   run editor shot [file]   // draws the file, prints `editor: ready` and
 //                            // holds ~5 s for the QMP screenshot harness
 //
-// The document is one `string[8192]` buffer (valid UTF-8 by construction) and
-// the view is derived from it on demand: a byte cursor, a scalar selection
+// The document is one `string[131072]` buffer (valid UTF-8 by construction)
+// and the view is derived from it on demand: a byte cursor, a scalar selection
 // anchor, a first visible line and a horizontal byte offset. Opening a file
 // checks the size first (`core.fs_size`), reads it in the API's 256-byte
-// chunks into a staged `bytes[8192]`, and publishes the whole buffer with one
+// chunks into a staged `bytes[131072]`, and publishes the whole buffer with one
 // `core.substr_into` (a `bytes` source is the strict UTF-8 conversion), so a
 // missing name, a directory, a malformed path, an over-size file or
 // invalid UTF-8 leaves the previous document byte-identical. The buffer limit
-// is 8192 bytes; a larger file is refused with a status line, not truncated.
+// is 131072 bytes (128 KiB, the spec 0008 per-unit source cap); a larger file
+// is refused with a status line, not truncated. M9.4 raised the M2.5.3 8 KiB
+// limit because every current source sample is larger (the largest, this
+// editor, is 81,509 bytes), and the file-open dialog was correctly returning
+// paths the editor then refused.
 //
 // Editing is app-local because the M2.4.1 `str_*` mutators declare a 256-byte
-// working capacity while this editor's buffer is 8 KiB. The read-only helpers
+// working capacity while this editor's buffer is 128 KiB. The read-only helpers
 // (`str_boundary`, `str_cursor_*`, `str_selection_normalize/all/collapse`) take
 // `const string[0]` and are reused unchanged; the one mutator is
 // `ed_replace`, the same checked prefix/insert/suffix staging rule as
 // `str_insert_into`/`str_delete_into` but with this buffer's capacity. It
 // requires both range ends to be code-point boundaries, stages into a local
-// `bytes[8192]`, converts with `core.substr_into` and publishes with one copy,
-// so a rejected edit changes nothing and the document stays valid UTF-8.
+// `bytes[BufferCapacity]`, converts with `core.substr_into` and publishes with
+// one copy, so a rejected edit changes nothing and the document stays valid
+// UTF-8.
 //
 // Saving is enabled by the M6.3 writable home filesystem (spec 0019, E1). The
 // whole document is written to a sibling temporary file (`<target>.tmp`), which
@@ -80,9 +85,11 @@ const
   ContentW = 640;
   ContentH = 480;
 
-  // Document capacity. The ext2 sources the editor opens in the samples are
-  // far below this; `widgets` (57 KiB) is the documented too-large case.
-  BufferCapacity = 8192;
+  // Document capacity: the spec 0008 per-unit source cap (128 KiB), so every
+  // current sample opens. M9.4 raised this from 8 KiB; the file-open dialog was
+  // already correct and returned `base/calculator` (32,516 B), which the old
+  // limit refused with a status line.
+  BufferCapacity = 131072;
   // `abi::fs::PATH_MAX` (spec 0013 F2 / spec 0018 L6). The M9.3 file dialog
   // publishes its whole 256-byte result here.
   PathCapacity = 256;
@@ -122,8 +129,8 @@ const
   TokenCapacity = 16;
   KeywordCount = 33;
   TypeCount = 14;
-  // One cached block-comment state per line start: an 8192-byte document has
-  // at most 8193 lines (one per '\n' plus the final empty line).
+  // One cached block-comment state per line start: a 131072-byte document has
+  // at most 131073 lines (one per '\n' plus the final empty line).
   LineStateCapacity = BufferCapacity + 1;
 
   HoldSeconds = 5;
@@ -727,7 +734,7 @@ begin
   return false;
 end;
 
-// ---- editing over the 8 KiB buffer ---------------------------------------
+// ---- editing over the 128 KiB buffer --------------------------------------
 
 // The single checked mutator: replaces `count` bytes at boundary `at` with
 // `ins` (any valid `string`). Both range ends must be boundaries; the result
@@ -841,7 +848,7 @@ begin
   else if value = Invalid then
     status_line := "not a readable file"
   else if value = CapacityExceeded then
-    status_line := "too large (8192 max)"
+    status_line := "too large (131072 max)"
   else
     status_line := "read error";
 end;
@@ -890,7 +897,7 @@ begin
   end;
   if size > uint(BufferCapacity) then
   begin
-    status_line := "too large (8192 max)";
+    status_line := "too large (131072 max)";
     return CapacityExceeded;
   end;
   total := int(size);
@@ -1251,7 +1258,7 @@ begin
     status_line := "";
   end
   else if value = CapacityExceeded then
-    status_line := "buffer full (8192 bytes)"
+    status_line := "buffer full (131072 bytes)"
   else
     status_line := "edit refused";
   ensure_visible();
@@ -2254,9 +2261,23 @@ begin
   value := open_path("base/child/x");
   verify("file as directory",
     value = Invalid and int(core.len(text)) = keep_length);
-  value := open_path("base/widgets");
-  verify("too large",
-    value = CapacityExceeded and int(core.len(text)) = keep_length);
+
+  // M9.4: every current source sample now fits the 128 KiB buffer; the largest
+  // is this editor (81,509 B). `base/calculator` (32,516 B) is the file the
+  // user opened through the dialog and the old 8 KiB limit refused.
+  value := open_path("base/calculator");
+  verify("large source",
+    value = Ok and path = "base/calculator" and int(core.len(text)) > 8192);
+  value := core.fs_size("base/calculator", size);
+  verify("large source complete",
+    value = Ok and int(core.len(text)) = int(size));
+  verify("large source valid",
+    stdlib.starts_with(text, "unit calculator;") and
+      stdlib.str_boundary(text, int(core.len(text))) and line_count(text) > 1);
+
+  value := open_path("base/child");
+  verify("large restore",
+    value = Ok and int(core.len(text)) = keep_length);
   verify("child intact", stdlib.starts_with(text, "unit child;"));
 end;
 

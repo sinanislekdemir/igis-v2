@@ -238,12 +238,23 @@ tree view:
   status line and is not opened;
 - no browser action writes a file or adds a handle.
 
-### The text editor (M2.5.3; lexical highlighting M9.1; pointer/scroll M9.2; file dialog M9.3)
+### The text editor (M2.5.3; lexical highlighting M9.1; pointer/scroll M9.2; file dialog M9.3; 128 KiB buffer M9.4)
 
 `samples/apps/base/editor` records the application-level contract over the file
 API. The document, editing and save rules are in spec 0003 ("Application
 buffers above 256 bytes") and spec 0019 (E1); M9.1 adds a view rule, M9.2 a
-drawing/drag rule and M9.3 the file-open dialog:
+drawing/drag rule, M9.3 the file-open dialog and M9.4 the document capacity:
+
+- the document is one `string[131072]` (128 KiB) buffer, the spec 0008
+  per-unit source cap. M9.4 raised the M2.5.3 8 KiB capacity because every
+  current source sample is larger: `beat` (554 B) and `deep` (874 B) opened,
+  while `base/calculator` (32,516 B) was refused by `open_path` with a
+  `too large (8192 max)` status line after the file dialog had correctly
+  returned the path. The largest current sample is `editor` itself (81,509 B).
+  `open_path` checks `core.fs_size` first and refuses anything over 131072
+  bytes with `too large (131072 max)`; nothing is truncated. The app-local
+  mutator's full-buffer boundary still returns `CapacityExceeded`, and the
+  per-line block-state cache is `bytes[131073]`;
 
 - a successfully opened path whose name starts with `base/`, `lib/` or
   `system/`, or whose last three bytes are `.ig`, enables **syntax
@@ -292,9 +303,9 @@ drawing/drag rule and M9.3 the file-open dialog:
   or to the line end, matching the language's single-line literals. An
   unterminated string or block comment colours to the end of its line and, for
   a block comment, carries the comment state to following lines;
-- the block-comment state at every line start is cached in a `bytes[8193]`
-  table (M9.2), refreshed by one allocation-free line-by-line scan whenever the
-  document is published (an open or an edit), not once per frame. `draw_lines`
+- the block-comment state at every line start is cached in a `bytes[131073]`
+  table (M9.2/M9.4), refreshed by one allocation-free line-by-line scan whenever
+  the document is published (an open or an edit), not once per frame. `draw_lines`
   reads the entry for its first visible line and carries the state through the
   visible rows, so a scrolled frame scans only the visible lines, never the
   document from byte 0. The line-by-line scan still makes a `//` end at its own
@@ -330,13 +341,19 @@ drawing/drag rule and M9.3 the file-open dialog:
   is added. `editor check` covers source-vs-plain detection, the menu check,
   every palette class, a block comment that spans lines and one that starts
   above the visible first line, that the toggle off leaves no palette pixel,
-  and (M9.2) a scrollbar-thumb press and drag through the injected pointer path
-  to the bottom (`top_line = line_count - Rows`, the drag ended and the thumb
-  redrawn at the bottom); the host path has no screen and reports the same
-  logical verdict. `scripts/editor_scroll_qmp.py` proves the budget rule on the
-  real pointer path: a burst of no-button moves plus a held-button drag ends
-  `exit Ok` with no `BudgetExceeded`, while the pre-M9.2 editor faults on the
-  same burst.
+  (M9.2) a scrollbar-thumb press and drag through the injected pointer path to
+  the bottom (`top_line = line_count - Rows`, the drag ended and the thumb
+  redrawn at the bottom), and (M9.4) `open_path("base/calculator")` returning
+  `Ok` with the whole 32,516-byte document (`core.fs_size` agrees), the
+  `base/calculator` path and valid UTF-8, followed by a restore of `base/child`;
+  the host path has no screen and reports the same logical verdict.
+  `scripts/editor_scroll_qmp.py` proves the budget rule on the real pointer
+  path: a burst of no-button moves plus a held-button drag ends `exit Ok` with
+  no `BudgetExceeded`, while the pre-M9.2 editor faults on the same burst.
+  `scripts/file_dialog_qmp.py` proves the user-facing M9.4 case: the dialog
+  loads `lib/math.ig`, then `base/calculator`, with the text region changing
+  and the path line showing the longer chosen path, before Escape cancels and
+  `Ctrl+Q` exits `Ok`.
 
 ## Interfaces
 
@@ -389,3 +406,4 @@ drawing/drag rule and M9.3 the file-open dialog:
 | 2026-11-19 | M9.1: the text editor highlights source files lexically. `base/`, `lib/`, `system/` paths and `.ig` names start highlighted; other files stay plain. The File menu gains a checked `Highlight` row (five rows total) that toggles the view. Keywords are blue, type/predeclared names dark red, strings dark green, comments gray and numbers dark brown; selected text stays white on the accent band. `//` ends at its line, `{ ... }` spans lines without nesting, and strings do not span lines. The block-comment state is scanned line by line once per frame and carried through the visible rows; token runs use whole code points and the existing checked slices, and unhighlighted drawing is unchanged. No file API, opcode, builtin or `stdlib` change. |
 | 2026-11-19 | M9.2: the editor repaints a pointer event only when it changes visible state, and its scrollbar thumb drags. The block-comment state at every line start is cached in a `bytes[8193]` table refreshed once per document publication, so a frame scans only the visible lines; the drag matches `stdlib.ui_scrollbar` and track clicks still page. The reported `Faulted(BudgetExceeded)` after 2,893 claims was the normal 10 s CPU watchdog, caused by a full repaint (and O(document) block scan) per pointer move; the fix removes the waste and leaves the budget, scheduler and realtime policy unchanged. `editor check` drags the thumb through the injected pointer path and `scripts/editor_scroll_qmp.py` proves the burst ends `Ok` with no budget fault. No file API, opcode, builtin, `Host` or `stdlib` change. |
 | 2026-11-19 | M9.3: File > Open and `Ctrl+O` run the `/lib` modal file-open dialog (`lib.file_dialog.open_file`) and load its result through the existing `open_path`; a cancel (`Invalid`) leaves every editor state untouched. The dialog starts in the current directory with the current name selected, lists up to 96 entries (directories/files selectable, kind-2 gray and refused), navigates with keys, row click/double-click, `Up`/`Open`/`Cancel`, scrollbar paging and thumb dragging, and returns a regular-file path or a cancel. The editor's `PathCapacity` becomes 256 (`PATH_MAX`) and `TempCapacity` 260; the destination is published only on `Ok`. No file API, opcode, builtin, `Host` or `stdlib` change. |
+| 2026-11-19 | M9.4: the editor's document buffer is 131072 bytes (128 KiB, the spec 0008 per-unit source cap), raised from the M2.5.3 8 KiB. The file-open dialog was already correct: it returned `base/calculator` (32,516 B), but `open_path` refused it with a `too large (8192 max)` status line, while the tiny `beat` (554 B) and `deep` (874 B) samples opened. Every current sample now fits (the largest is `editor` at 81,509 B); a file over 131072 bytes is still refused by size before it is read with `too large (131072 max)`, and an over-capacity edit still returns `CapacityExceeded`. The state grows to 530,392 B and the task stack to 174,328 B (the `ed_replace` staging buffer is now 128 KiB), both under the 1 MiB region caps; `editor check` proves `base/calculator` opens with the full size and valid UTF-8 and restores `base/child`, while `scripts/file_dialog_qmp.py` opens it through the dialog. No file API, opcode, builtin, `Host`, `stdlib` or kernel change. |

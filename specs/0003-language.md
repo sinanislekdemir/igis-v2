@@ -1671,31 +1671,36 @@ kernel (`run text_edit`) and on `langhost` with the same transcript.
 
 The M2.4.1 mutators keep their fixed 256-byte working capacity: there are no generics, and
 the checked slice's destination capacity is a call-site immediate, so a library mutator
-serves exactly one size. The text editor (`samples/apps/editor`) is the first caller that
-needs a larger document: it holds one `string[8192]` and implements one **app-local**
+serves exactly one size. The text editor (`samples/apps/base/editor`) is the first caller
+that needs a larger document: it holds one `string[131072]` and implements one **app-local**
 mutator with the same rules rather than widening the library:
 
 - both ends of the replaced range must be code-point boundaries (SE2), and the inserted
   text is itself a valid `string`;
-- the result is staged in a local `bytes[8192]` and published with one
+- the result is staged in a local `bytes[131072]` and published with one
   `core.substr_into` (strict UTF-8), so a rejected edit leaves the document
   byte-identical (SE3);
 - an over-capacity result returns `CapacityExceeded` and writes nothing (SE4 applied to
-  the app's 8192-byte capacity);
+  the app's 131072-byte capacity);
 - the read-only helpers (`str_boundary`, `str_cursor_clamp`/`left`/`right`/`home`/`end`,
   `str_selection_normalize`/`all`/`collapse`) take `const string[0]` and apply unchanged
   to the larger buffer.
 
-8192 bytes is an application constant, not a language limit: `string` capacities stay
-compile-time and any capacity the app declares works. The editor checks a file's size
+131072 bytes (128 KiB, the spec 0008 per-unit source cap) is an application constant, not a
+language limit: `string` capacities stay compile-time and any capacity the app declares
+works. M9.4 raised the M2.5.3 8 KiB capacity because every current source sample is larger;
+the file-open dialog already returned the chosen path, and the editor's size refusal was
+the reason `base/calculator` (32,516 B) did not open. The editor checks a file's size
 before reading and refuses anything larger with a status line instead of truncating. There
 is no writable filesystem in M2, so the editor's Save is disabled and a save attempt only
-reports "read-only" (spec 0013, open question 2 remains open).
+reports "read-only" (spec 0013, open question 2 remains open; the M6.3 writable home later
+enabled it).
 
 The editor's proof is `run editor check` (line/addressing logic, every load error class,
 insert/delete/backspace/Enter, a 2-byte code point, the capacity and invalid-UTF-8
-refusals, scrolling, an injected routed key and drawing pixels) and `editor: host ok` on
-`langhost`; `run editor shot` holds a frame for the QMP screenshot harness.
+refusals, scrolling, an injected routed key and drawing pixels, plus the M9.4
+`base/calculator` large-source load and restore) and `editor: host ok` on `langhost`;
+`run editor shot` holds a frame for the QMP screenshot harness.
 
 #### UI controls (M2.4.2)
 
@@ -2214,3 +2219,4 @@ controls and input dialog for the QMP screenshot harness.
 | 2026-11-18 | `EventKind.Close` joins the predeclared enum (ordinal 6, M8.2/spec 0011 W25). It is a global constant like `Expose`; an application compares `ev.kind = Close` and closes its own window. The compiler's predeclared variant list carries the same order (`PointerMove` 0 … `Expose` 5, `Close` 6); `Event`'s layout and every other type are unchanged. |
 | 2026-11-18 | M8.3 adds the modal popup input grab surface (spec 0011 W26, ADR 0044): `syslib.popup_grab(x: int, y: int, w: int, h: int) -> Status` and `syslib.popup_release() -> Status`. The grab is machine-wide and task-owned; while held, only the owner receives queued input events and the window service ignores pointer presses, so an app-drawn pull-down works over another window. `Ok`/`Full`/`Invalid` on take (a repeat by the owner updates the advisory rectangle), `Ok`/`NotFound`/`Invalid` on release. Host builtins 58/59, no opcode; the machine rejects a non-positive extent before the host call. |
 | 2026-11-18 | M8.4 adds the persistent pointer-region claim surface (spec 0011 W27, ADR 0045): `syslib.region_claim(x: int, y: int, w: int, h: int) -> Status` and `syslib.region_release() -> Status`. The claim is machine-wide and task-owned; while it is held and no modal grab is active, a queued `PointerDown` with `window = 0` inside the rectangle belongs only to the owner, and a new press there starts no service drag and posts no close request. `Ok`/`Full`/`Invalid` on take (a repeat by the owner updates the rectangle), `Ok`/`NotFound`/`Invalid` on release. Host builtins 60/61, no opcode; the machine rejects a non-positive extent before the host call. |
+| 2026-11-19 | M9.4 raises the editor's application buffer from 8192 to 131072 bytes (128 KiB, the spec 0008 per-unit source cap; `LineStateCapacity` follows at 131073). The M2.5.3 rules are unchanged — boundary-checked replacement, app-local `bytes[BufferCapacity]` staging, one strict-UTF-8 publish, `CapacityExceeded` without a partial write — and the size check now refuses only files over 131072 with `too large (131072 max)`. Every current source sample fits (the largest is `editor` at 81,509 B); the user-visible failure was the file-open dialog correctly returning `base/calculator` (32,516 B) while the editor's 8 KiB cap refused it silently. No language, ABI, opcode, builtin or file-API change. |
