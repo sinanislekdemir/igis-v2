@@ -26,9 +26,9 @@ constraints learned there.
   with a booting kernel, source applications, a read-only application image and a
   persistent writable `/home`, and a REPL that can drive a device.
 - **Status:** implementation. Specs 0001–0020 are accepted (0003 core implemented;
-  0015–0019 implemented; 0020's M10.1–M10.4 first slice implemented),
-  **553 host tests** (511 language + 42 `net`), ABI v1 at **75** opcodes,
-  M5/M6/M7.1/M8.1–M8.9 complete and
+  0015–0019 implemented; 0020's M10.1–M10.5/M10.8/M10.9 implemented),
+  **576 host tests** (511 language + 43 `net` + 22 `ext2w`), ABI v1 at **75**
+  opcodes, M5/M6/M7.1/M8.1–M8.9 complete and
   M9.1–M9.4 (editor syntax highlighting, cheap pointer redraws, a draggable
   scrollbar, a `/lib` file-open dialog and a 128 KiB document buffer) done. The
   application
@@ -918,19 +918,21 @@ the harness holds a tablet click for 0.35 s so a busy dialog cannot lose the
 USB press report. No kernel, opcode, builtin, `Host`, file-API, `stdlib` or
 dialog change.
 
-**M10 networking (2026-11-19).** The first slice (M10.1–M10.4) is implemented: a
-legacy virtio-net driver behind the kernel `net` facade, an allocation-free `net`
-crate (Ethernet, ARP, IPv4, ICMP, UDP, stop-and-wait TCP client), builtins 62–68
+**M10 networking (2026-11-19).** The first slice (M10.1–M10.5, M10.8, M10.9) is
+implemented: a legacy virtio-net driver and a polling e1000/e1000e driver behind
+the kernel `net` facade, an allocation-free `net` crate (Ethernet, ARP, IPv4,
+ICMP, UDP, stop-and-wait TCP client), builtins 62–68
 (`core.net_config`/`net_info`/`net_mac`, `core.socket_open`/`send`/`recv`/`close`),
-and the program-side `lib/socket.ig`, `lib/http.ig`, `lib/dns.ig` and
-`base/net_probe` units.
+and the program-side `lib/socket.ig`, `lib/http.ig`, `lib/dns.ig`, `lib/dhcp.ig`
+and `base/net_probe` units.
 `net_probe http` fetches `http://10.0.2.2:6666/` over a real TCP connection and
 prints `net_probe: ok` on `-smp 4`/`-smp 1`; `net_probe dns` resolves
-`example.com` through `10.0.2.3` (the two slirp A records alternate) and also
-prints `net_probe: ok`; `--no-net` reports `net_probe: no
-device`. Sockets are non-blocking in this slice (N13 staging); blocking waits,
-`WaitFor::Net`/`Deadline`, `socket_source`, DHCP, the listener and e1000
-remain M10.3–M10.9.
+`example.com` through `10.0.2.3`; `net_probe dhcp` obtains `10.0.2.15/24` from
+slirp and then fetches the page. The same three proofs run over e1000 (`8086:100e`)
+and e1000e (`8086:10d3`) selected by `xtask --net-device`; `--no-net` reports
+`net_probe: no device`. Sockets are non-blocking in this slice (N13 staging);
+blocking waits, `WaitFor::Net`/`Deadline`, `socket_source`, the listener and INTx
+remain.
 
 ## Ground rules
 
@@ -1173,6 +1175,8 @@ host tools are unaffected.
 | The first NIC is virtio-net (legacy/transitional I/O BAR0, static virtqueues and identity-mapped DMA, no offloads) behind one `NetDevice` seam; polling is first and INTx vector `0x2D` is added in M10.6. e1000/e1000e follows behind the same seam (VMware exposes `e1000`/`e1000e`/`VMXNET3`, not virtio-net); modern virtio, RTL8139 and a userspace driver are rejected for M10 | spec 0020, ADR 0049 |
 | Sockets are owner-checked opaque handles `(generation << 8) \| index` in a fixed table, closed on task termination; the ABI is `core.net_*`/`core.socket_*` builtins 62–73 (no opcode), blocking uses `WaitFor::Net(handle)` and a new `WaitFor::Deadline(ns)`, and `core.socket_source` tags a `next_any` source as `1 << 63 \| handle`. IPv4 is a `uint` in host order, ports are `uint`, and no new predeclared record is added | spec 0020, ADR 0050 |
 | The first M10 socket slice is non-blocking: `socket_open` returns at once and the kernel `net::service()` drives the handshake; `send`/`recv` return `WouldBlock` and the caller retries under a `core.clock()` deadline. `core.socket_recv` stages the destination's declared `bytes[N]` capacity as a hidden compiler scalar (at most 2048 bytes per call) because a buffer header holds only the runtime length. `WaitFor::Net`/`Deadline`, `socket_source` and the blocking form are the follow-up; the kernel service closes owned sockets on `Task::reclaim` | spec 0020 N13 staging, spec 0005, M10.3/M10.4 (`e08745d`) |
+| DHCP is ordinary `/lib` source over the UDP socket unit (`lib/dhcp.ig`): DISCOVER/OFFER/REQUEST/ACK from local port 68 to the limited broadcast, options 1/3/6/50/53/54/55/51, a 6 s cap and one NAK restart; `net_probe dhcp` applies the lease through `core.net_config`. A broadcast send is allowed before an address is configured, and a socket opened to the broadcast address accepts the server's reply from any source. No renewal, INFORM/RELEASE or authentication; the transaction id and magic cookie are the guard | spec 0020 N8/N18, M10.8 (`3752d17`) |
+| e1000/82540EM (`8086:100e`) and e1000e/82574L (`8086:10d3`) sit behind the same `NetDevice` seam as virtio-net: MMIO BAR0 mapped uncached, legacy 16-byte descriptors, 32 RX + 16 TX static 2 KiB buffers, a monotonic TX cursor and RX tail give-back, polling only, memory-space + bus-master enable. `xtask --net-device virtio\|e1000\|e1000e` selects the device; virtio remains the default. This is the VMware/real-hardware path; VMXNET3 and INTx remain future work | spec 0020 N1–N4, ADR 0049, M10.9 (`c7989c4`) |
 
 ## Open questions
 
@@ -1302,3 +1306,5 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-19 | M10 planning: spec 0020 "Networking — IPv4, UDP, TCP and the `socket` unit" (Accepted) and ADRs 0048–0050 (Accepted) open the network milestone. The wire stack (Ethernet, ARP, IPv4, ICMP, UDP, minimal TCP) is an allocation-free `net` crate used by the kernel and host-tested against a simulated link; the application surface is `samples/apps/lib/socket.ig` on the program/interpreter side, with DNS/HTTP as ordinary `/lib` source. The first NIC is virtio-net legacy behind one `NetDevice` seam (polling first, INTx vector `0x2D` in M10.6, e1000/e1000e later for VMware), sockets are owner-checked generation handles with `WaitFor::Net`/`WaitFor::Deadline` and a `1 << 63` source tag, and static IPv4 (`10.0.2.15/24`, gateway `10.0.2.2`, DNS `10.0.2.3`) comes before DHCP. PLAN gains M10.1–M10.9; OPEN-QUESTIONS gains Q52–Q58 (TLS, IPv6, Wi-Fi, multiple NICs, TCP backlog, DHCP/DNS follow-ups, trust). No code, no opcode, no builtin and no test count change. |
 | 2026-11-19 | M10.1–M10.4 first slice implemented (`e08745d`; spec 0020 N1–N16, ADRs 0048–0050). New host-testable `net` crate (Ethernet II, 16-entry ARP, IPv4/ICMP, UDP with one datagram per socket, stop-and-wait TCP client with SYN retry, 1/2/4/8 s RTO and RST/FIN; 42 host tests) and `kernel/src/net` with a legacy virtio-net I/O-BAR0 driver (two 16 KiB split rings, 32 RX + 16 TX 2 KiB buffers, identity-map physical addresses, polling, `net: tx ok`) behind a static `SpinLock`. ABI builtins 62–68 (`net_config`, `net_info`, `net_mac`, `socket_open`, `socket_send`, `socket_recv`, `socket_close`; `socket_recv` stages the destination capacity as a hidden compiler operand) and the program-side `samples/apps/lib/socket.ig` + `lib/http.ig` + `base/net_probe`; `task::reclaim` closes owned sockets. Sockets are non-blocking (N13 staging). Proof: `scripts/net_qmp.py` boots `--shell` with `-netdev user` and fetches `http://10.0.2.2:6666/` via a real TCP handshake; the body is 1,406 bytes (the host `python3 -m http.server` listing) and `net_probe: ok` on `-smp 4` and `-smp 1`, `--expect "Directory listing"` passes, `--no-net` prints `net_probe: no device`, the visual golden is unchanged (`37802052…e9e81c9f`), and `files`/`module_demo`/`streams`/`text`/`text_edit`/`desktop_shell check`/`windows check` pass. **553 host tests** (511 language + 42 net); `cargo xtask build`/`image`/`image --shell` clean; boot frames 57,803 free; `net_probe` package 87,280 B code (22 frames), 4,104 B state, 26,152 B stack. Remaining: blocking waits/`socket_source`, DNS, INTx, listener, DHCP, e1000. |
 | 2026-11-19 | M10.5 DNS resolver in source (`2b8bd70`; spec 0020 N16). `samples/apps/lib/dns.ig` (`unit dns; uses core, stdlib, lib.socket;`) builds a 29-byte standard recursive A query (id from `core.clock()` low bits, `0x0100`, one question, QNAME labels, QTYPE A/QCLASS IN), sends one UDP datagram to `server:53`, and validates a 61-byte slirp response (id/QR/opcode/TC/RCODE, qdcount 1, ancount ≥ 1, bounds-checked labels/compression pointers, first type-A/class-IN/rdlength-4 answer, CNAME chain up to four, NXDOMAIN `NotFound`, malformed `Invalid`, timeout `WouldBlock`). `net_probe dns` sets the static config and prints `net_probe: dns 104.20.23.154 (0x6814179a)` then `net_probe: ok`; the two slirp A records rotate. `net_probe bogus`/`--no-net` stay clean and a dead server times out after ~4 s with no false `ok`. 553 host tests unchanged (the canned DNS `langhost` check is not committed); `cargo xtask build`/`image --shell` clean; HTTP `net_probe` still passes. `net_probe` package 98,408 B code (25 frames), 4,104 B state, 28,912 B stack. |
+| 2026-11-19 | M10.8 DHCP client in source (`3752d17`; spec 0020 N8/N18). `samples/apps/lib/dhcp.ig` (`unit dhcp; uses core, stdlib, lib.socket;`) builds a 300-byte BOOTP/DHCP packet (chaddr from `core.net_mac()`, xid from `core.clock()`, broadcast flag, options 53/55), sends DISCOVER from local port 68 to `255.255.255.255:67`, parses OFFER (options 53/54/1/3/6/51), sends REQUEST (50/54), parses ACK, and applies the lease with `core.net_config`; 4+4 attempts under a 6 s cap, one NAK restart, outputs only on `Ok`, socket closed on every path. `socket.udp_from` adds the explicit local port. A one-line `net` fix lets a broadcast send leave from `0.0.0.0` before an address is configured; a socket opened to the broadcast address accepts the server reply from any source. `net_probe dhcp` prints `net_probe: dhcp 10.0.2.15/24 gw 10.0.2.2 dns 10.0.2.3`, fetches the 1,406-byte HTTP body and prints `net_probe: ok` on `-smp 4`/`-smp 1`; the same works over e1000/e1000e (`c7989c4`). `--no-net` is clean and a dead server times out in ~6 s with no false `ok`. **576 host tests** (511 language + 43 net + 22 ext2w); `net_probe` package 113,584 B code (28 frames), 4,104 B state, 32,760 B stack. No renewal/INFORM/RELEASE; transaction id + magic cookie are the guard. |
+| 2026-11-19 | M10.9 e1000/e1000e driver behind `NetDevice` (`c7989c4`; spec 0020 N1–N4, ADR 0049). `kernel/src/net/e1000.rs` drives the 82540EM (`8086:100e`, QEMU `-device e1000`) and 82574L (`8086:10d3`, `-device e1000e`): memory BAR0 mapped uncached through the existing 2 MiB split, `CTRL.RST`/`SLU`, MAC from RAL/RAH, 32 RX + 16 TX legacy 16-byte descriptor rings with static 2 KiB buffers, `RCTL = EN\|SBP\|UPE\|MPE\|BAM\|SECRC`, `TCTL = EN\|PSP\|CT\|COLD`, polling only (`IMC` masked). A monotonic TX cursor fixes a ring-wrap bug (TDT only moves forward); RX uses the standard tail give-back. `pci::find_e1000` accepts 100e/10d3 (and 100f/153a/15b8 untested), enables memory space + bus master, and `xtask --net-device virtio\|e1000\|e1000e` selects the QEMU device (default virtio). `net: e1000 8086:100e pci 00:03.0 mmio 0xfebc0000 mac 52:54:00:12:00:80`, `link up`, `tx ok`; HTTP 1,406 B + DNS pass on e1000/e1000e on `-smp 4`/`-smp 1`, DHCP + HTTP passes on both, a 10× HTTP/DNS stress run is 11/11, and virtio/`--no-net` are unchanged. The visual golden is unchanged (`37802052…e9e81c9f`). VMXNET3 and INTx remain future work. |

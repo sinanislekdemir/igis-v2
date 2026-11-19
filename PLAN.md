@@ -74,19 +74,21 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   0048–0050 (Accepted) are in the tree; the legacy virtio-net driver, the
   allocation-free `net` crate (Ethernet/ARP/IPv4/ICMP/UDP/TCP client), the
   `core.net_*`/`core.socket_*` builtins (62–68), `lib/socket.ig`, `lib/http.ig`,
-  `lib/dns.ig` and `base/net_probe` work. A `--shell` boot fetches
+  `lib/dns.ig`, `lib/dhcp.ig` and `base/net_probe` work; a polling e1000/e1000e
+  driver runs behind the same `NetDevice` seam and `xtask --net-device`
+  selects virtio/e1000/e1000e. A `--shell` boot fetches
   `http://10.0.2.2:6666/` over a real TCP connection and prints
   `net_probe: ok` on `-smp 4` and `-smp 1` (1,406 body bytes); `net_probe dns`
-  resolves `example.com` through `10.0.2.3` (the two slirp A records alternate).
-  Sockets are non-blocking in this slice; `WaitFor::Net`/`Deadline`,
-  `socket_source`, DHCP, the listener and e1000 remain.
-- **Last commit:** `2b8bd70` (M10.5 DNS) plus the docs commit. The tree is clean;
-  `build/home.img` is reset.
+  resolves `example.com` through `10.0.2.3`; `net_probe dhcp` obtains
+  `10.0.2.15/24` from slirp and then fetches the page. Sockets are non-blocking
+  in this slice; `WaitFor::Net`/`Deadline`, `socket_source`, the listener and
+  INTx remain.
+- **Last commit:** `c7989c4` (M10.9 e1000/e1000e) plus the docs commit. The tree
+  is clean; `build/home.img` is reset.
 - **Next:** M10.6 (NIC INTx, poll fallback, `net_stats`/`net_perf`), M10.7
-  (listener/`accept` + `net_echo`), M10.8 (DHCP) and M10.9 (e1000/e1000e), plus
-  the blocking `WaitFor::Net`/`Deadline`/`socket_source` follow-up. The deferred
-  backlog in [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) remains available for
-  non-network work.
+  (listener/`accept` + `net_echo`), and the blocking `WaitFor::Net`/`Deadline`/
+  `socket_source` follow-up. The deferred backlog in
+  [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) remains available for non-network work.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -2065,7 +2067,7 @@ parent verifies each.
 
 ### M10.8 — DHCP client in source
 
-- [ ] **M10.8 Configure the machine from a DHCP lease.**
+- [x] **M10.8 Configure the machine from a DHCP lease.**
   Write `samples/apps/lib/dhcp.ig` over the UDP socket unit: broadcast DISCOVER from
   local port 68 (kind 2 with `local = 68`), parse OFFER, send REQUEST, parse ACK,
   apply address/netmask/gateway/DNS through `core.net_config`; bounded retries and a
@@ -2082,10 +2084,17 @@ parent verifies each.
     host tests for the parser; `--no-net` still returns cleanly.
   - **Docs:** spec 0020 N18; AGENTS/PLAN. No kernel/ABI change (the unit uses the
     existing socket surface).
+  **Done (`3752d17`):** `lib/dhcp.ig` (DISCOVER/OFFER/REQUEST/ACK, xid/cookie,
+  options 1/3/6/50/53/54/55/51, broadcast from local port 68, 4+4 attempts under a
+  6 s cap, NAK restart) and `socket.udp_from`; `net_probe dhcp` applies
+  `10.0.2.15/24`, gateway `10.0.2.2`, DNS `10.0.2.3`, fetches the 1,406-byte HTTP
+  body and prints `net_probe: ok` on `-smp 4`/`-smp 1`. A one-line `net` fix allows
+  a broadcast send before an address is configured; `cargo test -p net` is 43.
+  Also proven over e1000/e1000e (`c7989c4`).
 
 ### M10.9 — e1000/e1000e behind the same seam
 
-- [ ] **M10.9 Prove the device seam with a second driver.**
+- [x] **M10.9 Prove the device seam with a second driver.**
   Add an `e1000`/`e1000e` driver (MMIO BAR0 mapped uncached, TX/RX descriptor rings,
   INTx or poll) behind `NetDevice`; `xtask` selects it with
   `--net-device e1000`; `net_probe`/`net_echo` run unchanged. Record the VMware
@@ -2097,6 +2106,14 @@ parent verifies each.
   - **Proof:** `net: e1000 ...`, `net_probe check/ping/http` on `-smp 4` and
     `-smp 1`; the virtio run still passes; no regression.
   - **Docs:** spec 0020 N2, ADR 0049; AGENTS/PLAN.
+  **Done (`c7989c4`):** a polling e1000/82540EM (`8086:100e`) and e1000e/82574L
+  (`8086:10d3`) driver behind `NetDevice` (MMIO BAR0 mapped uncached, 32 RX + 16 TX
+  legacy descriptor rings with static 2 KiB buffers, monotonic TX cursor, RX tail
+  give-back, memory-space + bus-master enable). `xtask --net-device
+  virtio|e1000|e1000e` selects the QEMU device (default virtio); `--no-net`
+  unchanged. HTTP and DNS pass on e1000/e1000e on `-smp 4`/`-smp 1`, DHCP + HTTP
+  passes on both, virtio is unchanged, and a 10× HTTP/DNS stress run completed
+  11/11. The VMXNET3 path remains a future option.
 
 **M10 definition of done (every ticket):** the standard verification in "How a
 ticket is verified" plus `cargo test -p net`; `-smp 4` and `-smp 1` transcripts;
