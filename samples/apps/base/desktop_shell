@@ -20,7 +20,7 @@ unit desktop_shell;
 //   Windows   raise the terminal window (the existing "bring forward" item)
 //   Terminal  launch `shell` non-blocking; a later click raises the existing
 //             Terminal window instead of spawning a second shell
-//   Apple     raise the shell's own window
+//   Apple     raise the shell's own window, reopening it if it was closed
 //   System    pull-down: About igis-v2 (Ctrl+A), Restart (Ctrl+R), Halt (Ctrl+H)
 //
 // Both pull-downs are drawn with the M2.4.3 menu model
@@ -317,6 +317,41 @@ begin
       end;
     end;
     status := syslib.window_present(own);
+  end;
+end;
+
+// Opens (or raises) the shell's own `Desktop` window. The window is the
+// shell's help/status panel, not the shell itself: closing it with its close
+// box only closes the window, the desktop keeps running, and the Apple square
+// reopens it (M8.7; spec 0012 D12/D19). The shell is the boot desktop, so
+// exiting here would leave no UI and halt the idle system.
+procedure open_desktop_window();
+begin
+  if own > 0 then
+  begin
+    status := syslib.window_raise(own);
+    draw_shell_window();
+    return;
+  end;
+  status := syslib.window_open(600, 72, 360, 164, "Desktop", own);
+  if status = Ok then
+  begin
+    out.say("desktop_shell: desktop window open\n");
+    draw_shell_window();
+  end
+  else
+    out.say("desktop_shell: desktop window open failed\n");
+end;
+
+// A close-box request for the shell's own window closes only that window; the
+// menu bar, the Apps/System menus and every launched application stay live.
+procedure close_desktop_window();
+begin
+  if own > 0 then
+  begin
+    status := syslib.window_close(own);
+    own := 0;
+    out.say("desktop_shell: desktop window closed\n");
   end;
 end;
 
@@ -989,8 +1024,7 @@ begin
     begin
       if system_open then close_system_menu();
       if app_open then close_apps_menu();
-      status := syslib.window_raise(own);
-      draw_shell_window();
+      open_desktop_window();
       handled := true;
     end
     else if x >= 20 and x < menu_apps_x - 4 then
@@ -1394,8 +1428,7 @@ end;
 procedure normal_mode();
 begin
   draw_menu_bar();
-  status := syslib.window_open(600, 72, 360, 164, "Desktop", own);
-  if status = Ok then draw_shell_window();
+  open_desktop_window();
 
   // A normal task would be killed by the 10-second budget. The shell is a
   // controller: promote to realtime and heartbeat around each blocked wait.
@@ -1412,14 +1445,15 @@ begin
     begin
       core.heartbeat();
       // A close request is owner-only and always addressed: the About panel
-      // closes itself, while closing the desktop's own window exits (the
-      // close box never kills the task; spec 0011, W23).
+      // closes itself, and the shell's own `Desktop` window closes only the
+      // help panel; the desktop keeps running (the close box never kills the
+      // task; spec 0011, W23; spec 0012 D12/D19; M8.7).
       if ev.kind = Close then
       begin
         if about_open and ev.window = about_id then
           close_about()
         else if ev.window = own then
-          running := false;
+          close_desktop_window();
       end
       // The About panel is modal: every other event goes to it until it
       // closes.
@@ -1460,8 +1494,10 @@ begin
       draw_menu_bar();
     end;
   end;
-  // The Desktop window was asked to close: close our own window and exit, not
-  // the task-by-kill path.
+  // The loop normally never ends: a Desktop-window close only closes the help
+  // panel (`close_desktop_window`) and the shell keeps pumping; Restart/Halt
+  // and task termination are the only exits. If a future quit path leaves the
+  // loop, close the shell's window before returning.
   if own > 0 then
     status := syslib.window_close(own);
 end;

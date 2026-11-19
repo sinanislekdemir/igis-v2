@@ -63,6 +63,11 @@ CALCULATOR_ROW = (140, 30)
 # at y = 24, above the kernel Terminal frame (y >= 26).
 SYSTEM_LABEL = (224, 10)
 ABOUT_ROW = (260, 24)
+APPLE = (10, 10)
+# The shell's own `Desktop` window opens at (600, 72); its close box centre is
+# frame + (9, 8), and the title bar (y 72..88) stays above the Browser frame
+# (y >= 90) so the click reaches the Desktop window while the Browser is live.
+DESKTOP_CLOSE = (609, 80)
 
 # `samples/apps/base/browser` opens content 680x480 at (160, 90); content
 # origin (161, 106). `ListLeft` 8, `ListTop` 30, `LineH` 16, `BodyH` 420.
@@ -425,6 +430,25 @@ def run(args):
             print("[harness] FAIL: the Calculator click did not change the display")
             return 1
 
+        # 4. The shell's own `Desktop` window is a help panel, not the shell.
+        # Closing it must not exit the desktop (the user-report bug: the boot
+        # entrypoint exited and the idle system halted); the Apple square
+        # reopens it. The Browser and Calculator stay live underneath.
+        click(qmp, *DESKTOP_CLOSE, width, height)
+        _, cursor = serial.wait_for(
+            r"desktop_shell: desktop window closed",
+            timeout=args.timeout,
+            start=cursor,
+        )
+        print("[harness] Desktop window closed; the shell keeps running")
+        click(qmp, *APPLE, width, height)
+        _, cursor = serial.wait_for(
+            r"desktop_shell: desktop window open",
+            timeout=args.timeout,
+            start=cursor,
+        )
+        print("[harness] Apple reopened the Desktop window")
+
         transcript = "\n".join(serial.lines)
         if "task 3: exit Ok" in transcript:
             print("[harness] FAIL: the desktop task exited")
@@ -435,8 +459,14 @@ def run(args):
         if "desktop_shell: about closed" not in transcript:
             print("[harness] FAIL: no About close in the transcript")
             return 1
-        if "desktop_shell: launched Calculator" not in transcript:
-            print("[harness] FAIL: no Calculator launch in the transcript")
+        if "repl: base/calculator: spawned as task" not in transcript:
+            print("[harness] FAIL: no Calculator spawn in the transcript")
+            return 1
+        if "desktop_shell: desktop window closed" not in transcript:
+            print("[harness] FAIL: no Desktop window close in the transcript")
+            return 1
+        if "desktop_shell: desktop window open" not in transcript:
+            print("[harness] FAIL: the Apple did not reopen the Desktop window")
             return 1
 
         if not args.no_capture:
@@ -453,8 +483,8 @@ def run(args):
                     f"({size} bytes, {out_width}x{out_height})"
                 )
         print(
-            "[harness] PASS: Browser click/keys, About close and Calculator "
-            "click all reached their windows with the desktop alive"
+            "[harness] PASS: Browser click/keys, About close, Calculator click "
+            "and the Desktop window close/reopen all worked with the desktop alive"
         )
         return 0
     finally:

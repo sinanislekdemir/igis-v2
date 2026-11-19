@@ -128,7 +128,10 @@ resize. Those are M2.4/M2.5.
   `core.run`. While a pull-down is open every pointer and key event goes to the shell
   (the grab); a pointer-down inside a row activates it, a bar click switches or closes,
   and a click outside the menu frame dismisses it.
-- **D12 (MUST):** The shell may own one window of its own ("Desktop"). It draws the
+- **D12 (MUST):** The shell may own one window of its own ("Desktop"). A close-box
+  request for that window closes only the help panel; the shell keeps running, the menu
+  bar and every launched application stay live, and the Apple square reopens the window
+  (M8.7). The shell's own window is not the shell's lifetime. It draws the
   window content on open and on every `Expose` for that id, calls `window_present`, and
   ignores exposes for windows it does not own. Every repaint re-reads
   `window_content_rect` first, because the frame origin is dynamic after a drag or move
@@ -200,9 +203,10 @@ resize. Those are M2.4/M2.5.
   suite may therefore still run on the shell-entry image (`cargo xtask image --shell`),
   which has no `entrypoint` and is exactly the pre-M2.5.6 boot, for determinism; a
   boot-desktop application now receives its own input. Closing the desktop's own window
-  with its close box still exits the desktop normally (D12); no harness needs that
-  workaround, and `scripts/drag_content_qmp.py` keeps the desktop alive for its
-  Calculator drag/click proof.
+  closes only the `Desktop` help panel (M8.7, D12): the shell keeps running, the Apple
+  square reopens it, and `scripts/drag_content_qmp.py` keeps the desktop alive for its
+  Calculator drag/click proof. A boot desktop cannot halt the system by losing its own
+  window.
 - **D20 (MUST):** The `Apps` item is the application-selection pull-down (M8.3). It has
   one 16-pixel row per item, in this order: `Calculator` → `calculator`, `Minesweeper` →
   `minesweeper`, `Text Editor` → `editor`, `File Browser` → `browser`, `Clock` →
