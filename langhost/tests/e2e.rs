@@ -2921,6 +2921,64 @@ fn the_net_perf_sample_reports_the_host_path() {
     assert_eq!(result.output, b"net_perf: no device\n".to_vec());
 }
 
+/// `lib.path` is the shared command-path helper (spec 0018 modules): the
+/// `samples/lang/path.ig` sample pins `split_cwd`, `join`, `display` and
+/// `basename`, including `..` clamping at the root, `~`, absolute arguments
+/// and the trailing space of a bare command's `<cwd> ` argument string.
+#[test]
+fn the_path_helpers_normalize_on_the_host() {
+    let result = run_sample("path.ig", b"");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(
+        String::from_utf8(result.output).expect("path output is UTF-8"),
+        "ok split0 status\n\
+         ok split0 cwd=/\n\
+         ok split0 rest=\n\
+         ok split1 status\n\
+         ok split1 cwd=/base\n\
+         ok split1 rest=\n\
+         ok split2 status\n\
+         ok split2 cwd=/base\n\
+         ok split2 rest=ls -a\n\
+         ok split3 status\n\
+         ok split3 cwd=/\n\
+         ok split3 rest=base/child\n\
+         ok join1 status\n\
+         ok join1=base/child\n\
+         ok join2 status\n\
+         ok join2=base\n\
+         ok join3 status\n\
+         ok join3=\n\
+         ok join4 status\n\
+         ok join4=\n\
+         ok join5 status\n\
+         ok join5=lib\n\
+         ok join6 status\n\
+         ok join6=home/x\n\
+         ok join7 status\n\
+         ok join7=home\n\
+         ok join8 status\n\
+         ok join8=base/y\n\
+         ok join9 status\n\
+         ok join9=base/a/b\n\
+         ok join10 status\n\
+         ok join10=home/x\n\
+         ok display0 status\n\
+         ok display0=/\n\
+         ok display1 status\n\
+         ok display1=/base/child\n\
+         ok display2 status\n\
+         ok display2=/base\n\
+         ok base0 status\n\
+         ok base0=child\n\
+         ok base1 status\n\
+         ok base1=\n\
+         ok base2 status\n\
+         ok base2=base\n\
+         path: ok\n"
+    );
+}
+
 /// `net_select` compiles the compiler-lowered `socket.source` and the
 /// `next_any` socket arm; `langhost` has no NIC, so both modes report the
 /// disabled-device contract and return at once (spec 0020, N13).
