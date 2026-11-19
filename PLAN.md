@@ -16,7 +16,7 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 - **Current state:** **505 host tests**; specs 0001–0019 (0018 and 0019
   Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1–M8.9 complete**,
-  plus **M9.1 and M9.2**. The
+  plus **M9.1–M9.3**. The
   application image is a read-only ext2 tree (`lib`, `base`, `home`, `system`);
   `/home` is a separate 8 MiB ext2 image on an ATA disk, read-write through
   `ext2w` and one router, persistent across reboots. Write builtins are 53–57.
@@ -56,10 +56,16 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   cached per line start and refreshed once per document publication. The
   user-reported `Faulted(BudgetExceeded)` after 2,893 claims was the normal 10 s
   CPU watchdog (a full repaint per pointer move), not a crash; the scheduler
-  budget and realtime policy are unchanged.
-- **Last commit:** `09dc57b` (M9.2) plus this docs commit. The tree is clean;
+  budget and realtime policy are unchanged. M9.3 adds a reusable `/lib` file-open
+  dialog (`lib.file_dialog.open_file`) and wires the editor's File > Open and
+  Ctrl+O to it: the modal window starts in the current directory, navigates the
+  image tree with keys, pointer, scrollbar and buttons, and returns a chosen
+  regular-file path or a null-like `Invalid` cancel with the destination
+  untouched; the editor loads the result through its existing `open_path`. No
+  kernel, ABI, opcode, builtin, file-API or `stdlib` change.
+- **Last commit:** `be544fa` (M9.3) plus this docs commit. The tree is clean;
   `build/home.img` is reset.
-- **Next:** M9.2 is complete. Pick from the deferred backlog in
+- **Next:** M9.3 is complete. Pick from the deferred backlog in
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) / the "Deferred" table below, or extend the
   desktop (a task switcher, submenus and interactive resize were deliberately left out).
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
@@ -101,7 +107,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `c69e392`), M8.9 (the browser's draggable scrollbar thumb, `d3087c6`),
   M9.1 (lexical syntax highlighting in the text editor, `a912765`) and
   M9.2 (the editor's cheap pointer path, draggable thumb and block-state
-  cache, `09dc57b`).
+  cache, `09dc57b`), and M9.3 (the `/lib` file-open dialog and the editor's
+  File > Open / Ctrl+O wiring, `be544fa`).
 - **Verified at that point (M3.4, independently by the parent):** **439 host tests**
   (abi 23, compiler 184, interpreter 150, langhost 81, 1 doctest); `cargo xtask
   build`/`image`/`image --shell` clean; boot `ext2: tree ok`. `run browser check`
@@ -1712,6 +1719,82 @@ parent verifies each.
   **Done (`09dc57b`):** the editor redraw suppression, thumb drag and per-line
   block cache plus `editor_scroll_qmp.py`; `editor: ok`, `editor: host ok`, the
   QMP burst on both core counts and the unchanged visual golden as above.
+
+### M9.3 — a `/lib` file-open dialog
+
+- [x] **M9.3 A reusable `/lib` file-open dialog, wired into the editor.**
+  User request: "Can we write a file-open dialog? But not in the kernel — as a
+  library element. When I choose Open in the editor, an open-file dialog should
+  appear, and it should return a file name or something like null."
+  - **Module:** `samples/apps/lib/file_dialog.ig` is ordinary module source
+    (`unit file_dialog;`, `uses core, stdlib, syslib;`) with no `main`, no
+    top-level `var` and no stream endpoint, so the M5 `stdlib`-import rule and
+    the M6 module rules are exercised. Its one public function is
+    `file_dialog.open_file(initial: const string[0]; chosen: var string[256])
+    -> Status`. The dialog state is one local `Dialog` record (id, content
+    rect, directory, 96 names/kinds, selection, top, status, drag/click
+    bookkeeping and the staged picked path) passed by reference to the
+    helpers; the module owns no state.
+  - **Window and content:** a normal task-owned `Open File` window (content
+    520×380, centred with the service chrome; frame `(251,185)` and content
+    `(252,201)` at 1024×768). White client face, path line
+    `igis:/`+directory (ellipsis tail when deep), visible `Up` button, 17-row
+    list (folder/file/other markers, name, right-aligned kind, accent
+    selection), scrollbar, status line, `Open` (default) and `Cancel` buttons.
+    No `syslib.clear`; drawing is `syslib` + `stdlib.ui_*` only.
+  - **Start and entries:** split `initial` at its last `/`; use that directory
+    when `core.fs_list` can list it (`base/child` starts in `base` with `child`
+    selected), else the root. Up to 96 entries, read from index 0 until
+    `NotFound`; kind 1 directories and kind 0 regular files are selectable,
+    kind 2 is shown gray and refused with a status. Directory rows path-join
+    with the 256-byte `PathCapacity` bound and probe the listing before
+    committing the new directory.
+  - **Navigation:** Up/Down, PageUp/PageDown, Home/End, Enter (descend or
+    return a file), Backspace/Ctrl+Up (parent; no-op at root) and Escape
+    (cancel). A row click selects, a double-click opens, the visible
+    `Up`/`Open`/`Cancel` buttons act, the scrollbar track pages, the thumb
+    drags (matching `stdlib.ui_scrollbar`), and the close box's owner
+    `EventKind.Close` cancels. `next_event` is filtered to the dialog's own
+    window; an owner `Expose` re-reads `window_content_rect`; only a visible
+    change repaints (key no-ops, plain moves and the drag press/release are
+    free).
+  - **Result:** `Ok` copies the whole picked path into `chosen` with one
+    `core.substr_into` and closes the window; a cancel is `Invalid`, a
+    too-long result is `CapacityExceeded`, and both leave `chosen` untouched.
+    A disabled screen (`langhost`) returns `Invalid` before opening a window.
+    No new opcode, builtin, `Host` method, file API or `stdlib` helper.
+  - **Editor:** `samples/apps/base/editor` says `uses ... lib.file_dialog;`,
+    and File > Open and Ctrl+O call `browse_open`: `open_file(path,
+    dialog_path)`, then `open_path(dialog_path)` on `Ok` and a status line on
+    cancel. The editor raises its own window after the dialog, and a cancel
+    leaves the document, path, caret, selection, scroll and highlighting
+    untouched. `PathCapacity` rises 64 → 256 (`abi::fs::PATH_MAX`) for the
+    dialog result and `TempCapacity` 96 → 260 for `<target>.tmp`; the check and
+    host paths still call `open_path` directly and never open the dialog.
+  - **Proof:** `scripts/file_dialog_qmp.py` boots `build/igis-shell.iso` with
+    the tablet, runs the interactive editor, sends Ctrl+O, verifies the dialog
+    frame/chrome/face pixels (left border black, title stripe on, list border,
+    both button borders, white face) and a 28,708-pixel frame diff, then goes
+    from `base` to the root with Backspace, clicks the root `lib` row, Enter,
+    clicks the `math.ig` row (computed from the sorted `build/apps-shell-root/lib`
+    stage: `file_dialog.ig, inject.ig, math.ig, ...`), clicks `Open` and
+    requires: dialog closure diff 30,742 px, editor text diff 17,959 px, path
+    line 231 px with the ink bbox growing 79 → 86 px (11 cells = `lib/math.ig`).
+    Ctrl+O then Escape closes the dialog (30,405 px) with a **0-pixel** text
+    diff. Ctrl+Q ends `task 6: exit Ok` (161 claims), the shell prompt returns,
+    and there is no budget fault or idle summary. The exact same counts occur on
+    `-smp 4` and `-smp 1`. Screenshots:
+    `/home/sinan/Desktop/igis-file-dialog.png` (1024×768, 29,726 B) and
+    `/home/sinan/Desktop/igis-file-dialog-open.png` (1024×768, 27,826 B).
+  - **Docs:** spec 0013 "The text editor" and changelog; spec 0018 "The `/lib`
+    file-open dialog" and changelog; PLAN/AGENTS. No ADR: this is a library
+    module and an application call site, not a kernel or ABI decision.
+  **Done (`be544fa`):** `lib/file_dialog.ig`, the editor `browse_open` wiring
+  (`PathCapacity` 256) and `scripts/file_dialog_qmp.py`; `editor: ok` on
+  `-smp 4`/`-smp 1`, `editor: host ok`, 505 host tests, `browser check`,
+  `desktop_shell check`, `boot_desktop_qmp.py` and the visual golden
+  (`37802052…e9e81c9f`) pass; the editor package is 202,328 B of code
+  (50 frames), 38,872 B of state and 51,416 B of stack.
 
 ## Deferred (not UI; pick up when they matter)
 

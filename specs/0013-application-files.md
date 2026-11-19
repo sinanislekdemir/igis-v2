@@ -238,12 +238,12 @@ tree view:
   status line and is not opened;
 - no browser action writes a file or adds a handle.
 
-### The text editor (M2.5.3; lexical highlighting M9.1; pointer/scroll M9.2)
+### The text editor (M2.5.3; lexical highlighting M9.1; pointer/scroll M9.2; file dialog M9.3)
 
 `samples/apps/base/editor` records the application-level contract over the file
 API. The document, editing and save rules are in spec 0003 ("Application
-buffers above 256 bytes") and spec 0019 (E1); M9.1 adds a view rule and M9.2 a
-drawing/drag rule:
+buffers above 256 bytes") and spec 0019 (E1); M9.1 adds a view rule, M9.2 a
+drawing/drag rule and M9.3 the file-open dialog:
 
 - a successfully opened path whose name starts with `base/`, `lib/` or
   `system/`, or whose last three bytes are `.ig`, enables **syntax
@@ -255,6 +255,24 @@ drawing/drag rule:
   quit row is index 4. `Ctrl+O`/`Ctrl+S`/`Ctrl+Q` keep their meanings; Highlight
   has no shortcut. The dropdown's checked mask carries the Highlight bit and is
   redrawn with the menu;
+- **File > Open and `Ctrl+O` (M9.3)** run the `/lib` modal file-open dialog
+  (`lib.file_dialog.open_file`, spec 0018 "The `/lib` file-open dialog") with
+  the current path as its start. The dialog begins in the current document's
+  directory with the current file name selected, lists the image with
+  `core.fs_list` (up to 96 entries; directories and regular files are
+  selectable, kind-2 entries are shown gray and refused), and returns a
+  regular-file image path or a null-like cancel (`Status.Invalid` with the
+  caller's destination untouched). Keys are Up/Down, PageUp/PageDown, Home/End,
+  Enter, Backspace/Ctrl+Up and Escape; a row click selects, a double-click
+  opens, and the visible `Up`/`Open`/`Cancel` buttons, the scrollbar track
+  (page) and thumb (drag) and the dialog's close box work. A cancel or any
+  failed choice leaves the document, path, caret, selection, scroll and
+  highlighting untouched; a successful choice is re-read through the same
+  `open_path` as before, and the editor raises its own window afterwards. The
+  editor's `PathCapacity` is `abi::fs::PATH_MAX` (256) so the dialog's whole
+  result fits, and `TempCapacity` is 260 for `<target>.tmp`. The check and
+  `langhost` paths keep calling `open_path` directly and never open the dialog;
+  no opcode, builtin, `Host` method, file API or `stdlib` function is added;
 - highlighting is **lexical only**, not a parser or type checker. One visible
   line is classified into: keywords (`unit`, `uses`, `const`, `var`, `type`,
   `record`, `end`, `procedure`, `function`, `begin`, `if`, `then`, `else`,
@@ -370,3 +388,4 @@ drawing/drag rule:
 | 2026-11-19 | M8.9: the file browser's scrollbar thumb is draggable. A pointer-down on the thumb (hit class 3) records the grab offset; pointer moves with the primary button held map the thumb top onto `top` across the travel, clamp the selection visible, and release ends the drag; track clicks still page. `scrollbar_thumb` matches `stdlib.ui_scrollbar` (track `BodyH-4`, 8-pixel floor); `browser check` drags the thumb to the bottom and `input_routing_qmp.py` proves it with a real mouse drag. No API change. |
 | 2026-11-19 | M9.1: the text editor highlights source files lexically. `base/`, `lib/`, `system/` paths and `.ig` names start highlighted; other files stay plain. The File menu gains a checked `Highlight` row (five rows total) that toggles the view. Keywords are blue, type/predeclared names dark red, strings dark green, comments gray and numbers dark brown; selected text stays white on the accent band. `//` ends at its line, `{ ... }` spans lines without nesting, and strings do not span lines. The block-comment state is scanned line by line once per frame and carried through the visible rows; token runs use whole code points and the existing checked slices, and unhighlighted drawing is unchanged. No file API, opcode, builtin or `stdlib` change. |
 | 2026-11-19 | M9.2: the editor repaints a pointer event only when it changes visible state, and its scrollbar thumb drags. The block-comment state at every line start is cached in a `bytes[8193]` table refreshed once per document publication, so a frame scans only the visible lines; the drag matches `stdlib.ui_scrollbar` and track clicks still page. The reported `Faulted(BudgetExceeded)` after 2,893 claims was the normal 10 s CPU watchdog, caused by a full repaint (and O(document) block scan) per pointer move; the fix removes the waste and leaves the budget, scheduler and realtime policy unchanged. `editor check` drags the thumb through the injected pointer path and `scripts/editor_scroll_qmp.py` proves the burst ends `Ok` with no budget fault. No file API, opcode, builtin, `Host` or `stdlib` change. |
+| 2026-11-19 | M9.3: File > Open and `Ctrl+O` run the `/lib` modal file-open dialog (`lib.file_dialog.open_file`) and load its result through the existing `open_path`; a cancel (`Invalid`) leaves every editor state untouched. The dialog starts in the current directory with the current name selected, lists up to 96 entries (directories/files selectable, kind-2 gray and refused), navigates with keys, row click/double-click, `Up`/`Open`/`Cancel`, scrollbar paging and thumb dragging, and returns a regular-file path or a cancel. The editor's `PathCapacity` becomes 256 (`PATH_MAX`) and `TempCapacity` 260; the destination is published only on `Ok`. No file API, opcode, builtin, `Host` or `stdlib` change. |

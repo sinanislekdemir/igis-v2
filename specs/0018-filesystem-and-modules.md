@@ -217,6 +217,40 @@ The kernel keeps its 128 KiB application-source buffer and adds the 16 MiB arena
 `.bss`; module sources are copied into the arena, so both buffers are static and
 preallocated (ADR 0007).
 
+### The `/lib` file-open dialog (M9.3)
+
+`samples/apps/lib/file_dialog.ig` is an ordinary module under M5/M6: it says
+`uses core, stdlib, syslib;`, declares no `main`, no top-level `var` state and no
+stream endpoint, and is compiled into every application that imports it with
+`uses lib.file_dialog;`. Its one public function is:
+
+```text
+function file_dialog.open_file(initial: const string[0];
+                               chosen: var string[256]) -> Status;
+```
+
+`open_file` opens a normal task-owned window (title `Open File`, content
+520 × 380, centred on the reported screen with the service chrome included) and
+runs the modal loop over events addressed to that window. The start directory is
+the directory part of `initial` when that directory is listable (`base/child`
+starts in `base` with `child` selected); otherwise it is the root. It reads up
+to 96 entries with `core.fs_list` from index 0 until `NotFound`, shows kind 1
+(directory), kind 0 (regular file) and kind 2 (other, gray and refused), and
+draws with `stdlib.ui_*` and the `syslib` graphics primitives only. Up/Down,
+PageUp/PageDown, Home/End, Enter, Backspace/Ctrl+Up and Escape work; a row click
+selects and a double-click opens, the visible `Up`/`Open`/`Cancel` buttons work,
+the scrollbar track pages and the thumb drags, and the close box cancels through
+the owner `EventKind.Close` request. An owner `Expose` re-reads
+`window_content_rect` so a dragged dialog redraws at its new origin, and only a
+visible change repaints.
+
+`Ok` publishes the whole regular-file path into `chosen` with one
+`core.substr_into`; a cancel is `Invalid` and a path that does not fit is
+`CapacityExceeded`, and in both cases `chosen` is untouched. A disabled screen
+(`langhost`) is `Invalid` without opening a window. The module adds no opcode,
+builtin, `Host` method, file API or `stdlib` function; it is the caller's
+window and task that host it, and the caller's own window stays behind.
+
 ## Interfaces
 
 - `abi::fs::validate_path` (L6) is the single path rule; the root-only variants
@@ -268,3 +302,4 @@ preallocated (ADR 0007).
 |------|--------|
 | 2026-11-17 | Initial draft, decided with the project owner: `uses lib.x` dotted imports, header-name qualification, read-only `/home`, embedded `stdlib`, same-image `/system`, short names resolving under `base`, caps 384 KiB / 16 MiB. |
 | 2026-11-18 | Implemented: M3.1 (tree, ext2 paths, boot, short names), M3.2 (compiler `SourceReader`/units/caps), M3.3 (kernel `ImageReader`, `module_demo`) and M3.4 (browser navigation). The kernel keeps a 128 KiB application-source buffer and copies module sources into the 16 MiB arena; `abi::MAX_UNIT_ID` is 16. |
+| 2026-11-19 | M9.3 adds `lib/file_dialog.ig`: a module with one public function, `file_dialog.open_file(initial, chosen) -> Status`, that opens a task-owned, screen-centred `Open File` window, lists up to 96 image entries, navigates with keys/pointer/scrollbar and writes a regular-file path only on `Ok` (`Invalid` cancel, `CapacityExceeded` when the caller's 256-byte destination cannot hold it; both leave `chosen` untouched). It follows the M5 (`stdlib` import) and M6 (no `main`/state/stream) module rules and adds no opcode, builtin, file API or `stdlib` function. |
