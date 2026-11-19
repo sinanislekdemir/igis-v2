@@ -238,6 +238,56 @@ tree view:
   status line and is not opened;
 - no browser action writes a file or adds a handle.
 
+### The text editor (M2.5.3; lexical highlighting M9.1)
+
+`samples/apps/base/editor` records the application-level contract over the file
+API. The document, editing and save rules are in spec 0003 ("Application
+buffers above 256 bytes") and spec 0019 (E1); M9.1 adds only a view rule:
+
+- a successfully opened path whose name starts with `base/`, `lib/` or
+  `system/`, or whose last three bytes are `.ig`, enables **syntax
+  highlighting**. Any other text file (for example `home/readme.txt`) stays
+  plain; the File menu's **Highlight** row toggles colouring for the current
+  document either way and carries a check mark while it is on. Opening a file
+  resets the toggle from the path rule;
+- the File menu is five rows — `Open`, `Save`, `-`, `Highlight`, `Quit` — so the
+  quit row is index 4. `Ctrl+O`/`Ctrl+S`/`Ctrl+Q` keep their meanings; Highlight
+  has no shortcut. The dropdown's checked mask carries the Highlight bit and is
+  redrawn with the menu;
+- highlighting is **lexical only**, not a parser or type checker. One visible
+  line is classified into: keywords (`unit`, `uses`, `const`, `var`, `type`,
+  `record`, `end`, `procedure`, `function`, `begin`, `if`, `then`, `else`,
+  `while`, `do`, `case`, `of`, `return`, `array`, `ring`, `map`, `in_stream`,
+  `out_stream`, `value`, `and`, `or`, `not`, `div`, `mod`, `fault`, `exit`,
+  `true`, `false`), predeclared type names (`int`, `uint`, `byte`, `bool`,
+  `f64`, `string`, `bytes`, `Status`, `FaultCode`, `Diagnostic`, `ExitReason`,
+  `Rect`, `Event`, `EventKind`), strings, comments, numbers and default text;
+- the palette is keyword `0x000080`, type `0x800000`, string `0x008000`,
+  comment `0x808080`, number `0x804000`; punctuation, whitespace and other
+  identifiers stay black. Selected cells remain white on the accent band, and
+  the caret, scrolling, line/column readout, editing and save behaviour are
+  unchanged;
+- `//` runs to the end of its line. `{ ... }` is a block comment that ends at
+  the first `}`, does not nest, and may span lines. A `//` or `{` inside a
+  string is string content. A string runs to its closing quote (`\"` is skipped)
+  or to the line end, matching the language's single-line literals. An
+  unterminated string or block comment colours to the end of its line and, for
+  a block comment, carries the comment state to following lines;
+- the block-comment state at the first visible line is computed by scanning the
+  document from byte 0 to that line's start once per frame, line by line (so a
+  `//` never swallows a later line's `{`), then carried through the visible
+  lines. The scan is allocation-free and O(document), bounded by the 8192-byte
+  buffer. With highlighting off the old all-black/all-white drawing path is
+  used exactly;
+- token boundaries are whole UTF-8 code points and every drawn run still goes
+  through `core.substr_into` and the existing `snap_boundary`, so a multi-byte
+  code point is never split. Non-ASCII default text stays black;
+- no file API call, handle, opcode, builtin, `Host` method or `stdlib` function
+  is added. `editor check` covers source-vs-plain detection, the menu check,
+  every palette class, a block comment that spans lines and one that starts
+  above the visible first line, and that the toggle off leaves no palette
+  pixel; the host path has no screen and reports the same logical verdict.
+
 ## Interfaces
 
 | Layer | Contract |
@@ -286,3 +336,4 @@ tree view:
 | 2026-11-18 | M3.4 amendment: the browser navigates — one directory at a time with a `dir` path, `Enter`/double-click descends into a kind-1 entry, `Backspace`/`Ctrl+Up` truncates the current path to go up (no `..`), preview and launch use the full path, the listing capacity is 96, and path construction is bounded by `PATH_MAX`. |
 | 2026-11-19 | M8.8: the file browser gains a visible `Up` button in the path line (44×18, left of the writability label) that goes to the parent through the real pointer path; `Backspace`/`Ctrl+Up` remain, and the status hint names `Bksp up`. `browser check` clicks the button, and `input_routing_qmp.py` requires the path to return to the pre-navigation root. No API change. |
 | 2026-11-19 | M8.9: the file browser's scrollbar thumb is draggable. A pointer-down on the thumb (hit class 3) records the grab offset; pointer moves with the primary button held map the thumb top onto `top` across the travel, clamp the selection visible, and release ends the drag; track clicks still page. `scrollbar_thumb` matches `stdlib.ui_scrollbar` (track `BodyH-4`, 8-pixel floor); `browser check` drags the thumb to the bottom and `input_routing_qmp.py` proves it with a real mouse drag. No API change. |
+| 2026-11-19 | M9.1: the text editor highlights source files lexically. `base/`, `lib/`, `system/` paths and `.ig` names start highlighted; other files stay plain. The File menu gains a checked `Highlight` row (five rows total) that toggles the view. Keywords are blue, type/predeclared names dark red, strings dark green, comments gray and numbers dark brown; selected text stays white on the accent band. `//` ends at its line, `{ ... }` spans lines without nesting, and strings do not span lines. The block-comment state is scanned line by line once per frame and carried through the visible rows; token runs use whole code points and the existing checked slices, and unhighlighted drawing is unchanged. No file API, opcode, builtin or `stdlib` change. |

@@ -38,6 +38,14 @@ unit editor;
 //
 // The File menu's Open re-reads the current path (there is no file picker
 // until M2.5.4), Ctrl+O does the same, Ctrl+Q quits and Ctrl+A selects all.
+// M9.1 adds lexical syntax highlighting for source files and a File > Highlight
+// toggle: `unit`, `var`, `if` and the other keywords are blue, type and
+// predeclared names dark red, strings dark green, comments gray and numbers
+// dark brown. A file opened from `base/`, `lib/` or `system/`, or ending in
+// `.ig`, starts highlighted; other text files stay plain and can be toggled on.
+// Block comments (`{ ... }`) carry their state across visible lines; UTF-8 code
+// points are never split because token runs use whole code points and the
+// drawing path still publishes slices through the checked `core.substr_into`.
 // The scrollbar uses `ui_scrollbar`/`ui_scrollbar_hit`: a click on the track
 // pages the view; dragging the thumb is not implemented (the M2.4 scrollbar
 // helper defers thumb dragging). Tab inserts two spaces, the repository's
@@ -83,6 +91,23 @@ const
   ScrollH = 416;
   StatusTop = 456;
 
+  // File menu rows: Open, Save, separator, Highlight, Quit.
+  FileItemCount = 5;
+  FileHighlightItem = 3;
+  FileQuitItem = 4;
+
+  // Lexical token classes and the longest word the highlighter compares
+  // (`in_stream`/`out_stream` are 10 bytes; 16 leaves headroom).
+  ClassDefault = 0;
+  ClassKeyword = 1;
+  ClassType = 2;
+  ClassString = 3;
+  ClassComment = 4;
+  ClassNumber = 5;
+  TokenCapacity = 16;
+  KeywordCount = 33;
+  TypeCount = 14;
+
   HoldSeconds = 5;
   NanosPerSecond = 1000000000;
 
@@ -110,7 +135,16 @@ var
   file_items: array[string[64], 16];
   file_keys: array[string[32], 16];
   file_disabled: uint;
+  file_checked: uint;
   titles: array[string[32], 8];
+
+  // Lexical highlighting (M9.1): the keyword/type tables are built once at
+  // startup; `block_open` carries a `{ ... }` comment across visible lines.
+  highlight: bool;
+  block_open: bool;
+  keywords: array[string[16], 40];
+  type_names: array[string[16], 20];
+  word_buf: string[TokenCapacity];
 
   // Window and absolute layout.
   id: int;
@@ -126,6 +160,11 @@ var
   white: uint;
   gray: uint;
   accent: uint;
+  kw_color: uint;
+  type_color: uint;
+  string_color: uint;
+  comment_color: uint;
+  number_color: uint;
 
   // Mode and scratch.
   mode: int;
@@ -160,6 +199,28 @@ begin
     out.say(label);
     out.say(")\n");
   end;
+end;
+
+// True when any pixel in the rectangle has exactly `color`. The M9.1 syntax
+// probes use it on one glyph row (8 px tall) at a time, so the scan is small.
+function region_has_color(x: int; y: int; w: int; h: int; color: uint): bool;
+var
+  px: int;
+  py: int;
+begin
+  py := y;
+  while py < y + h do
+  begin
+    px := x;
+    while px < x + w do
+    begin
+      if syslib.get_pixel(px, py) = color then
+        return true;
+      px := px + 1;
+    end;
+    py := py + 1;
+  end;
+  return false;
 end;
 
 // ---- text geometry (pure over any capacity) ------------------------------
@@ -290,6 +351,341 @@ begin
   while i > from and i < length and is_continuation(t[i]) do
     i := i - 1;
   return i;
+end;
+
+// ---- lexical highlighting (M9.1) ----------------------------------------
+
+// The keyword and type tables are fixed arrays built once at startup; no
+// allocation, no generic container and no new language feature.
+
+function is_digit(value: byte): bool;
+begin
+  return value >= byte(48) and value <= byte(57);
+end;
+
+function is_hex_digit(value: byte): bool;
+begin
+  return is_digit(value) or
+    (value >= byte(97) and value <= byte(102)) or
+    (value >= byte(65) and value <= byte(70));
+end;
+
+function is_letter(value: byte): bool;
+begin
+  return (value >= byte(65) and value <= byte(90)) or
+    (value >= byte(97) and value <= byte(122));
+end;
+
+function is_ident_start(value: byte): bool;
+begin
+  return is_letter(value) or value = byte(95);
+end;
+
+function is_ident_char(value: byte): bool;
+begin
+  return is_ident_start(value) or is_digit(value);
+end;
+
+// Byte length of the UTF-8 code point at `at` (the text is valid UTF-8, so a
+// lead byte always has its full sequence before the line's '\n'); clamped to
+// `stop` anyway. Used so a default token never begins or ends inside a code
+// point.
+function codepoint_length(t: const string[0]; at: int; stop: int): int;
+var
+  value: byte;
+  length: int;
+begin
+  value := t[at];
+  length := 1;
+  if value >= byte(0xF0) then
+    length := 4
+  else if value >= byte(0xE0) then
+    length := 3
+  else if value >= byte(0xC0) then
+    length := 2;
+  if at + length > stop then
+    length := stop - at;
+  return length;
+end;
+
+procedure setup_highlight();
+begin
+  keywords[0] := "unit";
+  keywords[1] := "uses";
+  keywords[2] := "const";
+  keywords[3] := "var";
+  keywords[4] := "type";
+  keywords[5] := "record";
+  keywords[6] := "end";
+  keywords[7] := "procedure";
+  keywords[8] := "function";
+  keywords[9] := "begin";
+  keywords[10] := "if";
+  keywords[11] := "then";
+  keywords[12] := "else";
+  keywords[13] := "while";
+  keywords[14] := "do";
+  keywords[15] := "case";
+  keywords[16] := "of";
+  keywords[17] := "return";
+  keywords[18] := "array";
+  keywords[19] := "ring";
+  keywords[20] := "map";
+  keywords[21] := "in_stream";
+  keywords[22] := "out_stream";
+  keywords[23] := "value";
+  keywords[24] := "and";
+  keywords[25] := "or";
+  keywords[26] := "not";
+  keywords[27] := "div";
+  keywords[28] := "mod";
+  keywords[29] := "fault";
+  keywords[30] := "exit";
+  keywords[31] := "true";
+  keywords[32] := "false";
+
+  type_names[0] := "int";
+  type_names[1] := "uint";
+  type_names[2] := "byte";
+  type_names[3] := "bool";
+  type_names[4] := "f64";
+  type_names[5] := "string";
+  type_names[6] := "bytes";
+  type_names[7] := "Status";
+  type_names[8] := "FaultCode";
+  type_names[9] := "Diagnostic";
+  type_names[10] := "ExitReason";
+  type_names[11] := "Rect";
+  type_names[12] := "Event";
+  type_names[13] := "EventKind";
+end;
+
+function classify_word(t: const string[0]; at: int; stop: int): int;
+var
+  length: int;
+  got: int;
+  i: int;
+begin
+  length := stop - at;
+  if length > TokenCapacity then
+    return ClassDefault;
+  got := core.substr_into(word_buf, t, at, length);
+  if got <> length then
+    return ClassDefault;
+  i := 0;
+  while i < KeywordCount do
+  begin
+    if word_buf = keywords[i] then
+      return ClassKeyword;
+    i := i + 1;
+  end;
+  i := 0;
+  while i < TypeCount do
+  begin
+    if word_buf = type_names[i] then
+      return ClassType;
+    i := i + 1;
+  end;
+  return ClassDefault;
+end;
+
+// Classifies the token starting at `at` and sets its exclusive end, its class
+// and the block-comment state after it. `//` runs to the line end, `{` opens a
+// block comment that ends at the first `}` (no nesting, as the lexer), a
+// string runs to its closing quote (with `\"` skipped) or the line end, and
+// any other byte is one default code point. A `//` or `{` inside a string is
+// string content, and strings/comments skip their interior.
+procedure scan_token(t: const string[0]; at: int; stop: int; in_block: bool;
+                    out_end: var int; out_class: var int; out_block: var bool);
+var
+  value: byte;
+  i: int;
+  exponent: int;
+begin
+  out_end := at;
+  out_class := ClassDefault;
+  out_block := in_block;
+  if at >= stop then
+    return;
+  value := t[at];
+  if in_block then
+  begin
+    out_class := ClassComment;
+    i := at;
+    while i < stop do
+    begin
+      if t[i] = byte(125) then
+      begin
+        out_end := i + 1;
+        out_block := false;
+        return;
+      end;
+      i := i + 1;
+    end;
+    out_end := stop;
+    out_block := true;
+    return;
+  end;
+  if value = byte(47) and at + 1 < stop and t[at + 1] = byte(47) then
+  begin
+    out_class := ClassComment;
+    out_end := stop;
+    return;
+  end;
+  if value = byte(123) then
+  begin
+    out_class := ClassComment;
+    i := at + 1;
+    while i < stop do
+    begin
+      if t[i] = byte(125) then
+      begin
+        out_end := i + 1;
+        out_block := false;
+        return;
+      end;
+      i := i + 1;
+    end;
+    out_end := stop;
+    out_block := true;
+    return;
+  end;
+  if value = byte(34) then
+  begin
+    out_class := ClassString;
+    i := at + 1;
+    while i < stop do
+    begin
+      if t[i] = byte(92) then
+        i := i + 2
+      else if t[i] = byte(34) then
+      begin
+        out_end := i + 1;
+        return;
+      end
+      else
+        i := i + 1;
+    end;
+    out_end := stop;
+    return;
+  end;
+  if is_digit(value) then
+  begin
+    out_class := ClassNumber;
+    i := at;
+    if value = byte(48) and i + 1 < stop and
+       (t[i + 1] = byte(120) or t[i + 1] = byte(88)) and
+       i + 2 < stop and is_hex_digit(t[i + 2]) then
+    begin
+      i := i + 2;
+      while i < stop and is_hex_digit(t[i]) do
+        i := i + 1;
+    end
+    else
+    begin
+      while i < stop and is_digit(t[i]) do
+        i := i + 1;
+      if i + 1 < stop and t[i] = byte(46) and is_digit(t[i + 1]) then
+      begin
+        i := i + 2;
+        while i < stop and is_digit(t[i]) do
+          i := i + 1;
+      end;
+      if i < stop and (t[i] = byte(101) or t[i] = byte(69)) then
+      begin
+        exponent := i + 1;
+        if exponent < stop and
+           (t[exponent] = byte(43) or t[exponent] = byte(45)) then
+          exponent := exponent + 1;
+        if exponent < stop and is_digit(t[exponent]) then
+        begin
+          i := exponent + 1;
+          while i < stop and is_digit(t[i]) do
+            i := i + 1;
+        end;
+      end;
+    end;
+    out_end := i;
+    return;
+  end;
+  if is_ident_start(value) then
+  begin
+    i := at + 1;
+    while i < stop and is_ident_char(t[i]) do
+      i := i + 1;
+    out_end := i;
+    out_class := classify_word(t, at, i);
+    return;
+  end;
+  out_end := at + codepoint_length(t, at, stop);
+end;
+
+// Block-comment state at byte `up_to` (normally a line start), computed by a
+// single allocation-free scan from byte 0. O(document) per frame, bounded by
+// the 8192-byte buffer.
+function block_state_at(up_to: int): bool;
+var
+  i: int;
+  line_stop: int;
+  next_state: bool;
+  finish: int;
+  cls: int;
+  state: bool;
+begin
+  i := 0;
+  state := false;
+  while i < up_to do
+  begin
+    // A `//` comment ends at its own line's '\n', so the state scan must not
+    // let one line's `//` swallow a later line's `{`.
+    line_stop := i;
+    while line_stop < up_to and text[line_stop] <> byte(10) do
+      line_stop := line_stop + 1;
+    while i < line_stop do
+    begin
+      scan_token(text, i, line_stop, state, finish, cls, next_state);
+      if finish <= i then
+        finish := i + 1;
+      state := next_state;
+      i := finish;
+    end;
+    if i < up_to and text[i] = byte(10) then
+      i := i + 1;
+  end;
+  return state;
+end;
+
+function class_color(cls: int): uint;
+begin
+  if cls = ClassKeyword then
+    return kw_color;
+  if cls = ClassType then
+    return type_color;
+  if cls = ClassString then
+    return string_color;
+  if cls = ClassComment then
+    return comment_color;
+  if cls = ClassNumber then
+    return number_color;
+  return black;
+end;
+
+// A source path is highlighted by default: `base/`, `lib/` and `system/` hold
+// source, and a `.ig` suffix names source anywhere. Other text files (for
+// example `home/*.txt`) stay plain until the File > Highlight toggle turns
+// colouring on.
+function is_source_path(name: const string[0]): bool;
+var
+  length: int;
+begin
+  if stdlib.starts_with(name, "base/") or stdlib.starts_with(name, "lib/") or
+     stdlib.starts_with(name, "system/") then
+    return true;
+  length := int(core.len(name));
+  if length >= 3 and name[length - 3] = byte(46) and
+     name[length - 2] = byte(105) and name[length - 1] = byte(103) then
+    return true;
+  return false;
 end;
 
 // ---- editing over the 8 KiB buffer ---------------------------------------
@@ -491,6 +887,9 @@ begin
     return value;
   end;
   used := core.substr_into(path, name, 0, int(core.len(name)));
+  highlight := is_source_path(path);
+  file_checked := stdlib.ui_menu_set(
+    file_checked, FileHighlightItem, highlight);
   caret := 0;
   anchor := 0;
   top_line := 0;
@@ -995,12 +1394,15 @@ begin
   file_items[0] := "Open";
   file_items[1] := "Save";
   file_items[2] := "-";
-  file_items[3] := "Quit";
+  file_items[3] := "Highlight";
+  file_items[4] := "Quit";
   file_keys[0] := "Ctrl+O";
   file_keys[1] := "Ctrl+S";
   file_keys[2] := "";
-  file_keys[3] := "Ctrl+Q";
-  // Every row is enabled now that the home filesystem is writable.
+  file_keys[3] := "";
+  file_keys[4] := "Ctrl+Q";
+  // Every row is enabled now that the home filesystem is writable; the
+  // separator is never selectable regardless of the mask.
   file_disabled := uint(0);
 end;
 
@@ -1012,7 +1414,21 @@ end;
 
 procedure open_file_menu();
 begin
-  open_menu := stdlib.ui_menu_open(0, 4, file_items, file_disabled, selected);
+  open_menu := stdlib.ui_menu_open(
+    0, FileItemCount, file_items, file_disabled, selected);
+end;
+
+// The File > Highlight toggle: lexical colouring on/off and the menu check
+// mark stay in step. The caller redraws the frame.
+procedure toggle_highlight();
+begin
+  highlight := not highlight;
+  file_checked := stdlib.ui_menu_set(
+    file_checked, FileHighlightItem, highlight);
+  if highlight then
+    status_line := "syntax on"
+  else
+    status_line := "syntax off";
 end;
 
 procedure activate_menu(index: int);
@@ -1027,7 +1443,12 @@ begin
     close_menu();
     try_save();
   end
-  else if index = 3 then
+  else if index = FileHighlightItem then
+  begin
+    close_menu();
+    toggle_highlight();
+  end
+  else if index = FileQuitItem then
   begin
     close_menu();
     running := false;
@@ -1056,9 +1477,11 @@ begin
     if action = 6 then
       close_menu()
     else if action = 1 then
-      selected := stdlib.ui_menu_move(selected, 4, -1, file_items, file_disabled)
+      selected := stdlib.ui_menu_move(
+        selected, FileItemCount, -1, file_items, file_disabled)
     else if action = 2 then
-      selected := stdlib.ui_menu_move(selected, 4, 1, file_items, file_disabled)
+      selected := stdlib.ui_menu_move(
+        selected, FileItemCount, 1, file_items, file_disabled)
     else if action = 5 then
     begin
       if selected >= 0 and
@@ -1205,7 +1628,8 @@ begin
     if open_menu >= 0 then
     begin
       row := stdlib.ui_menu_hit(
-        rect.x + 4, rect.y + MenuBarH, MenuW, file_items, 4, ev.x, ev.y);
+        rect.x + 4, rect.y + MenuBarH, MenuW, file_items, FileItemCount,
+        ev.x, ev.y);
       if row >= 0 then
       begin
         if stdlib.ui_menu_selectable(file_items[row], file_disabled, row) then
@@ -1234,7 +1658,8 @@ begin
     if open_menu >= 0 then
     begin
       row := stdlib.ui_menu_hit(
-        rect.x + 4, rect.y + MenuBarH, MenuW, file_items, 4, ev.x, ev.y);
+        rect.x + 4, rect.y + MenuBarH, MenuW, file_items, FileItemCount,
+        ev.x, ev.y);
       if row >= 0 and row = selected and
          stdlib.ui_menu_selectable(file_items[row], file_disabled, row) then
         activate_menu(row)
@@ -1248,7 +1673,8 @@ begin
     if open_menu >= 0 then
     begin
       row := stdlib.ui_menu_hit(
-        rect.x + 4, rect.y + MenuBarH, MenuW, file_items, 4, ev.x, ev.y);
+        rect.x + 4, rect.y + MenuBarH, MenuW, file_items, FileItemCount,
+        ev.x, ev.y);
       if row >= 0 and stdlib.ui_menu_selectable(file_items[row], file_disabled, row) then
         selected := row;
     end;
@@ -1336,6 +1762,127 @@ begin
     draw_segment(from, from, to, y, black);
 end;
 
+// One line with lexical colours (M9.1). `block_open` is the block-comment
+// state at the line start and is left at the line end, so `draw_lines` carries
+// it to the next visible line. The whole line is scanned (even the part left
+// of `left_byte`) so a comment opened before the visible span still colours
+// it; only the visible span is drawn, in at most three pieces around the
+// selection band. Runs of default bytes are merged into one draw call, so a
+// line of plain text costs one `draw_text`.
+procedure draw_syntax_line(start: int; stop: int; y: int);
+var
+  from: int;
+  to: int;
+  first: int;
+  last: int;
+  band_from: int;
+  band_to: int;
+  i: int;
+  finish: int;
+  cls: int;
+  step: int;
+  state: bool;
+  next_state: bool;
+  grouping: bool;
+  a: int;
+  b: int;
+  ink: uint;
+  part_from: int;
+  part_to: int;
+begin
+  from := start + left_byte;
+  if from > stop then
+    from := stop;
+  to := stop;
+  if to > from + VisibleCols then
+    to := from + VisibleCols;
+  to := snap_boundary(text, from, to);
+  if to < from then
+    to := from;
+  selection_bounds(first, last);
+  band_from := from;
+  if first > band_from then
+    band_from := first;
+  band_to := to;
+  if last < band_to then
+    band_to := last;
+  if band_from < band_to then
+    st := syslib.fill_rect(
+      text_x + (band_from - from) * 8, y + 2,
+      (band_to - band_from) * 8, 12, accent);
+
+  state := block_open;
+  i := start;
+  while i < stop do
+  begin
+    scan_token(text, i, stop, state, finish, cls, next_state);
+    state := next_state;
+    if finish <= i then
+      finish := i + 1;
+    if cls = ClassDefault then
+    begin
+      // Merge all following default bytes (whitespace, punctuation, whole
+      // non-ASCII code points) until a token that needs its own colour.
+      grouping := true;
+      while finish < stop and grouping do
+      begin
+        if text[finish] = byte(47) and finish + 1 < stop and
+           text[finish + 1] = byte(47) then
+          grouping := false
+        else if text[finish] = byte(123) or text[finish] = byte(34) or
+                is_digit(text[finish]) or is_ident_start(text[finish]) then
+          grouping := false
+        else
+        begin
+          step := codepoint_length(text, finish, stop);
+          if step <= 0 then
+            grouping := false
+          else
+            finish := finish + step;
+        end;
+      end;
+    end;
+
+    ink := class_color(cls);
+    a := i;
+    if a < from then
+      a := from;
+    b := finish;
+    if b > to then
+      b := to;
+    if a < b then
+    begin
+      // The unselected span before the band keeps the token colour.
+      part_from := a;
+      part_to := b;
+      if part_to > band_from then
+        part_to := band_from;
+      if part_to > part_from then
+        draw_segment(from, part_from, part_to, y, ink);
+
+      // Selected cells are white on the accent band, as before.
+      part_from := a;
+      if part_from < band_from then
+        part_from := band_from;
+      part_to := b;
+      if part_to > band_to then
+        part_to := band_to;
+      if part_to > part_from then
+        draw_segment(from, part_from, part_to, y, white);
+
+      // The unselected span after the band.
+      part_from := a;
+      if part_from < band_to then
+        part_from := band_to;
+      part_to := b;
+      if part_to > part_from then
+        draw_segment(from, part_from, part_to, y, ink);
+    end;
+    i := finish;
+  end;
+  block_open := state;
+end;
+
 procedure draw_lines();
 var
   total: int;
@@ -1352,6 +1899,8 @@ begin
   length := int(core.len(text));
   total := line_count(text);
   start := line_start_of(text, top_line);
+  if highlight then
+    block_open := block_state_at(start);
   row := 0;
   while row < Rows do
   begin
@@ -1360,7 +1909,10 @@ begin
     begin
       stop := line_end_of(text, start);
       y := text_y + row * LineH;
-      draw_line(start, stop, y);
+      if highlight then
+        draw_syntax_line(start, stop, y)
+      else
+        draw_line(start, stop, y);
       if stop < length then
         start := stop + 1
       else
@@ -1426,8 +1978,8 @@ end;
 procedure draw_dropdown();
 begin
   st := stdlib.ui_menu_dropdown(
-    rect.x + 4, rect.y + MenuBarH, MenuW, file_items, file_keys, 4,
-    selected, uint(0), file_disabled, true);
+    rect.x + 4, rect.y + MenuBarH, MenuW, file_items, file_keys, FileItemCount,
+    selected, file_checked, file_disabled, true);
 end;
 
 // One complete frame: background, menu, path line, text view, carets,
@@ -1691,11 +2243,90 @@ var
   found: bool;
   a: int;
   b: int;
+  value: Status;
 begin
   file_checks();
   scroll_checks();
   buffer_checks();
   save_checks();
+
+  // M9.1: source paths start highlighted, plain text files do not, and the
+  // File > Highlight row is present and checked.
+  value := open_path("home/readme.txt");
+  verify("plain file plain", value = Ok and not highlight);
+  verify("plain menu clear", not stdlib.ui_menu_has(file_checked, FileHighlightItem));
+  value := open_path("base/child");
+  verify("source file highlighted", value = Ok and highlight);
+  verify("highlight item", file_items[FileHighlightItem] = "Highlight");
+  verify("highlight checked", stdlib.ui_menu_has(file_checked, FileHighlightItem));
+
+  // Lexical colours on deterministic source lines: keyword, comment, type,
+  // number and string; then a block comment that starts on one line and ends
+  // on the next.
+  text := "unit child; // note\nvar n: int; const k := 1;\nconst s := \"x\";";
+  highlight := true;
+  file_checked := stdlib.ui_menu_set(file_checked, FileHighlightItem, true);
+  collapse_to(int(core.len(text)));
+  top_line := 0;
+  left_byte := 0;
+  draw_all();
+  present_frame();
+  verify("syntax keyword",
+    region_has_color(text_x, text_y + 4, 320, 8, kw_color));
+  verify("syntax comment",
+    region_has_color(text_x, text_y + 4, 320, 8, comment_color));
+  verify("syntax type",
+    region_has_color(text_x, text_y + 4 + LineH, 320, 8, type_color));
+  verify("syntax number",
+    region_has_color(text_x, text_y + 4 + LineH, 320, 8, number_color));
+  verify("syntax string",
+    region_has_color(text_x, text_y + 4 + 2 * LineH, 320, 8, string_color));
+
+  text := "unit c; { note\nstill note } var n: int;";
+  collapse_to(int(core.len(text)));
+  top_line := 0;
+  left_byte := 0;
+  draw_all();
+  present_frame();
+  verify("block comment continues",
+    region_has_color(text_x, text_y + 4 + LineH, 320, 8, comment_color));
+  verify("block comment ends",
+    region_has_color(text_x, text_y + 4 + LineH, 320, 8, type_color));
+
+  // The state at the first visible line must be computed line by line: the
+  // earlier `//` ends at its newline and does not swallow the `{` on line 1.
+  text := "// lead\n{ note\nstill note } var n: int;";
+  collapse_to(int(core.len(text)));
+  top_line := 2;
+  left_byte := 0;
+  draw_all();
+  present_frame();
+  verify("scrolled block comment",
+    region_has_color(text_x, text_y + 4, 320, 8, comment_color));
+  verify("scrolled block ends",
+    region_has_color(text_x, text_y + 4, 320, 8, type_color));
+
+  // The toggle off leaves only black/white/accent in the text area and clears
+  // the menu check. Use the same three coloured lines as the on-probes.
+  text := "unit child; // note\nvar n: int; const k := 1;\nconst s := \"x\";";
+  collapse_to(int(core.len(text)));
+  top_line := 0;
+  left_byte := 0;
+  highlight := false;
+  file_checked := stdlib.ui_menu_set(file_checked, FileHighlightItem, false);
+  draw_all();
+  present_frame();
+  verify("off keyword",
+    not region_has_color(text_x, text_y + 4, 320, 8, kw_color));
+  verify("off comment",
+    not region_has_color(text_x, text_y + 4 + LineH, 320, 8, comment_color));
+  verify("off type",
+    not region_has_color(text_x, text_y + 4 + LineH, 320, 8, type_color));
+  verify("off string",
+    not region_has_color(text_x, text_y + 4 + 2 * LineH, 320, 8, string_color));
+  verify("highlight menu off", not stdlib.ui_menu_has(file_checked, FileHighlightItem));
+  highlight := true;
+  file_checked := stdlib.ui_menu_set(file_checked, FileHighlightItem, true);
 
   // A deterministic document for the drawing probes.
   text := "IGIS editor\nline two\nline three";
@@ -1944,6 +2575,17 @@ begin
   white := stdlib.ui_white();
   gray := stdlib.ui_gray();
   accent := stdlib.ui_accent();
+  // M9.1 palette: keyword blue, type dark red, string dark green, comment
+  // medium gray, number dark brown. Selected text stays white on the accent.
+  kw_color := uint(0x000080);
+  type_color := uint(0x800000);
+  string_color := uint(0x008000);
+  comment_color := uint(0x808080);
+  number_color := uint(0x804000);
+  highlight := true;
+  block_open := false;
+  file_checked := uint(0);
+  setup_highlight();
   setup_menu();
   parse_args(args);
 
