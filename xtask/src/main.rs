@@ -34,7 +34,7 @@ fn main() -> ExitCode {
         other => {
             eprintln!("unknown command: {other}");
             eprintln!(
-                "usage: cargo xtask <build|image [--shell] [--reset-home]|run [--headless] [--no-tablet] [--no-net] [--no-home] [--reset-home] [--shell] [--cores N]|clean>"
+                "usage: cargo xtask <build|image [--shell] [--reset-home]|run [--headless] [--no-tablet] [--no-net] [--net-device virtio|e1000|e1000e] [--no-home] [--reset-home] [--shell] [--cores N]|clean>"
             );
             ExitCode::FAILURE
         }
@@ -308,8 +308,20 @@ fn run(args: &[String]) -> ExitCode {
     // be checked (spec 0010, M2.2.6).
     let no_tablet = args.iter().any(|arg| arg == "--no-tablet");
     // One user-mode NIC is the default test device (spec 0020, N19/ADR 0049);
-    // `--no-net` proves the graceful-absence path.
+    // `--no-net` proves the graceful-absence path and `--net-device` selects the
+    // driver under test (virtio-net is the default, e1000/e1000e is VMware's
+    // standard virtual NIC and the second `NetDevice` implementation).
     let no_net = args.iter().any(|arg| arg == "--no-net");
+    let mut net_device = "virtio";
+    if let Some(position) = args.iter().position(|arg| arg == "--net-device") {
+        match args.get(position + 1).map(String::as_str) {
+            Some(value @ ("virtio" | "e1000" | "e1000e")) => net_device = value,
+            _ => {
+                eprintln!("--net-device needs one of virtio, e1000, e1000e");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     // The home disk is optional (spec 0019, H2/H3); `--no-home` proves the
     // read-only fallback exactly as an image without the drive would.
     let no_home = args.iter().any(|arg| arg == "--no-home");
@@ -365,14 +377,16 @@ fn run(args: &[String]) -> ExitCode {
         qemu.arg("-device").arg("usb-tablet");
     }
 
-    // One deterministic legacy virtio-net device on QEMU user networking
-    // (spec 0020, N19; ADR 0049). `disable-modern=on` keeps the legacy I/O
-    // BAR0 register layout the driver implements.
+    // One deterministic NIC on QEMU user networking (spec 0020, N19; ADR 0049).
+    // `disable-modern=on` keeps the legacy I/O BAR0 register layout the virtio
+    // driver implements; `e1000`/`e1000e` select the MMIO driver instead.
     if !no_net {
-        qemu.arg("-netdev")
-            .arg("user,id=n0")
-            .arg("-device")
-            .arg("virtio-net-pci,netdev=n0,disable-modern=on");
+        qemu.arg("-netdev").arg("user,id=n0").arg("-device");
+        match net_device {
+            "e1000" => qemu.arg("e1000,netdev=n0"),
+            "e1000e" => qemu.arg("e1000e,netdev=n0"),
+            _ => qemu.arg("virtio-net-pci,netdev=n0,disable-modern=on"),
+        };
     } else {
         // QEMU adds a default e1000 when no network option is present;
         // `-nic none` makes `--no-net` a real absence (spec 0020, N19).

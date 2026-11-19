@@ -15,6 +15,7 @@
 // suppressing it one item at a time.
 #![allow(dead_code)]
 
+mod e1000;
 mod virtio;
 
 use ::net::{Config, Stack};
@@ -26,6 +27,7 @@ use crate::pci;
 use crate::println;
 use crate::sync::SpinLock;
 
+use e1000::E1000;
 use virtio::VirtioNet;
 
 /// Largest frame the driver copies out of one RX buffer (2 KiB minus nothing;
@@ -47,6 +49,7 @@ pub struct NetInfo {
 enum Device {
     None,
     Virtio(VirtioNet),
+    E1000(E1000),
 }
 
 impl Device {
@@ -54,6 +57,7 @@ impl Device {
         match self {
             Device::None => Status::IoError,
             Device::Virtio(device) => device.transmit(frame),
+            Device::E1000(device) => device.transmit(frame),
         }
     }
 
@@ -61,11 +65,12 @@ impl Device {
         match self {
             Device::None => None,
             Device::Virtio(device) => device.receive(out),
+            Device::E1000(device) => device.receive(out),
         }
     }
 
     fn present(&self) -> bool {
-        matches!(self, Device::Virtio(_))
+        matches!(self, Device::Virtio(_) | Device::E1000(_))
     }
 }
 
@@ -103,12 +108,23 @@ fn pack_mac(mac: [u8; 6]) -> u64 {
 
 /// Finds, brings up and records the NIC. A missing or failed device is a
 /// normal boot line and leaves every socket call disabled.
+///
+/// virtio-net is tried first and wins when both devices are present; a machine
+/// with only an e1000/e1000e (VMware's standard NICs) runs the second driver
+/// behind the same seam. `xtask --net-device` attaches exactly one of them.
 pub fn init() {
-    let Some(controller) = pci::find_virtio_net() else {
-        println!("net: no device");
+    if let Some(controller) = pci::find_virtio_net() {
+        init_virtio(&controller);
         return;
-    };
+    }
+    if let Some(controller) = pci::find_e1000() {
+        init_e1000(&controller);
+        return;
+    }
+    println!("net: no device");
+}
 
+fn init_virtio(controller: &pci::VirtioNetController) {
     // The value must live in the static before `bring_up`: the descriptor
     // addresses written there are the addresses of its own buffers.
     let outcome = {
@@ -116,7 +132,7 @@ pub fn init() {
         guard.device = Device::Virtio(VirtioNet::empty(controller.io_base));
         let NetState { stack, device, .. } = &mut *guard;
         match device {
-            Device::Virtio(nic) => match nic.bring_up(&controller) {
+            Device::Virtio(nic) => match nic.bring_up(controller) {
                 Ok(tx_ok) => {
                     let mac = nic.mac();
                     stack.set_mac(mac);
@@ -127,7 +143,7 @@ pub fn init() {
                     None
                 }
             },
-            Device::None => None,
+            _ => None,
         }
     };
 
@@ -151,6 +167,69 @@ pub fn init() {
         virtio::RX_BUFFERS,
         virtio::TX_BUFFERS
     );
+    if tx_ok {
+        println!("net: tx ok");
+    }
+}
+
+fn init_e1000(controller: &pci::E1000Controller) {
+    // Same rule as virtio: the ring and buffer addresses are taken from the
+    // value's final location inside the static.
+    let outcome = {
+        let mut guard = NET.lock();
+        guard.device = Device::E1000(E1000::empty(controller.mmio_base));
+        let NetState { stack, device, .. } = &mut *guard;
+        match device {
+            Device::E1000(nic) => match nic.bring_up(controller) {
+                Ok(tx_ok) => {
+                    let mac = nic.mac();
+                    stack.set_mac(mac);
+                    Some(Ok((mac, nic.link_up(), tx_ok, nic.mac_from_default())))
+                }
+                Err(error) => {
+                    *device = Device::None;
+                    Some(Err(error))
+                }
+            },
+            _ => None,
+        }
+    };
+
+    let (mac, link_up, tx_ok, mac_from_default) = match outcome {
+        Some(Ok(state)) => state,
+        Some(Err(e1000::InitError::Mmio)) => {
+            println!("net: e1000 mmio unsupported");
+            return;
+        }
+        _ => {
+            println!("net: device init failed");
+            return;
+        }
+    };
+
+    println!(
+        "net: e1000 {:04x}:{:04x} pci 00:{:02x}.{} mmio {:#010x} mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        controller.vendor,
+        controller.device,
+        controller.slot,
+        controller.function,
+        controller.mmio_base,
+        mac[0],
+        mac[1],
+        mac[2],
+        mac[3],
+        mac[4],
+        mac[5]
+    );
+    if link_up {
+        println!("net: link up");
+    } else {
+        println!("net: link down");
+    }
+    println!("net: buffers 32x2 KiB + 16x2 KiB, polling");
+    if mac_from_default {
+        println!("net: e1000 reported no station address; using the default");
+    }
     if tx_ok {
         println!("net: tx ok");
     }

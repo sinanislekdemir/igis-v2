@@ -7,10 +7,10 @@
 //!
 //! [`init`] keeps its M2.2 job — locate the UHCI host controller the USB tablet
 //! hangs on and log one line per function found. [`find_virtio_net`] is the
-//! network path (M10.1): it looks for a legacy virtio-net function and enables
-//! I/O space plus bus mastering. A second scan of the same 256 functions is
-//! cheap and stays silent, so the boot log still has exactly one PCI line per
-//! function.
+//! default network path (M10.1) and [`find_e1000`] the second driver (M10.9):
+//! each looks for its own function and enables the PCI command bits it needs. A
+//! second scan of the same 256 functions is cheap and stays silent, so the boot
+//! log still has exactly one PCI line per function.
 //!
 //! ADR 0013 says machine discovery belongs behind `arch`/`platform`. This
 //! module, [`crate::usb`] and [`crate::net`] are the exception for the current
@@ -36,8 +36,20 @@ const VIRTIO_VENDOR: u16 = 0x1AF4;
 const VIRTIO_NET_LEGACY: u16 = 0x1000;
 const VIRTIO_NET_TRANSITIONAL: u16 = 0x1041;
 
-/// Command-register bits: I/O space and bus mastering.
+/// Intel, and the e1000/e1000e controller ids the second driver accepts
+/// (spec 0020, N2/ADR 0049). Only `82540EM` (QEMU `-device e1000`) and `82574L`
+/// (QEMU `-device e1000e`) are exercised; the other ids share the register set
+/// but are unproven here and listed so a machine does not silently fall back.
+const INTEL_VENDOR: u16 = 0x8086;
+const E1000_82540EM: u16 = 0x100E;
+const E1000_82545EM: u16 = 0x100F;
+const E1000_82574L: u16 = 0x10D3;
+const E1000_I217: u16 = 0x153A;
+const E1000_I219: u16 = 0x15B8;
+
+/// Command-register bits: I/O space, memory space and bus mastering.
 const COMMAND_IO_SPACE: u16 = 1 << 0;
+const COMMAND_MEMORY_SPACE: u16 = 1 << 1;
 const COMMAND_BUS_MASTER: u16 = 1 << 2;
 
 /// The UHCI controller the tablet driver drives.
@@ -78,6 +90,17 @@ pub struct VirtioNetController {
     pub function: u8,
     /// Base of the legacy 32-byte virtio I/O region (BAR0).
     pub io_base: u16,
+}
+
+/// The e1000-family function the kernel driver owns (spec 0020, N2).
+#[derive(Clone, Copy)]
+pub struct E1000Controller {
+    pub vendor: u16,
+    pub device: u16,
+    pub slot: u8,
+    pub function: u8,
+    /// Physical base of the MMIO register window (BAR0, low four bits masked).
+    pub mmio_base: u64,
 }
 
 fn address(bus: u8, slot: u8, function: u8, offset: u8) -> u32 {
@@ -124,6 +147,21 @@ fn enable_io_and_bus_master(device: &Device) {
         device.function,
         0x04,
         command | COMMAND_IO_SPACE | COMMAND_BUS_MASTER,
+    );
+}
+
+/// Enables memory space and bus mastering for one function.
+///
+/// A device with a memory BAR does not need I/O space; the UHCI and virtio
+/// paths keep their I/O variant unchanged.
+fn enable_memory_and_bus_master(device: &Device) {
+    let command = read_u16(device.bus, device.slot, device.function, 0x04);
+    write_u16(
+        device.bus,
+        device.slot,
+        device.function,
+        0x04,
+        command | COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER,
     );
 }
 
@@ -259,6 +297,54 @@ pub fn find_virtio_net() -> Option<VirtioNetController> {
             // The legacy register window is 32 bytes; an I/O BAR's low five
             // bits are flags, not address.
             io_base: (bar0 & !0x1F) as u16,
+        });
+    });
+
+    found
+}
+
+/// Finds an e1000/e1000e function on bus 0 and enables memory space plus bus
+/// mastering (spec 0020, N2).
+///
+/// Only a memory BAR0 (bit 0 clear) is accepted; its low four bits are flags.
+/// A 64-bit memory BAR takes its upper half from BAR1. An I/O BAR is not a
+/// device this driver can drive and is skipped. The scan is silent for the same
+/// reason [`find_virtio_net`] is: [`init`] already logged every function.
+pub fn find_e1000() -> Option<E1000Controller> {
+    let mut found = None;
+
+    scan(|device| {
+        if found.is_some()
+            || device.vendor != INTEL_VENDOR
+            || !matches!(
+                device.device,
+                E1000_82540EM | E1000_82545EM | E1000_82574L | E1000_I217 | E1000_I219
+            )
+        {
+            return;
+        }
+        let bar0 = device.bars[0];
+        if bar0 & 1 != 0 {
+            return;
+        }
+        // BAR type bits 2:1: 00 = 32-bit memory, 10 = 64-bit memory.
+        let mmio_base = match (bar0 >> 1) & 0b11 {
+            0b00 => u64::from(bar0 & !0xF),
+            0b10 => u64::from(bar0 & !0xF) | (u64::from(device.bars[1]) << 32),
+            _ => return,
+        };
+        if mmio_base == 0 {
+            return;
+        }
+
+        enable_memory_and_bus_master(device);
+
+        found = Some(E1000Controller {
+            vendor: device.vendor,
+            device: device.device,
+            slot: device.slot,
+            function: device.function,
+            mmio_base,
         });
     });
 
