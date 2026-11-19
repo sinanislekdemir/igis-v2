@@ -274,10 +274,14 @@ tick (the tick only marks expiry; the service opportunity performs the work).
 Readiness for `next_any` is a snapshot, not a reservation: the following
 `socket_recv` is authoritative, the same contract streams already use.
 
-A socket is readable when it has queued data, reached EOF, failed, completed a
-connect, or (for a listener) has a pending connection. It is writable when the
-TX arena has space. `poll_any`/`next_any` currently model read sources; M10 adds
-a writable source only if a proof needs it.
+A socket is **selector-ready** when it has queued data, reached EOF, failed,
+timed out, or (for a listener) has a pending connection. A bare completed
+connect is deliberately not a selector source: the first blocking `recv` on an
+empty connection still waits for data, so reporting the connect would spin a
+selector and, in a console loop like `nc`, block the task where a console byte
+can no longer wake it. `Stack::readable` still reports connect completion for
+callers that ask for it. A socket is writable when the TX arena has space;
+`poll_any`/`next_any` model read sources only.
 
 ### Configuration and name resolution
 
@@ -463,3 +467,4 @@ Boot lines: `pci: ...` (existing), `net: virtio-net 1af4:1000 mac ...`,
 | 2026-11-19 | M10.7 TCP listener/`accept` and the `net_echo` proof: `KIND_LISTEN` (open kind 3, nonzero bind port), a two-handle pending queue, inbound SYN → `SynReceived` + SYN-ACK, final ACK → `Established`/enqueue, backlog-full RST, SYN-ACK retry/5 s expiry, RST cleanup and listener close/owner cleanup; accepted connections use the normal TCP path. `core.socket_accept` is builtin 72; `lib/socket.listen/accept` and `samples/apps/base/net_echo` are the program side; `scripts/net_echo_qmp.py` proves three host clients through `hostfwd` on `-smp 4`/`-smp 1`. 590 host tests; no TIME-WAIT, backlog 2. |
 | 2026-11-19 | Blocking sockets and `socket_source`: `WaitFor::Net(handle)`/`WaitFor::Deadline(ns)`, `Outcome::Blocked` retry, per-socket `core.socket_timeout` (71; 0 = none, default 30 s, connect keeps 5 s `Closed`), compiler-lowered `core.socket_source` (`1 << 63 \| handle`) in `next_any`/`poll_any`, and the readiness-event/wake path that drops `NET` before `task::wake_net`. `net_select` proves the selector and 300 ms recv/select timeouts; 605 host tests; `kill_stress` 300/300. |
 | 2026-11-19 | DNS host test: `samples/lang/dns_check.ig` (host-only, socket-free) exercises the query builder and `parse_response` on canned A/NXDOMAIN/CNAME/TC/truncated/overrun packets and `langhost/tests/e2e.rs` pins `dns_check: ok`; 606 host tests. M10 is complete. |
+| 2026-11-19 | Selector readiness correction: `core.socket_source`/`next_any` uses `select_ready` (data/EOF/error/pending listener/timeout), not a bare completed connect; `Stack::readable` still reports connect completion for other callers. This prevents a selector/console loop (`nc`) from selecting an empty established socket and then blocking where a console byte cannot wake it. |

@@ -676,10 +676,11 @@ pub trait Host {
         Err(Status::Invalid)
     }
 
-    /// Reports read readiness for a socket (`core.next_any` source tag,
-    /// spec 0020; ADR 0050). Data, EOF, an error, a completed connect or a
-    /// pending listener connection is readable. The default is `false`, so a
-    /// bare host and a disabled NIC keep `next_any` deterministic.
+    /// Reports selector readiness for a socket (`core.next_any` source tag,
+    /// spec 0020; ADR 0050). Data, EOF, an error, a pending listener connection
+    /// or an expired deadline is ready; a bare completed connect is not, because
+    /// the first blocking receive still waits for data. The default is `false`,
+    /// so a bare host and a disabled NIC keep `next_any` deterministic.
     fn socket_readable(&mut self, _handle: u64) -> bool {
         false
     }
