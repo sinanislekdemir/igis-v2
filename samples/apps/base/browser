@@ -125,6 +125,9 @@ var
   // Selection and view.
   selected: int;
   top: int;
+  // Scrollbar thumb drag (M8.9): grabbed at a pointer offset within the thumb.
+  scroll_dragging: bool;
+  scroll_grab_dy: int;
 
   // Preview.
   preview: string[PreviewCapacity];
@@ -287,6 +290,7 @@ var
 begin
   entry_count := 0;
   truncated := false;
+  scroll_dragging := false;
   index := uint(0);
   st := core.fs_list(dir, index, name, kind, size);
   while st = Ok and entry_count < EntryCapacity do
@@ -725,6 +729,41 @@ begin
     status_line := "remove failed";
 end;
 
+// The current scrollbar thumb geometry, matching `stdlib.ui_scrollbar`
+// (M8.9): the track is `BodyH - 4` tall, the thumb is the visible fraction
+// with an 8-pixel floor, and it travels over `track - thumb`. The drag handler
+// and the check-mode proof use the same arithmetic.
+procedure scrollbar_thumb(thumb_y: var int; thumb_h: var int);
+var
+  track_h: int;
+  max: int;
+  pos: int;
+  travel: int;
+begin
+  track_h := BodyH - 4;
+  if entry_count <= 0 then
+    thumb_h := track_h
+  else
+  begin
+    if ListRows <= 0 then
+      thumb_h := 8
+    else
+      thumb_h := (track_h * ListRows) div entry_count;
+    if thumb_h < 8 then
+      thumb_h := 8;
+    if thumb_h > track_h then
+      thumb_h := track_h;
+  end;
+  max := entry_count - ListRows;
+  if max < 0 then
+    max := 0;
+  pos := stdlib.ui_scrollbar_clamp(top, ListRows, entry_count);
+  travel := track_h - thumb_h;
+  thumb_y := scroll_y + 2;
+  if max > 0 and travel > 0 then
+    thumb_y := scroll_y + 2 + (travel * pos) div max;
+end;
+
 // ---- key and pointer handling ---------------------------------------------
 
 procedure handle_key();
@@ -791,7 +830,55 @@ var
   hit: int;
   action: int;
   now: uint;
+  thumb_y: int;
+  thumb_h: int;
+  track_h: int;
+  travel: int;
+  desired: int;
+  max_top: int;
 begin
+  // A grabbed scrollbar thumb follows the pointer while the primary button is
+  // held (M8.9). The move maps the thumb position onto the scrollbar travel;
+  // release (or a move without the button) ends the drag.
+  if scroll_dragging then
+  begin
+    if ev.kind = PointerUp then
+    begin
+      scroll_dragging := false;
+      return;
+    end;
+    if ev.kind = PointerMove then
+    begin
+      if ev.code mod uint(2) <> uint(1) then
+      begin
+        scroll_dragging := false;
+        return;
+      end;
+      scrollbar_thumb(thumb_y, thumb_h);
+      track_h := BodyH - 4;
+      travel := track_h - thumb_h;
+      max_top := entry_count - ListRows;
+      if max_top < 0 then
+        max_top := 0;
+      if travel > 0 and max_top > 0 then
+      begin
+        desired := ev.y - scroll_grab_dy;
+        if desired < scroll_y + 2 then
+          desired := scroll_y + 2;
+        if desired > scroll_y + 2 + travel then
+          desired := scroll_y + 2 + travel;
+        top := ((desired - (scroll_y + 2)) * max_top) div travel;
+        top := stdlib.ui_scrollbar_clamp(top, ListRows, entry_count);
+        if selected < top then
+          selected := top;
+        if selected >= top + ListRows then
+          selected := top + ListRows - 1;
+      end;
+      return;
+    end;
+    return;
+  end;
+
   if ev.kind <> PointerDown then
     return;
 
@@ -809,7 +896,13 @@ begin
     if action = 1 then
       top := stdlib.ui_scrollbar_clamp(top - ListRows, ListRows, entry_count)
     else if action = 2 then
-      top := stdlib.ui_scrollbar_clamp(top + ListRows, ListRows, entry_count);
+      top := stdlib.ui_scrollbar_clamp(top + ListRows, ListRows, entry_count)
+    else if action = 3 then
+    begin
+      scrollbar_thumb(thumb_y, thumb_h);
+      scroll_dragging := true;
+      scroll_grab_dy := ev.y - thumb_y;
+    end;
     if selected < top then
       selected := top;
     if selected >= top + ListRows then
@@ -1193,6 +1286,16 @@ end;
 procedure pointer_up();
 begin
   st := inject.pointer_up();
+  drain_events();
+end;
+
+// Moves with the primary button held, for the scrollbar-thumb drag proof
+// (M8.9). `inject.pointer_to` would release the button, so the delta is sent
+// directly through the debug pointer hook.
+procedure pointer_drag_to(px: int; py: int);
+begin
+  st := syslib.inject_pointer(
+    px - syslib.pointer_x(), py - syslib.pointer_y(), uint(1));
   drain_events();
 end;
 
@@ -1654,6 +1757,25 @@ begin
     syslib.get_pixel(scroll_x + 4, thumb_y + 2) = gray);
   verify("hint ink",
     syslib.get_pixel(hint_x + 1, status_y + 1) = gray);
+
+  // Grab the scrollbar thumb and drag it to the bottom through the real
+  // pointer path (M8.9). The thumb geometry matches `ui_scrollbar`; the move
+  // maps the thumb position onto `top`, and release ends the drag.
+  top := 0;
+  selected := 0;
+  ensure_visible();
+  draw_all();
+  scrollbar_thumb(thumb_y, thumb_h);
+  pointer_to(scroll_x + 8, thumb_y + thumb_h div 2);
+  pointer_down();
+  pointer_drag_to(scroll_x + 8, scroll_y + BodyH - 4);
+  max_top := entry_count - ListRows;
+  verify("scrollbar drag down", top > 0 and top = max_top);
+  pointer_up();
+  verify("scrollbar drag ends", not scroll_dragging and top = max_top);
+  top := 0;
+  selected := 0;
+  ensure_visible();
 
   // The visible `Up` button goes to the parent through the real pointer path
   // (M8.8); the Backspace and Ctrl+Up keys are checked next.

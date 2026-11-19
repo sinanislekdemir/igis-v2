@@ -217,6 +217,12 @@ tree view:
   `stdlib.ui_button`, left of the writability label); a pointer-down on it goes
   up exactly like `Backspace`/`Ctrl+Up` (M8.8). The status hint names
   `Bksp up`, so the keyboard route stays discoverable;
+- the scrollbar thumb can be **grabbed and dragged** (M8.9): a pointer-down in
+  the thumb (hit class 3) records the offset inside the thumb, pointer moves
+  while the primary button is held map the thumb top onto `top` over the travel,
+  and release ends the drag. A track click still pages, and the thumb geometry
+  matches `stdlib.ui_scrollbar` (track `BodyH - 4`, 8-pixel floor, travel
+  `track - thumb`);
 - a kind-0 entry is previewed on `Enter`/double-click (at most 2048 bytes via
   `fs_size` and 256-byte `fs_read` chunks, one strict-UTF-8 `substr_into`), and
   the previous preview is left byte-identical on every failure class in F14;
@@ -279,3 +285,4 @@ tree view:
 | 2026-11-18 | M3.1 amendment: the view is the image tree (spec 0018 L1/L6) — `fs_list` takes any directory path or `""`/`"."`, `fs_read`/`fs_size` take any regular-file path, components are ≤64 bytes, a path is ≤8 components, `validate_root`/`validate_root_name` are gone in favour of `validate_path`/`validate_dir`, and `Ext2::find` walks one directory at a time without following symlinks. The failure table and interface rows are updated. |
 | 2026-11-18 | M3.4 amendment: the browser navigates — one directory at a time with a `dir` path, `Enter`/double-click descends into a kind-1 entry, `Backspace`/`Ctrl+Up` truncates the current path to go up (no `..`), preview and launch use the full path, the listing capacity is 96, and path construction is bounded by `PATH_MAX`. |
 | 2026-11-19 | M8.8: the file browser gains a visible `Up` button in the path line (44×18, left of the writability label) that goes to the parent through the real pointer path; `Backspace`/`Ctrl+Up` remain, and the status hint names `Bksp up`. `browser check` clicks the button, and `input_routing_qmp.py` requires the path to return to the pre-navigation root. No API change. |
+| 2026-11-19 | M8.9: the file browser's scrollbar thumb is draggable. A pointer-down on the thumb (hit class 3) records the grab offset; pointer moves with the primary button held map the thumb top onto `top` across the travel, clamp the selection visible, and release ends the drag; track clicks still page. `scrollbar_thumb` matches `stdlib.ui_scrollbar` (track `BodyH-4`, 8-pixel floor); `browser check` drags the thumb to the bottom and `input_routing_qmp.py` proves it with a real mouse drag. No API change. |

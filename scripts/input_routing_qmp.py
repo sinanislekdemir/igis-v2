@@ -81,6 +81,14 @@ BROWSER_ROW_THREE = (BROWSER_LIST_X + 40, BROWSER_LIST_Y + 41)
 # (677, 108), 44x18; its centre is (699, 117). `home writable` is 13 code
 # points (104 px) in the 8x8 UI font.
 BROWSER_UP_BUTTON = (699, 117)
+# Root row 1 (`base`, a long directory; the image's directory order is
+# lost+found, base, home, lib, system). The scrollbar is at content + (352, 30),
+# track 16x420, with the thumb near the top.
+BROWSER_ROW_BASE = (BROWSER_LIST_X + 40, BROWSER_LIST_Y + 25)
+BROWSER_SCROLL_X = BROWSER_CONTENT[0] + 352 + 8
+BROWSER_SCROLL_TOP = BROWSER_CONTENT[1] + 30 + 2
+BROWSER_SCROLL_BOTTOM = BROWSER_CONTENT[1] + 30 + 420 - 4
+SCROLL_REGION = (BROWSER_CONTENT[0] + 352, BROWSER_CONTENT[1] + 30, 16, 420)
 # The path line is the first 22 pixels of the content; the list strip is the
 # first five rows plus the selection/preview band.
 PATH_REGION = (BROWSER_CONTENT[0], BROWSER_CONTENT[1], 360, 21)
@@ -122,6 +130,19 @@ def send(qmp, x, y, width, height, left):
 
 def move(qmp, x, y, width, height):
     send(qmp, x, y, width, height, False)
+    time.sleep(0.1)
+
+
+def drag(qmp, x, y0, y1, width, height):
+    send(qmp, x, y0, width, height, False)
+    time.sleep(0.1)
+    send(qmp, x, y0, width, height, True)
+    time.sleep(0.1)
+    for step in range(1, 6):
+        y = y0 + (y1 - y0) * step // 5
+        send(qmp, x, y, width, height, True)
+        time.sleep(0.1)
+    send(qmp, x, y1, width, height, False)
     time.sleep(0.1)
 
 
@@ -252,6 +273,8 @@ def run(args):
     after_click_path = os.path.join(scratch, "after-click.png")
     after_nav_path = os.path.join(scratch, "after-nav.png")
     after_up_path = os.path.join(scratch, "after-up.png")
+    before_scroll_path = os.path.join(scratch, "before-scroll.png")
+    after_scroll_path = os.path.join(scratch, "after-scroll.png")
     before_button_path = os.path.join(scratch, "before-button.png")
     after_button_path = os.path.join(scratch, "after-button.png")
 
@@ -382,6 +405,41 @@ def run(args):
         )
         if up_changed > 60:
             print("[harness] FAIL: the visible Up button did not go back")
+            return 1
+
+        # Scrollbar thumb drag (M8.9): enter `base` (a long directory) and drag
+        # the thumb from the top to the bottom through the real pointer path.
+        click(qmp, *BROWSER_ROW_BASE, width, height)
+        time.sleep(0.3)
+        send_key(qmp, "ret")
+        time.sleep(0.8)
+        capture(qmp, before_scroll_path)
+        drag(
+            qmp,
+            BROWSER_SCROLL_X,
+            BROWSER_SCROLL_TOP + 90,
+            BROWSER_SCROLL_BOTTOM,
+            width,
+            height,
+        )
+        time.sleep(0.8)
+        capture(qmp, after_scroll_path)
+        with Image.open(before_scroll_path) as handle:
+            before_scroll = handle.convert("RGB")
+        with Image.open(after_scroll_path) as handle:
+            after_scroll = handle.convert("RGB")
+        scroll_changed, scroll_bbox = differing_pixels(
+            before_scroll, after_scroll, SCROLL_REGION
+        )
+        scrolled_list, scrolled_bbox = differing_pixels(
+            before_scroll, after_scroll, LIST_REGION
+        )
+        print(
+            f"[harness] scrollbar drag changed {scroll_changed} thumb pixels at "
+            f"{scroll_bbox}, list {scrolled_list} pixels at {scrolled_bbox}"
+        )
+        if scroll_changed < 20 or scrolled_list < 100:
+            print("[harness] FAIL: the scrollbar thumb drag did not scroll the list")
             return 1
 
         # 2. About opens and closes from its close box while the Browser is
