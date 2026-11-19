@@ -213,6 +213,10 @@ tree view:
   into it (`dir := dir + "/" + name`, or `name` at the root). `Backspace` (or
   `Ctrl+Up`) goes up by truncating the last component of the current path; at
   the root it does nothing. There is no `..` path and no backtracking stack;
+- the path line carries a visible **`Up` button** at its right (a 44×18
+  `stdlib.ui_button`, left of the writability label); a pointer-down on it goes
+  up exactly like `Backspace`/`Ctrl+Up` (M8.8). The status hint names
+  `Bksp up`, so the keyboard route stays discoverable;
 - a kind-0 entry is previewed on `Enter`/double-click (at most 2048 bytes via
   `fs_size` and 256-byte `fs_read` chunks, one strict-UTF-8 `substr_into`), and
   the previous preview is left byte-identical on every failure class in F14;
@@ -274,3 +278,4 @@ tree view:
 | 2026-11-17 | M2.5.4 note: the file browser consumes the root view and records the application contract — 64-entry listing until `NotFound`, kind-1 and kind-2 entries shown but refused, a 2048-byte preview with atomic failure, and a `core.spawn` + `core.wait` launch for regular entries. No API change. |
 | 2026-11-18 | M3.1 amendment: the view is the image tree (spec 0018 L1/L6) — `fs_list` takes any directory path or `""`/`"."`, `fs_read`/`fs_size` take any regular-file path, components are ≤64 bytes, a path is ≤8 components, `validate_root`/`validate_root_name` are gone in favour of `validate_path`/`validate_dir`, and `Ext2::find` walks one directory at a time without following symlinks. The failure table and interface rows are updated. |
 | 2026-11-18 | M3.4 amendment: the browser navigates — one directory at a time with a `dir` path, `Enter`/double-click descends into a kind-1 entry, `Backspace`/`Ctrl+Up` truncates the current path to go up (no `..`), preview and launch use the full path, the listing capacity is 96, and path construction is bounded by `PATH_MAX`. |
+| 2026-11-19 | M8.8: the file browser gains a visible `Up` button in the path line (44×18, left of the writability label) that goes to the parent through the real pointer path; `Backspace`/`Ctrl+Up` remain, and the status hint names `Bksp up`. `browser check` clicks the button, and `input_routing_qmp.py` requires the path to return to the pre-navigation root. No API change. |

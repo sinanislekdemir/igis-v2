@@ -20,7 +20,9 @@ unit browser;
 // (`dir := dir + "/" + name`, or the name at the root) and reload the listing
 // with the selection, view, preview and status reset. Backspace and Ctrl+Up go
 // up by truncating the last component of `dir`; at the root that is a no-op.
-// There is no `..` path and no history stack. Path construction is bounded by
+// The path line also carries a visible `Up` button, so the parent directory is
+// reachable with the pointer alone (M8.8). There is no `..` path and no history
+// stack. Path construction is bounded by
 // PATH_MAX (256 bytes): a combination that would not fit sets the status line
 // and is not opened.
 //
@@ -141,6 +143,11 @@ var
   preview_x: int;
   preview_y: int;
   status_y: int;
+  // Visible parent-directory button in the path line (M8.8).
+  up_x: int;
+  up_y: int;
+  up_w: int;
+  up_h: int;
 
   // Palette.
   black: uint;
@@ -788,6 +795,12 @@ begin
   if ev.kind <> PointerDown then
     return;
 
+  if stdlib.ui_button_hit(up_x, up_y, up_w, up_h, ev.x, ev.y) then
+  begin
+    go_up();
+    return;
+  end;
+
   if stdlib.ui_rect_hit(scroll_x, scroll_y, ScrollW, BodyH, ev.x, ev.y) then
   begin
     action := stdlib.ui_scrollbar_hit(
@@ -840,6 +853,14 @@ begin
   preview_x := rect.x + PreviewLeft;
   preview_y := rect.y + ListTop;
   status_y := rect.y + StatusTop;
+  // A small `Up` button at the right of the path line, left of the writability
+  // label. It is the visible parent-directory affordance (M8.8); the Backspace
+  // and Ctrl+Up keys keep working.
+  up_w := 44;
+  up_h := 18;
+  up_x := rect.x + ContentW - 8 - stdlib.ui_text_width("home writable")
+    - 8 - up_w;
+  up_y := rect.y + 2;
 end;
 
 procedure draw_marker(x: int; y: int; entry_kind: uint; color: uint);
@@ -929,6 +950,7 @@ begin
   width := stdlib.ui_text_width("home writable");
   st := syslib.draw_text(
     rect.x + ContentW - 8 - width, rect.y + 4, "home writable", gray);
+  st := stdlib.ui_button(up_x, up_y, up_w, up_h, "Up", false, false);
   st := stdlib.ui_separator(rect.x, rect.y + PathH - 1, ContentW);
 end;
 
@@ -1071,10 +1093,11 @@ var
 begin
   st := stdlib.ui_separator(rect.x, status_y - 6, ContentW);
   st := syslib.draw_text(rect.x + 8, status_y, status_line, black);
-  width := stdlib.ui_text_width("Enter open  Ctrl+L launch  N new  Del delete");
+  width := stdlib.ui_text_width(
+    "Enter open  Ctrl+L launch  Bksp up  N new  Del delete");
   st := syslib.draw_text(
     rect.x + ContentW - 8 - width, status_y,
-    "Enter open  Ctrl+L launch  N new  Del delete", gray);
+    "Enter open  Ctrl+L launch  Bksp up  N new  Del delete", gray);
 end;
 
 // One complete frame; the caller presents once afterwards.
@@ -1585,7 +1608,7 @@ begin
     other_row := 1;
   preview_text_y := preview_y + 26;
   hint_x := rect.x + ContentW - 8 - stdlib.ui_text_width(
-    "Enter open  Ctrl+L launch  N new  Del delete");
+    "Enter open  Ctrl+L launch  Bksp up  N new  Del delete");
   verify("path rule", syslib.get_pixel(rect.x + 300, rect.y + PathH - 1) = black);
   verify("list border", syslib.get_pixel(list_x, list_y) = black);
   verify("selected row", syslib.get_pixel(list_x + 2, row_y + 3) = accent);
@@ -1631,6 +1654,18 @@ begin
     syslib.get_pixel(scroll_x + 4, thumb_y + 2) = gray);
   verify("hint ink",
     syslib.get_pixel(hint_x + 1, status_y + 1) = gray);
+
+  // The visible `Up` button goes to the parent through the real pointer path
+  // (M8.8); the Backspace and Ctrl+Up keys are checked next.
+  draw_all();
+  verify("up button drawn", syslib.get_pixel(up_x, up_y) = black);
+  pointer_to(up_x + up_w div 2, up_y + up_h div 2);
+  pointer_down();
+  pointer_up();
+  verify("up button returns to root",
+    int(core.len(dir)) = 0 and has_kind("base", uint(1)));
+  err := enter_dir("base");
+  verify("back in base for keys", err = Ok and dir = "base");
 
   // Backspace goes up from `base` to the root through the real key path.
   auto_draw := false;

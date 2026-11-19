@@ -77,6 +77,10 @@ BROWSER_LIST_Y = BROWSER_CONTENT[1] + 30
 BROWSER_LIST_W = 342
 # Third row centre: list_y + 1 + 2 * 16 + 8.
 BROWSER_ROW_THREE = (BROWSER_LIST_X + 40, BROWSER_LIST_Y + 41)
+# The visible `Up` button is content + (ContentW - 8 - 104 - 8 - 44, 2) =
+# (677, 108), 44x18; its centre is (699, 117). `home writable` is 13 code
+# points (104 px) in the 8x8 UI font.
+BROWSER_UP_BUTTON = (699, 117)
 # The path line is the first 22 pixels of the content; the list strip is the
 # first five rows plus the selection/preview band.
 PATH_REGION = (BROWSER_CONTENT[0], BROWSER_CONTENT[1], 360, 21)
@@ -247,6 +251,7 @@ def run(args):
     before_click_path = os.path.join(scratch, "before-click.png")
     after_click_path = os.path.join(scratch, "after-click.png")
     after_nav_path = os.path.join(scratch, "after-nav.png")
+    after_up_path = os.path.join(scratch, "after-up.png")
     before_button_path = os.path.join(scratch, "before-button.png")
     after_button_path = os.path.join(scratch, "after-button.png")
 
@@ -361,6 +366,22 @@ def run(args):
             return 1
         if list_changed < 100:
             print("[harness] FAIL: the Browser listing did not change")
+            return 1
+
+        # The visible `Up` button returns to the parent through a real pointer
+        # click; the path line must match the pre-navigation root again.
+        click(qmp, *BROWSER_UP_BUTTON, width, height)
+        time.sleep(0.6)
+        capture(qmp, after_up_path)
+        with Image.open(after_up_path) as handle:
+            after_up = handle.convert("RGB")
+        up_changed, up_bbox = differing_pixels(before_click, after_up, PATH_REGION)
+        print(
+            f"[harness] Up button returned to the parent path "
+            f"({up_changed} pixels differ at {up_bbox})"
+        )
+        if up_changed > 60:
+            print("[harness] FAIL: the visible Up button did not go back")
             return 1
 
         # 2. About opens and closes from its close box while the Browser is
