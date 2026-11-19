@@ -15,7 +15,7 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 ## Resume point (update this when a session ends)
 
 - **Current state:** **505 host tests**; specs 0001–0019 (0018 and 0019
-  Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1–M8.6 complete**. The
+  Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1–M8.7 complete**. The
   application image is a read-only ext2 tree (`lib`, `base`, `home`, `system`);
   `/home` is a separate 8 MiB ext2 image on an ATA disk, read-write through
   `ext2w` and one router, persistent across reboots. Write builtins are 53–57.
@@ -39,8 +39,10 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   grab still takes precedence, a region press stays unchanged, and readiness uses the
   same rule; `window: target ok` is the boot self-check and
   `scripts/input_routing_qmp.py` proves Browser, About and Calculator input with the
-  desktop alive.
-- **Last commit:** `3598fda` (M8.6) plus this docs commit. The tree is clean;
+  desktop alive. M8.7 closes only the `Desktop` help panel when its close box is used;
+  the shell keeps running, the Apple square reopens the window, and a lost desktop
+  window can no longer halt the boot system.
+- **Last commit:** `5c97e39` (M8.7) plus this docs commit. The tree is clean;
   `build/home.img` is reset.
 - **Next:** M8 is complete. Pick from the deferred backlog in
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) / the "Deferred" table below, or extend the
@@ -1492,6 +1494,38 @@ parent verifies each.
   `tablet_qmp.py` 7/7 and the visual golden `37802052…e9e81c9f` pass on both
   core counts. No opcode, builtin, `Host`, `stdlib` or `Event` layout change
   (ABI v1 stays 75; `stdlib` 125 functions).
+
+- [x] **M8.7 Closing the `Desktop` window must not end the desktop.**
+  User report: closing the window titled `Desktop` (the shell's own help panel)
+  exited the boot `desktop_shell` with `task 3: exit Ok`; the entrypoint was gone
+  and the idle system halted, which the user saw as a lock-up. The `Desktop`
+  window is not the shell's lifetime: the shell is the boot desktop and must keep
+  its menu bar and launched applications running.
+  - **Fix (application-only, no kernel change):** a `Close` for `own` calls
+    `close_desktop_window` (close the window, `own := 0`, log
+    `desktop_shell: desktop window closed`) and does **not** clear `running`.
+    The Apple square calls `open_desktop_window`: raise/draw the live window, or
+    reopen it at `(600, 72)` with `window_open` when `own = 0`, logging
+    `desktop_shell: desktop window open`. Normal mode starts through the same
+    helper; Restart/Halt and task termination remain the only exits.
+  - **Proof:** extend `scripts/input_routing_qmp.py` — with the Browser and
+    Calculator live, click the Desktop window's close box, require
+    `desktop_shell: desktop window closed`, assert no `task 3: exit Ok` and no
+    idle summary/halt, then click the Apple and require
+    `desktop_shell: desktop window open`; the Browser/Calculator checks still
+    pass. Run both core counts.
+  - **Docs:** spec 0012 D12/D19, PLAN/AGENTS (no ADR; it is the desktop's own
+    lifetime policy, not a kernel decision).
+  **Done (`5c97e39`):** `open_desktop_window` raises/draws or reopens at
+  `(600, 72)` and logs `desktop_shell: desktop window open`; `close_desktop_window`
+  closes only the help panel, sets `own := 0` and logs
+  `desktop_shell: desktop window closed`; the normal loop no longer clears
+  `running` on an own `Close`, and the Apple item reopens. Spec 0012 D12/D19
+  updated. `scripts/input_routing_qmp.py` now closes the Desktop window with the
+  Browser and Calculator live, requires the closed log and the Apple reopen, and
+  asserts no `task 3: exit Ok`/idle summary/halt; it passes on `--cores 4` and
+  `--cores 1`. `desktop_shell check` still prints `desktop_shell: ok` on
+  `-smp 4`; no kernel/ABI change.
 
 ## Deferred (not UI; pick up when they matter)
 
