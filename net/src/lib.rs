@@ -579,11 +579,14 @@ impl Stack {
         now_ns: u64,
         tx: &mut dyn FnMut(&[u8]) -> bool,
     ) -> Option<[u8; 6]> {
-        if self.config.ip == 0 {
-            return None;
-        }
+        // A broadcast needs no next-hop lookup, so it also works before an
+        // address is configured: the DHCP client's DISCOVER leaves from
+        // 0.0.0.0 to 255.255.255.255 (spec 0020, N8/N18).
         if dst_ip == BROADCAST_IP || (self.config.mask != 0 && dst_ip == self.broadcast_ip()) {
             return Some(ethernet::BROADCAST_MAC);
+        }
+        if self.config.ip == 0 {
+            return None;
         }
         let next_hop = if self.on_link(dst_ip) {
             dst_ip

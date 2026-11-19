@@ -38,6 +38,14 @@ begin
   return core.socket_open(uint(2), ip, port, uint(0), id);
 end;
 
+// Opens a connected UDP socket on an explicit local port. DHCP needs this:
+// it answers from port 68 and must therefore send from 68. The same port
+// collision rules apply, so a second socket on `local` is `Invalid`.
+function udp_from(local: uint; ip: uint; port: uint; id: var int): Status;
+begin
+  return core.socket_open(uint(2), ip, port, local, id);
+end;
+
 // Closes a socket owned by the calling task.
 function close(id: int): Status;
 begin

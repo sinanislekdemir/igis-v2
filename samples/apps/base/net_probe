@@ -5,6 +5,7 @@ unit net_probe;
 //
 //   run net_probe http     // one host-forwarded HTTP/1.0 GET (also the default)
 //   run net_probe dns      // resolve example.com with lib.dns
+//   run net_probe dhcp     // obtain a lease with lib.dhcp, then fetch the page
 //
 // With QEMU user networking the guest is `10.0.2.15/24`, the host is
 // `10.0.2.2`, DNS is `10.0.2.3`, and a host `python3 -m http.server 6666`
@@ -13,12 +14,17 @@ unit net_probe;
 // line (`net_probe: ok`) is printed only after the result reached the
 // application. No window, no graphics.
 //
-// The socket surface is non-blocking in this slice. `http.get` and
-// `dns.resolve` retry with a `core.clock()` deadline and a retry cap, so a
-// dead peer prints a failure and the task stays inside its CPU budget. A
-// machine without a NIC (the `--no-net` boot) reports `net_probe: no device`.
+// `dhcp` is the only mode without a static configuration: it starts from an
+// unconfigured stack, takes the address/netmask/router/DNS from the QEMU slirp
+// DHCP server and then runs the same HTTP probe on the lease.
+//
+// The socket surface is non-blocking in this slice. `http.get`,
+// `dns.resolve` and `dhcp.acquire` retry with a `core.clock()` deadline and a
+// retry cap, so a dead peer prints a failure and the task stays inside its CPU
+// budget. A machine without a NIC (the `--no-net` boot) reports
+// `net_probe: no device`.
 
-uses core, stdlib, lib.socket, lib.http, lib.dns;
+uses core, stdlib, lib.socket, lib.http, lib.dns, lib.dhcp;
 
 const
   BodyCapacity = 4096;
@@ -85,6 +91,82 @@ begin
   end;
 end;
 
+// Writes one dotted-quad address in host order (first octet in bits 24..31).
+procedure write_address(value: uint);
+begin
+  write_octet((value div uint(16777216)) mod uint(256));
+  core.write(".");
+  write_octet((value div uint(65536)) mod uint(256));
+  core.write(".");
+  write_octet((value div uint(256)) mod uint(256));
+  core.write(".");
+  write_octet(value mod uint(256));
+end;
+
+// Counts the set bits of a netmask. A real netmask is contiguous, so this is
+// its prefix length (`255.255.255.0` -> 24).
+function prefix_length(mask: uint): int;
+var
+  bits: int;
+  value: uint;
+begin
+  bits := 0;
+  value := mask;
+  while value <> uint(0) do
+  begin
+    if value mod uint(2) = uint(1) then
+      bits := bits + 1;
+    value := value div uint(2);
+  end;
+  return bits;
+end;
+
+// One DHCP lease, then the same HTTP proof on the leased configuration.
+procedure run_dhcp();
+var
+  ip: uint;
+  mask: uint;
+  gateway: uint;
+  dns: uint;
+  st: Status;
+  digits: bytes[32];
+  used: int;
+begin
+  st := dhcp.acquire(ip, mask, gateway, dns);
+  if st <> Ok then
+  begin
+    if st = IoError then
+      core.write("net_probe: no device\n")
+    else
+    begin
+      used := core.format_int_into(digits, int(st), uint(10), uint(0));
+      core.write("net_probe: dhcp failed ");
+      core.write(digits);
+      core.write("\n");
+    end;
+    return;
+  end;
+  st := core.net_config(ip, mask, gateway, dns);
+  if st <> Ok then
+  begin
+    core.write("net_probe: no device\n");
+    return;
+  end;
+
+  used := core.format_int_into(digits, prefix_length(mask), uint(10), uint(0));
+  core.write("net_probe: dhcp ");
+  write_address(ip);
+  core.write("/");
+  core.write(digits);
+  core.write(" gw ");
+  write_address(gateway);
+  core.write(" dns ");
+  write_address(dns);
+  core.write("\n");
+
+  run_http();
+end;
+
 // One A-record lookup: dotted address, packed hex form, then the proof line.
 procedure run_dns();
 var
@@ -128,7 +210,8 @@ var
   mode: string[256];
   trimmed: int;
 begin
-  // Mode dispatch: `http` (the default when the tail is empty) or `dns`.
+  // Mode dispatch: `http` (the default when the tail is empty), `dns` or
+  // `dhcp`.
   mode := "";
   if int(core.len(args)) > 0 then
   begin
@@ -141,7 +224,7 @@ begin
   end;
   if int(core.len(mode)) = 0 then
     mode := "http";
-  if mode <> "http" and mode <> "dns" then
+  if mode <> "http" and mode <> "dns" and mode <> "dhcp" then
   begin
     core.write("net_probe: unknown mode\n");
     return;
@@ -152,6 +235,13 @@ begin
   core.write("net_probe: mac 0x");
   core.write(digits);
   core.write("\n");
+
+  // `dhcp` starts from an unconfigured stack and applies the lease itself.
+  if mode = "dhcp" then
+  begin
+    run_dhcp();
+    return;
+  end;
 
   st := core.net_config(uint(LocalIp), uint(NetMask), uint(GatewayIp),
     uint(DnsIp));

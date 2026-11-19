@@ -757,6 +757,35 @@ fn a_broadcast_udp_socket_accepts_any_source_and_can_send() {
 }
 
 #[test]
+fn a_broadcast_socket_sends_before_an_address_is_configured() {
+    let mut stack = Stack::new();
+    stack.set_mac(OUR_MAC);
+    let mut wire = Wire::new();
+
+    // A DHCP client has no address yet: the frame leaves from 0.0.0.0 to the
+    // limited broadcast without an ARP request.
+    assert_eq!(stack.config().ip, 0);
+    let handle = stack.open(KIND_UDP, 0xFFFF_FFFF, 67, 68, 1).unwrap();
+    assert_eq!(wire.send(&mut stack, 1, handle, b"discover", T0), Ok(8));
+    let frame = wire.last().to_vec();
+    assert_eq!(parse_eth(&frame).dst, [0xFF; 6], "broadcast MAC");
+    let ip = parse_ip(&frame);
+    assert_eq!(ip.src, 0, "an unconfigured source address");
+    assert_eq!(ip.dst, 0xFFFF_FFFF);
+    let udp = parse_udp(&ip);
+    assert!(udp.checksum_valid, "the broadcast checksum is valid");
+    assert_eq!((udp.src_port, udp.dst_port), (68, 67));
+
+    // The server's broadcast reply is accepted from any source, and the
+    // unconfigured stack still hands it to the socket.
+    let reply = udp_packet(PEER_IP, 0xFFFF_FFFF, 67, 68, b"offer");
+    wire.receive(&mut stack, T0, &from_peer(&reply));
+    let mut buf = [0u8; 16];
+    assert_eq!(stack.recv(handle, 1, &mut buf), Ok(5));
+    assert_eq!(&buf[..5], b"offer");
+}
+
+#[test]
 fn a_broadcast_datagram_validates_against_its_own_destination() {
     let mut stack = configured();
     let mut wire = Wire::new();
