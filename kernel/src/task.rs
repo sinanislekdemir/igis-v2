@@ -650,7 +650,7 @@ fn source_ready(task: u64, source: u64) -> bool {
             || crate::window::has_expose(task)
             || crate::window::has_close(task)
     } else if is_socket_source(source) {
-        crate::net::readable(socket_handle(source), task)
+        crate::net::select_ready(socket_handle(source), task)
     } else {
         crate::stream::readable(task, source)
     }

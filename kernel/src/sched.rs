@@ -686,7 +686,7 @@ impl Host for KernelHost {
     }
 
     fn socket_readable(&mut self, handle: u64) -> bool {
-        crate::net::readable(handle, self.current)
+        crate::net::select_ready(handle, self.current)
     }
 
     // Streams (spec 0006): the kernel table owns the buffer and the generation

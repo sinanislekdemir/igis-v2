@@ -172,6 +172,10 @@ fn an_established_empty_socket_is_not_receive_ready() {
     let mut wire = Wire::new();
     let (handle, _, _) = connect(&mut stack, &mut wire, 1);
     assert!(stack.readable(handle, 1), "the connect completed");
+    assert!(
+        !stack.select_ready(handle, 1),
+        "a bare connect is not a selector-ready read source"
+    );
 
     let mut buf = [0u8; 8];
     assert_eq!(stack.recv(handle, 1, &mut buf), Err(Status::WouldBlock));

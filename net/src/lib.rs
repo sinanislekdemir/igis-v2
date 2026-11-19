@@ -825,6 +825,21 @@ impl Stack {
         socket.timed_out || self.slot_readable(socket)
     }
 
+    /// Readiness for a **selector** (`core.next_any`/`poll_any`): data, EOF,
+    /// error, a pending listener connection or an expired deadline. A bare
+    /// completed TCP connect is deliberately excluded; the first blocking
+    /// `recv` on an empty connection still waits for data, so reporting the
+    /// connect as a select-ready source would spin the selector (and, in a
+    /// console loop like `nc`, would block the task on the socket where a
+    /// console byte can no longer wake it).
+    pub fn select_ready(&self, handle: u64, owner: u64) -> bool {
+        let Ok(index) = self.lookup(handle, owner) else {
+            return false;
+        };
+        let socket = &self.sockets[index];
+        socket.timed_out || self.slot_recv_ready(socket)
+    }
+
     /// Finds a live slot for `handle`, checking the generation and the owner.
     fn lookup(&self, handle: u64, owner: u64) -> Result<usize, Status> {
         let generation = handle >> 8;

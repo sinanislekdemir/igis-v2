@@ -578,6 +578,14 @@ pub fn readable(handle: u64, owner: u64) -> bool {
     guard.stack.readable(handle, owner)
 }
 
+/// Readiness for `core.next_any`/`poll_any`: data, EOF, a pending listener
+/// connection or a timeout. A bare completed TCP connect is not a selector
+/// source; the first receive still waits for data.
+pub fn select_ready(handle: u64, owner: u64) -> bool {
+    let guard = NET.lock();
+    guard.stack.select_ready(handle, owner)
+}
+
 /// Closes every socket owned by a terminating task (spec 0020, N14). Called
 /// from `Task::reclaim` before the task's regions are freed.
 pub fn close_task(owner: u64) {
