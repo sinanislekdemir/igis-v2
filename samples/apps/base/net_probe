@@ -3,21 +3,22 @@ unit net_probe;
 // Deterministic networking proof (spec 0020, N18/N20). It runs as an ordinary
 // application in the shell:
 //
-//   run net_probe http
+//   run net_probe http     // one host-forwarded HTTP/1.0 GET (also the default)
+//   run net_probe dns      // resolve example.com with lib.dns
 //
 // With QEMU user networking the guest is `10.0.2.15/24`, the host is
-// `10.0.2.2`, and a host `python3 -m http.server 6666` serves the directory
-// listing this probe fetches. QEMU's NAT answers ARP for the host alias, so the
-// exchange is a real TCP handshake, a real HTTP/1.0 request and a real
-// response; `net_probe: ok` is printed only after the body reached the
-// application. No window, no graphics, no DNS.
+// `10.0.2.2`, DNS is `10.0.2.3`, and a host `python3 -m http.server 6666`
+// serves the directory listing the HTTP probe fetches. QEMU's NAT answers ARP
+// for the host aliases and forwards DNS, so both exchanges are real; a proof
+// line (`net_probe: ok`) is printed only after the result reached the
+// application. No window, no graphics.
 //
-// The socket surface is non-blocking in this slice. `http.get` retries with a
-// `core.clock()` deadline and a retry cap, so a dead peer prints
-// `net_probe: timeout` and the task stays inside its CPU budget. A machine
-// without a NIC (the `--no-net` boot) reports `net_probe: no device`.
+// The socket surface is non-blocking in this slice. `http.get` and
+// `dns.resolve` retry with a `core.clock()` deadline and a retry cap, so a
+// dead peer prints a failure and the task stays inside its CPU budget. A
+// machine without a NIC (the `--no-net` boot) reports `net_probe: no device`.
 
-uses core, stdlib, lib.socket, lib.http;
+uses core, stdlib, lib.socket, lib.http, lib.dns;
 
 const
   BodyCapacity = 4096;
@@ -33,7 +34,17 @@ const
 var
   body: string[BodyCapacity];
 
-// `net_probe: failed <ordinal>` when the exchange returned another status.
+// Writes one decimal octet of an address.
+procedure write_octet(value: uint);
+var
+  digits: bytes[8];
+  used: int;
+begin
+  used := core.format_int_into(digits, int(value), uint(10), uint(0));
+  core.write(digits);
+end;
+
+// `net_probe: failed <ordinal>` when an exchange returned another status.
 procedure report_failure(st: Status);
 var
   digits: bytes[32];
@@ -45,35 +56,13 @@ begin
   core.write("\n");
 end;
 
-procedure main(args: const string[1024]);
+// One HTTP/1.0 GET to the host alias and the body summary.
+procedure run_http();
 var
-  mac: uint;
   digits: bytes[32];
-  used: int;
   st: Status;
   length: int;
 begin
-  // Only the HTTP proof exists in this slice; an empty tail is the same mode.
-  if int(core.len(args)) > 0 and not stdlib.contains_byte(args, byte(104)) then
-  begin
-    core.write("net_probe: unknown mode (use http)\n");
-    return;
-  end;
-
-  mac := core.net_mac();
-  used := core.format_int_into(digits, int(mac), uint(16), uint(0));
-  core.write("net_probe: mac 0x");
-  core.write(digits);
-  core.write("\n");
-
-  st := core.net_config(uint(LocalIp), uint(NetMask), uint(GatewayIp),
-    uint(DnsIp));
-  if st <> Ok then
-  begin
-    core.write("net_probe: no device\n");
-    return;
-  end;
-
   st := http.get(uint(HostIp), uint(HostPort), "10.0.2.2", "/", body);
   if st = Ok then
   begin
@@ -94,4 +83,86 @@ begin
     else
       report_failure(st);
   end;
+end;
+
+// One A-record lookup: dotted address, packed hex form, then the proof line.
+procedure run_dns();
+var
+  ip: uint;
+  st: Status;
+  digits: bytes[32];
+  used: int;
+begin
+  st := dns.resolve("example.com", uint(DnsIp), ip);
+  if st = Ok then
+  begin
+    core.write("net_probe: dns ");
+    write_octet((ip div uint(16777216)) mod uint(256));
+    core.write(".");
+    write_octet((ip div uint(65536)) mod uint(256));
+    core.write(".");
+    write_octet((ip div uint(256)) mod uint(256));
+    core.write(".");
+    write_octet(ip mod uint(256));
+    core.write(" (0x");
+    used := core.format_int_into(digits, int(ip), uint(16), uint(8));
+    core.write(digits);
+    core.write(")\n");
+    core.write("net_probe: ok\n");
+  end
+  else
+  begin
+    used := core.format_int_into(digits, int(st), uint(10), uint(0));
+    core.write("net_probe: dns failed ");
+    core.write(digits);
+    core.write("\n");
+  end;
+end;
+
+procedure main(args: const string[1024]);
+var
+  mac: uint;
+  digits: bytes[32];
+  used: int;
+  st: Status;
+  mode: string[256];
+  trimmed: int;
+begin
+  // Mode dispatch: `http` (the default when the tail is empty) or `dns`.
+  mode := "";
+  if int(core.len(args)) > 0 then
+  begin
+    trimmed := stdlib.trim_into(mode, args);
+    if trimmed < 0 then
+    begin
+      core.write("net_probe: unknown mode\n");
+      return;
+    end;
+  end;
+  if int(core.len(mode)) = 0 then
+    mode := "http";
+  if mode <> "http" and mode <> "dns" then
+  begin
+    core.write("net_probe: unknown mode\n");
+    return;
+  end;
+
+  mac := core.net_mac();
+  used := core.format_int_into(digits, int(mac), uint(16), uint(0));
+  core.write("net_probe: mac 0x");
+  core.write(digits);
+  core.write("\n");
+
+  st := core.net_config(uint(LocalIp), uint(NetMask), uint(GatewayIp),
+    uint(DnsIp));
+  if st <> Ok then
+  begin
+    core.write("net_probe: no device\n");
+    return;
+  end;
+
+  if mode = "http" then
+    run_http()
+  else
+    run_dns();
 end;
