@@ -15,7 +15,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 ## Resume point (update this when a session ends)
 
 - **Current state:** **505 host tests**; specs 0001–0019 (0018 and 0019
-  Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1–M8.9 complete**. The
+  Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1–M8.9 complete**,
+  plus **M9.1**. The
   application image is a read-only ext2 tree (`lib`, `base`, `home`, `system`);
   `/home` is a separate 8 MiB ext2 image on an ATA disk, read-write through
   `ext2w` and one router, persistent across reboots. Write builtins are 53–57.
@@ -44,10 +45,15 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   window can no longer halt the boot system. M8.8 adds a visible `Up` button to the
   File Browser path line (the keys remain), so the parent directory is reachable with
   the pointer alone. M8.9 makes the File Browser's scrollbar thumb draggable; the track
-  still pages and the selection stays visible.
-- **Last commit:** `d3087c6` (M8.9) plus this docs commit. The tree is clean;
+  still pages and the selection stays visible. M9.1 adds lexical syntax highlighting to
+  the text editor: source paths (`base/`, `lib/`, `system/`, `.ig`) start coloured,
+  keywords/types/strings/comments/numbers have fixed palette colours, `{ ... }` block
+  state carries across visible lines without splitting UTF-8 code points, and a checked
+  File > Highlight row toggles the view; old plain files are unchanged and no
+  opcode/builtin/`stdlib` surface was added.
+- **Last commit:** `a912765` (M9.1) plus this docs commit. The tree is clean;
   `build/home.img` is reset.
-- **Next:** M8 is complete. Pick from the deferred backlog in
+- **Next:** M9.1 is complete. Pick from the deferred backlog in
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) / the "Deferred" table below, or extend the
   desktop (a task switcher, submenus and interactive resize were deliberately left out).
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
@@ -83,8 +89,11 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 - **Done since M7.1:** M8.1 (window drag and close box), M8.2 (owner close requests),
   M8.3 (Apps application menu and the modal popup input grab, `94187ed`), M8.4
   (persistent menu-bar pointer-region claim, `1304df8`), M8.5 (topmost content
-  snapshot plus the client content-rect refresh, `f478f9b`) and M8.6 (window-addressed
-  input delivery, `3598fda`; M8 close).
+  snapshot plus the client content-rect refresh, `f478f9b`), M8.6 (window-addressed
+  input delivery, `3598fda`), M8.7 (the `Desktop` help panel no longer owns the
+  shell's lifetime, `5c97e39`), M8.8 (the browser's visible `Up` button,
+  `c69e392`), M8.9 (the browser's draggable scrollbar thumb, `d3087c6`) and
+  M9.1 (lexical syntax highlighting in the text editor, `a912765`).
 - **Verified at that point (M3.4, independently by the parent):** **439 host tests**
   (abi 23, compiler 184, interpreter 150, langhost 81, 1 doctest); `cargo xtask
   build`/`image`/`image --shell` clean; boot `ext2: tree ok`. `run browser check`
@@ -1576,6 +1585,58 @@ parent verifies each.
     `stdlib` change.
   **Done (`d3087c6`):** the browser drag code and the check/QMP proofs above;
   `browser: ok` and `input_routing_qmp.py` pass on `-smp 4` and `-smp 1`.
+
+## M9 — application experience
+
+### M9.1 — syntax highlighting in the text editor
+
+- [x] **M9.1 Syntax highlighting in the text editor.**
+  User request: "In the text editor, can we do syntax highlighting for .ig
+  files?" The answer is a first lexical slice inside the editor only; there is
+  no parser, no new opcode, builtin, `Host` method, `stdlib` function or ABI
+  change, and no new application file.
+  - **Detection and menu:** a successful `open_path` enables highlighting when
+    the path starts with `base/`, `lib/` or `system/`, or ends in `.ig`; other
+    text files (for example `home/readme.txt`) stay plain. The File menu is now
+    five rows (`Open`, `Save`, `-`, `Highlight`, `Quit`), its checked mask is
+    `file_checked`, and row 3 toggles the view with `syntax on`/`syntax off` in
+    the status line. Quit moved from row 3 to row 4; `Ctrl+Q` is unchanged.
+  - **Lexer (`samples/apps/base/editor`):** one visible line is scanned with
+    `//` to the line end, `{ ... }` block comments to the first `}` (no
+    nesting, strings and comments skip their interior), strings to the closing
+    quote with `\"` skipped or to the line end, identifiers classified against
+    a startup-built keyword table (33 words) and type table (14 predeclared
+    names), and decimal/hex/float numbers. Default punctuation and whitespace
+    are grouped so a plain line is one draw call. The palette is keyword
+    `0x000080`, type `0x800000`, string `0x008000`, comment `0x808080`, number
+    `0x804000`; selected text stays white on the accent band.
+  - **Block state and UTF-8:** when the first visible line is not line 0, the
+    block-comment state is computed by one allocation-free scan from byte 0,
+    **line by line** (a `//` must not swallow a later line's `{`), then carried
+    through the visible lines by `draw_syntax_line`. The scan is O(document),
+    bounded by the 8192-byte buffer. Token runs use whole code points and still
+    draw through `core.substr_into` and `snap_boundary`, so a multi-byte code
+    point is never split. With highlighting off the old all-black/all-white
+    `draw_line` path runs unchanged.
+  - **Proof:** `editor check` opens a plain `home/readme.txt` and a source
+    `base/child`, checks the menu item string and check mask, then draws
+    deterministic lines and scans `syslib.get_pixel` for keyword, comment,
+    type, number and string pixels; it also proves a block comment crossing a
+    line and one whose `{` is above the first visible line (top_line 2 after a
+    `//` line), toggles off and requires no palette pixel, and restores the
+    document for the existing glyph/selection/caret/scroll probes. A real QMP
+    pointer run (`press File`, drag to the Highlight row, release) turns every
+    palette count to 0 and back to the exact original counts (916 keyword,
+    285 type, 488 string, 4,209 comment, 380 number pixels in `base/child`).
+    The editor screenshot shows the highlighted source and the shell returns
+    after Ctrl+Q; the visual golden is unchanged.
+  - **Docs:** spec 0013 "The text editor" and changelog, PLAN/AGENTS. No ADR:
+    this is an app-local lexical colouring rule, not a kernel or ABI decision.
+  **Done (`a912765`):** `editor: ok` on `-smp 4` and `-smp 1`,
+  `editor: host ok` on `langhost`; 505 host tests; `browser check`,
+  `desktop_shell check`, `terminal` and the visual golden
+  (`37802052…e9e81c9f`) pass; `/home/sinan/Desktop/igis-editor.png` is
+  1024×768, 29,772 bytes with keyword/type/string/comment/number pixels.
 
 ## Deferred (not UI; pick up when they matter)
 
