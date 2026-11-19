@@ -1,8 +1,9 @@
 //! The network API's fixed limits and range rules (spec 0020).
 //!
-//! Seven host builtins are the whole application surface: three for the
-//! machine-wide configuration (`net_config`, `net_info`, `net_mac`) and four
-//! for sockets (`socket_open`, `socket_send`, `socket_recv`, `socket_close`).
+//! Nine host builtins are the whole application surface: three for the
+//! machine-wide configuration (`net_config`, `net_info`, `net_mac`), one for
+//! the protocol counters (`net_stats`) and five for sockets (`socket_open`,
+//! `socket_send`, `socket_recv`, `socket_close`, `socket_accept`).
 //! The wire stack itself lives in the kernel's `net` crate; this module holds
 //! only the constants and the operand rules the compiler and the interpreter
 //! must agree on, so a bad kind, port or address means the same thing
@@ -23,6 +24,10 @@ pub const KIND_TCP: u64 = 1;
 /// connection state.
 pub const KIND_UDP: u64 = 2;
 
+/// `core.socket_open` kind for a passive-open TCP listener (spec 0020, N10).
+/// `local` is the bind port and must be nonzero; `ip`/`port` are ignored.
+pub const KIND_LISTEN: u64 = 3;
+
 /// The largest port number, inclusive. `local` port `0` means "ephemeral".
 pub const MAX_PORT: u64 = 65535;
 
@@ -36,17 +41,19 @@ pub const MAX_ADDRESS: u64 = u32::MAX as u64;
 pub const RECV_CHUNK: usize = 2048;
 
 /// Validates the operands of `core.socket_open` (spec 0020, N12): `kind` must
-/// be [`KIND_TCP`] or [`KIND_UDP`], and `port` and `local` must be at most
-/// [`MAX_PORT`]. The listener kind (`3`) arrives with M10.7 and widens this
-/// rule then.
+/// be [`KIND_TCP`], [`KIND_UDP`] or [`KIND_LISTEN`], `port` and `local` must be
+/// at most [`MAX_PORT`], and a listener must bind a nonzero `local` port.
 ///
 /// A rejected operand is [`Status::Invalid`]; the caller pushes it without a
 /// host call, so a malformed open never touches the socket table.
 pub fn validate_open(kind: u64, port: u64, local: u64) -> Status {
-    if kind != KIND_TCP && kind != KIND_UDP {
+    if kind != KIND_TCP && kind != KIND_UDP && kind != KIND_LISTEN {
         return Status::Invalid;
     }
     if port > MAX_PORT || local > MAX_PORT {
+        return Status::Invalid;
+    }
+    if kind == KIND_LISTEN && local == 0 {
         return Status::Invalid;
     }
     Status::Ok
@@ -69,7 +76,7 @@ mod tests {
 
     #[test]
     fn limits_are_the_spec_constants() {
-        assert_eq!((KIND_TCP, KIND_UDP), (1, 2));
+        assert_eq!((KIND_TCP, KIND_UDP, KIND_LISTEN), (1, 2, 3));
         assert_eq!(MAX_PORT, 65535);
         assert_eq!(MAX_ADDRESS, 0xFFFF_FFFF);
         assert_eq!(RECV_CHUNK, 2048);
@@ -80,8 +87,13 @@ mod tests {
         assert_eq!(validate_open(KIND_TCP, 6666, 0), Status::Ok);
         assert_eq!(validate_open(KIND_UDP, 0, 5353), Status::Ok);
         assert_eq!(validate_open(KIND_TCP, MAX_PORT, MAX_PORT), Status::Ok);
-        // The listener kind is M10.7 and is not accepted yet.
-        for kind in [0, 3, 99] {
+        assert_eq!(validate_open(KIND_LISTEN, 0, 7), Status::Ok);
+        assert_eq!(validate_open(KIND_LISTEN, MAX_PORT, MAX_PORT), Status::Ok);
+        // A listener must bind a local port; other kinds cannot use kind 3's
+        // rules, and an unknown kind stays invalid.
+        assert_eq!(validate_open(KIND_LISTEN, 0, 0), Status::Invalid);
+        assert_eq!(validate_open(KIND_LISTEN, 7, 0), Status::Invalid);
+        for kind in [0, 4, 99] {
             assert_eq!(validate_open(kind, 80, 0), Status::Invalid, "kind {kind}");
         }
         for (port, local) in [(MAX_PORT + 1, 0), (0, MAX_PORT + 1), (0x1_0000, 0x1_0000)] {

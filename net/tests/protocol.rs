@@ -6,7 +6,14 @@
 //! against itself.
 
 use abi::Status;
-use net::{Config, Stack, KIND_TCP, KIND_UDP, MAX_SOCKETS, MSS};
+use net::{
+    Config, Stack, KIND_LISTEN, KIND_TCP, KIND_UDP, LISTEN_BACKLOG, MAX_SOCKETS, MSS,
+};
+
+/// The stack's SYN retry interval and passive handshake deadline (spec 0020,
+/// N9); private tuning constants, pinned here independently.
+const SYN_RETRY_NS: u64 = 200_000_000;
+const CONNECT_TIMEOUT_NS: u64 = 5_000_000_000;
 
 const OUR_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
 const PEER_MAC: [u8; 6] = [0x52, 0x55, 0x0A, 0x00, 0x02, 0x02];
@@ -1255,6 +1262,404 @@ fn tcp_close_owner_sends_a_fin_and_releases() {
     assert_eq!(stack.recv(handle, 1, &mut [0u8; 8]), Err(Status::NotFound));
 }
 
+// ---------------------------------------------------------------------------
+// TCP listener (M10.7, spec 0020 N10)
+// ---------------------------------------------------------------------------
+
+const LISTEN_PORT: u16 = 7;
+const CLIENT_ONE: u16 = 40_000;
+
+/// Sends one SYN to a listening port and returns the server ISN from its
+/// SYN-ACK, checking the acknowledgement, the MSS option and the window.
+fn syn_to_listener(
+    stack: &mut Stack,
+    wire: &mut Wire,
+    port: u16,
+    client_port: u16,
+    client_seq: u32,
+    now: u64,
+) -> u32 {
+    wire.clear();
+    let syn = tcp_packet(PEER_IP, OUR_IP, client_port, port, client_seq, 0, SYN, &[], &[]);
+    wire.receive(stack, now, &from_peer(&syn));
+    assert_eq!(wire.frames.len(), 1, "the listener answers with SYN-ACK");
+    let reply = parse_tcp(&parse_ip(&wire.last().to_vec()));
+    assert_eq!(reply.flags, SYN | ACK);
+    assert_eq!(reply.src_port, port);
+    assert_eq!(reply.dst_port, client_port);
+    assert_eq!(reply.ack, client_seq.wrapping_add(1));
+    assert_eq!(reply.window, 4096);
+    assert_eq!(
+        reply.options.as_slice(),
+        &[2, 4, (MSS >> 8) as u8, MSS as u8],
+        "the SYN-ACK offers MSS"
+    );
+    assert!(reply.checksum_valid);
+    reply.seq
+}
+
+/// Sends the final ACK of the passive handshake.
+fn complete_to_listener(
+    stack: &mut Stack,
+    wire: &mut Wire,
+    port: u16,
+    client_port: u16,
+    client_seq: u32,
+    server_isn: u32,
+    now: u64,
+) {
+    wire.clear();
+    let ack = tcp_packet(
+        PEER_IP,
+        OUR_IP,
+        client_port,
+        port,
+        client_seq.wrapping_add(1),
+        server_isn.wrapping_add(1),
+        ACK,
+        &[],
+        &[],
+    );
+    wire.receive(stack, now, &from_peer(&ack));
+}
+
+/// Opens a listener on `port` for `owner`.
+fn listener(stack: &mut Stack, owner: u64, port: u16) -> u64 {
+    stack
+        .open(KIND_LISTEN, 0, 0, port, owner)
+        .expect("a listener opens")
+}
+
+#[test]
+fn tcp_listener_accepts_and_echoes_a_line() {
+    let mut stack = configured();
+    let mut wire = Wire::new();
+    let owner = 1;
+    let listen = listener(&mut stack, owner, LISTEN_PORT);
+
+    let mut buf = [0u8; 64];
+    assert_eq!(stack.accept(listen, owner), Err(Status::WouldBlock));
+    assert!(!stack.readable(listen, owner));
+
+    let client_seq = 5000;
+    let isn = syn_to_listener(&mut stack, &mut wire, LISTEN_PORT, CLIENT_ONE, client_seq, T0);
+    assert_eq!(
+        stack.accept(listen, owner),
+        Err(Status::WouldBlock),
+        "a half-open connection is not accepted"
+    );
+    assert!(!stack.readable(listen, owner));
+
+    complete_to_listener(
+        &mut stack,
+        &mut wire,
+        LISTEN_PORT,
+        CLIENT_ONE,
+        client_seq,
+        isn,
+        T0,
+    );
+    assert!(wire.frames.is_empty(), "the final ACK needs no answer");
+    assert!(stack.readable(listen, owner), "the connection is pending");
+
+    let peer = stack.accept(listen, owner).expect("accept");
+    assert_ne!(peer, listen);
+    assert_eq!(peer & 0xFF, 1, "a distinct connection slot");
+    assert_eq!(stack.accept(listen, owner), Err(Status::WouldBlock));
+    assert!(!stack.readable(listen, owner));
+    assert!(stack.readable(peer, owner), "an established connection");
+
+    // Data arrives, is queued, acknowledged and readable.
+    wire.clear();
+    let line = b"hello-1\n";
+    let data = tcp_packet(
+        PEER_IP,
+        OUR_IP,
+        CLIENT_ONE,
+        LISTEN_PORT,
+        client_seq.wrapping_add(1),
+        isn.wrapping_add(1),
+        ACK | PSH,
+        &[],
+        line,
+    );
+    wire.receive(&mut stack, T0, &from_peer(&data));
+    let ack = parse_tcp(&parse_ip(&wire.last().to_vec()));
+    assert_eq!(ack.flags, ACK);
+    assert_eq!(ack.ack, client_seq.wrapping_add(1 + line.len() as u32));
+    assert_eq!(stack.recv(peer, owner, &mut buf), Ok(line.len()));
+    assert_eq!(&buf[..line.len()], line);
+
+    // The echo is one segment on the accepted connection.
+    wire.clear();
+    assert_eq!(wire.send(&mut stack, owner, peer, line, T0), Ok(line.len()));
+    let echo = parse_tcp(&parse_ip(&wire.last().to_vec()));
+    assert_eq!(echo.flags, PSH | ACK);
+    assert_eq!(echo.seq, isn.wrapping_add(1));
+    assert_eq!(echo.ack, client_seq.wrapping_add(1 + line.len() as u32));
+    assert_eq!(echo.payload.as_slice(), line);
+    assert!(echo.checksum_valid);
+
+    // The client acknowledges the echo.
+    wire.clear();
+    let ack = tcp_packet(
+        PEER_IP,
+        OUR_IP,
+        CLIENT_ONE,
+        LISTEN_PORT,
+        client_seq.wrapping_add(1 + line.len() as u32),
+        isn.wrapping_add(1 + line.len() as u32),
+        ACK,
+        &[],
+        &[],
+    );
+    wire.receive(&mut stack, T0, &from_peer(&ack));
+    assert!(wire.frames.is_empty());
+
+    // FIN: EOF, then our close completes and releases the slot.
+    wire.clear();
+    let fin = tcp_packet(
+        PEER_IP,
+        OUR_IP,
+        CLIENT_ONE,
+        LISTEN_PORT,
+        client_seq.wrapping_add(1 + line.len() as u32),
+        isn.wrapping_add(1 + line.len() as u32),
+        ACK | FIN,
+        &[],
+        &[],
+    );
+    wire.receive(&mut stack, T0, &from_peer(&fin));
+    let ack = parse_tcp(&parse_ip(&wire.last().to_vec()));
+    assert_eq!(ack.ack, client_seq.wrapping_add(2 + line.len() as u32));
+    assert_eq!(stack.recv(peer, owner, &mut buf), Ok(0), "end of file");
+
+    wire.clear();
+    assert_eq!(wire.close(&mut stack, owner, peer, T0), Status::Ok);
+    let our_fin = parse_tcp(&parse_ip(&wire.last().to_vec()));
+    assert_eq!(our_fin.flags, FIN | ACK);
+    let final_ack = tcp_packet(
+        PEER_IP,
+        OUR_IP,
+        CLIENT_ONE,
+        LISTEN_PORT,
+        client_seq.wrapping_add(2 + line.len() as u32),
+        isn.wrapping_add(2 + line.len() as u32),
+        ACK,
+        &[],
+        &[],
+    );
+    wire.receive(&mut stack, T0, &from_peer(&final_ack));
+    assert_eq!(
+        stack.recv(peer, owner, &mut buf),
+        Err(Status::NotFound),
+        "the connection slot was released"
+    );
+}
+
+#[test]
+fn tcp_listener_backlog_is_two_and_refuses_a_third() {
+    let mut stack = configured();
+    let mut wire = Wire::new();
+    let owner = 1;
+    let listen = listener(&mut stack, owner, LISTEN_PORT);
+
+    for slot in 0..LISTEN_BACKLOG {
+        let client_port = CLIENT_ONE + slot as u16;
+        let client_seq = 6000 + slot as u32 * 100;
+        let isn = syn_to_listener(&mut stack, &mut wire, LISTEN_PORT, client_port, client_seq, T0);
+        complete_to_listener(
+            &mut stack,
+            &mut wire,
+            LISTEN_PORT,
+            client_port,
+            client_seq,
+            isn,
+            T0,
+        );
+        assert!(wire.frames.is_empty());
+    }
+    assert!(stack.readable(listen, owner), "two connections are pending");
+
+    // A third completed connection is refused with RST and released while the
+    // queue is still full.
+    let client_port = CLIENT_ONE + 2;
+    let client_seq = 6200;
+    let isn = syn_to_listener(&mut stack, &mut wire, LISTEN_PORT, client_port, client_seq, T0);
+    wire.clear();
+    let ack = tcp_packet(
+        PEER_IP,
+        OUR_IP,
+        client_port,
+        LISTEN_PORT,
+        client_seq.wrapping_add(1),
+        isn.wrapping_add(1),
+        ACK,
+        &[],
+        &[],
+    );
+    wire.receive(&mut stack, T0, &from_peer(&ack));
+    let reset = parse_tcp(&parse_ip(&wire.last().to_vec()));
+    assert_eq!(reset.flags & RST, RST, "the third connection is refused");
+
+    // Both queued connections are valid and distinct.
+    let first = stack.accept(listen, owner).expect("accept one");
+    let second = stack.accept(listen, owner).expect("accept two");
+    assert_ne!(first, second);
+    assert_eq!(stack.accept(listen, owner), Err(Status::WouldBlock));
+    let mut buf = [0u8; 8];
+    assert_eq!(stack.recv(first, owner, &mut buf), Err(Status::WouldBlock));
+    assert_eq!(stack.recv(second, owner, &mut buf), Err(Status::WouldBlock));
+}
+
+#[test]
+fn tcp_listener_close_releases_pending_and_half_open_connections() {
+    let mut stack = configured();
+    let mut wire = Wire::new();
+    let owner = 1;
+    let listen = listener(&mut stack, owner, LISTEN_PORT);
+
+    let client_seq = 7000;
+    let isn = syn_to_listener(&mut stack, &mut wire, LISTEN_PORT, CLIENT_ONE, client_seq, T0);
+    complete_to_listener(
+        &mut stack,
+        &mut wire,
+        LISTEN_PORT,
+        CLIENT_ONE,
+        client_seq,
+        isn,
+        T0,
+    );
+    let peer = stack.accept(listen, owner).expect("accept");
+
+    // A second connection is still half-open when the listener closes.
+    let _ = syn_to_listener(
+        &mut stack,
+        &mut wire,
+        LISTEN_PORT,
+        CLIENT_ONE + 1,
+        7100,
+        T0,
+    );
+
+    assert_eq!(stack.close(listen, owner, T0, &mut |_: &[u8]| true), Status::Ok);
+    assert_eq!(stack.accept(listen, owner), Err(Status::NotFound));
+    assert_eq!(
+        stack.recv(peer, owner, &mut [0u8; 8]),
+        Err(Status::WouldBlock),
+        "an accepted connection is the application's, not the listener's"
+    );
+
+    // The listener and the half-open connection are gone; the accepted
+    // connection still holds one slot.
+    let mut handles = Vec::new();
+    for _ in 0..MAX_SOCKETS - 1 {
+        handles.push(
+            stack
+                .open(KIND_UDP, PEER_IP, 53, 0, owner)
+                .expect("a free slot"),
+        );
+    }
+    assert_eq!(
+        stack.open(KIND_UDP, PEER_IP, 53, 0, owner),
+        Err(Status::Full)
+    );
+}
+
+#[test]
+fn tcp_listener_checks_ownership_kind_and_bind_port() {
+    let mut stack = configured();
+    let owner = 1;
+    let listen = listener(&mut stack, owner, LISTEN_PORT);
+    let client = stack.open(KIND_TCP, PEER_IP, PEER_PORT, 0, owner).unwrap();
+
+    assert_eq!(stack.accept(listen, 2), Err(Status::Invalid));
+    assert_eq!(stack.accept(client, owner), Err(Status::Invalid));
+    assert_eq!(
+        stack.send(listen, owner, b"x", T0, &mut |_: &[u8]| true),
+        Err(Status::Invalid)
+    );
+    assert_eq!(stack.recv(listen, owner, &mut [0u8; 8]), Err(Status::Invalid));
+    assert_eq!(
+        stack.close(listen, 2, T0, &mut |_: &[u8]| true),
+        Status::Invalid
+    );
+    // A listener must bind a real port, and one port has one listener.
+    assert_eq!(
+        stack.open(KIND_LISTEN, 0, 0, 0, owner),
+        Err(Status::Invalid)
+    );
+    assert_eq!(
+        stack.open(KIND_LISTEN, 0, 0, LISTEN_PORT, owner),
+        Err(Status::Invalid)
+    );
+    // A listener handle is not a connection, and vice versa.
+    assert!(!stack.readable(client, owner));
+    assert_eq!(stack.accept(listen, owner), Err(Status::WouldBlock));
+}
+
+#[test]
+fn tcp_listener_retransmits_the_syn_ack_and_expires_a_half_open_connection() {
+    let mut stack = configured();
+    let mut wire = Wire::new();
+    let owner = 1;
+    let listen = listener(&mut stack, owner, LISTEN_PORT);
+    let client_seq = 8000;
+
+    let isn = syn_to_listener(&mut stack, &mut wire, LISTEN_PORT, CLIENT_ONE, client_seq, T0);
+    let first = parse_tcp(&parse_ip(&wire.last().to_vec()));
+
+    wire.clear();
+    wire.service(&mut stack, T0 + SYN_RETRY_NS);
+    let again = parse_tcp(&parse_ip(&wire.last().to_vec()));
+    assert_eq!(again.flags, SYN | ACK);
+    assert_eq!(again.seq, first.seq, "the same sequence number");
+    assert_eq!(again.ack, first.ack);
+    assert_eq!(again.options, first.options);
+
+    // No final ACK: the half-open slot expires and is released.
+    wire.clear();
+    wire.service(&mut stack, T0 + CONNECT_TIMEOUT_NS + 1);
+    assert!(wire.frames.is_empty());
+    // The listener plus seven new sockets fill the table; the half-open slot
+    // is gone.
+    for _ in 0..MAX_SOCKETS - 1 {
+        assert!(stack.open(KIND_UDP, PEER_IP, 53, 0, owner).is_ok());
+    }
+    assert_eq!(
+        stack.open(KIND_UDP, PEER_IP, 53, 0, owner),
+        Err(Status::Full)
+    );
+    let _ = isn;
+}
+
+#[test]
+fn a_syn_with_no_listener_is_dropped() {
+    let mut stack = configured();
+    let mut wire = Wire::new();
+    let syn = tcp_packet(PEER_IP, OUR_IP, CLIENT_ONE, LISTEN_PORT, 9000, 0, SYN, &[], &[]);
+    let mut drops = stack.stats().drops;
+    wire.receive(&mut stack, T0, &from_peer(&syn));
+    assert!(wire.frames.is_empty(), "no RST is sent");
+    assert_eq!(stack.stats().drops, drops + 1);
+    drops = stack.stats().drops;
+    // A bare ACK for an unknown connection is dropped too.
+    let ack = tcp_packet(
+        PEER_IP,
+        OUR_IP,
+        CLIENT_ONE,
+        LISTEN_PORT,
+        9001,
+        1,
+        ACK,
+        &[],
+        &[],
+    );
+    wire.receive(&mut stack, T0, &from_peer(&ack));
+    assert!(wire.frames.is_empty());
+    assert_eq!(stack.stats().drops, drops + 1);
+}
+
 #[test]
 fn tcp_rejects_a_foreign_owner_and_a_stale_handle() {
     let mut stack = configured();
@@ -1305,8 +1710,11 @@ fn the_socket_table_is_full_at_eight() {
 #[test]
 fn a_bad_kind_is_rejected() {
     let mut stack = configured();
-    assert_eq!(stack.open(3, PEER_IP, 53, 0, 1), Err(Status::Invalid));
     assert_eq!(stack.open(0, PEER_IP, 53, 0, 1), Err(Status::Invalid));
+    assert_eq!(stack.open(4, PEER_IP, 53, 0, 1), Err(Status::Invalid));
+    // The listener kind is accepted, but it must bind a local port.
+    assert_eq!(stack.open(KIND_LISTEN, PEER_IP, 53, 0, 1), Err(Status::Invalid));
+    assert!(stack.open(KIND_LISTEN, PEER_IP, 53, 80, 1).is_ok());
 }
 
 #[test]

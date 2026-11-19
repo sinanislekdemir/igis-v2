@@ -667,6 +667,15 @@ pub trait Host {
         Status::Invalid
     }
 
+    /// Pops the oldest completed connection from a listener
+    /// (`core.socket_accept`, spec 0020, N10). The returned handle is a normal
+    /// connected socket owned by the same task. `WouldBlock` when none is
+    /// pending; `Invalid` for a live non-listener handle. The default is
+    /// `Invalid`, the disabled-NIC result.
+    fn socket_accept(&mut self, _handle: u64) -> Result<u64, Status> {
+        Err(Status::Invalid)
+    }
+
     /// Reports read readiness for a socket (`core.next_any` source tag,
     /// spec 0020; ADR 0050). Data, EOF, an error, a completed connect or a
     /// pending listener connection is readable. The default is `false`, so a
@@ -2992,6 +3001,31 @@ impl Machine {
                         let handle = self.pop(stack)?;
                         let status = host.socket_close(handle);
                         self.push(stack, status as u64)?;
+                    }
+                    builtin::SOCKET_ACCEPT => {
+                        let peer_bits = self.pop(stack)?;
+                        let handle = self.pop(stack)?;
+                        match host.socket_accept(handle) {
+                            Ok(peer) => {
+                                // `0` is never a valid handle (the same rule
+                                // `SOCKET_OPEN` applies to its out-parameter).
+                                if peer == 0 {
+                                    return Err(FaultCode::IllegalOperation);
+                                }
+                                self.write_ref(
+                                    peer_bits,
+                                    peer,
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.push(stack, Status::Ok as u64)?;
+                            }
+                            // `WouldBlock` and every other failure leave
+                            // `peer` untouched, so a retry is safe.
+                            Err(status) => self.push(stack, status as u64)?,
+                        }
                     }
                     _ => return Err(FaultCode::IllegalOperation),
                 }

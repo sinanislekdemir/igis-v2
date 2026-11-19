@@ -483,8 +483,18 @@ pub fn close(handle: u64, owner: u64) -> Status {
     })
 }
 
-/// Reports whether a socket is readable (data, EOF, error or a completed
-/// connect).
+/// Pops the oldest completed connection from a listener (spec 0020, N10). The
+/// returned handle is a normal connected socket owned by the listener's task.
+pub fn accept(handle: u64, owner: u64) -> Result<u64, Status> {
+    let mut guard = NET.lock();
+    if !guard.device.present() {
+        return Err(Status::IoError);
+    }
+    guard.stack.accept(handle, owner)
+}
+
+/// Reports whether a socket is readable (data, EOF, error, a completed
+/// connect or a listener with a pending connection).
 pub fn readable(handle: u64, owner: u64) -> bool {
     let guard = NET.lock();
     guard.stack.readable(handle, owner)

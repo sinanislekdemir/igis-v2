@@ -908,10 +908,12 @@ pub mod builtin {
     /// `core.socket_open(kind, ip, port, local, var id) -> Status`: open a
     /// socket to the peer `ip`:`port` (spec 0020, N12). `kind` is
     /// [`crate::net::KIND_TCP`] (a TCP client; the handshake runs in the background,
-    /// so the first send may be `WouldBlock`) or [`crate::net::KIND_UDP`]; `local` is
-    /// the local port, `0` for an ephemeral one. `Ok` writes the opaque
-    /// owner-checked handle through `id`; `Invalid` for a bad kind, port or
-    /// address, `Full` when the socket table is full, `IoError` with no device.
+    /// so the first send may be `WouldBlock`), [`crate::net::KIND_UDP`] or
+    /// [`crate::net::KIND_LISTEN`] (a passive listener bound to `local`);
+    /// `local` is the local port, `0` for an ephemeral one. `Ok` writes the
+    /// opaque owner-checked handle through `id`; `Invalid` for a bad kind, port
+    /// or address, `Full` when the socket table is full, `IoError` with no
+    /// device.
     /// A failure leaves `id` untouched. Operands: `[kind][ip][port][local][id
     /// reference]`.
     pub const SOCKET_OPEN: u32 = 65;
@@ -945,6 +947,15 @@ pub mod builtin {
     /// `NotFound` for a stale handle and `Invalid` for another task's. No
     /// out-parameters.
     pub const SOCKET_CLOSE: u32 = 68;
+
+    /// `core.socket_accept(id, var peer) -> Status`: pop the oldest completed
+    /// connection from the listener `id` (spec 0020, N10). The returned
+    /// `peer` is a normal connected `int` socket handle owned by the same task,
+    /// so `socket_send`/`recv`/`close` work unchanged. `WouldBlock` when no
+    /// connection is pending (the caller retries); `Invalid` for a live handle
+    /// that is not a listener; `NotFound`/`Invalid` follow the ordinary
+    /// stale/foreign handle rules. Operands: `[id][peer reference]`.
+    pub const SOCKET_ACCEPT: u32 = 72;
 
     /// `core.net_stats(var rx, var tx, var drops, var errors) -> Status`: the
     /// stack's bounded protocol counters (spec 0020, N22). `Ok` writes the four
@@ -1026,6 +1037,7 @@ pub mod builtin {
             SOCKET_SEND => Some((3, 1)),
             SOCKET_RECV => Some((4, 1)),
             SOCKET_CLOSE => Some((1, 1)),
+            SOCKET_ACCEPT => Some((2, 1)),
             NET_STATS => Some((4, 1)),
             _ => None,
         }

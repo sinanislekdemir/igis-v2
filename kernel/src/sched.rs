@@ -669,6 +669,10 @@ impl Host for KernelHost {
         crate::net::close(handle, self.current)
     }
 
+    fn socket_accept(&mut self, handle: u64) -> Result<u64, Status> {
+        crate::net::accept(handle, self.current)
+    }
+
     fn socket_readable(&mut self, handle: u64) -> bool {
         crate::net::readable(handle, self.current)
     }

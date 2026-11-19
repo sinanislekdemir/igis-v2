@@ -46,6 +46,24 @@ begin
   return core.socket_open(uint(2), ip, port, local, id);
 end;
 
+// Opens a passive TCP listener bound to `port` (spec 0020, N10). The stack
+// answers inbound SYNs at once; `accept` pops one completed connection. `id`
+// receives the handle only on `Ok`; `port` must be nonzero and a second
+// listener on the same port is `Invalid`.
+function listen(port: uint; id: var int): Status;
+begin
+  return core.socket_open(uint(3), uint(0), uint(0), port, id);
+end;
+
+// Pops the oldest completed connection from a listener. `peer` receives a
+// normal connected socket handle owned by the calling task, so `send`, `recv`,
+// `send_text` and `close` work on it unchanged. `WouldBlock` means no
+// connection is pending (the caller retries); `peer` is untouched then.
+function accept(id: int; peer: var int): Status;
+begin
+  return core.socket_accept(id, peer);
+end;
+
 // Closes a socket owned by the calling task.
 function close(id: int): Status;
 begin

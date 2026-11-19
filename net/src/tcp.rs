@@ -11,8 +11,9 @@ use crate::checksum;
 use crate::ethernet;
 use crate::ipv4::PROTO_TCP;
 use crate::{
-    Stack, TcpState, ETH_HEADER, FRAME_MAX, INITIAL_RTO_NS, IPV4_HEADER, MAX_ATTEMPTS, MAX_SOCKETS,
-    MSS, RX_CAP,
+    Stack, Socket, TcpState, CONNECT_TIMEOUT_NS, ETH_HEADER, FRAME_MAX, INITIAL_RTO_NS,
+    IPV4_HEADER, KIND_LISTEN, LISTEN_BACKLOG, MAX_ATTEMPTS, MAX_SOCKETS, MSS, RX_CAP,
+    SYN_RETRY_NS,
 };
 
 /// FIN flag.
@@ -91,6 +92,134 @@ impl Stack {
         None
     }
 
+    /// Finds a listener bound to `local_port` and owned by `owner`.
+    fn find_listener(&self, local_port: u16, owner: u64) -> Option<usize> {
+        for index in 0..MAX_SOCKETS {
+            let socket = &self.sockets[index];
+            if socket.active
+                && socket.kind == KIND_LISTEN
+                && socket.local_port == local_port
+                && socket.owner == owner
+            {
+                return Some(index);
+            }
+        }
+        None
+    }
+
+    /// Answers an inbound SYN on a listening port (spec 0020, N10).
+    ///
+    /// Allocates a connection slot in `SynReceived`, records the peer and the
+    /// client's sequence number and sends `SYN|ACK` (MSS 1460, window 4096).
+    /// With no listener or no free slot the segment is dropped and counted; no
+    /// RST is sent, so a stray SYN cannot be used to probe the host.
+    fn listener_syn(
+        &mut self,
+        src_ip: u32,
+        src_port: u16,
+        dst_port: u16,
+        seq: u32,
+        now_ns: u64,
+        tx: &mut dyn FnMut(&[u8]) -> bool,
+    ) {
+        let Some(listener) = self
+            .sockets
+            .iter()
+            .position(|socket| {
+                socket.active && socket.kind == KIND_LISTEN && socket.local_port == dst_port
+            })
+        else {
+            self.count_drop();
+            return;
+        };
+        let owner = self.sockets[listener].owner;
+        let Some(index) = self.sockets.iter().position(|socket| !socket.active) else {
+            // The socket table is shared by listeners and connections; with no
+            // free slot the SYN is dropped and the client retries. Sending a
+            // RST would need a connection slot to answer from in the first
+            // place, which is exactly what is missing.
+            self.count_drop();
+            return;
+        };
+        let generation = self.next_generation();
+        let isn = self.next_isn();
+        {
+            let socket = &mut self.sockets[index];
+            *socket = Socket::EMPTY;
+            socket.active = true;
+            socket.generation = generation;
+            socket.owner = owner;
+            socket.kind = crate::KIND_TCP;
+            socket.local_port = dst_port;
+            socket.remote_ip = src_ip;
+            socket.remote_port = src_port;
+            socket.state = TcpState::SynReceived;
+            socket.snd_una = isn;
+            socket.snd_nxt = isn.wrapping_add(1);
+            socket.rcv_nxt = seq.wrapping_add(1);
+            socket.syn_started = true;
+            socket.syn_next = now_ns.saturating_add(SYN_RETRY_NS);
+            socket.connect_deadline = now_ns.saturating_add(CONNECT_TIMEOUT_NS);
+        }
+        let ack = self.sockets[index].rcv_nxt;
+        let _ = self.transmit_tcp(index, isn, ack, SYN | ACK, Payload::Empty, now_ns, tx);
+    }
+
+    /// Applies one segment to a half-open `SynReceived` connection.
+    ///
+    /// Returns true when the caller must stop processing (the normal case):
+    /// the segment was a retransmitted SYN, an unexpected acknowledgement, the
+    /// final ACK that established and enqueued the connection, or a failure
+    /// that released the slot.
+    fn tcp_syn_received(
+        &mut self,
+        index: usize,
+        parsed: &Parsed<'_>,
+        now_ns: u64,
+        tx: &mut dyn FnMut(&[u8]) -> bool,
+    ) -> bool {
+        if parsed.flags & SYN != 0 && parsed.flags & ACK == 0 {
+            // Our SYN-ACK was lost: repeat it instead of answering a bare ACK.
+            let (seq, ack) = {
+                let socket = &self.sockets[index];
+                (socket.snd_una, socket.rcv_nxt)
+            };
+            let _ = self.transmit_tcp(index, seq, ack, SYN | ACK, Payload::Empty, now_ns, tx);
+            return true;
+        }
+        if parsed.flags & ACK == 0 || parsed.ack != self.sockets[index].snd_nxt {
+            return true;
+        }
+
+        let (port, owner) = {
+            let socket = &self.sockets[index];
+            (socket.local_port, socket.owner)
+        };
+        let Some(listener) = self.find_listener(port, owner) else {
+            // The listener disappeared between the SYN and the ACK.
+            let _ = self.tcp_send_reset(index, now_ns, tx);
+            self.release(index);
+            return true;
+        };
+        {
+            let socket = &mut self.sockets[index];
+            socket.state = TcpState::Established;
+            socket.snd_una = socket.snd_nxt;
+        }
+        if self.sockets[listener].pending_len >= LISTEN_BACKLOG {
+            // A third completed connection is refused; `accept` never sees it
+            // (spec 0020, N10's two-entry queue).
+            let _ = self.tcp_send_reset(index, now_ns, tx);
+            self.release(index);
+            return true;
+        }
+        let handle = (self.sockets[index].generation << 8) | index as u64;
+        let listener_socket = &mut self.sockets[listener];
+        listener_socket.pending[listener_socket.pending_len] = handle;
+        listener_socket.pending_len += 1;
+        true
+    }
+
     /// Builds and transmits one TCP segment for the socket at `index`.
     pub(crate) fn transmit_tcp(
         &mut self,
@@ -121,7 +250,7 @@ impl Stack {
         if payload_len > MSS {
             return Status::Invalid;
         }
-        let options = if flags & SYN != 0 && flags & ACK == 0 {
+        let options = if flags & SYN != 0 {
             SYN_OPTIONS_LEN
         } else {
             0
@@ -270,20 +399,44 @@ impl Stack {
             self.count_drop();
             return;
         };
-        let Some(index) = self.find_tcp(src_ip, parsed.src_port, parsed.dst_port) else {
-            self.count_drop();
-            return;
-        };
+        // Validate the checksum before any state is touched: a damaged segment
+        // must not open a connection or enqueue anything.
         let mut summer = checksum::pseudo(src_ip, dst_ip, PROTO_TCP, segment.len() as u16);
         summer.add(segment);
         if !summer.verify() {
             self.count_error();
             return;
         }
+        let Some(index) = self.find_tcp(src_ip, parsed.src_port, parsed.dst_port) else {
+            // No connection matches. A bare SYN may open one on a listening
+            // port; everything else belongs to no socket and is dropped.
+            if parsed.flags & SYN != 0 && parsed.flags & ACK == 0 {
+                self.listener_syn(
+                    src_ip,
+                    parsed.src_port,
+                    parsed.dst_port,
+                    parsed.seq,
+                    now_ns,
+                    tx,
+                );
+            } else {
+                self.count_drop();
+            }
+            return;
+        };
 
         // A reset ends the connection immediately; queued data is discarded.
         if parsed.flags & RST != 0 {
-            self.tcp_reset_received(index);
+            if self.unpend(index) {
+                // The application never accepted it, so there is nothing to
+                // observe: free the slot rather than leak a pending ghost.
+                self.release(index);
+            } else if self.sockets[index].state == TcpState::SynReceived {
+                // The handshake never completed; the listener never saw it.
+                self.release(index);
+            } else {
+                self.tcp_reset_received(index);
+            }
             return;
         }
         // A socket that already failed (connect timeout, exhausted
@@ -310,6 +463,12 @@ impl Stack {
             }
             // A wrong acknowledgement is ignored; the SYN is retried.
             return;
+        }
+
+        if self.sockets[index].state == TcpState::SynReceived {
+            if self.tcp_syn_received(index, &parsed, now_ns, tx) {
+                return;
+            }
         }
 
         if parsed.flags & ACK != 0 && self.tcp_ack(index, parsed.ack) {
@@ -441,7 +600,7 @@ impl Stack {
                 self.sockets[index].close_requested = true;
                 Status::Ok
             }
-            TcpState::Closed => {
+            TcpState::Listen | TcpState::SynReceived | TcpState::Closed => {
                 self.release(index);
                 Status::Ok
             }
@@ -478,6 +637,29 @@ impl Stack {
             let seq = self.sockets[index].snd_una;
             let _ = self.transmit_tcp(index, seq, 0, SYN, Payload::Empty, now_ns, tx);
             self.sockets[index].syn_next = now_ns.saturating_add(crate::SYN_RETRY_NS);
+        }
+    }
+
+    /// Drives a half-open listener connection: retransmits the SYN-ACK on the
+    /// SYN retry interval and releases the slot when the handshake deadline
+    /// expires (a client that never sends the final ACK).
+    pub(crate) fn tcp_service_syn_received(
+        &mut self,
+        index: usize,
+        now_ns: u64,
+        tx: &mut dyn FnMut(&[u8]) -> bool,
+    ) {
+        if now_ns >= self.sockets[index].connect_deadline {
+            self.release(index);
+            return;
+        }
+        if now_ns >= self.sockets[index].syn_next {
+            let (seq, ack) = {
+                let socket = &self.sockets[index];
+                (socket.snd_una, socket.rcv_nxt)
+            };
+            let _ = self.transmit_tcp(index, seq, ack, SYN | ACK, Payload::Empty, now_ns, tx);
+            self.sockets[index].syn_next = now_ns.saturating_add(SYN_RETRY_NS);
         }
     }
 

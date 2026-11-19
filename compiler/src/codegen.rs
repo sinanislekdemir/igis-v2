@@ -7948,6 +7948,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             "core.socket_send" => self.socket_send_call(args, line, column),
             "core.socket_recv" => self.socket_recv_call(args, line, column),
             "core.socket_close" => self.socket_close_call(args, line, column),
+            "core.socket_accept" => self.socket_accept_call(args, line, column),
             // Terminal attach (spec 0014): bind the console's machine-wide
             // terminal grid to a window owned by the caller. The kernel host
             // supplies the task id; the compiler only checks the staged
@@ -8737,6 +8738,44 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         }
         self.one(opcodes::BUILTIN, builtin::SOCKET_CLOSE)?;
         self.pop(1)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// `core.socket_accept(id, var peer) -> Status`.
+    fn socket_accept_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 2 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!(
+                    "`core.socket_accept` expects 2 arguments, got {}",
+                    args.len()
+                ),
+            ));
+        }
+        let id = self.expr_scalar(args[0])?;
+        if id.kind != Kind::Int {
+            return Err(self.err_at(
+                args[0],
+                format_args!("`core.socket_accept` expects an `int` listener id, found `{id}`"),
+            ));
+        }
+        let peer = self.emit_scalar_ref(args[1])?;
+        if peer.kind != Kind::Int {
+            let found = self.type_name(peer);
+            return Err(self.err_at(
+                args[1],
+                format_args!("`core.socket_accept` expects `var peer: int`, found `{found}`"),
+            ));
+        }
+        self.one(opcodes::BUILTIN, builtin::SOCKET_ACCEPT)?;
+        self.pop(2)?;
         self.push();
         Ok(Some(Type::enumeration(STATUS_ENUM)))
     }

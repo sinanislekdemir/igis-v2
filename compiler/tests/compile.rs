@@ -9066,7 +9066,7 @@ fn instruction_words(package: &Owned) -> Vec<(u8, Vec<u32>)> {
 }
 
 #[test]
-fn net_primitives_are_builtin_ids_62_to_68_and_check_their_signatures() {
+fn net_primitives_are_builtin_ids_62_to_73_and_check_their_signatures() {
     use abi::opcodes::{self, builtin};
 
     let source = r#"
@@ -9079,6 +9079,7 @@ var
   gateway: uint;
   dns: uint;
   id: int;
+  peer: int;
   sent: int;
   read: int;
   mac: uint;
@@ -9099,6 +9100,7 @@ begin
   status := core.socket_send(id, text, sent);
   status := core.socket_recv(id, chunk, read);
   status := core.socket_close(id);
+  status := core.socket_accept(id, peer);
 end;
 "#;
     let package = compile(source.as_bytes(), "t.ig").expect("the network primitives compile");
@@ -9111,6 +9113,7 @@ end;
         builtin::SOCKET_SEND,
         builtin::SOCKET_RECV,
         builtin::SOCKET_CLOSE,
+        builtin::SOCKET_ACCEPT,
     ] {
         assert!(builtin_count(&package, id) >= 1, "builtin {id} is emitted");
     }
@@ -9125,8 +9128,9 @@ end;
             builtin::SOCKET_SEND,
             builtin::SOCKET_RECV,
             builtin::SOCKET_CLOSE,
+            builtin::SOCKET_ACCEPT,
         ),
-        (62, 63, 64, 73, 65, 66, 67, 68)
+        (62, 63, 64, 73, 65, 66, 67, 68, 72)
     );
     assert_eq!(builtin::effect(builtin::NET_CONFIG), Some((4, 1)));
     assert_eq!(builtin::effect(builtin::NET_INFO), Some((4, 1)));
@@ -9140,6 +9144,7 @@ end;
         "the destination capacity is staged as a fourth operand"
     );
     assert_eq!(builtin::effect(builtin::SOCKET_CLOSE), Some((1, 1)));
+    assert_eq!(builtin::effect(builtin::SOCKET_ACCEPT), Some((2, 1)));
 
     // `socket_recv` stages the destination's declared capacity between the id
     // and the data reference: `const 100` then the state reference.
@@ -9317,6 +9322,42 @@ begin
 end;
 "#,
             "buffer `chunk` cannot be used as a scalar value",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; id: int;
+procedure main(args: const string[1024]);
+begin
+  status := core.socket_accept(id);
+end;
+"#,
+            "`core.socket_accept` expects 2 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; id: int; peer: uint;
+procedure main(args: const string[1024]);
+begin
+  status := core.socket_accept(id, peer);
+end;
+"#,
+            "`core.socket_accept` expects `var peer: int`",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; id: uint; peer: int;
+procedure main(args: const string[1024]);
+begin
+  status := core.socket_accept(id, peer);
+end;
+"#,
+            "`core.socket_accept` expects an `int` listener id",
         ),
         (
             r#"

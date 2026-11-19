@@ -12,6 +12,7 @@
 //! - **M10.2** added Ethernet, ARP, IPv4 and ICMP echo.
 //! - **M10.3** added UDP sockets and the generation/owner handle rules.
 //! - **M10.4** added the stop-and-wait TCP client used by the HTTP proof.
+//! - **M10.7** added the TCP listener, the two-entry pending queue and `accept`.
 //!
 //! Every table is a fixed-size array sized at compile time, nothing here
 //! allocates, and no malformed frame can panic: bad input is dropped and
@@ -24,8 +25,9 @@
 //! afterwards. There is no reassembly queue: an out-of-order segment is
 //! dropped and answered with an ACK for the expected sequence, so the peer
 //! retransmits. A UDP socket holds exactly one datagram; a second datagram
-//! arriving before `recv` is dropped and counted. TCP has no listener, no
-//! window scaling, no SACK and no delayed ACK; it acknowledges every segment.
+//! arriving before `recv` is dropped and counted. A TCP listener accepts at most
+//! two completed connections before `accept` drains one. TCP has no window
+//! scaling, no SACK and no delayed ACK; it acknowledges every segment.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -54,6 +56,11 @@ pub const TX_CAP: usize = 4096;
 pub const KIND_TCP: u64 = 1;
 /// Connected UDP socket kind.
 pub const KIND_UDP: u64 = 2;
+/// Passive-open TCP listener kind (spec 0020, N10). `open` binds `local`; `ip`
+/// and `port` are ignored.
+pub const KIND_LISTEN: u64 = 3;
+/// Completed connections a listener holds before `accept` drains one.
+pub const LISTEN_BACKLOG: usize = 2;
 
 /// Ethernet II header length.
 pub(crate) const ETH_HEADER: usize = ethernet::HEADER_LEN;
@@ -114,6 +121,10 @@ pub(crate) enum TcpState {
     Closed,
     /// SYN sent, waiting for the SYN-ACK.
     SynSent,
+    /// Bound and waiting for an inbound SYN.
+    Listen,
+    /// An inbound SYN was answered; waiting for the final ACK.
+    SynReceived,
     /// The handshake completed.
     Established,
     /// Our FIN was sent; waiting for its ACK.
@@ -165,6 +176,10 @@ struct Socket {
     close_requested: bool,
     /// `recv` drained the arena; `service` re-advertises the window.
     window_dirty: bool,
+    /// Completed connections waiting for `accept`: listener handles, oldest
+    /// first. Only a [`KIND_LISTEN`] slot fills this.
+    pending: [u64; LISTEN_BACKLOG],
+    pending_len: usize,
 }
 
 impl Socket {
@@ -199,6 +214,8 @@ impl Socket {
         connect_deadline: 0,
         close_requested: false,
         window_dirty: false,
+        pending: [0; LISTEN_BACKLOG],
+        pending_len: 0,
     };
 }
 
@@ -271,10 +288,12 @@ impl Stack {
         self.stats
     }
 
-    /// Opens a socket. `kind` is [`KIND_TCP`] (active open) or [`KIND_UDP`];
-    /// `ip`/`port` are the remote peer and `local` 0 asks for an ephemeral
-    /// port. TCP returns immediately in SYN-SENT and `service` drives the
-    /// handshake; UDP is ready at once.
+    /// Opens a socket. `kind` is [`KIND_TCP`] (active open), [`KIND_UDP`] or
+    /// [`KIND_LISTEN`] (passive open); `ip`/`port` are the remote peer and
+    /// `local` 0 asks for an ephemeral port. TCP returns immediately in
+    /// SYN-SENT and `service` drives the handshake; UDP is ready at once. A
+    /// listener requires a nonzero `local` bind port, ignores `ip`/`port` and
+    /// waits for inbound SYNs on that port.
     pub fn open(
         &mut self,
         kind: u64,
@@ -283,7 +302,10 @@ impl Stack {
         local: u16,
         owner: u64,
     ) -> Result<u64, Status> {
-        if kind != KIND_TCP && kind != KIND_UDP {
+        if kind != KIND_TCP && kind != KIND_UDP && kind != KIND_LISTEN {
+            return Err(Status::Invalid);
+        }
+        if kind == KIND_LISTEN && local == 0 {
             return Err(Status::Invalid);
         }
         let mut free = None;
@@ -305,8 +327,14 @@ impl Stack {
         socket.owner = owner;
         socket.kind = kind;
         socket.local_port = local_port;
-        socket.remote_ip = ip;
-        socket.remote_port = port;
+        if kind == KIND_LISTEN {
+            // A listener has no peer and no remote state; each accepted
+            // connection takes its own sequence number in `listener_syn`.
+            socket.state = TcpState::Listen;
+        } else {
+            socket.remote_ip = ip;
+            socket.remote_port = port;
+        }
         if kind == KIND_TCP {
             socket.state = TcpState::SynSent;
             socket.snd_una = isn;
@@ -319,7 +347,8 @@ impl Stack {
     ///
     /// `WouldBlock` when the socket is not connected, the previous TCP segment
     /// is unacknowledged, the next hop is not resolved yet, or the device
-    /// refused the frame. `Ok(n)` reports the accepted byte count.
+    /// refused the frame. `Ok(n)` reports the accepted byte count. A listener
+    /// is `Invalid`: it carries no byte stream.
     pub fn send(
         &mut self,
         handle: u64,
@@ -342,6 +371,10 @@ impl Stack {
     pub fn recv(&mut self, handle: u64, owner: u64, dst: &mut [u8]) -> Result<usize, Status> {
         let index = self.lookup(handle, owner)?;
         let socket = &mut self.sockets[index];
+        if socket.kind == KIND_LISTEN {
+            // A listener is not a datagram or byte stream; use `accept`.
+            return Err(Status::Invalid);
+        }
         if socket.kind == KIND_UDP {
             if !socket.udp_ready {
                 return Err(Status::WouldBlock);
@@ -385,9 +418,42 @@ impl Stack {
         Err(Status::WouldBlock)
     }
 
+    /// Pops the oldest completed connection from a listener (spec 0020, N10).
+    ///
+    /// The connection was created by the stack, is already in `Established`,
+    /// and belongs to the listener's owner, so the returned handle is a normal
+    /// [`KIND_TCP`] socket for `send`/`recv`/`close`. `WouldBlock` when the
+    /// pending queue is empty; `Invalid` for a live handle that is not a
+    /// listener; `NotFound`/`Invalid` for the ordinary stale/foreign rules.
+    pub fn accept(&mut self, handle: u64, owner: u64) -> Result<u64, Status> {
+        let index = self.lookup(handle, owner)?;
+        if self.sockets[index].kind != KIND_LISTEN {
+            return Err(Status::Invalid);
+        }
+        loop {
+            if self.sockets[index].pending_len == 0 {
+                return Err(Status::WouldBlock);
+            }
+            let peer = self.sockets[index].pending[0];
+            let socket = &mut self.sockets[index];
+            for slot in 0..(socket.pending_len - 1) {
+                socket.pending[slot] = socket.pending[slot + 1];
+            }
+            socket.pending_len -= 1;
+            socket.pending[socket.pending_len] = 0;
+            // A pending connection is released on a listener close or a peer
+            // reset, and those paths remove it; a dead entry is skipped rather
+            // than handed out with a stale generation.
+            if self.lookup(peer, owner).is_ok() {
+                return Ok(peer);
+            }
+        }
+    }
+
     /// Sends FIN for a connected TCP socket (or frees a UDP socket). The slot
     /// is released once the close handshake completes; UDP and a socket that
-    /// never connected are released immediately.
+    /// never connected are released immediately. Closing a listener releases
+    /// its completed and half-open connections.
     pub fn close(
         &mut self,
         handle: u64,
@@ -405,6 +471,10 @@ impl Stack {
                 Status::Ok
             }
             KIND_TCP => self.tcp_close(index, now_ns, tx),
+            KIND_LISTEN => {
+                self.release_listener(index);
+                Status::Ok
+            }
             _ => {
                 self.release(index);
                 Status::Ok
@@ -418,12 +488,16 @@ impl Stack {
             if !self.sockets[index].active || self.sockets[index].owner != owner {
                 continue;
             }
+            if self.sockets[index].kind == KIND_LISTEN {
+                self.release_listener(index);
+                continue;
+            }
             if self.sockets[index].kind == KIND_TCP {
                 match self.sockets[index].state {
                     TcpState::Established | TcpState::CloseWait => {
                         let _ = self.tcp_send_fin(index, now_ns, tx);
                     }
-                    TcpState::SynSent => {
+                    TcpState::SynSent | TcpState::SynReceived => {
                         let _ = self.tcp_send_reset(index, now_ns, tx);
                     }
                     _ => {}
@@ -463,23 +537,28 @@ impl Stack {
             }
             match self.sockets[index].state {
                 TcpState::SynSent => self.tcp_service_syn(index, now_ns, tx),
+                TcpState::SynReceived => self.tcp_service_syn_received(index, now_ns, tx),
                 TcpState::Established
                 | TcpState::FinWait1
                 | TcpState::FinWait2
                 | TcpState::CloseWait
                 | TcpState::LastAck => self.tcp_service_data(index, now_ns, tx),
-                TcpState::Closed => {}
+                TcpState::Listen | TcpState::Closed => {}
             }
         }
     }
 
-    /// Reports whether a socket is readable: queued data, EOF, an error, or a
-    /// completed TCP connect. Owner-checked.
+    /// Reports whether a socket is readable: queued data, EOF, an error, a
+    /// completed TCP connect or, for a listener, a pending connection.
+    /// Owner-checked.
     pub fn readable(&self, handle: u64, owner: u64) -> bool {
         let Ok(index) = self.lookup(handle, owner) else {
             return false;
         };
         let socket = &self.sockets[index];
+        if socket.kind == KIND_LISTEN {
+            return socket.pending_len > 0;
+        }
         if socket.udp_ready || socket.rx_len > 0 || socket.eof || socket.error {
             return true;
         }
@@ -506,6 +585,63 @@ impl Stack {
     /// Frees a slot; the generation is not reused, so old handles stay stale.
     fn release(&mut self, index: usize) {
         self.sockets[index] = Socket::EMPTY;
+    }
+
+    /// Releases a listener: the slot, its completed connections and any
+    /// half-open `SynReceived` connection bound to the same port and owner.
+    fn release_listener(&mut self, index: usize) {
+        let owner = self.sockets[index].owner;
+        let port = self.sockets[index].local_port;
+        let mut pending = [0u64; LISTEN_BACKLOG];
+        let pending_len = self.sockets[index].pending_len;
+        pending[..pending_len]
+            .copy_from_slice(&self.sockets[index].pending[..pending_len]);
+        self.release(index);
+        for handle in &pending[..pending_len] {
+            if let Ok(peer) = self.lookup(*handle, owner) {
+                self.release(peer);
+            }
+        }
+        for slot in 0..MAX_SOCKETS {
+            let socket = &self.sockets[slot];
+            if socket.active
+                && socket.owner == owner
+                && socket.kind == KIND_TCP
+                && socket.local_port == port
+                && socket.state == TcpState::SynReceived
+            {
+                self.release(slot);
+            }
+        }
+    }
+
+    /// Removes the socket at `index` from every listener's pending queue.
+    /// Returns whether it was queued, which is how a reset distinguishes a
+    /// connection the application never accepted from an accepted one.
+    pub(crate) fn unpend(&mut self, index: usize) -> bool {
+        let handle = (self.sockets[index].generation << 8) | index as u64;
+        for listener in 0..MAX_SOCKETS {
+            if !self.sockets[listener].active || self.sockets[listener].kind != KIND_LISTEN {
+                continue;
+            }
+            let socket = &mut self.sockets[listener];
+            let mut found = None;
+            for slot in 0..socket.pending_len {
+                if socket.pending[slot] == handle {
+                    found = Some(slot);
+                    break;
+                }
+            }
+            if let Some(position) = found {
+                for slot in position..(socket.pending_len - 1) {
+                    socket.pending[slot] = socket.pending[slot + 1];
+                }
+                socket.pending_len -= 1;
+                socket.pending[socket.pending_len] = 0;
+                return true;
+            }
+        }
+        false
     }
 
     fn next_generation(&mut self) -> u64 {

@@ -87,6 +87,7 @@ struct NetHost {
     recv: Result<usize, Status>,
     recv_bytes: Vec<u8>,
     close: Status,
+    accept: Result<u64, Status>,
     calls: usize,
     last_config: Option<(u32, u32, u32, u32)>,
     last_open: Option<(u64, u32, u16, u16)>,
@@ -117,6 +118,7 @@ impl NetHost {
             recv: Ok(0),
             recv_bytes: Vec::new(),
             close: Status::Ok,
+            accept: Ok(0x0202),
             calls: 0,
             last_config: None,
             last_open: None,
@@ -188,6 +190,12 @@ impl Host for NetHost {
         self.calls += 1;
         self.last_handle = handle;
         self.close
+    }
+
+    fn socket_accept(&mut self, handle: u64) -> Result<u64, Status> {
+        self.calls += 1;
+        self.last_handle = handle;
+        self.accept
     }
 }
 
@@ -714,6 +722,72 @@ fn socket_close_returns_the_host_status() {
     assert_eq!(state_word(&state, 0), Status::NotFound as u64);
 }
 
+/// `[listener][peer][status]`, with the listener handle a constant.
+fn accept_program(handle: i64) -> Vec<u8> {
+    let mut instructions = Vec::new();
+    op_const(&mut instructions, handle);
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    builtin(&mut instructions, opcodes::builtin::SOCKET_ACCEPT);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 8);
+    op(&mut instructions, opcodes::RET);
+    build(&instructions, &[], 16)
+}
+
+#[test]
+fn socket_accept_writes_the_peer_on_ok() {
+    let mut state = vec![0u8; 16];
+    let mut host = NetHost::new();
+    host.accept = Ok(0x0202);
+    assert_eq!(
+        run(&accept_program(0x0101), &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(host.last_handle, 0x0101);
+    assert_eq!(state_word(&state, 0), 0x0202);
+    assert_eq!(state_word(&state, 8), Status::Ok as u64);
+}
+
+#[test]
+fn socket_accept_would_block_leaves_the_peer_untouched() {
+    let mut state = vec![0u8; 16];
+    set_word(&mut state, 0, 0xAAAA);
+    let mut host = NetHost::new();
+    host.accept = Err(Status::WouldBlock);
+    assert_eq!(
+        run(&accept_program(0x0101), &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(host.last_handle, 0x0101);
+    assert_eq!(state_word(&state, 0), 0xAAAA, "`peer` is untouched");
+    assert_eq!(state_word(&state, 8), Status::WouldBlock as u64);
+}
+
+#[test]
+fn socket_accept_invalid_handle_leaves_the_peer_untouched() {
+    let mut state = vec![0u8; 16];
+    set_word(&mut state, 0, 0xBEEF);
+    let mut host = NetHost::new();
+    host.accept = Err(Status::Invalid);
+    assert_eq!(
+        run(&accept_program(0x0101), &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(state_word(&state, 0), 0xBEEF);
+    assert_eq!(state_word(&state, 8), Status::Invalid as u64);
+}
+
+#[test]
+fn socket_accept_faults_on_a_zero_peer() {
+    let mut state = vec![0u8; 16];
+    let mut host = NetHost::new();
+    host.accept = Ok(0);
+    assert_eq!(
+        run(&accept_program(0x0101), &mut state, &mut host),
+        Outcome::Exited(ExitReason::Faulted(FaultCode::IllegalOperation))
+    );
+    assert_eq!(state_word(&state, 0), 0);
+}
+
 #[test]
 fn the_disabled_nic_defaults_leave_everything_untouched() {
     // `net_config` is `Invalid`, `net_info` is `Invalid`, `net_mac` is 0.
@@ -759,4 +833,12 @@ fn the_disabled_nic_defaults_leave_everything_untouched() {
     );
     assert_eq!(state_word(&socket_state, 0), 0xAAAA_AAAA_AAAA_AAAA);
     assert_eq!(state_word(&socket_state, 8), Status::Invalid as u64);
+
+    let mut accept_state = vec![0xAAu8; 16];
+    assert_eq!(
+        run(&accept_program(0x0101), &mut accept_state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(state_word(&accept_state, 0), 0xAAAA_AAAA_AAAA_AAAA);
+    assert_eq!(state_word(&accept_state, 8), Status::Invalid as u64);
 }
