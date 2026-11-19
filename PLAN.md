@@ -16,7 +16,7 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 - **Current state:** **505 host tests**; specs 0001–0019 (0018 and 0019
   Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1–M8.9 complete**,
-  plus **M9.1**. The
+  plus **M9.1 and M9.2**. The
   application image is a read-only ext2 tree (`lib`, `base`, `home`, `system`);
   `/home` is a separate 8 MiB ext2 image on an ATA disk, read-write through
   `ext2w` and one router, persistent across reboots. Write builtins are 53–57.
@@ -50,10 +50,16 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   keywords/types/strings/comments/numbers have fixed palette colours, `{ ... }` block
   state carries across visible lines without splitting UTF-8 code points, and a checked
   File > Highlight row toggles the view; old plain files are unchanged and no
-  opcode/builtin/`stdlib` surface was added.
-- **Last commit:** `a912765` (M9.1) plus this docs commit. The tree is clean;
+  opcode/builtin/`stdlib` surface was added. M9.2 makes the editor's pointer path
+  cheap: a pointer event repaints only when it changes visible state, the
+  scrollbar thumb drags like the browser's, and the block-comment state is
+  cached per line start and refreshed once per document publication. The
+  user-reported `Faulted(BudgetExceeded)` after 2,893 claims was the normal 10 s
+  CPU watchdog (a full repaint per pointer move), not a crash; the scheduler
+  budget and realtime policy are unchanged.
+- **Last commit:** `09dc57b` (M9.2) plus this docs commit. The tree is clean;
   `build/home.img` is reset.
-- **Next:** M9.1 is complete. Pick from the deferred backlog in
+- **Next:** M9.2 is complete. Pick from the deferred backlog in
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) / the "Deferred" table below, or extend the
   desktop (a task switcher, submenus and interactive resize were deliberately left out).
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
@@ -92,8 +98,10 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   snapshot plus the client content-rect refresh, `f478f9b`), M8.6 (window-addressed
   input delivery, `3598fda`), M8.7 (the `Desktop` help panel no longer owns the
   shell's lifetime, `5c97e39`), M8.8 (the browser's visible `Up` button,
-  `c69e392`), M8.9 (the browser's draggable scrollbar thumb, `d3087c6`) and
-  M9.1 (lexical syntax highlighting in the text editor, `a912765`).
+  `c69e392`), M8.9 (the browser's draggable scrollbar thumb, `d3087c6`),
+  M9.1 (lexical syntax highlighting in the text editor, `a912765`) and
+  M9.2 (the editor's cheap pointer path, draggable thumb and block-state
+  cache, `09dc57b`).
 - **Verified at that point (M3.4, independently by the parent):** **439 host tests**
   (abi 23, compiler 184, interpreter 150, langhost 81, 1 doctest); `cargo xtask
   build`/`image`/`image --shell` clean; boot `ext2: tree ok`. `run browser check`
@@ -1637,6 +1645,73 @@ parent verifies each.
   `desktop_shell check`, `terminal` and the visual golden
   (`37802052…e9e81c9f`) pass; `/home/sinan/Desktop/igis-editor.png` is
   1024×768, 29,772 bytes with keyword/type/string/comment/number pixels.
+
+### M9.2 — the editor's pointer budget and draggable scrollbar
+
+- [x] **M9.2 The editor repaints only on real changes and its thumb drags.**
+  User report: "task 4: exit Faulted(BudgetExceeded) after 2893 claims (2891
+  yields) while trying to scroll in the editor." This was the **normal-task
+  10 s CPU watchdog** (spec 0007 Sch8), not a crash. The editor's interactive
+  loop called `draw_all` + `present_frame` for every `PointerDown`/`PointerUp`/
+  `PointerMove` addressed to it, even when `handle_pointer` changed nothing; M9.1
+  had made each frame expensive (the block-comment state rescanned the document
+  from byte 0 when `top_line > 0`, plus per-token work), so moving the pointer
+  over the editor spent the task's whole lifetime budget on frames nobody could
+  see change. The scrollbar thumb also did not drag (unlike the browser's M8.9).
+  - **Redraw rule:** `handle_pointer` returns whether visible state changed and
+    the interactive and `shot` loops call `draw_all`/`present_frame` only on
+    true. A plain move over the text does nothing; a move with the File menu
+    open repaints only when the highlighted row changes (a separator or disabled
+    row is skipped); a thumb-drag move only when `top_line` changes; a press on
+    the thumb starts the drag without a repaint; release ends it without one;
+    track clicks repaint only when the page actually moved. Presses that
+    open/close the menu, move the caret/selection, page the view or activate an
+    item repaint. Key events and owner `Expose` are unchanged. Every event is
+    still delivered and handled.
+  - **Thumb drag:** `scroll_dragging`/`scroll_grab_dy` plus `scrollbar_thumb`
+    matching `stdlib.ui_scrollbar` (track `ScrollH-4`, visible-fraction thumb
+    with an 8-pixel floor, travel `track - thumb`, `Rows` against
+    `line_count(text)`). A hit class 3 press records `pointer - thumb_y`; held
+    primary-button moves map the thumb top onto `top_line` over the travel and
+    clamp it; release or a move without the button ends the drag. Track clicks
+    still page. Both paths clamp the caret into the visible lines (collapsing
+    the selection) so the next key does not jump the view.
+  - **Block-state cache:** `block_state_at(start)` per frame is replaced by
+    `line_states: bytes[8193]`, one state per line start, filled by
+    `refresh_line_states` with the same line-by-line `scan_token` walk. It is
+    refreshed by `publish_staged` (open/load) and `ed_replace` (every edit), plus
+    the check-mode direct `text :=` assignments that draw. `draw_lines` reads
+    the state for `top_line` and carries it through the visible rows: O(visible)
+    per frame, output identical (including a block comment above the visible
+    top line and a `//` that must not swallow a later `{`).
+  - **Budget:** no kernel/scheduler/realtime change. The fix removes the work,
+    it does not raise the budget. A QMP stress with ~3,000 no-button moves plus
+    a 300-step real thumb drag now ends `Ok`; see the proof below.
+  - **Proof:** `editor check` now drags the thumb in `base/child` through the
+    injected pointer path (`lib.inject` + a local pump): hit class 3, drag to
+    the bottom, require `top_line = line_count - Rows`, the drag ended and the
+    thumb redrawn at the bottom; the M9.1 syntax checks still pass.
+    `scripts/editor_scroll_qmp.py` boots `build/igis-shell.iso` with the
+    absolute tablet, runs interactive `editor`, sends 3,000 no-button moves over
+    the text, drags the thumb to the bottom with 300 held-button moves, compares
+    before/after captures (text view changed, thumb left the top of the track),
+    sends Ctrl+Q and requires `exit Ok` with no `BudgetExceeded`, the shell
+    prompt back and no idle summary/halt. Measured:
+    - old code (`c98d019`): `task 6: Faulted(BudgetExceeded) after 2826 claims
+      (2823 yields)` on `-smp 4` — the user's failure reproduced;
+    - new code: `task 6: exit Ok after 2448–2633 claims`, no budget fault, text
+      region diff 12,607 px, thumb strip gray 190 → 0 on `-smp 4` and `-smp 1`
+      (2,571 claims on `-smp 4`, 2,633 on `-smp 1` in the no-capture runs).
+    `editor check` prints `editor: ok` on `-smp 4` and `-smp 1`,
+    `editor: host ok` on `langhost`; 505 host tests; `browser check` and
+    `desktop_shell check` pass; the visual golden is unchanged
+    (`37802052…e9e81c9f`) on both core counts;
+    `/home/sinan/Desktop/igis-editor-scroll.png` is 1024×768, 17,206 bytes.
+  - **Docs:** spec 0013 "The text editor" and changelog, PLAN/AGENTS. No ADR:
+    the budget policy does not change; this is an app-local drawing/scroll rule.
+  **Done (`09dc57b`):** the editor redraw suppression, thumb drag and per-line
+  block cache plus `editor_scroll_qmp.py`; `editor: ok`, `editor: host ok`, the
+  QMP burst on both core counts and the unchanged visual golden as above.
 
 ## Deferred (not UI; pick up when they matter)
 
