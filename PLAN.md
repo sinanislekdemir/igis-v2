@@ -99,11 +99,11 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   71), `core.socket_source` (`1 << 63 | handle`) in `next_any`/`poll_any`, and
   `net_select` (selector + 300 ms recv/select timeouts); `net_echo`'s `accept`
   blocks, `kill_stress` is 300/300 and `mouse` 600/600.
-- **Last commit:** `5ae91bc` (blocking waits) plus the docs commit. `build/home.img`
-  is reset.
-- **Next:** the persistent DNS `langhost` test (M10.5 follow-up). The deferred
-  backlog in [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) remains available for
-  non-network work.
+- **Last commit:** `af27de8` (DNS `langhost` test) plus the docs commit.
+  `build/home.img` is reset.
+- **Next:** **M10 is complete.** Pick from the deferred backlog in
+  [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) (TLS Q52, IPv6 Q53, Wi-Fi Q54,
+  multi-NIC Q55, backlog Q56, DHCP/DNS follow-ups Q57) or the non-network items.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -2053,8 +2053,10 @@ parent verifies each.
   `net_probe: ok` on `-smp 4` and `-smp 1` (the two A records alternate in slirp).
   The HTTP probe still passes; `--no-net` prints `net_probe: no device`, an
   unknown mode is rejected, and a dead server times out after ~4 s (two 2 s
-  attempts) without a false `ok`. A canned-packet `langhost` check lived in
-  `/tmp` rather than the repo; the kernel proof is the committed evidence.
+  attempts) without a false `ok`. A canned-packet `langhost` check is committed as
+  `samples/lang/dns_check.ig` plus `langhost/tests/e2e.rs` (`af27de8`,
+  `dns_check: ok`), covering the query builder and A/NXDOMAIN/CNAME/TC/truncated/
+  overrun responses; the kernel proof remains the end-to-end evidence.
 
 ### M10.6 — NIC interrupts and network counters
 

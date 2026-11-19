@@ -26,7 +26,7 @@ revised as understanding improves, and their history lives in git.
 | 0017 | [The system menu and system control](0017-system-menu.md) | Implemented | kernel sched/smp/main, arch reboot, abi, compiler, interpreter, langhost, samples/apps | 2026-11-17 |
 | 0018 | [The image filesystem and importable library modules](0018-filesystem-and-modules.md) | Implemented | abi, compiler, interpreter, kernel ext2/repl/sched, langhost, xtask, samples/apps | 2026-11-18 |
 | 0019 | [The writable home filesystem](0019-writable-home-filesystem.md) | Implemented | ext2w, kernel ata/fs/repl/sched, abi, compiler, interpreter, langhost, xtask, samples/apps | 2026-11-18 |
-| 0020 | [Networking — IPv4, UDP, TCP and the `socket` unit](0020-networking.md) | Accepted | net (new crate), kernel pci/net/sched/task, arch PCI/IOAPIC/IDT, abi, compiler, interpreter, langhost, xtask, samples/apps, scripts | 2026-11-19 |
+| 0020 | [Networking — IPv4, UDP, TCP and the `socket` unit](0020-networking.md) | Implemented | net (new crate), kernel pci/net/sched/task, arch PCI/IOAPIC/IDT, abi, compiler, interpreter, langhost, xtask, samples/apps, scripts | 2026-11-19 |
 
 ## Lifecycle
 

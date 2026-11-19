@@ -1,6 +1,6 @@
 # 0020: Networking — IPv4, UDP, TCP and the `socket` unit
 
-- **Status:** Accepted
+- **Status:** Implemented
 - **Scope:** `net` (new crate), `kernel` (pci, net, sched, task, main), `arch/x86_64`
   (PCI, I/O APIC, IDT), `abi`, `compiler`, `interpreter`, `langhost`, `xtask`,
   `samples/apps/lib`, `samples/apps/base`, `scripts`
@@ -462,3 +462,4 @@ Boot lines: `pci: ...` (existing), `net: virtio-net 1af4:1000 mac ...`,
 | 2026-11-19 | M10.6 INTx, the polling fallback and `core.net_stats`: one PCI INTx route (QEMU GSI 11) to the boot core as vector `0x2D`, a lock-free handler (pending flag, one read-to-clear device acknowledge, EOI) and the used-ring drain left in the service opportunity; `--net-irq intx\|poll` through the multiboot2 command line; builtin 73 `core.net_stats`; `base/net_perf` (ten timed HTTP gets with the counters before and after). Note for legacy virtio: the boot-time test frame can leave the PCI INTx level latched high, so `net::enable_irq` reads the ISR once to drop it — a level that never changes would swallow every later notification. |
 | 2026-11-19 | M10.7 TCP listener/`accept` and the `net_echo` proof: `KIND_LISTEN` (open kind 3, nonzero bind port), a two-handle pending queue, inbound SYN → `SynReceived` + SYN-ACK, final ACK → `Established`/enqueue, backlog-full RST, SYN-ACK retry/5 s expiry, RST cleanup and listener close/owner cleanup; accepted connections use the normal TCP path. `core.socket_accept` is builtin 72; `lib/socket.listen/accept` and `samples/apps/base/net_echo` are the program side; `scripts/net_echo_qmp.py` proves three host clients through `hostfwd` on `-smp 4`/`-smp 1`. 590 host tests; no TIME-WAIT, backlog 2. |
 | 2026-11-19 | Blocking sockets and `socket_source`: `WaitFor::Net(handle)`/`WaitFor::Deadline(ns)`, `Outcome::Blocked` retry, per-socket `core.socket_timeout` (71; 0 = none, default 30 s, connect keeps 5 s `Closed`), compiler-lowered `core.socket_source` (`1 << 63 \| handle`) in `next_any`/`poll_any`, and the readiness-event/wake path that drops `NET` before `task::wake_net`. `net_select` proves the selector and 300 ms recv/select timeouts; 605 host tests; `kill_stress` 300/300. |
+| 2026-11-19 | DNS host test: `samples/lang/dns_check.ig` (host-only, socket-free) exercises the query builder and `parse_response` on canned A/NXDOMAIN/CNAME/TC/truncated/overrun packets and `langhost/tests/e2e.rs` pins `dns_check: ok`; 606 host tests. M10 is complete. |
