@@ -1,5 +1,9 @@
-//! The I/O APIC, used for one thing in this milestone: routing the PS/2
-//! auxiliary interrupt (IRQ12) to the boot core (spec 0010, ADR 0023).
+//! The I/O APIC, used for two things in this milestone: routing the PS/2
+//! auxiliary interrupt (IRQ12) to the boot core (spec 0010, ADR 0023) and
+//! routing the NIC's PCI INTx line (QEMU GSI 11) to the boot core (spec 0020,
+//! N4). [`init`] programs one redirection entry per call; the register page is
+//! split and marked uncached only once, so a second route reuses the first
+//! call's page table and leaves the other entries untouched.
 //!
 //! The legacy 8259 PICs are masked at boot (`apic::init`), so an ISA IRQ only
 //! reaches a core through the I/O APIC. Its registers are MMIO at the
@@ -43,8 +47,8 @@ const REG_REDIRECTION: u32 = 0x10;
 /// active-high (bit 13 = 0), level-triggered (bit 15 = 1), unmasked (bit 16 = 0).
 const REDIR_LEVEL: u32 = 1 << 15;
 
-/// One 4 KiB page table for the split, in `.bss`. The IOAPIC is programmed once
-/// at boot, so one table is enough and the guard cache is untouched.
+/// One 4 KiB page table for the split, in `.bss`. The IOAPIC is programmed at
+/// boot, so one table serves every route and the guard cache is untouched.
 #[repr(C, align(4096))]
 struct PageTable([u64; 512]);
 
@@ -75,6 +79,10 @@ fn write(register: u32, value: u32) {
 
 /// Maps the register page uncached, then routes `irq` to `vector` on the core
 /// with APIC id `destination`.
+///
+/// Safe to call once per line: the 2 MiB page is split only the first time and
+/// each call programs just its own redirection entry, so an earlier route
+/// keeps working.
 ///
 /// Returns the IOAPIC version register on success (the boot log prints the
 /// version byte), or `None` when the page cannot be remapped or the version

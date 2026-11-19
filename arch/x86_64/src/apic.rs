@@ -33,6 +33,8 @@ pub const SPURIOUS_VECTOR: u8 = 0xFF;
 pub const WAKE_VECTOR: u8 = 0x40;
 /// PS/2 auxiliary interrupt (IRQ12) through the I/O APIC (spec 0010, ADR 0023).
 pub const AUX_VECTOR: u8 = 0x2C;
+/// NIC PCI INTx (QEMU GSI 11) through the I/O APIC (spec 0020, N4; ADR 0023).
+pub const NET_VECTOR: u8 = 0x2D;
 
 /// Interrupt command register: delivery status (bit 12) is clear when the
 /// previous IPI has been accepted.

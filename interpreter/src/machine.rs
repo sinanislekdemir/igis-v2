@@ -120,6 +120,25 @@ pub struct NetInfo {
 /// many bytes, and the interpreter stages them in a local array (spec 0020).
 pub const NET_RECV_CHUNK: usize = abi::net::RECV_CHUNK;
 
+/// The bounded protocol counters returned by [`Host::net_stats`]
+/// (spec 0020, N22).
+///
+/// The interpreter writes the four values into the caller's four `var uint`
+/// operands only on `Ok`, so a failure leaves them untouched. The counters are
+/// monotonic for the life of the machine and saturate rather than wrap.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NetStats {
+    /// Frames accepted from the device and parsed.
+    pub rx_frames: u64,
+    /// Frames handed to the device's transmit path.
+    pub tx_frames: u64,
+    /// Packets dropped before reaching a socket (malformed, wrong checksum,
+    /// not for this machine, no route, hardware error).
+    pub drops: u64,
+    /// Protocol errors (a failed exchange, a bad handshake, a refused write).
+    pub errors: u64,
+}
+
 /// The host interface as far as this slice needs it (spec 0005).
 ///
 /// The kernel implements this over its own console, clock and REPL service;
@@ -596,6 +615,12 @@ pub trait Host {
     /// (`core.net_mac`, spec 0020). The default is `0`.
     fn net_mac(&mut self) -> u64 {
         0
+    }
+
+    /// The stack's bounded protocol counters (`core.net_stats`, spec 0020,
+    /// N22). The default is `Invalid`, the disabled-NIC result.
+    fn net_stats(&mut self) -> Result<NetStats, Status> {
+        Err(Status::Invalid)
     }
 
     /// Opens a socket to `ip`:`port` (`core.socket_open`, spec 0020).
@@ -2790,6 +2815,50 @@ impl Machine {
                     builtin::NET_MAC => {
                         let mac = host.net_mac();
                         self.push(stack, mac)?;
+                    }
+                    builtin::NET_STATS => {
+                        let errors_bits = self.pop(stack)?;
+                        let drops_bits = self.pop(stack)?;
+                        let tx_bits = self.pop(stack)?;
+                        let rx_bits = self.pop(stack)?;
+                        match host.net_stats() {
+                            Ok(stats) => {
+                                self.write_ref(
+                                    rx_bits,
+                                    stats.rx_frames,
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.write_ref(
+                                    tx_bits,
+                                    stats.tx_frames,
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.write_ref(
+                                    drops_bits,
+                                    stats.drops,
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.write_ref(
+                                    errors_bits,
+                                    stats.errors,
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.push(stack, Status::Ok as u64)?;
+                            }
+                            Err(status) => self.push(stack, status as u64)?,
+                        }
                     }
                     builtin::SOCKET_OPEN => {
                         let id_bits = self.pop(stack)?;

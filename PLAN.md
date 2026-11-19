@@ -81,13 +81,19 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `net_probe: ok` on `-smp 4` and `-smp 1` (1,406 body bytes); `net_probe dns`
   resolves `example.com` through `10.0.2.3`; `net_probe dhcp` obtains
   `10.0.2.15/24` from slirp and then fetches the page. Sockets are non-blocking
-  in this slice; `WaitFor::Net`/`Deadline`, `socket_source`, the listener and
-  INTx remain.
-- **Last commit:** `c7989c4` (M10.9 e1000/e1000e) plus the docs commit. The tree
-  is clean; `build/home.img` is reset.
-- **Next:** M10.6 (NIC INTx, poll fallback, `net_stats`/`net_perf`), M10.7
-  (listener/`accept` + `net_echo`), and the blocking `WaitFor::Net`/`Deadline`/
-  `socket_source` follow-up. The deferred backlog in
+  in this slice. **M10.6 (in the tree, uncommitted):** the NIC's PCI INTx line
+  (GSI 11) is routed through the I/O APIC to the boot core as vector `0x2D`; the
+  handler only sets a flag, acknowledges the device and EOIs, and the used-ring
+  drain stays in `net::service` (ADR 0051). `xtask --net-irq intx|poll` selects
+  the path through the multiboot2 command line, `core.net_stats` (73) exposes the
+  counters, and `base/net_perf` proves ten timed HTTP gets with them;
+  `net_probe http`/`dns`/`dhcp` and `net_perf` pass with INTx and with polling on
+  `-smp 4`/`-smp 1` over virtio, e1000 and e1000e. `WaitFor::Net`/`Deadline`,
+  `socket_source` and the listener remain.
+- **Last commit:** `c7989c4` (M10.9 e1000/e1000e) plus the docs commit; M10.6 is
+  in the working tree for review and not yet committed. `build/home.img` is reset.
+- **Next:** M10.7 (listener/`accept` + `net_echo`) and the blocking
+  `WaitFor::Net`/`Deadline`/`socket_source` follow-up. The deferred backlog in
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) remains available for non-network work.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
@@ -2035,20 +2041,37 @@ parent verifies each.
 
 ### M10.6 — NIC interrupts and network counters
 
-- [ ] **M10.6 Add INTx and prove the poll fallback.**
+- [x] **M10.6 Add INTx and prove the poll fallback.**
   Route the NIC's PCI INTx (QEMU GSI 11) through the I/O APIC to the boot core as
-  vector `0x2D`; the handler drains the used ring into the SPSC ring and EOIs
-  (ADR 0023 rule) while `net::service()` does the protocol work. Add
-  `core.net_stats` (73) and `samples/apps/base/net_perf` (ping/HTTP latency idle and
-  under `realtime` + workers, min/avg/max with `core.clock()`). Keep the polling path
-  as the default when the route is absent and add `--no-net-irq` to force polling
-  for the proof.
-  - **Acceptance:** the boot log shows `ioapic: ... IRQ 11 -> vector 0x2d` and
-    `net: irq ok`; the same transfer completes with interrupts and with polling
-    only; the handler takes no kernel lock; counters move for RX/TX/drops/errors.
-  - **Proof:** `net_probe http` with IRQ and with the polled path on `-smp 4` and
-    `-smp 1`; `net_perf` numbers in the AGENTS status row; no regression.
-  - **Docs:** spec 0020 N4/N22, ADR 0023/0049; AGENTS/PLAN.
+  vector `0x2D`; the handler only sets a pending flag, acknowledges the device with
+  one read-to-clear register access and EOIs, while `net::service()` does the
+  used-ring drain and the protocol work (ADR 0051 refines ADR 0023's "no lock in a
+  handler" rule; the rings are not SPSC-safe against the service path, so a flag is
+  the bounded handler). Add `core.net_stats` (73) and
+  `samples/apps/base/net_perf` (ten timed HTTP GETs, min/avg/max from
+  `core.clock()`, counters before/after). Polling stays the default when the route
+  is absent, when the device refuses to unmask, or when the boot asks for it:
+  `xtask --net-irq intx|poll` writes `igis.net_irq=poll` into the multiboot2 command
+  line, so the polled proof runs the same kernel and image.
+  - **Acceptance met:** the boot log shows `ioapic: version 0x20, IRQ11 -> vector
+    0x2d on apic 0 (level)` and `net: irq ok (vector 0x2d)` (or
+    `net: polling (igis.net_irq=poll)`); QEMU `-d int` counts 103 `v=2d`
+    deliveries for one virtio `net_perf` run, so the line is used; the same
+    transfers complete with interrupts and with polling only; the handler takes no
+    kernel lock; counters move (`17/23 -> 77/113` virtio, `9/12 -> 69/102` e1000,
+    `15/21 -> 75/111` e1000e).
+  - **Proof:** `net_probe http`/`dns`/`dhcp` and `net_perf` with INTx and with
+    `--net-irq poll` on `-smp 4`/`-smp 1` over virtio, e1000 and e1000e;
+    `scripts/net_qmp.py` passes both core counts; `--no-net` is clean; the visual
+    golden and `boot_desktop_qmp.py` are unchanged. `net_perf` numbers are in the
+    AGENTS status row.
+  - **Docs:** spec 0020 N4/N19/N22, ADR 0023/0049 + **ADR 0051**; AGENTS/PLAN.
+  - **Device notes:** legacy virtio can latch its PCI INTx level high from the
+    boot-time test frame (the PCI layer only turns a level *change* into an
+    interrupt), so `net::enable_irq` reads the ISR once after the route is
+    installed; e1000 masks with `IMS` and unmasks only the receive causes with
+    `IMC` (the old `IMC = u32::MAX` at reset actually unmasked everything, which
+    polling hid). No MSI/MSI-X.
 
 ### M10.7 — TCP listener and the in-guest echo server
 

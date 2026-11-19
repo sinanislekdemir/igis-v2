@@ -61,9 +61,15 @@ as late M10 tickets, not prerequisites.
   identity-mapped (virtual address equals physical address, as `ata.rs` and
   `usb.rs` already rely on). No allocation and no `alloc` crate.
 - **N4 (MUST):** The driver is polled in the service opportunity. M10.6 adds one
-  PCI INTx line routed through the I/O APIC to the boot core as vector `0x2D`;
-  its handler only drains the device's used ring into a lock-free SPSC ring and
-  EOIs, and polling remains the fallback when the route is unavailable.
+  PCI INTx line routed through the I/O APIC to the boot core as vector `0x2D`.
+  The handler is bounded and lock-free: it sets a pending flag, acknowledges the
+  device with one read-to-clear register access (virtio ISR / e1000 `ICR`) and
+  EOIs the local APIC. It does **not** walk the rings; the used-ring drain and
+  every protocol step stay in the service opportunity, because the handler may
+  interrupt a core that already holds the network lock and the device rings are
+  not safe to walk from two contexts. Polling therefore remains both the
+  fallback when the route is unavailable (or the boot asks for it) and a
+  harmless second chance: a missed interrupt costs at most one service period.
 
 ### The wire stack
 
@@ -109,7 +115,7 @@ as late M10 tickets, not prerequisites.
   **Implementation staging:** M10.3–M10.5 MAY ship the non-blocking form first
   (`send`/`recv`/`open` return `WouldBlock` and the application retries), so the
   first HTTP proof does not depend on the scheduler extension; the blocking
-  waits and `socket_source` are mandatory by M10.6.
+  waits and `socket_source` are the next follow-up after M10.7.
 - **N14 (MUST):** A task's sockets close when the task terminates, on every
   destruction path, before its regions are freed. A blocked peer is woken with
   `Closed`; queued data is discarded.
@@ -131,8 +137,11 @@ as late M10 tickets, not prerequisites.
   M10 uses static values (QEMU: `10.0.2.15/24`, gateway `10.0.2.2`, DNS
   `10.0.2.3`); a DHCP client follows in M10.8.
 - **N19 (MUST):** `xtask run` attaches one user-mode NIC by default and accepts
-  `--no-net` (no device, graceful absence) and `--net-device virtio|e1000`
-  (driver selection once M10.9 lands). The deterministic harness starts a host
+  `--no-net` (no device, graceful absence), `--net-device
+  virtio|e1000|e1000e` and `--net-irq intx|poll` (M10.6). `--net-irq intx|poll` (M10.6) selects the
+  interrupt path: `poll` writes `igis.net_irq=poll` into the boot loader's
+  command line, so the same kernel image skips the INTx route and proves the
+  polling fallback. The deterministic harness starts a host
   TCP service and uses a guest-forwarded address; external internet access is an
   optional run, not part of the regression suite.
 - **N20 (MUST):** Proofs run on `-smp 4` and `-smp 1`: `net_probe check` (stack up,
@@ -145,9 +154,11 @@ as late M10 tickets, not prerequisites.
   route behaves deterministically: `core.net_*` returns `Invalid`/`IoError`, a
   blocking call times out with `Closed`/`WouldBlock`, the boot log says so, and
   nothing panics or spins.
-- **N22 (SHOULD):** `net` exposes bounded counters (RX/TX frames, drops, checksum
-  errors, ARP misses, retransmits) readable through `core.net_stats`, so
-  failures are diagnosable without a debugger.
+- **N22 (SHOULD):** `net` exposes bounded counters (RX/TX frames, drops, protocol
+  errors) readable through `core.net_stats(var rx, var tx, var drops, var
+  errors) -> Status` (builtin 73, M10.6), so failures are diagnosable without a
+  debugger and an application can prove that traffic moved. `base/net_perf` is
+  the proof application: ten timed HTTP gets with the counters before and after.
 
 ## Design
 
@@ -220,7 +231,9 @@ The kernel keeps one `Device` value in a `SpinLock` (concrete enum dispatch is
 acceptable and avoids a trait-object vtable in the static path). `net::service()`
 runs in the service opportunity next to `mouse::poll`: it drains the device,
 passes frames to the `Stack`, runs protocol timers, and wakes blocked tasks. The
-NIC handler (M10.6) does only `device::drain_irq()` into the SPSC ring.
+NIC handler (M10.6) sets a pending flag, acknowledges the device with one
+read-to-clear register access and EOIs; the used-ring drain stays in the service
+opportunity (ADR 0051).
 
 ### Packet flow
 
@@ -442,3 +455,4 @@ Boot lines: `pci: ...` (existing), `net: virtio-net 1af4:1000 mac ...`,
 | 2026-11-19 | M10.5 DNS in source (`2b8bd70`): `lib/dns.ig` builds/sends a standard A query over UDP and parses the response (id/QR/opcode/TC/RCODE, labels/compression, first A, CNAME chain, NXDOMAIN, timeouts); `net_probe dns` resolves `example.com` via `10.0.2.3` on `-smp 4`/`-smp 1`. No kernel/ABI change. |
 | 2026-11-19 | M10.8 DHCP in source (`3752d17`): `lib/dhcp.ig` (DISCOVER/OFFER/REQUEST/ACK, local port 68, broadcast, options 1/3/6/50/53/54/55/51, 6 s cap, NAK restart) and `socket.udp_from`; `net_probe dhcp` applies `10.0.2.15/24`/`10.0.2.2`/`10.0.2.3` and then fetches the HTTP page on `-smp 4`/`-smp 1`. A broadcast send is allowed before an address is configured. |
 | 2026-11-19 | M10.9 e1000/e1000e behind `NetDevice` (`c7989c4`): polling 82540EM/82574L drivers with uncached MMIO BAR0, 32 RX + 16 TX legacy rings and static buffers; `xtask --net-device virtio\|e1000\|e1000e`. HTTP, DNS and DHCP+HTTP pass over both on `-smp 4`/`-smp 1`; virtio and `--no-net` are unchanged. |
+| 2026-11-19 | M10.6 INTx, the polling fallback and `core.net_stats`: one PCI INTx route (QEMU GSI 11) to the boot core as vector `0x2D`, a lock-free handler (pending flag, one read-to-clear device acknowledge, EOI) and the used-ring drain left in the service opportunity; `--net-irq intx\|poll` through the multiboot2 command line; builtin 73 `core.net_stats`; `base/net_perf` (ten timed HTTP gets with the counters before and after). Note for legacy virtio: the boot-time test frame can leave the PCI INTx level latched high, so `net::enable_irq` reads the ISR once to drop it — a level that never changes would swallow every later notification. |

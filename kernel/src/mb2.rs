@@ -78,6 +78,31 @@ pub fn framebuffer(info: usize) -> Option<Framebuffer> {
 
 pub const MODULE_TAG: u32 = 3;
 
+/// The boot loader's command line (multiboot2 tag type 1).
+const COMMAND_LINE_TAG: u32 = 1;
+
+/// Visits the boot command line, when the boot loader supplied one.
+///
+/// Layout (multiboot2 3.6.9): `type`, `size`, then a UTF-8 string terminated by
+/// a NUL; the NUL is not part of the argument passed to `visit`. GRUB passes
+/// what follows the `multiboot2` keyword in the menu entry, which is how
+/// `xtask run --net-irq poll` selects the polled network path without a second
+/// kernel image.
+pub fn for_each_command_line(info: usize, mut visit: impl FnMut(&[u8])) {
+    each_tag(info, |kind, tag, size| {
+        if kind != COMMAND_LINE_TAG || size < 9 {
+            return;
+        }
+        // SAFETY: the string follows the 8-byte tag header and `size` bounds
+        // the tag.
+        let bytes = unsafe { core::slice::from_raw_parts((tag + 8) as *const u8, size - 8) };
+        let Some(length) = bytes.iter().position(|byte| *byte == 0) else {
+            return;
+        };
+        visit(&bytes[..length]);
+    });
+}
+
 /// A bootloader module: a byte range in identity-mapped physical memory.
 #[derive(Clone, Copy, Debug)]
 pub struct Module {

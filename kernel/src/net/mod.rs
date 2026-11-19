@@ -5,6 +5,22 @@
 //! then runs the stack's timers; every transmit closure borrows the device and
 //! returns whether the frame reached the driver's TX ring.
 //!
+//! # Polling and the INTx route
+//!
+//! The driver is polled in the service opportunity ([`service`], called from
+//! `sched::service` and the idle loop). M10.6 adds one PCI INTx line (QEMU GSI
+//! 11) routed through the I/O APIC to the boot core as
+//! [`arch_x86_64::apic::NET_VECTOR`]. [`on_irq`] is the whole handler: it sets a
+//! pending flag, acknowledges the device with a read-only register access and
+//! EOIs the local APIC. It deliberately takes no lock, prints nothing and does
+//! not drain: the kernel may be interrupted while it holds [`NET`] (or any
+//! other lock), and the device rings are not safe to walk from two contexts.
+//! The used-ring drain therefore stays in [`service`], which already runs on
+//! every schedulable opportunity, so an interrupt is only a wake-up hint and a
+//! missed one costs at most one service period. Polling remains the path when
+//! no line was routed, when the boot asked for it (`--net-irq poll`) or when
+//! the device refused to unmask.
+//!
 //! The socket and configuration wrappers are pass-throughs to the `net`
 //! stack and are called by the interpreter host with the calling task as the
 //! socket owner (spec 0020, N12/N14). A missing device leaves every one of
@@ -18,7 +34,9 @@
 mod e1000;
 mod virtio;
 
-use ::net::{Config, Stack};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+
+use ::net::{Config, Stats, Stack};
 
 use abi::Status;
 
@@ -96,6 +114,61 @@ impl NetState {
 
 static NET: SpinLock<NetState> = SpinLock::new(NetState::new());
 
+// ---- The interrupt path (spec 0020, N4) -----------------------------------
+//
+// The handler may interrupt any core while it holds any lock, so everything it
+// needs is in these atomics: which device to acknowledge and how. `init` fills
+// them before the IOAPIC entry can deliver anything.
+
+/// A NIC interrupt is waiting for the next service opportunity.
+static IRQ_PENDING: AtomicBool = AtomicBool::new(false);
+/// Interrupts taken so far; the service opportunity prints the first non-zero
+/// value once, like the PS/2 aux line does.
+static IRQ_ENTRIES: AtomicU64 = AtomicU64::new(0);
+/// The one-time `net: irq delivered ...` line has been printed.
+static IRQ_REPORTED: AtomicBool = AtomicBool::new(false);
+/// Whether an INTx line is routed and the device is delivering on it.
+static IRQ_ROUTED: AtomicBool = AtomicBool::new(false);
+
+const ACK_NONE: u8 = 0;
+const ACK_VIRTIO: u8 = 1;
+const ACK_E1000: u8 = 2;
+
+/// How the handler acknowledges the device: [`ACK_NONE`], [`ACK_VIRTIO`] (read
+/// the legacy ISR byte) or [`ACK_E1000`] (read `ICR`).
+static IRQ_ACK: AtomicU8 = AtomicU8::new(ACK_NONE);
+/// The base the acknowledge reads: the virtio I/O BAR or the e1000 MMIO BAR.
+static IRQ_ACK_BASE: AtomicU64 = AtomicU64::new(0);
+
+/// The NIC interrupt handler (spec 0020, N4). Called from the `irq_net` stub
+/// with interrupts disabled.
+///
+/// Bounded and lock-free by construction: a pending flag, one device register
+/// read (which is the acknowledgement; both devices clear on read) and the
+/// local-APIC EOI. A spurious delivery with no device configured only sets the
+/// flag and EOIs. The rings are drained by [`service`], never here.
+pub fn on_irq() {
+    IRQ_PENDING.store(true, Ordering::Release);
+    IRQ_ENTRIES.fetch_add(1, Ordering::Relaxed);
+
+    let base = IRQ_ACK_BASE.load(Ordering::Acquire);
+    match IRQ_ACK.load(Ordering::Acquire) {
+        ACK_VIRTIO => virtio::acknowledge_interrupt(base as u16),
+        ACK_E1000 => e1000::acknowledge_interrupt(base),
+        _ => {}
+    }
+
+    // EOI after the device acknowledge: the IOAPIC entry is level-triggered, so
+    // a still-asserted line is re-delivered instead of lost.
+    arch_x86_64::apic::eoi();
+}
+
+/// True when the machine is interrupt-driven (a route was programmed and the
+/// device accepted it).
+pub fn irq_active() -> bool {
+    IRQ_ROUTED.load(Ordering::Acquire)
+}
+
 /// Packs six MAC bytes big-endian (`52:54:00:12:34:56` is `0x5254_0012_3456`).
 fn pack_mac(mac: [u8; 6]) -> u64 {
     (u64::from(mac[0]) << 40)
@@ -152,6 +225,11 @@ fn init_virtio(controller: &pci::VirtioNetController) {
         return;
     };
 
+    // Record how an interrupt is acknowledged *before* any line can deliver:
+    // the statics are visible to the handler, which must not take `NET`.
+    IRQ_ACK_BASE.store(u64::from(controller.io_base), Ordering::Release);
+    IRQ_ACK.store(ACK_VIRTIO, Ordering::Release);
+
     println!(
         "net: virtio-net {:04x}:{:04x} mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         controller.vendor, controller.device, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
@@ -207,6 +285,9 @@ fn init_e1000(controller: &pci::E1000Controller) {
         }
     };
 
+    IRQ_ACK_BASE.store(controller.mmio_base, Ordering::Release);
+    IRQ_ACK.store(ACK_E1000, Ordering::Release);
+
     println!(
         "net: e1000 {:04x}:{:04x} pci 00:{:02x}.{} mmio {:#010x} mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         controller.vendor,
@@ -226,7 +307,7 @@ fn init_e1000(controller: &pci::E1000Controller) {
     } else {
         println!("net: link down");
     }
-    println!("net: buffers 32x2 KiB + 16x2 KiB, polling");
+    println!("net: buffers 32x2 KiB + 16x2 KiB");
     if mac_from_default {
         println!("net: e1000 reported no station address; using the default");
     }
@@ -235,9 +316,58 @@ fn init_e1000(controller: &pci::E1000Controller) {
     }
 }
 
+/// Enables the device's interrupt delivery on the already-programmed line.
+///
+/// `routed` is the I/O APIC outcome from boot. Returns whether the machine is
+/// now interrupt-driven; `false` means the caller's polling path stays and the
+/// boot log says so. The device acknowledge is armed by [`init`] regardless,
+/// so a line that fires unexpectedly can always be acknowledged.
+pub fn enable_irq(routed: bool) -> bool {
+    if !routed {
+        return false;
+    }
+    let mut guard = NET.lock();
+    let enabled = match &mut guard.device {
+        // Legacy virtio interrupts need no enable step: the device asserts the
+        // line once DRIVER_OK is set and notifications are not suppressed. The
+        // boot-time test frame may already have asserted it, though, so read
+        // the ISR once to drop the line: the PCI level latch only turns a
+        // *change* into an interrupt, and a level that is still high would
+        // swallow every later notification.
+        Device::Virtio(device) => {
+            let _ = device.acknowledge_interrupt();
+            true
+        }
+        Device::E1000(device) => device.enable_irq(),
+        Device::None => false,
+    };
+    drop(guard);
+    IRQ_ROUTED.store(enabled, Ordering::Release);
+    enabled
+}
+
+/// Printer for the first interrupt this machine takes. Runs in the service
+/// opportunity, never in the handler, and only once.
+fn report_irq_once() {
+    if IRQ_ROUTED.load(Ordering::Acquire) {
+        let entries = IRQ_ENTRIES.load(Ordering::Relaxed);
+        if entries > 0 && !IRQ_REPORTED.swap(true, Ordering::AcqRel) {
+            println!("net: irq delivered {entries} interrupt(s)");
+        }
+    }
+}
+
 /// Drains the device and runs the stack's timers. Called from the service
-/// opportunity and the idle loop.
+/// opportunity and the idle loop, and that is where all protocol work happens:
+/// the interrupt handler only sets [`IRQ_PENDING`], so a missed interrupt is
+/// harmless and a spurious one costs nothing.
 pub fn service() {
+    // The flag is advisory: the drain below always runs (polling is the
+    // fallback), and clearing it here is what makes it "handled by the service
+    // opportunity". The value is only used to keep the read honest.
+    let _was_pending = IRQ_PENDING.swap(false, Ordering::AcqRel);
+    report_irq_once();
+
     let mut guard = NET.lock();
     let now = clock::now_ns();
     let NetState {
@@ -294,6 +424,16 @@ pub fn info() -> Result<NetInfo, Status> {
 pub fn mac() -> u64 {
     let guard = NET.lock();
     pack_mac(guard.stack.mac())
+}
+
+/// The stack's bounded protocol counters (spec 0020, N22). `IoError` when no
+/// device is present, so a caller can tell "nothing happened" from "no NIC".
+pub fn stats() -> Result<Stats, Status> {
+    let guard = NET.lock();
+    if !guard.device.present() {
+        return Err(Status::IoError);
+    }
+    Ok(guard.stack.stats())
 }
 
 /// Opens a socket (spec 0020, N12); TCP starts in SYN-SENT and `service`

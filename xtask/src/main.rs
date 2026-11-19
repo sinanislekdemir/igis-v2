@@ -25,19 +25,42 @@ fn main() -> ExitCode {
 
     match command {
         "build" => build(),
-        "image" => image(
-            args.iter().any(|arg| arg == "--shell"),
-            args.iter().any(|arg| arg == "--reset-home"),
-        ),
+        "image" => match net_irq(&args) {
+            Ok(mode) => image(
+                args.iter().any(|arg| arg == "--shell"),
+                args.iter().any(|arg| arg == "--reset-home"),
+                mode,
+            ),
+            Err(code) => code,
+        },
         "run" => run(&args[1..]),
         "clean" => clean(),
         other => {
             eprintln!("unknown command: {other}");
             eprintln!(
-                "usage: cargo xtask <build|image [--shell] [--reset-home]|run [--headless] [--no-tablet] [--no-net] [--net-device virtio|e1000|e1000e] [--no-home] [--reset-home] [--shell] [--cores N]|clean>"
+                "usage: cargo xtask <build|image [--shell] [--reset-home] [--net-irq intx|poll]|run [--headless] [--no-tablet] [--no-net] [--net-device virtio|e1000|e1000e] [--net-irq intx|poll] [--no-home] [--reset-home] [--shell] [--cores N]|clean>"
             );
             ExitCode::FAILURE
         }
+    }
+}
+
+/// The NIC interrupt mode selected by `--net-irq` (spec 0020, N4).
+///
+/// `intx` is the default: boot routes the PCI INTx line. `poll` puts
+/// `igis.net_irq=poll` on the multiboot2 command line so the same kernel skips
+/// the route and keeps the polling drain, which is how the fallback is proved.
+fn net_irq(args: &[String]) -> Result<&'static str, ExitCode> {
+    match args.iter().position(|arg| arg == "--net-irq") {
+        None => Ok("intx"),
+        Some(position) => match args.get(position + 1).map(String::as_str) {
+            Some("intx") => Ok("intx"),
+            Some("poll") => Ok("poll"),
+            _ => {
+                eprintln!("--net-irq needs one of intx, poll");
+                Err(ExitCode::FAILURE)
+            }
+        },
     }
 }
 
@@ -63,7 +86,7 @@ fn kernel_elf() -> PathBuf {
         .join(KERNEL_ELF)
 }
 
-fn image(shell: bool, reset_home: bool) -> ExitCode {
+fn image(shell: bool, reset_home: bool, net_irq: &str) -> ExitCode {
     if build() == ExitCode::FAILURE {
         return ExitCode::FAILURE;
     }
@@ -97,7 +120,11 @@ fn image(shell: bool, reset_home: bool) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let cmdline = "multiboot2 /boot/kernel.elf";
+    let cmdline = if net_irq == "poll" {
+        "multiboot2 /boot/kernel.elf igis.net_irq=poll"
+    } else {
+        "multiboot2 /boot/kernel.elf"
+    };
     let module = "module2 /boot/apps.img apps";
     let config = format!(
         "serial --unit=0 --speed=115200\n\
@@ -298,7 +325,11 @@ fn stage_tree(source: &Path, destination: &Path) -> Result<(), String> {
 fn run(args: &[String]) -> ExitCode {
     let shell = args.iter().any(|arg| arg == "--shell");
     let reset_home = args.iter().any(|arg| arg == "--reset-home");
-    if image(shell, reset_home) == ExitCode::FAILURE {
+    let net_irq = match net_irq(args) {
+        Ok(mode) => mode,
+        Err(code) => return code,
+    };
+    if image(shell, reset_home, net_irq) == ExitCode::FAILURE {
         return ExitCode::FAILURE;
     }
 

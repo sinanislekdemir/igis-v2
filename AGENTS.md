@@ -26,8 +26,8 @@ constraints learned there.
   with a booting kernel, source applications, a read-only application image and a
   persistent writable `/home`, and a REPL that can drive a device.
 - **Status:** implementation. Specs 0001–0020 are accepted (0003 core implemented;
-  0015–0019 implemented; 0020's M10.1–M10.5/M10.8/M10.9 implemented),
-  **576 host tests** (511 language + 43 `net` + 22 `ext2w`), ABI v1 at **75**
+  0015–0019 implemented; 0020's M10.1–M10.5/M10.6/M10.8/M10.9 implemented),
+  **580 host tests** (515 language + 43 `net` + 22 `ext2w`), ABI v1 at **75**
   opcodes, M5/M6/M7.1/M8.1–M8.9 complete and
   M9.1–M9.4 (editor syntax highlighting, cheap pointer redraws, a draggable
   scrollbar, a `/lib` file-open dialog and a 128 KiB document buffer) done. The
@@ -931,8 +931,39 @@ prints `net_probe: ok` on `-smp 4`/`-smp 1`; `net_probe dns` resolves
 slirp and then fetches the page. The same three proofs run over e1000 (`8086:100e`)
 and e1000e (`8086:10d3`) selected by `xtask --net-device`; `--no-net` reports
 `net_probe: no device`. Sockets are non-blocking in this slice (N13 staging);
-blocking waits, `WaitFor::Net`/`Deadline`, `socket_source`, the listener and INTx
-remain.
+blocking waits, `WaitFor::Net`/`Deadline` and `socket_source` remain.
+
+**M10.6 NIC interrupts, the poll fallback and `net_stats` (2026-11-19).** The
+NIC's PCI INTx line (QEMU GSI 11 at 00:03.0 for virtio-net and e1000/e1000e) is
+routed through the I/O APIC to the boot core as vector `0x2D`
+(`apic::NET_VECTOR`, `irq_net` stub, `net_irq` entry). The handler is bounded and
+lock-free: it sets a pending flag, performs one read-to-clear device acknowledge
+(virtio `ISR` / e1000 `ICR`, addressed through two atomics so it never touches
+the network lock) and EOIs the local APIC. The used-ring drain and every
+protocol step stay in `net::service`, which already runs before each claim and
+in the idle loop, so an interrupt is a latency hint and polling remains the
+fallback when the route is absent, when the boot asks for it, or when the device
+refuses to unmask (ADR 0051). `ioapic::init` programs one redirection entry per
+call and splits its page once, so IRQ12 and IRQ11 coexist. `xtask --net-irq
+intx|poll` (default `intx`) selects the path by writing `igis.net_irq=poll` into
+the multiboot2 command line, so the polled proof runs the same kernel and image.
+Two device details are recorded: legacy virtio can leave the PCI INTx level
+latched high from its boot-time test frame, so `net::enable_irq` reads the ISR
+once after the route is installed; e1000 must mask every cause with `IMS` and
+unmask only the receive causes (`RXT0`/`RXO`/`RXDMTO`/`LSC`) with `IMC` — the old
+`IMC = u32::MAX` at reset actually unmasked everything, which polling hid.
+`core.net_stats(var rx, var tx, var drops, var errors) -> Status` is builtin 73
+(no opcode) over the stack's `Stats`, and `base/net_perf` runs ten timed HTTP
+gets and prints the counters before and after. Boot logs
+`ioapic: version 0x20, IRQ11 -> vector 0x2d on apic 0 (level)`, `net: irq ok
+(vector 0x2d)` and, once an interrupt arrives, `net: irq delivered N
+interrupt(s)` (`net: polling (igis.net_irq=poll)` on the polled boot). On
+`-smp 4`/`-smp 1`: `http`, `dns`, `dhcp` and `net_perf` pass over virtio,
+e1000 and e1000e with INTx (103 `v=2d` deliveries counted with QEMU `-d int`)
+and with `--net-irq poll`; `--no-net` reports `net_probe: no device` with no
+hang. `net_perf` on `-smp 4` with INTx: `total 179 ms, min 16 ms, avg 17.9 ms,
+max 21 ms`, counters `17/23 -> 77/113` (virtio) and `9/12 -> 69/102`
+(e1000); polling gives the same counters and equivalent times.
 
 ## Ground rules
 
@@ -1176,7 +1207,8 @@ host tools are unaffected.
 | Sockets are owner-checked opaque handles `(generation << 8) \| index` in a fixed table, closed on task termination; the ABI is `core.net_*`/`core.socket_*` builtins 62–73 (no opcode), blocking uses `WaitFor::Net(handle)` and a new `WaitFor::Deadline(ns)`, and `core.socket_source` tags a `next_any` source as `1 << 63 \| handle`. IPv4 is a `uint` in host order, ports are `uint`, and no new predeclared record is added | spec 0020, ADR 0050 |
 | The first M10 socket slice is non-blocking: `socket_open` returns at once and the kernel `net::service()` drives the handshake; `send`/`recv` return `WouldBlock` and the caller retries under a `core.clock()` deadline. `core.socket_recv` stages the destination's declared `bytes[N]` capacity as a hidden compiler scalar (at most 2048 bytes per call) because a buffer header holds only the runtime length. `WaitFor::Net`/`Deadline`, `socket_source` and the blocking form are the follow-up; the kernel service closes owned sockets on `Task::reclaim` | spec 0020 N13 staging, spec 0005, M10.3/M10.4 (`e08745d`) |
 | DHCP is ordinary `/lib` source over the UDP socket unit (`lib/dhcp.ig`): DISCOVER/OFFER/REQUEST/ACK from local port 68 to the limited broadcast, options 1/3/6/50/53/54/55/51, a 6 s cap and one NAK restart; `net_probe dhcp` applies the lease through `core.net_config`. A broadcast send is allowed before an address is configured, and a socket opened to the broadcast address accepts the server's reply from any source. No renewal, INFORM/RELEASE or authentication; the transaction id and magic cookie are the guard | spec 0020 N8/N18, M10.8 (`3752d17`) |
-| e1000/82540EM (`8086:100e`) and e1000e/82574L (`8086:10d3`) sit behind the same `NetDevice` seam as virtio-net: MMIO BAR0 mapped uncached, legacy 16-byte descriptors, 32 RX + 16 TX static 2 KiB buffers, a monotonic TX cursor and RX tail give-back, polling only, memory-space + bus-master enable. `xtask --net-device virtio\|e1000\|e1000e` selects the device; virtio remains the default. This is the VMware/real-hardware path; VMXNET3 and INTx remain future work | spec 0020 N1–N4, ADR 0049, M10.9 (`c7989c4`) |
+| e1000/82540EM (`8086:100e`) and e1000e/82574L (`8086:10d3`) sit behind the same `NetDevice` seam as virtio-net: MMIO BAR0 mapped uncached, legacy 16-byte descriptors, 32 RX + 16 TX static 2 KiB buffers, a monotonic TX cursor and RX tail give-back, memory-space + bus-master enable. `xtask --net-device virtio\|e1000\|e1000e` selects the device; virtio remains the default. This is the VMware/real-hardware path; VMXNET3 remains future work | spec 0020 N1–N4, ADR 0049, M10.9 (`c7989c4`) |
+| The NIC takes one PCI INTx line (QEMU GSI 11 at 00:03.0) through the I/O APIC to the boot core as vector `0x2D`. The handler is bounded and lock-free: a pending flag, one read-to-clear device acknowledge (virtio `ISR` / e1000 `ICR`, addressed through atomics so it takes no network lock) and an EOI; the used-ring drain stays in `net::service`, so an interrupt is a hint and polling is the fallback (route absent, boot-time `--net-irq poll` via the multiboot2 command line `igis.net_irq=poll`, or a device that refuses to unmask). `ioapic::init` programs one redirection entry per call and splits its page once, so IRQ12 and IRQ11 coexist. Legacy virtio can latch its INTx level high from the boot test frame, so `net::enable_irq` reads the ISR once after the route; e1000 masks with `IMS` and unmasks only the receive causes with `IMC` (the old `IMC = u32::MAX` unmasked everything). `core.net_stats` (builtin 73, no opcode) and `base/net_perf` are the counters/proof | spec 0020 N4/N19/N22, ADR 0051, M10.6 |
 
 ## Open questions
 
@@ -1308,3 +1340,4 @@ When an item is resolved, record the answer in its spec or a new ADR and remove 
 | 2026-11-19 | M10.5 DNS resolver in source (`2b8bd70`; spec 0020 N16). `samples/apps/lib/dns.ig` (`unit dns; uses core, stdlib, lib.socket;`) builds a 29-byte standard recursive A query (id from `core.clock()` low bits, `0x0100`, one question, QNAME labels, QTYPE A/QCLASS IN), sends one UDP datagram to `server:53`, and validates a 61-byte slirp response (id/QR/opcode/TC/RCODE, qdcount 1, ancount ≥ 1, bounds-checked labels/compression pointers, first type-A/class-IN/rdlength-4 answer, CNAME chain up to four, NXDOMAIN `NotFound`, malformed `Invalid`, timeout `WouldBlock`). `net_probe dns` sets the static config and prints `net_probe: dns 104.20.23.154 (0x6814179a)` then `net_probe: ok`; the two slirp A records rotate. `net_probe bogus`/`--no-net` stay clean and a dead server times out after ~4 s with no false `ok`. 553 host tests unchanged (the canned DNS `langhost` check is not committed); `cargo xtask build`/`image --shell` clean; HTTP `net_probe` still passes. `net_probe` package 98,408 B code (25 frames), 4,104 B state, 28,912 B stack. |
 | 2026-11-19 | M10.8 DHCP client in source (`3752d17`; spec 0020 N8/N18). `samples/apps/lib/dhcp.ig` (`unit dhcp; uses core, stdlib, lib.socket;`) builds a 300-byte BOOTP/DHCP packet (chaddr from `core.net_mac()`, xid from `core.clock()`, broadcast flag, options 53/55), sends DISCOVER from local port 68 to `255.255.255.255:67`, parses OFFER (options 53/54/1/3/6/51), sends REQUEST (50/54), parses ACK, and applies the lease with `core.net_config`; 4+4 attempts under a 6 s cap, one NAK restart, outputs only on `Ok`, socket closed on every path. `socket.udp_from` adds the explicit local port. A one-line `net` fix lets a broadcast send leave from `0.0.0.0` before an address is configured; a socket opened to the broadcast address accepts the server reply from any source. `net_probe dhcp` prints `net_probe: dhcp 10.0.2.15/24 gw 10.0.2.2 dns 10.0.2.3`, fetches the 1,406-byte HTTP body and prints `net_probe: ok` on `-smp 4`/`-smp 1`; the same works over e1000/e1000e (`c7989c4`). `--no-net` is clean and a dead server times out in ~6 s with no false `ok`. **576 host tests** (511 language + 43 net + 22 ext2w); `net_probe` package 113,584 B code (28 frames), 4,104 B state, 32,760 B stack. No renewal/INFORM/RELEASE; transaction id + magic cookie are the guard. |
 | 2026-11-19 | M10.9 e1000/e1000e driver behind `NetDevice` (`c7989c4`; spec 0020 N1–N4, ADR 0049). `kernel/src/net/e1000.rs` drives the 82540EM (`8086:100e`, QEMU `-device e1000`) and 82574L (`8086:10d3`, `-device e1000e`): memory BAR0 mapped uncached through the existing 2 MiB split, `CTRL.RST`/`SLU`, MAC from RAL/RAH, 32 RX + 16 TX legacy 16-byte descriptor rings with static 2 KiB buffers, `RCTL = EN\|SBP\|UPE\|MPE\|BAM\|SECRC`, `TCTL = EN\|PSP\|CT\|COLD`, polling only (`IMC` masked). A monotonic TX cursor fixes a ring-wrap bug (TDT only moves forward); RX uses the standard tail give-back. `pci::find_e1000` accepts 100e/10d3 (and 100f/153a/15b8 untested), enables memory space + bus master, and `xtask --net-device virtio\|e1000\|e1000e` selects the QEMU device (default virtio). `net: e1000 8086:100e pci 00:03.0 mmio 0xfebc0000 mac 52:54:00:12:00:80`, `link up`, `tx ok`; HTTP 1,406 B + DNS pass on e1000/e1000e on `-smp 4`/`-smp 1`, DHCP + HTTP passes on both, a 10× HTTP/DNS stress run is 11/11, and virtio/`--no-net` are unchanged. The visual golden is unchanged (`37802052…e9e81c9f`). VMXNET3 and INTx remain future work. |
+| 2026-11-19 | M10.6 NIC INTx, the polling fallback and `core.net_stats` (spec 0020 N4/N19/N22, ADR 0023/0049 + new ADR 0051). `arch/x86_64` gains `apic::NET_VECTOR = 0x2d`, an `irq_net` stub and an IDT gate; `main.rs` parses the multiboot2 command line for `igis.net_irq=poll`, routes GSI 11 through the existing `ioapic::init` (one redirection entry per call, page split once, IRQ12 untouched) and logs `ioapic: version 0x20, IRQ11 -> vector 0x2d on apic 0 (level)` + `net: irq ok (vector 0x2d)`. `net::on_irq` is the whole handler: pending flag, one read-to-clear acknowledge (virtio ISR / e1000 ICR through two atomics, never the `NET` lock) and an EOI; `net::service` drains as before and prints `net: irq delivered N interrupt(s)` once. `net::enable_irq` clears a stale cause after the route (legacy virtio latches its INTx level high from the boot test frame); e1000 now masks with `IMS` and unmasks only `RXT0|RXO|RXDMTO|LSC` with `IMC` (the old `IMC = u32::MAX` had unmasked everything, hidden by polling). `core.net_stats(var rx, var tx, var drops, var errors) -> Status` is builtin 73 (no opcode; `interpreter::NetStats`, `Host::net_stats` default `Invalid`, kernel mapping from `net::stats`) and `samples/apps/base/net_perf` runs ten timed HTTP gets and prints the counters before/after. `xtask --net-irq intx|poll` writes `igis.net_irq=poll` into grub.cfg for the polled proof; `--no-net`/`--net-device` unchanged. QEMU `-d int` counts 103 `v=2d` deliveries for a virtio `net_perf` run. On `-smp 4` and `-smp 1`: `net_probe http`/`dns`/`dhcp` and `net_perf` pass with INTx over virtio, e1000 and e1000e, and with `--net-irq poll` (same counters: virtio `17/23 -> 77/113`, e1000 `9/12 -> 69/102`, e1000e `15/21 -> 75/111`); poll `net_perf` 174 ms total (avg 17.4 ms) vs INTx 179 ms (avg 17.9 ms) on `-smp 4`. `--no-net` reports `net_probe: no device`; `scripts/net_qmp.py` passes on both core counts; the visual golden is unchanged (`37802052…e9e81c9f`); `boot_desktop_qmp.py` reaches `terminal: ok`. **580 host tests** (515 language + 43 `net` + 22 `ext2w`); ABI v1 stays at 75 and `stdlib` at 125 functions. |

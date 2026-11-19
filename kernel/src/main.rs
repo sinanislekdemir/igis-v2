@@ -326,7 +326,61 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
     // `net` device seam. It runs after the USB tablet so the tablet's PCI scan
     // and enumeration order are unchanged, and before the scheduler so the
     // service opportunity can drain frames from the first claim.
+    //
+    // The polling fallback is selectable at boot (spec 0020, N4): `xtask run
+    // --net-irq poll` passes `igis.net_irq=poll` on the multiboot2 command
+    // line, which GRUB carries in its command-line tag. Nothing else changes,
+    // so the polled proof runs the same kernel and the same image.
+    let mut net_poll_only = false;
+    mb2::for_each_command_line(mb2_info as usize, |line| {
+        if line
+            .split(|byte| *byte == b' ')
+            .any(|word| word == b"igis.net_irq=poll")
+        {
+            net_poll_only = true;
+        }
+    });
     net::init();
+
+    // The NIC's PCI INTx line (QEMU GSI 11 for both virtio-net and
+    // e1000/e1000e at 00:03.0) goes through the I/O APIC to this core on
+    // `apic::NET_VECTOR`. The IOAPIC page is already split (IRQ12 above), so
+    // this programs one more redirection entry and leaves PS/2 alone. A failed
+    // route, a requested poll boot or a device that refuses to unmask leaves
+    // the existing polling drain in charge; nothing hangs.
+    if net_poll_only {
+        println!("net: polling (igis.net_irq=poll)");
+    }
+    let routed = if net_poll_only {
+        false
+    } else {
+        match apic_id {
+            Some(destination) => match ioapic::init(11, apic::NET_VECTOR, destination) {
+                Some(version) => {
+                    println!(
+                        "ioapic: version {:#04x}, IRQ11 -> vector {:#x} on apic {} (level)",
+                        version & 0xFF,
+                        apic::NET_VECTOR,
+                        destination
+                    );
+                    true
+                }
+                None => {
+                    println!("ioapic: IRQ11 route unavailable; net polling only");
+                    false
+                }
+            },
+            None => {
+                println!("ioapic: no local APIC; net polling only");
+                false
+            }
+        }
+    };
+    if net::enable_irq(routed) {
+        println!("net: irq ok (vector {:#x})", apic::NET_VECTOR);
+    } else if !net_poll_only {
+        println!("net: polling");
+    }
 
     println!("memory map:");
     let mut available_bytes = 0u64;
@@ -563,6 +617,14 @@ pub extern "C" fn wake_ipi() {
 #[no_mangle]
 pub extern "C" fn aux_irq() {
     mouse::on_irq();
+}
+
+/// Called by the NIC PCI INTx (IRQ11) stub in `arch_x86_64` (spec 0020, N4).
+/// Acknowledges the device, sets the pending flag and EOIs the LAPIC; the used
+/// rings are drained later, in `net::service`.
+#[no_mangle]
+pub extern "C" fn net_irq() {
+    net::on_irq();
 }
 
 /// Called by `arch_x86_64` for any architectural exception.

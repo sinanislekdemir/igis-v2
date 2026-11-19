@@ -9084,11 +9084,16 @@ var
   mac: uint;
   chunk: bytes[100];
   text: string[16];
+  rx: uint;
+  tx: uint;
+  drops: uint;
+  errors: uint;
 procedure main(args: const string[1024]);
 begin
   status := core.net_config(uint(0), uint(0), uint(0), uint(0));
   status := core.net_info(ip, mask, gateway, dns);
   mac := core.net_mac();
+  status := core.net_stats(rx, tx, drops, errors);
   status := core.socket_open(uint(2), uint(0), uint(80), uint(0), id);
   status := core.socket_send(id, chunk, sent);
   status := core.socket_send(id, text, sent);
@@ -9101,6 +9106,7 @@ end;
         builtin::NET_CONFIG,
         builtin::NET_INFO,
         builtin::NET_MAC,
+        builtin::NET_STATS,
         builtin::SOCKET_OPEN,
         builtin::SOCKET_SEND,
         builtin::SOCKET_RECV,
@@ -9114,16 +9120,18 @@ end;
             builtin::NET_CONFIG,
             builtin::NET_INFO,
             builtin::NET_MAC,
+            builtin::NET_STATS,
             builtin::SOCKET_OPEN,
             builtin::SOCKET_SEND,
             builtin::SOCKET_RECV,
             builtin::SOCKET_CLOSE,
         ),
-        (62, 63, 64, 65, 66, 67, 68)
+        (62, 63, 64, 73, 65, 66, 67, 68)
     );
     assert_eq!(builtin::effect(builtin::NET_CONFIG), Some((4, 1)));
     assert_eq!(builtin::effect(builtin::NET_INFO), Some((4, 1)));
     assert_eq!(builtin::effect(builtin::NET_MAC), Some((0, 1)));
+    assert_eq!(builtin::effect(builtin::NET_STATS), Some((4, 1)));
     assert_eq!(builtin::effect(builtin::SOCKET_OPEN), Some((5, 1)));
     assert_eq!(builtin::effect(builtin::SOCKET_SEND), Some((3, 1)));
     assert_eq!(
@@ -9309,6 +9317,30 @@ begin
 end;
 "#,
             "buffer `chunk` cannot be used as a scalar value",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; rx: uint; tx: uint; drops: uint;
+procedure main(args: const string[1024]);
+begin
+  status := core.net_stats(rx, tx, drops);
+end;
+"#,
+            "`core.net_stats` expects 4 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; rx: uint; tx: uint; drops: uint; errors: int;
+procedure main(args: const string[1024]);
+begin
+  status := core.net_stats(rx, tx, drops, errors);
+end;
+"#,
+            "`core.net_stats` expects `var errors: uint`",
         ),
     ];
     for (source, expected) in cases {

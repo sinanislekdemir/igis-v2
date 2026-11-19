@@ -7943,6 +7943,7 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             "core.net_config" => self.net_config_call(args, line, column),
             "core.net_info" => self.net_info_call(args, line, column),
             "core.net_mac" => self.net_mac_call(args, line, column),
+            "core.net_stats" => self.net_stats_call(args, line, column),
             "core.socket_open" => self.socket_open_call(args, line, column),
             "core.socket_send" => self.socket_send_call(args, line, column),
             "core.socket_recv" => self.socket_recv_call(args, line, column),
@@ -8544,6 +8545,36 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         self.one(opcodes::BUILTIN, builtin::NET_MAC)?;
         self.push();
         Ok(Some(Type::scalar(Kind::Uint)))
+    }
+
+    /// `core.net_stats(var rx, var tx, var drops, var errors) -> Status`.
+    fn net_stats_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 4 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`core.net_stats` expects 4 arguments, got {}", args.len()),
+            ));
+        }
+        for (index, name) in ["rx", "tx", "drops", "errors"].iter().enumerate() {
+            let value = self.emit_scalar_ref(args[index])?;
+            if value.kind != Kind::Uint {
+                let found = self.type_name(value);
+                return Err(self.err_at(
+                    args[index],
+                    format_args!("`core.net_stats` expects `var {name}: uint`, found `{found}`"),
+                ));
+            }
+        }
+        self.one(opcodes::BUILTIN, builtin::NET_STATS)?;
+        self.pop(4)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
     }
 
     /// `core.socket_open(kind, ip, port, local, var id) -> Status`.

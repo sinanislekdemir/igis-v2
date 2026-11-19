@@ -946,6 +946,15 @@ pub mod builtin {
     /// out-parameters.
     pub const SOCKET_CLOSE: u32 = 68;
 
+    /// `core.net_stats(var rx, var tx, var drops, var errors) -> Status`: the
+    /// stack's bounded protocol counters (spec 0020, N22). `Ok` writes the four
+    /// monotonic `uint` counters — frames received, frames transmitted,
+    /// packets dropped (malformed, wrong checksum, not ours, no route) and
+    /// protocol errors — and a failure (`IoError` with no device) leaves all
+    /// four untouched. Operands: `[rx reference][tx reference][drops
+    /// reference][errors reference]`.
+    pub const NET_STATS: u32 = 73;
+
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
         match id {
@@ -1017,6 +1026,7 @@ pub mod builtin {
             SOCKET_SEND => Some((3, 1)),
             SOCKET_RECV => Some((4, 1)),
             SOCKET_CLOSE => Some((1, 1)),
+            NET_STATS => Some((4, 1)),
             _ => None,
         }
     }

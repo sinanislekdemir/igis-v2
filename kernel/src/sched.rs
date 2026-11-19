@@ -637,6 +637,16 @@ impl Host for KernelHost {
         crate::net::mac()
     }
 
+    /// `core.net_stats` (spec 0020, N22): the wire stack's bounded counters.
+    fn net_stats(&mut self) -> Result<interpreter::NetStats, Status> {
+        crate::net::stats().map(|stats| interpreter::NetStats {
+            rx_frames: stats.rx_frames,
+            tx_frames: stats.tx_frames,
+            drops: stats.drops,
+            errors: stats.errors,
+        })
+    }
+
     fn socket_open(
         &mut self,
         kind: u64,

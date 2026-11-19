@@ -38,7 +38,7 @@ mod program;
 
 pub use abi::{ExitReason, FaultCode, Status};
 pub use machine::{
-    FsEntry, Host, Machine, NetInfo, Outcome, StreamError, WaitKind, WaitOutcome, WindowInfo,
-    FS_NAME_CAP, FS_READ_CHUNK, NET_RECV_CHUNK, WINDOW_TITLE_CAP,
+    FsEntry, Host, Machine, NetInfo, NetStats, Outcome, StreamError, WaitKind, WaitOutcome,
+    WindowInfo, FS_NAME_CAP, FS_READ_CHUNK, NET_RECV_CHUNK, WINDOW_TITLE_CAP,
 };
 pub use program::{verify, Diagnostic, Program};

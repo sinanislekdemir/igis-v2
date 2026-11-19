@@ -12,7 +12,7 @@ use abi::{
     CodeHeader, FaultCode, Function, Status, ABI_VERSION, CODE_MAGIC, NO_DIAGNOSTIC, NO_NAME,
     PROFILE_X86_64_LE,
 };
-use interpreter::{ExitReason, Host, Machine, NetInfo, Outcome};
+use interpreter::{ExitReason, Host, Machine, NetInfo, NetStats, Outcome};
 
 fn build(instructions: &[u8], constants: &[u8], state_size: u32) -> Vec<u8> {
     let header = CodeHeader {
@@ -80,6 +80,7 @@ fn builtin(out: &mut Vec<u8>, id: u32) {
 struct NetHost {
     config: Status,
     info: Result<NetInfo, Status>,
+    stats: Result<NetStats, Status>,
     mac: u64,
     open: Result<u64, Status>,
     send: Result<usize, Status>,
@@ -105,6 +106,12 @@ impl NetHost {
                 dns: 0x0A00_0203,
             }),
             mac: 0x5254_0012_3456,
+            stats: Ok(NetStats {
+                rx_frames: 11,
+                tx_frames: 7,
+                drops: 2,
+                errors: 1,
+            }),
             open: Ok(0x0101),
             send: Ok(0),
             recv: Ok(0),
@@ -141,6 +148,11 @@ impl Host for NetHost {
     fn net_mac(&mut self) -> u64 {
         self.calls += 1;
         self.mac
+    }
+
+    fn net_stats(&mut self) -> Result<NetStats, Status> {
+        self.calls += 1;
+        self.stats
     }
 
     fn socket_open(&mut self, kind: u64, ip: u32, port: u16, local: u16) -> Result<u64, Status> {
@@ -331,6 +343,69 @@ fn net_mac_pushes_the_host_value() {
         Outcome::Exited(ExitReason::Ok)
     );
     assert_eq!(state_word(&state, 0), 0, "no device reports zero");
+}
+
+/// `[rx][tx][drops][errors][status]`.
+fn stats_program() -> Vec<u8> {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_imm(&mut instructions, opcodes::REF_STATE, 8);
+    op_imm(&mut instructions, opcodes::REF_STATE, 16);
+    op_imm(&mut instructions, opcodes::REF_STATE, 24);
+    builtin(&mut instructions, opcodes::builtin::NET_STATS);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 32);
+    op(&mut instructions, opcodes::RET);
+    build(&instructions, &[], 40)
+}
+
+#[test]
+fn net_stats_writes_all_four_counters_on_ok() {
+    let mut state = vec![0u8; 40];
+    let mut host = NetHost::new();
+    assert_eq!(
+        run(&stats_program(), &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(state_word(&state, 0), 11);
+    assert_eq!(state_word(&state, 8), 7);
+    assert_eq!(state_word(&state, 16), 2);
+    assert_eq!(state_word(&state, 24), 1);
+    assert_eq!(state_word(&state, 32), Status::Ok as u64);
+    assert_eq!(host.calls, 1);
+}
+
+#[test]
+fn net_stats_failure_leaves_all_four_counters_untouched() {
+    let mut state = vec![0xAAu8; 40];
+    let mut host = NetHost::new();
+    host.stats = Err(Status::IoError);
+    assert_eq!(
+        run(&stats_program(), &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    for offset in (0..32).step_by(8) {
+        assert_eq!(
+            state_word(&state, offset),
+            0xAAAA_AAAA_AAAA_AAAA,
+            "counter {offset} untouched"
+        );
+    }
+    assert_eq!(state_word(&state, 32), Status::IoError as u64);
+}
+
+#[test]
+fn the_default_net_stats_is_the_disabled_nic() {
+    // `DisabledHost` overrides nothing, so `net_stats` is the trait default.
+    let mut state = vec![0x11u8; 40];
+    let mut host = DisabledHost;
+    assert_eq!(
+        run(&stats_program(), &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    for offset in (0..32).step_by(8) {
+        assert_eq!(state_word(&state, offset), 0x1111_1111_1111_1111);
+    }
+    assert_eq!(state_word(&state, 32), Status::Invalid as u64);
 }
 
 // ---- sockets ---------------------------------------------------------

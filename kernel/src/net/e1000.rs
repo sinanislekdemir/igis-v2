@@ -39,9 +39,11 @@
 //! offloads are enabled, so the stack keeps computing its own checksums; only
 //! the Ethernet CRC is handled by the device (`SECRC` in, `IFCS` out).
 //!
-//! Polling only: M10.6's INTx route belongs to virtio-net; this slice does not
-//! claim an interrupt line. `ICR` is cleared and every interrupt is masked at
-//! reset.
+//! Polling is the base path. M10.6 optionally unmasks the receive interrupt
+//! causes ([`E1000::enable_irq`]) once boot has routed the PCI INTx line to the
+//! boot core; the line is acknowledged in the handler by a read-only `ICR`
+//! access ([`acknowledge_interrupt`]) and the rings are still drained in the
+//! service opportunity.
 
 use core::sync::atomic::{compiler_fence, fence, Ordering};
 
@@ -57,6 +59,7 @@ use crate::pci::E1000Controller;
 const CTRL: u32 = 0x00000;
 const STATUS: u32 = 0x00008;
 const ICR: u32 = 0x000C0;
+const IMS: u32 = 0x000D0;
 const IMC: u32 = 0x000D8;
 const RCTL: u32 = 0x00100;
 const TCTL: u32 = 0x00400;
@@ -92,6 +95,15 @@ const TCTL_VALUE: u32 = 0x2 | 0x8 | 0x0000_0100 | 0x0000_0200;
 const RX_STATUS_DD: u8 = 0x01;
 /// `RXDESC.STATUS.EOP`: end of packet (one buffer per frame at 2 KiB).
 const RX_STATUS_EOP: u8 = 0x02;
+
+/// `ICR` cause bits the driver unmasks: receiver timer, receiver overrun,
+/// receiver descriptor-low-water and link status change. Transmit causes are
+/// left masked, so a send does not interrupt.
+const ICR_LSC: u32 = 1 << 2;
+const ICR_RXDMT0: u32 = 1 << 4;
+const ICR_RXO: u32 = 1 << 6;
+const ICR_RXT0: u32 = 1 << 7;
+const RX_CAUSES: u32 = ICR_LSC | ICR_RXDMT0 | ICR_RXO | ICR_RXT0;
 
 /// `TXDESC.CMD`: end of packet, insert FCS, report status.
 const TX_CMD: u8 = 0x01 | 0x02 | 0x08;
@@ -321,9 +333,11 @@ impl E1000 {
             return Err(InitError::Device);
         }
 
-        // No interrupts in this slice: clear the cause and mask everything.
+        // No interrupts are delivered until `enable_irq` runs: mask every
+        // cause and clear a stale one. `IMS` sets mask bits (a write of ones
+        // masks); `IMC` clears them.
+        write32(mmio, IMS, u32::MAX);
         write32(mmio, ICR, u32::MAX);
-        write32(mmio, IMC, u32::MAX);
 
         // Set link up (`STATUS.LU` reports the result) and read the station
         // address the device loaded from its EEPROM.
@@ -408,6 +422,20 @@ impl E1000 {
         write32(mmio, TDH, 0);
         write32(mmio, TDT, 0);
         write32(mmio, TCTL, TCTL_VALUE);
+    }
+
+    /// Unmasks the receive interrupt causes after boot has routed the INTx
+    /// line (spec 0020, N4).
+    ///
+    /// Masks everything first so the unmask set is exactly [`RX_CAUSES`], then
+    /// clears a stale cause and returns whether the readback shows every
+    /// receive cause unmasked. `false` leaves polling in charge.
+    pub fn enable_irq(&mut self) -> bool {
+        let mmio = self.mmio;
+        write32(mmio, IMS, u32::MAX);
+        write32(mmio, ICR, u32::MAX);
+        write32(mmio, IMC, RX_CAUSES);
+        read32(mmio, IMS) & RX_CAUSES == 0
     }
 
     /// Reclaims every TX descriptor the device has finished with.
@@ -516,6 +544,14 @@ impl E1000 {
 
         Some(copied)
     }
+}
+
+/// Reads and clears the interrupt cause register using only the MMIO base, so
+/// the interrupt handler can acknowledge without touching the driver state
+/// (spec 0020, N4). `ICR` is read-to-clear; the device drops its INTx line once
+/// every posted cause has been read.
+pub fn acknowledge_interrupt(mmio: u64) {
+    let _ = read32(mmio, ICR);
 }
 
 /// Reads `RAL0`/`RAH0` into a station address.

@@ -462,3 +462,12 @@ impl VirtioNet {
         unsafe { inb(self.io_base + REG_ISR) }
     }
 }
+
+/// Reads and clears the legacy ISR byte using only the I/O base, so the
+/// interrupt handler can acknowledge without touching the driver state (spec
+/// 0020, N4). The read is the acknowledgement: `ISR` is read-to-clear and the
+/// device drops its INTx line once every posted cause has been read.
+pub fn acknowledge_interrupt(io_base: u16) {
+    // SAFETY: the ISR register is part of the legacy I/O window.
+    let _ = unsafe { inb(io_base + REG_ISR) };
+}

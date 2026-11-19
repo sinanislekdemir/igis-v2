@@ -2899,3 +2899,17 @@ fn the_windows_drag_sample_reports_the_host_path() {
     assert_eq!(result.reason, ExitReason::Ok);
     assert_eq!(result.output, b"windows_drag: host ok\n".to_vec());
 }
+
+/// The M10.6 `net_perf` sample on `langhost`'s disabled NIC: `core.net_mac` is
+/// `0`, so it reports the no-device contract and exits without timing anything
+/// (spec 0020, N4/N22).
+#[test]
+fn the_net_perf_sample_reports_the_host_path() {
+    let path = app_path("net_perf");
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "net_perf").expect("the net_perf sample compiles");
+    let result =
+        langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies and runs");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"net_perf: no device\n".to_vec());
+}

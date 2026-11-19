@@ -75,3 +75,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0048 | [Keep the IPv4 wire stack in the kernel and expose a `/lib/socket` unit](0048-kernel-net-stack-and-lib-socket.md) | Accepted | 2026-11-19 |
 | 0049 | [Start with virtio-net behind a device seam, not a virtio-specific stack](0049-virtio-net-first-device-seam.md) | Accepted | 2026-11-19 |
 | 0050 | [Sockets are owned opaque handles with blocking waits and deadlines](0050-socket-handles-and-blocking.md) | Accepted | 2026-11-19 |
+| 0051 | [Acknowledge the NIC on its own INTx vector and keep the ring drain in the service opportunity](0051-nic-intx-acknowledge-and-poll-fallback.md) | Accepted | 2026-11-19 |
