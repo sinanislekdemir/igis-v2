@@ -70,15 +70,20 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   stack 174,328 B, both under the 1 MiB region caps; `editor check` proves the
   full `base/calculator` load and the file-dialog QMP harness proves the
   user-facing path.
-  **M10 implementation is in progress:** spec 0020 (Accepted) fixes the kernel
-  `net` crate, the `/lib/socket` unit on the program/interpreter side, virtio-net
-  first behind a `NetDevice` seam, static IPv4, UDP, a minimal TCP client,
-  DNS/HTTP in source and the M10 ticket split; ADRs 0048–0050 are Accepted.
-- **Last commit:** `142c0f2` (M9.4) plus the M10 planning docs commit. The tree is
-  clean; `build/home.img` is reset.
-- **Next:** **M10.1** (the `net` crate skeleton, PCI device discovery, virtio-net
-  bring-up and the `NetDevice` seam), then M10.2–M10.4 for the first HTTP proof.
-  The deferred backlog in
+  **M10.1–M10.4 first slice is implemented:** spec 0020 (Accepted) and ADRs
+  0048–0050 (Accepted) are in the tree; the legacy virtio-net driver, the
+  allocation-free `net` crate (Ethernet/ARP/IPv4/ICMP/UDP/TCP client), the
+  `core.net_*`/`core.socket_*` builtins (62–68), `lib/socket.ig`, `lib/http.ig`
+  and `base/net_probe` work. A `--shell` boot fetches
+  `http://10.0.2.2:6666/` over a real TCP connection and prints
+  `net_probe: ok` on `-smp 4` and `-smp 1` (1,406 body bytes). Sockets are
+  non-blocking in this slice; `WaitFor::Net`/`Deadline`, `socket_source`, DNS,
+  DHCP, the listener and e1000 remain.
+- **Last commit:** `e08745d` (M10.1–M10.4 first slice) plus the docs commit.
+  The tree is clean; `build/home.img` is reset.
+- **Next:** finish M10.3/M10.4 with the blocking wait conditions and
+  `socket_source`, then M10.5 (DNS), M10.6 (INTx), M10.7 (listener), M10.8
+  (DHCP) and M10.9 (e1000/e1000e). The deferred backlog in
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) remains available for non-network work.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
@@ -1894,7 +1899,7 @@ parent verifies each.
 
 ### M10.1 — the `net` crate, PCI discovery and virtio-net bring-up
 
-- [ ] **M10.1 Add the `net` crate skeleton and the first NIC driver.**
+- [x] **M10.1 Add the `net` crate skeleton and the first NIC driver.**
   New allocation-free `net` crate (`no_std`, `#![forbid(unsafe_code)]`, depends on
   `abi` only) with the `Link`/`Clock` seams and an empty `Stack`; a `NetDevice`
   trait in `kernel/src/net/mod.rs`; a generalized `kernel/src/pci.rs` that returns
@@ -1914,10 +1919,14 @@ parent verifies each.
     `-smp 1`; `--no-net` on both; the visual golden is unchanged; no sample
     regresses.
   - **Docs:** spec 0020 N1–N4, ADR 0049; AGENTS/PLAN.
+  **Done (`e08745d`):** PCI 1AF4:1000 at 00:03.0, MAC
+  `52:54:00:12:34:56`, `net: link up`, `net: tx ok`, `--no-net` clean; the
+  higher-half physical-address rule is handled like `usb.rs` (`virtual -
+  KERNEL_BASE`).
 
 ### M10.2 — Ethernet, ARP, IPv4, ICMP and static configuration
 
-- [ ] **M10.2 Reach the gateway with ARP and ICMP echo.**
+- [x] **M10.2 Reach the gateway with ARP and ICMP echo.**
   Add `net::{ethernet,arp,ipv4,icmp,checksum}` with a 16-entry ARP cache (60 s,
   three requests, one queued packet), IPv4 validation/checksum/TTL, one address +
   netmask + gateway, and ICMP echo reply. Add `core.net_config` (62),
@@ -1932,10 +1941,14 @@ parent verifies each.
     `0xFFFF` fold) and the ARP cache/queue; `net_probe check`/`ping` on `-smp 4` and
     `-smp 1`; `--no-net` returns `IoError`; `cargo test -p net` joins the suite.
   - **Docs:** spec 0005 (the three builtins), spec 0020 N5–N7/N18; AGENTS/PLAN.
+  **Done (`e08745d`):** Ethernet/ARP/IPv4/ICMP with host tests; `core.net_config`
+  (62), `core.net_info` (63) and `core.net_mac` (64); the static
+  `10.0.2.15/24` config is applied by `net_probe`, and ARP/ICMP are proven by the
+  `net` crate's simulated-link tests (the kernel proof is the HTTP exchange).
 
 ### M10.3 — UDP sockets, the host ABI and `lib/socket`
 
-- [ ] **M10.3 Open the first socket: UDP and the `socket` unit.**
+- [~] **M10.3 Open the first socket: UDP and the `socket` unit.**
   Add a fixed socket table (8 slots, generation handles, owner task, 4 KiB RX/TX),
   UDP demultiplexing with the per-datagram boundary rule, and builtins
   `core.socket_open` (65, kind/remote-ip/remote-port/local-port), `socket_send`
@@ -1958,10 +1971,14 @@ parent verifies each.
     test; `socket: ok`/`net: udp ok`.
   - **Docs:** spec 0005 (socket builtins/wait), spec 0020 N8/N12–N15, ADR 0050;
     AGENTS/PLAN.
+  **Partial (`e08745d`):** UDP, the fixed socket table, generation/owner handles,
+  builtins 65–70 and `lib/socket.ig` are implemented and host-tested. The
+  blocking `WaitFor::Net`/`socket_source`/`next_any` arm is not; this slice is
+  non-blocking (`WouldBlock` + caller retry), as N13 permits.
 
 ### M10.4 — TCP client, deadlines and HTTP
 
-- [ ] **M10.4 A TCP client that can fetch a page.**
+- [~] **M10.4 A TCP client that can fetch a page.**
   Add the TCP client state machine (active open, handshake, MSS 1460, fixed receive
   window, one outstanding segment, 1 s RTO with exponential backoff and five
   attempts, RST, FIN close), `WaitFor::Deadline(ns)` and `core.socket_timeout` (71).
@@ -1979,6 +1996,12 @@ parent verifies each.
     `net_probe internet` run (not in the regression suite) resolves and fetches a
     real page.
   - **Docs:** spec 0005 (timeout/deadline), spec 0020 N9/N13/N16; AGENTS/PLAN.
+  **Partial (`e08745d`):** the TCP client (handshake, one outstanding segment,
+  1/2/4/8 s retransmit, 5 s connect timeout, FIN/RST, close), `lib/socket.ig`,
+  `lib/http.ig` (HTTP/1.0 GET, header strip, 8 s app deadline) and
+  `base/net_probe` are implemented. `scripts/net_qmp.py` proves a real HTTP body
+  and `net_probe: ok` on `-smp 4` and `-smp 1`; the blocking
+  `WaitFor::Deadline` arm remains for the follow-up.
 
 ### M10.5 — DNS resolution in source
 
@@ -2098,8 +2121,9 @@ NICs and TCP congestion control remain out of scope (OPEN-QUESTIONS Q52–Q58).
 
 ## How a ticket is verified (headless first)
 
-1. Host tests: `cargo test -p abi -p compiler -p interpreter -p langhost -p ext2w`
-   (the filesystem crate is host-tested against an `mke2fs` image).
+1. Host tests: `cargo test -p abi -p compiler -p interpreter -p langhost -p ext2w -p net`
+   (the filesystem crate is host-tested against an `mke2fs` image; `net` is
+   host-tested against a simulated link).
 2. Kernel transcript with a self-check the app prints (`files: ok` style), using
    `syslib.get_pixel` for drawing and `syslib.inject_event` for input; filesystem
    tickets also run `e2fsck -fn build/home.img` after the proof.
@@ -2109,7 +2133,8 @@ NICs and TCP congestion control remain out of scope (OPEN-QUESTIONS Q52–Q58).
    `calculator`/`minesweeper`, the UI set, `widgets`, `clock_window`, `windows*`,
    `desktop_shell check`, `terminal`, `events`, `streams`, `frames`, `deep`,
    `utf8`, `realtime`, `cores`, `kill_stress`, `multiplex`, `font`, `perf`,
-   `f64parse`, `text`, `text_edit`.
+   `f64parse`, `text`, `text_edit`, and `net_probe` (with `scripts/net_qmp.py`
+   when the network path changes).
 5. `scripts/visual_regression.py` for the framebuffer: `samples/apps/visual` is
    deterministic and the committed golden must match on both core counts;
    `--tamper` proves the compare rejects a changed pixel. `scripts/boot_desktop_qmp.py`

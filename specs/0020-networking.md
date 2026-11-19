@@ -325,7 +325,7 @@ rules and links like any other `/lib` unit.
 | 64 | `core.net_mac() -> uint` | M10.1 | packed MAC, `0` when absent |
 | 65 | `core.socket_open(kind, ip, port, local, var id) -> Status` | M10.3 | kind 1 TCP (M10.4), 2 UDP, 3 listen (M10.7); `local` 0 = ephemeral, listener binds it |
 | 66 | `core.socket_send(id, data, var sent) -> Status` | M10.3 | blocking sends all; UDP is one datagram; the try variant may send a prefix |
-| 67 | `core.socket_recv(id, var dst, var read) -> Status` | M10.3 | blocking; `Ok`/0 is EOF |
+| 67 | `core.socket_recv(id, var dst, var read) -> Status` | M10.3 | non-blocking first slice; `Ok`/0 is EOF; the compiler stages `dst` capacity as a hidden scalar |
 | 68 | `core.socket_try_send(id, data, var sent) -> Status` | M10.3 | `WouldBlock`, never blocks |
 | 69 | `core.socket_try_recv(id, var dst, var read) -> Status` | M10.3 | `WouldBlock` when empty |
 | 70 | `core.socket_close(id) -> Status` | M10.3 | owner-only |
@@ -438,3 +438,4 @@ Boot lines: `pci: ...` (existing), `net: virtio-net 1af4:1000 mac ...`,
 |------|--------|
 | 2026-11-19 | Initial draft for the M10 planning session: kernel wire stack, `net` crate, `/lib/socket` unit, virtio-net first behind a `NetDevice` seam, static configuration, DNS/HTTP in source, M10 ticket split. |
 | 2026-11-19 | Accepted; implementation starts at M10.1. The first M10.3–M10.5 slice may use the non-blocking socket form (N13 staging) and `core.net_mac() -> uint`; blocking waits, `socket_source`, DNS, DHCP, the listener and e1000 follow in their tickets. |
+| 2026-11-19 | M10.1–M10.4 first slice implemented (`e08745d`): legacy virtio-net, the `net` crate (Ethernet/ARP/IPv4/ICMP/UDP/TCP client), builtins 62–68, `lib/socket.ig`, `lib/http.ig` and `base/net_probe`; a real HTTP/1.0 GET to `10.0.2.2:6666` prints `net_probe: ok` on `-smp 4` and `-smp 1`. Non-blocking sockets; 553 host tests. |
