@@ -73,18 +73,20 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   **M10.1–M10.4 first slice is implemented:** spec 0020 (Accepted) and ADRs
   0048–0050 (Accepted) are in the tree; the legacy virtio-net driver, the
   allocation-free `net` crate (Ethernet/ARP/IPv4/ICMP/UDP/TCP client), the
-  `core.net_*`/`core.socket_*` builtins (62–68), `lib/socket.ig`, `lib/http.ig`
-  and `base/net_probe` work. A `--shell` boot fetches
+  `core.net_*`/`core.socket_*` builtins (62–68), `lib/socket.ig`, `lib/http.ig`,
+  `lib/dns.ig` and `base/net_probe` work. A `--shell` boot fetches
   `http://10.0.2.2:6666/` over a real TCP connection and prints
-  `net_probe: ok` on `-smp 4` and `-smp 1` (1,406 body bytes). Sockets are
-  non-blocking in this slice; `WaitFor::Net`/`Deadline`, `socket_source`, DNS,
-  DHCP, the listener and e1000 remain.
-- **Last commit:** `e08745d` (M10.1–M10.4 first slice) plus the docs commit.
-  The tree is clean; `build/home.img` is reset.
-- **Next:** finish M10.3/M10.4 with the blocking wait conditions and
-  `socket_source`, then M10.5 (DNS), M10.6 (INTx), M10.7 (listener), M10.8
-  (DHCP) and M10.9 (e1000/e1000e). The deferred backlog in
-  [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) remains available for non-network work.
+  `net_probe: ok` on `-smp 4` and `-smp 1` (1,406 body bytes); `net_probe dns`
+  resolves `example.com` through `10.0.2.3` (the two slirp A records alternate).
+  Sockets are non-blocking in this slice; `WaitFor::Net`/`Deadline`,
+  `socket_source`, DHCP, the listener and e1000 remain.
+- **Last commit:** `2b8bd70` (M10.5 DNS) plus the docs commit. The tree is clean;
+  `build/home.img` is reset.
+- **Next:** M10.6 (NIC INTx, poll fallback, `net_stats`/`net_perf`), M10.7
+  (listener/`accept` + `net_echo`), M10.8 (DHCP) and M10.9 (e1000/e1000e), plus
+  the blocking `WaitFor::Net`/`Deadline`/`socket_source` follow-up. The deferred
+  backlog in [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) remains available for
+  non-network work.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -2005,7 +2007,7 @@ parent verifies each.
 
 ### M10.5 — DNS resolution in source
 
-- [ ] **M10.5 Resolve a name with `lib/dns.ig`.**
+- [x] **M10.5 Resolve a name with `lib/dns.ig`.**
   Write the DNS A-record resolver as ordinary source (transaction id, one question,
   recursion desired, response validation, first A record, CNAME chain up to four,
   two retries, 2 s deadline) over a UDP socket, and add `net_probe dns`. Host tests
@@ -2019,6 +2021,15 @@ parent verifies each.
   - **Proof:** host tests for the parser and builder; `net_probe dns` (or the
     documented offline arm) on `-smp 4` and `-smp 1`; `net: dns ok`.
   - **Docs:** spec 0020 N16; AGENTS/PLAN. No kernel/ABI change.
+  **Done (`2b8bd70`):** `lib/dns.ig` builds a 29-byte standard A query, sends one
+  UDP datagram to `10.0.2.3:53`, validates the id/QR/opcode/TC/RCODE and the
+  question, follows a CNAME chain up to four links and returns the first A record;
+  `net_probe dns` prints `net_probe: dns 104.20.23.154 (0x6814179a)` and
+  `net_probe: ok` on `-smp 4` and `-smp 1` (the two A records alternate in slirp).
+  The HTTP probe still passes; `--no-net` prints `net_probe: no device`, an
+  unknown mode is rejected, and a dead server times out after ~4 s (two 2 s
+  attempts) without a false `ok`. A canned-packet `langhost` check lived in
+  `/tmp` rather than the repo; the kernel proof is the committed evidence.
 
 ### M10.6 — NIC interrupts and network counters
 
