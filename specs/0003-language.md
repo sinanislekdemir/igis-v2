@@ -1,6 +1,6 @@
 # 0003: Language and standard library
 
-- **Status:** Accepted (design specified; implementation pending)
+- **Status:** Accepted (core implementation complete; deferred items in `OPEN-QUESTIONS.md`)
 - **Scope:** application language, type system, memory model, standard library
 - **Supersedes:** none
 - **Superseded by:** none

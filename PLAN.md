@@ -1613,6 +1613,10 @@ parent verifies each.
 
 ### M9.1 — syntax highlighting in the text editor
 
+> Historical slice: M9.2 replaced the per-frame block-state scan with the cached
+> `line_states` table, and M9.4 raised the document buffer from 8192 to 131072
+> bytes. The 8192/per-frame details below are the M9.1 record, not current behaviour.
+
 - [x] **M9.1 Syntax highlighting in the text editor.**
   User request: "In the text editor, can we do syntax highlighting for .ig
   files?" The answer is a first lexical slice inside the editor only; there is
@@ -1662,6 +1666,10 @@ parent verifies each.
   1024×768, 29,772 bytes with keyword/type/string/comment/number pixels.
 
 ### M9.2 — the editor's pointer budget and draggable scrollbar
+
+> Historical slice: M9.4 raised the editor buffer from 8192 to 131072 bytes and
+> therefore `LineStateCapacity` from 8193 to 131073; the cache/redraw rules below
+> are current, the 8193 figure is the M9.2 record.
 
 - [x] **M9.2 The editor repaints only on real changes and its thumb drags.**
   User report: "task 4: exit Faulted(BudgetExceeded) after 2893 claims (2891
