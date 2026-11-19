@@ -108,14 +108,18 @@ as late M10 tickets, not prerequisites.
   never reach a recycled slot. A foreign or stale handle is `Invalid`/`NotFound`.
 - **N13 (MUST):** The blocked operation is a new wait condition
   (`WaitFor::Net(handle)`); a timed block is `WaitFor::Deadline(ns)`. Both wake
-  through the existing scheduler, and a socket close, EOF or error wakes every
-  waiter. `next_any`/`poll_any` accept a socket source returned by
+  through the existing scheduler, and a socket close, EOF, error or timeout wakes
+  every waiter. `next_any`/`poll_any` accept a socket source returned by
   `core.socket_source(id)` (`1 << 63 | handle`), and `Host` gains
   `socket_readable`.
-  **Implementation staging:** M10.3–M10.5 MAY ship the non-blocking form first
-  (`send`/`recv`/`open` return `WouldBlock` and the application retries), so the
-  first HTTP proof does not depend on the scheduler extension; the blocking
-  waits and `socket_source` are the next follow-up after M10.7.
+  **Implemented:** a host `WouldBlock` from `socket_send`/`recv`/`accept` makes
+  the interpreter return `Outcome::Blocked` and retry the same instruction after
+  the wake. The stack records a per-socket deadline (`core.socket_timeout`,
+  builtin 71; `0` = none, default 30 s; the TCP connect keeps its 5 s `Closed`);
+  `net::service` expires it and calls `task::wake_net` after dropping the network
+  lock, and the scheduler's post-block probe uses the recorded direction.
+  `WaitFor::Deadline(ns)` is a generic timer-woken arm; socket timeouts use the
+  per-socket arm. `kill_stress` and `net_select` are the concurrency proofs.
 - **N14 (MUST):** A task's sockets close when the task terminates, on every
   destruction path, before its regions are freed. A blocked peer is woken with
   `Closed`; queued data is discarded.
@@ -457,3 +461,4 @@ Boot lines: `pci: ...` (existing), `net: virtio-net 1af4:1000 mac ...`,
 | 2026-11-19 | M10.9 e1000/e1000e behind `NetDevice` (`c7989c4`): polling 82540EM/82574L drivers with uncached MMIO BAR0, 32 RX + 16 TX legacy rings and static buffers; `xtask --net-device virtio\|e1000\|e1000e`. HTTP, DNS and DHCP+HTTP pass over both on `-smp 4`/`-smp 1`; virtio and `--no-net` are unchanged. |
 | 2026-11-19 | M10.6 INTx, the polling fallback and `core.net_stats`: one PCI INTx route (QEMU GSI 11) to the boot core as vector `0x2D`, a lock-free handler (pending flag, one read-to-clear device acknowledge, EOI) and the used-ring drain left in the service opportunity; `--net-irq intx\|poll` through the multiboot2 command line; builtin 73 `core.net_stats`; `base/net_perf` (ten timed HTTP gets with the counters before and after). Note for legacy virtio: the boot-time test frame can leave the PCI INTx level latched high, so `net::enable_irq` reads the ISR once to drop it — a level that never changes would swallow every later notification. |
 | 2026-11-19 | M10.7 TCP listener/`accept` and the `net_echo` proof: `KIND_LISTEN` (open kind 3, nonzero bind port), a two-handle pending queue, inbound SYN → `SynReceived` + SYN-ACK, final ACK → `Established`/enqueue, backlog-full RST, SYN-ACK retry/5 s expiry, RST cleanup and listener close/owner cleanup; accepted connections use the normal TCP path. `core.socket_accept` is builtin 72; `lib/socket.listen/accept` and `samples/apps/base/net_echo` are the program side; `scripts/net_echo_qmp.py` proves three host clients through `hostfwd` on `-smp 4`/`-smp 1`. 590 host tests; no TIME-WAIT, backlog 2. |
+| 2026-11-19 | Blocking sockets and `socket_source`: `WaitFor::Net(handle)`/`WaitFor::Deadline(ns)`, `Outcome::Blocked` retry, per-socket `core.socket_timeout` (71; 0 = none, default 30 s, connect keeps 5 s `Closed`), compiler-lowered `core.socket_source` (`1 << 63 \| handle`) in `next_any`/`poll_any`, and the readiness-event/wake path that drops `NET` before `task::wake_net`. `net_select` proves the selector and 300 ms recv/select timeouts; 605 host tests; `kill_stress` 300/300. |

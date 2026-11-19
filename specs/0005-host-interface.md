@@ -82,20 +82,25 @@ The interface is split into two namespaces:
 | `socket_send` | `fn socket_send(handle: u64, data: &[u8]) -> Result<usize, Status>` | no in this slice; `WouldBlock` until connected/TX space (`core.socket_send`, builtin 66) |
 | `socket_recv` | `fn socket_recv(handle: u64, dst: &mut [u8]) -> Result<usize, Status>` | no in this slice; `WouldBlock` when empty, `Ok(0)` EOF (`core.socket_recv`, builtin 67) |
 | `socket_close` | `fn socket_close(handle: u64) -> Status` | no; owner-checked (`core.socket_close`, builtin 68) |
+| `socket_timeout` | `fn socket_timeout(handle: u64, ms: u64) -> Status` | no; sets the per-socket blocking deadline (`core.socket_timeout`, builtin 71; `0` = none) |
 
-- **Networking (spec 0020, M10.1–M10.4).** `NetInfo` is `{ ip, mask, gateway, dns: u32 }`
-  in host order (first octet in bits 24..31). A socket is an opaque
-  `(generation << 8) | index` handle; `0` is invalid, a foreign live handle is
-  `Invalid`, a stale one `NotFound`, and a full table `Full`. The first slice is
-  **non-blocking**: `socket_send`/`socket_recv` return `WouldBlock` and the caller
-  retries with `core.clock()`; `socket_open` returns immediately and the kernel's
-  service opportunity drives the TCP handshake. `core.socket_recv` copies at most
+- **Networking (spec 0020, M10.1–M10.9 and the blocking follow-up).** `NetInfo` is
+  `{ ip, mask, gateway, dns: u32 }` in host order (first octet in bits 24..31). A
+  socket is an opaque `(generation << 8) | index` handle; `0` is invalid, a foreign
+  live handle is `Invalid`, a stale one `NotFound`, and a full table `Full`.
+  `socket_send`/`recv`/`accept` **block**: the host returns `WouldBlock`, the
+  machine records `WaitFor::Net(handle)` and retries the same instruction after
+  the wake. The `net` stack owns a per-socket deadline (`core.socket_timeout`,
+  default 30 s, `0` = none; the TCP connect keeps its 5 s `Closed`); `net::service`
+  expires it and calls `task::wake_net` after dropping the network lock, and the
+  scheduler's post-block probe uses the recorded direction. `WaitFor::Deadline(ns)`
+  is a generic timer-woken arm. `core.socket_recv` copies at most
   `abi::net::RECV_CHUNK` (2048) bytes and the compiler stages the destination's
   declared `bytes[N]` capacity as a hidden scalar operand, so a short buffer can
-  never be overrun. `Host::socket_readable` exists with a `false` default for the
-  future blocking/multi-source arm; `WaitFor::Net`/`Deadline` and
-  `core.socket_source` arrive in the follow-up. `Task::reclaim` calls
-  `Host`-independent `net::close_task(task)` for every owned socket.
+  never be overrun. `Host::socket_readable` (default `false`) backs
+  `core.socket_source` (`1 << 63 | handle`, compiler-lowered) in
+  `next_any`/`poll_any`; `Host::socket_arm_wait` and `Host::socket_timed_out` are
+  the kernel-only helpers for that arm. `Task::reclaim` calls `net::close_task`.
 
 - `realtime_on` promotes the calling task, one way, to the realtime class: it is claimed
   before normal tasks and is not released at quantum expiry. It returns `Status.Full` when
@@ -603,4 +608,5 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-17 | System control (spec 0017, M2.6.4): `Host::halt`/`Host::reboot` (0 → 1, builtins 48/49, default `Invalid`) drive `sched::halt_system`/`sched::reboot`. The shutdown flag plus the existing `0x40` wake IPI stop every other core in the handler (acknowledge then halt), the wait is bounded by the clock and a spin ceiling, and `reboot` resets through `0xCF9` and the 8042 pulse command, halting if the firmware ignores both. No opcode. |
 | 2026-11-17 | Multi-source waits (Q39, ADR 0036): `Host::console_line_ready`/`input_ready`/`stream_readable` (all default `false`) back `core.poll_any`/`core.next_any` (builtins 51/52, no opcode). Sources are `0` console line, `1` input event and `>= 2` stream read readiness; `core.stream_source` is compiler-lowered and adds no host method. The kernel maps the probes to `console::has_line`, `event::has_event`/`window::has_expose` and `stream::readable`, and a single `WaitFor::Any` set carries the block; `read_line`/`next_event` are unchanged. |
 | 2026-11-19 | Networking (spec 0020, M10.1–M10.4): `Host::net_config`/`net_info`/`net_mac` (builtins 62–64, `Invalid`/`0` defaults) and `Host::socket_open`/`socket_send`/`socket_recv`/`socket_close` (65–68, `Invalid` defaults), plus `Host::socket_readable` (`false`) reserved for the blocking arm. Sockets are owner-checked generation handles; `socket_recv` stages the destination capacity as a hidden compiler operand and copies at most 2048 bytes. The first slice is non-blocking (`WouldBlock` + caller retry); no opcode, ABI v1 stays 75. |
+| 2026-11-19 | Blocking sockets (spec 0020 N13, M10.3/M10.4 follow-up): `WaitFor::Net(handle)`/`WaitFor::Deadline(ns)`; `Host::socket_timeout` (builtin 71), `Host::socket_timed_out` and `Host::socket_arm_wait` (kernel helpers), and compiler-lowered `core.socket_source` (`1 << 63 \| handle`) in `next_any`/`poll_any`. A host `WouldBlock` blocks the machine and retries the same instruction; the stack deadline defaults to 30 s (`0` = none), the TCP connect keeps 5 s, and `net::service` wakes after dropping the network lock. No opcode; ABI v1 stays 75. |
 | 2026-11-17 | Q44 resolved (ADR 0037): the kernel line discipline is gone. COM1 drains into a 512-byte raw ring (newest byte dropped and counted when full, no echo); PS/2 key presses go only to the event queue. `Host::read_input(dst) -> usize` (non-blocking, `0` when empty) behind `core.read_input(var bytes[N]) -> int` replaces `Host::read_line`; it reuses the `READ_LINE` opcode slot as `READ_INPUT` (`0x42`), so ABI v1 stays at 75. Source `0` is now "a console byte is available" and the probe is `Host::console_byte_ready`. The shell echoes and edits its own `string[256]` with the `stdlib.str_*` helpers and blocks in `core.next_any`; `langhost` drains a scripted byte queue. |

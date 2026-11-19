@@ -80,8 +80,10 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `http://10.0.2.2:6666/` over a real TCP connection and prints
   `net_probe: ok` on `-smp 4` and `-smp 1` (1,406 body bytes); `net_probe dns`
   resolves `example.com` through `10.0.2.3`; `net_probe dhcp` obtains
-  `10.0.2.15/24` from slirp and then fetches the page. Sockets are non-blocking
-  in this slice. **M10.6 (done, `2051069`):** the NIC's PCI INTx line
+  `10.0.2.15/24` from slirp and then fetches the page. Sockets now have both
+  forms: the blocking `send`/`recv`/`accept` sleeps on `WaitFor::Net(handle)` and
+  the non-blocking retry remains for `core.next_any`/timeouts. **M10.6 (done,
+  `2051069`):** the NIC's PCI INTx line
   (GSI 11) is routed through the I/O APIC to the boot core as vector `0x2D`; the
   handler only sets a flag, acknowledges the device and EOIs, and the used-ring
   drain stays in `net::service` (ADR 0051). `xtask --net-irq intx|poll` selects
@@ -92,11 +94,16 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `KIND_LISTEN` with a two-handle pending queue, inbound SYN/SYN-ACK/ACK,
   `core.socket_accept` (72), `lib/socket.listen/accept` and the `net_echo` server
   (three sequential host clients through `hostfwd`), proven over virtio, e1000 and
-  e1000e. `WaitFor::Net`/`Deadline` and `socket_source` remain.
-- **Last commit:** `efeeadf` (M10.7) plus the docs commit. `build/home.img` is reset.
-- **Next:** the blocking `WaitFor::Net`/`Deadline`/`socket_source` follow-up, then
-  the persistent DNS `langhost` test. The deferred backlog in
-  [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) remains available for non-network work.
+  e1000e. **Blocking follow-up (done, `5ae91bc`):** `WaitFor::Net(handle)` and
+  `WaitFor::Deadline(ns)`, a per-socket deadline (`core.socket_timeout`, builtin
+  71), `core.socket_source` (`1 << 63 | handle`) in `next_any`/`poll_any`, and
+  `net_select` (selector + 300 ms recv/select timeouts); `net_echo`'s `accept`
+  blocks, `kill_stress` is 300/300 and `mouse` 600/600.
+- **Last commit:** `5ae91bc` (blocking waits) plus the docs commit. `build/home.img`
+  is reset.
+- **Next:** the persistent DNS `langhost` test (M10.5 follow-up). The deferred
+  backlog in [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) remains available for
+  non-network work.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -1960,7 +1967,7 @@ parent verifies each.
 
 ### M10.3 — UDP sockets, the host ABI and `lib/socket`
 
-- [~] **M10.3 Open the first socket: UDP and the `socket` unit.**
+- [x] **M10.3 Open the first socket: UDP and the `socket` unit.**
   Add a fixed socket table (8 slots, generation handles, owner task, 4 KiB RX/TX),
   UDP demultiplexing with the per-datagram boundary rule, and builtins
   `core.socket_open` (65, kind/remote-ip/remote-port/local-port), `socket_send`
@@ -1983,14 +1990,19 @@ parent verifies each.
     test; `socket: ok`/`net: udp ok`.
   - **Docs:** spec 0005 (socket builtins/wait), spec 0020 N8/N12–N15, ADR 0050;
     AGENTS/PLAN.
-  **Partial (`e08745d`):** UDP, the fixed socket table, generation/owner handles,
-  builtins 65–70 and `lib/socket.ig` are implemented and host-tested. The
-  blocking `WaitFor::Net`/`socket_source`/`next_any` arm is not; this slice is
-  non-blocking (`WouldBlock` + caller retry), as N13 permits.
+  **Done (`e08745d`, blocking in `5ae91bc`):** UDP, the fixed socket table,
+  generation/owner handles, builtins 65–70 and `lib/socket.ig` are implemented and
+  host-tested. The blocking form is now in too: `WaitFor::Net(handle)` sleeps a
+  `send`/`recv`/`accept` that returns `WouldBlock`, `net::service` wakes on
+  data/space/EOF/close/timeout after dropping its lock, and the post-block recheck
+  closes the lost-wake window. `core.socket_source` (`1 << 63 | handle`) feeds
+  `core.next_any`/`poll_any`; `samples/apps/base/net_select` proves the selector,
+  a 300 ms recv timeout and a 300 ms select timeout. `kill_stress` is still
+  300/300 and `mouse` 600/600.
 
 ### M10.4 — TCP client, deadlines and HTTP
 
-- [~] **M10.4 A TCP client that can fetch a page.**
+- [x] **M10.4 A TCP client that can fetch a page.**
   Add the TCP client state machine (active open, handshake, MSS 1460, fixed receive
   window, one outstanding segment, 1 s RTO with exponential backoff and five
   attempts, RST, FIN close), `WaitFor::Deadline(ns)` and `core.socket_timeout` (71).
@@ -2008,12 +2020,15 @@ parent verifies each.
     `net_probe internet` run (not in the regression suite) resolves and fetches a
     real page.
   - **Docs:** spec 0005 (timeout/deadline), spec 0020 N9/N13/N16; AGENTS/PLAN.
-  **Partial (`e08745d`):** the TCP client (handshake, one outstanding segment,
-  1/2/4/8 s retransmit, 5 s connect timeout, FIN/RST, close), `lib/socket.ig`,
-  `lib/http.ig` (HTTP/1.0 GET, header strip, 8 s app deadline) and
-  `base/net_probe` are implemented. `scripts/net_qmp.py` proves a real HTTP body
-  and `net_probe: ok` on `-smp 4` and `-smp 1`; the blocking
-  `WaitFor::Deadline` arm remains for the follow-up.
+  **Done (`e08745d`, blocking in `5ae91bc`):** the TCP client (handshake, one
+  outstanding segment, 1/2/4/8 s retransmit, 5 s connect timeout, FIN/RST,
+  close), `lib/socket.ig`, `lib/http.ig` (HTTP/1.0 GET, header strip, 8 s app
+  deadline) and `base/net_probe` are implemented. The blocking form uses
+  `WaitFor::Net(handle)` with a per-socket deadline (`core.socket_timeout`, 0 =
+  none, default 30 s for send/recv/accept); `WaitFor::Deadline(ns)` is a generic
+  timer-woken arm. `scripts/net_qmp.py` proves a real HTTP body and
+  `net_probe: ok` on `-smp 4` and `-smp 1`; `net_select` proves a 300 ms recv and
+  a 300 ms `next_any` timeout.
 
 ### M10.5 — DNS resolution in source
 
