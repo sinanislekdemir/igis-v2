@@ -182,6 +182,15 @@ begin
     report_failure(st);
     return;
   end;
+  // `accept` now sleeps in the scheduler; the deadline keeps the service's
+  // own 30 s window. A client connection wakes it at once.
+  st := socket.set_timeout(listener, uint(30000));
+  if st <> Ok then
+  begin
+    socket.close(listener);
+    report_failure(st);
+    return;
+  end;
   core.write("net_echo: ready\n");
 
   client := 0;
@@ -205,6 +214,17 @@ begin
     core.write("net_echo: client ");
     write_int(client);
     core.write("\n");
+
+    // A silent client is bounded by its own 30 s window; recv/send sleep
+    // until data, space or the deadline.
+    st := socket.set_timeout(peer, uint(30000));
+    if st <> Ok then
+    begin
+      socket.close(peer);
+      socket.close(listener);
+      report_failure(st);
+      return;
+    end;
 
     st := echo_client(peer);
     socket.close(peer);

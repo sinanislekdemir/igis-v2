@@ -684,6 +684,32 @@ pub trait Host {
         false
     }
 
+    /// Sets the deadline for the next blocking socket operation
+    /// (`core.socket_timeout`, spec 0020, N13). `ms = 0` means "no timeout";
+    /// the stack clamps a larger value. The default is `Invalid`, the
+    /// disabled-NIC result.
+    fn socket_timeout(&mut self, _handle: u64, _ms: u64) -> Status {
+        Status::Invalid
+    }
+
+    /// Reports (once) that a blocking socket operation's deadline expired.
+    ///
+    /// When a send/receive/accept returns `WouldBlock` and this is `true`, the
+    /// machine reports `WouldBlock` to the application instead of blocking the
+    /// task again, so an expired deadline is observable without a new status
+    /// code or an unbounded wait. The default is `false`.
+    fn socket_timed_out(&mut self, _handle: u64) -> bool {
+        false
+    }
+
+    /// Arms the read deadline for a socket named in a blocking `next_any` set
+    /// (`core.socket_source`, spec 0020, N13). The stack's default applies when
+    /// the application did not call `core.socket_timeout`. The default is
+    /// `Invalid`, so a host without sockets keeps `next_any` unchanged.
+    fn socket_arm_wait(&mut self, _handle: u64) -> Status {
+        Status::Invalid
+    }
+
     /// Requests a new application instance (`core.spawn`).
     ///
     /// `path` and `args` are the bytes of the two `string` buffers. `diag` is a
@@ -759,6 +785,14 @@ pub enum WaitKind {
     /// first source that reports ready wins; the builtin is retried whole, so
     /// it re-reads the caller's array and count after the wake-up.
     Any(WaitSet),
+    /// Wait for data, space, EOF, an error or a deadline on the socket with
+    /// this handle (`core.socket_send`/`recv`/`accept`, spec 0020, N13;
+    /// ADR 0050). The stack records the direction; the same instruction is
+    /// retried with its operands intact.
+    Net(u64),
+    /// Wait until the monotonic clock reaches this nanosecond value (the
+    /// generic deadline arm; the 1 kHz service opportunity marks expiry).
+    Deadline(u64),
 }
 
 /// Result of [`Host::wait`].
@@ -2234,6 +2268,18 @@ impl Machine {
                                     self.push(stack, Status::WouldBlock as u64)?;
                                 }
                                 None => {
+                                    // A socket source is a read select: arm its
+                                    // deadline before sleeping, so a selector
+                                    // over a dead peer cannot block forever
+                                    // (spec 0020, N13).
+                                    for index in 0..set.len() {
+                                        if let Some(source) = set.get(index) {
+                                            if wait::is_socket_source(source) {
+                                                let _ = host
+                                                    .socket_arm_wait(wait::socket_handle(source));
+                                            }
+                                        }
+                                    }
                                     // Restore the instruction boundary like
                                     // `next_event` does: the retry sees
                                     // unchanged operands and `pc`.
@@ -2925,9 +2971,20 @@ impl Machine {
                                 )?;
                                 self.push(stack, Status::Ok as u64)?;
                             }
-                            // `WouldBlock` (and every other failure) leaves
-                            // `sent` untouched, so the caller can retry with the
-                            // same buffer.
+                            // `WouldBlock` leaves `sent` untouched so the
+                            // caller can retry the same buffer. A live socket
+                            // blocks the task on the socket wait (spec 0020,
+                            // N13); an expired deadline reports `WouldBlock`
+                            // without blocking again.
+                            Err(Status::WouldBlock) => {
+                                if host.socket_timed_out(handle) {
+                                    self.push(stack, Status::WouldBlock as u64)?;
+                                } else {
+                                    self.pc = pc;
+                                    self.sp = saved_sp;
+                                    return Ok(Step::Blocked(WaitKind::Net(handle)));
+                                }
+                            }
                             Err(status) => self.push(stack, status as u64)?,
                         }
                     }
@@ -2994,12 +3051,36 @@ impl Machine {
                                 )?;
                                 self.push(stack, Status::Ok as u64)?;
                             }
+                            // The destination and `read` are untouched on a
+                            // retry (the host wrote into the machine's staging
+                            // chunk, never the caller's buffer). A live socket
+                            // blocks on the socket wait; an expired deadline
+                            // reports `WouldBlock` and lets the application
+                            // observe it (spec 0020, N13).
+                            Err(Status::WouldBlock) => {
+                                if host.socket_timed_out(handle) {
+                                    self.push(stack, Status::WouldBlock as u64)?;
+                                } else {
+                                    self.pc = pc;
+                                    self.sp = saved_sp;
+                                    return Ok(Step::Blocked(WaitKind::Net(handle)));
+                                }
+                            }
                             Err(status) => self.push(stack, status as u64)?,
                         }
                     }
                     builtin::SOCKET_CLOSE => {
                         let handle = self.pop(stack)?;
                         let status = host.socket_close(handle);
+                        self.push(stack, status as u64)?;
+                    }
+                    builtin::SOCKET_TIMEOUT => {
+                        // Operands: `[id][ms]`. The stack clamps a large value;
+                        // a bad handle is the host's status, with no
+                        // out-parameter to leave untouched.
+                        let ms = self.pop(stack)?;
+                        let handle = self.pop(stack)?;
+                        let status = host.socket_timeout(handle, ms);
                         self.push(stack, status as u64)?;
                     }
                     builtin::SOCKET_ACCEPT => {
@@ -3023,7 +3104,19 @@ impl Machine {
                                 self.push(stack, Status::Ok as u64)?;
                             }
                             // `WouldBlock` and every other failure leave
-                            // `peer` untouched, so a retry is safe.
+                            // `peer` untouched, so a retry is safe. A live
+                            // listener blocks the task until a connection is
+                            // pending; an expired deadline reports
+                            // `WouldBlock` instead of blocking again.
+                            Err(Status::WouldBlock) => {
+                                if host.socket_timed_out(handle) {
+                                    self.push(stack, Status::WouldBlock as u64)?;
+                                } else {
+                                    self.pc = pc;
+                                    self.sp = saved_sp;
+                                    return Ok(Step::Blocked(WaitKind::Net(handle)));
+                                }
+                            }
                             Err(status) => self.push(stack, status as u64)?,
                         }
                     }
@@ -4100,6 +4193,9 @@ impl Machine {
             let ready = match source {
                 wait::SOURCE_CONSOLE_BYTE => host.console_byte_ready(),
                 wait::SOURCE_INPUT => host.input_ready(),
+                value if wait::is_socket_source(value) => {
+                    host.socket_readable(wait::socket_handle(value))
+                }
                 handle => host.stream_readable(handle),
             };
             if ready {

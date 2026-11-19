@@ -948,6 +948,14 @@ pub mod builtin {
     /// out-parameters.
     pub const SOCKET_CLOSE: u32 = 68;
 
+    /// `core.socket_timeout(id, ms) -> Status`: set the deadline for the next
+    /// blocking call on the socket `id` (spec 0020, N13; ADR 0050). `ms` is
+    /// milliseconds; `0` means "no timeout". A value above
+    /// [`crate::net::MAX_TIMEOUT_MS`] is clamped by the stack. `Ok` when the
+    /// socket accepted it, `NotFound`/`Invalid` follow the ordinary handle
+    /// rules. No out-parameters. Operands: `[id][ms]`.
+    pub const SOCKET_TIMEOUT: u32 = 71;
+
     /// `core.socket_accept(id, var peer) -> Status`: pop the oldest completed
     /// connection from the listener `id` (spec 0020, N10). The returned
     /// `peer` is a normal connected `int` socket handle owned by the same task,
@@ -1037,6 +1045,7 @@ pub mod builtin {
             SOCKET_SEND => Some((3, 1)),
             SOCKET_RECV => Some((4, 1)),
             SOCKET_CLOSE => Some((1, 1)),
+            SOCKET_TIMEOUT => Some((2, 1)),
             SOCKET_ACCEPT => Some((2, 1)),
             NET_STATS => Some((4, 1)),
             _ => None,

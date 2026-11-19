@@ -100,6 +100,8 @@ struct NetState {
     /// Scratch frame for the service drain; static so a service opportunity
     /// does not touch 2 KiB of kernel stack.
     rx_frame: [u8; RX_FRAME_BYTES],
+    /// The stack's readiness-event counter at the last service opportunity.
+    last_events: u64,
 }
 
 impl NetState {
@@ -108,6 +110,7 @@ impl NetState {
             stack: Stack::new(),
             device: Device::None,
             rx_frame: [0; RX_FRAME_BYTES],
+            last_events: 0,
         }
     }
 }
@@ -368,26 +371,41 @@ pub fn service() {
     let _was_pending = IRQ_PENDING.swap(false, Ordering::AcqRel);
     report_irq_once();
 
-    let mut guard = NET.lock();
-    let now = clock::now_ns();
-    let NetState {
-        stack,
-        device,
-        rx_frame,
-    } = &mut *guard;
+    let mut wake = [0u64; ::net::MAX_SOCKETS];
+    let mut wake_count = 0usize;
+    {
+        let mut guard = NET.lock();
+        let now = clock::now_ns();
+        let NetState {
+            stack,
+            device,
+            rx_frame,
+            last_events,
+        } = &mut *guard;
 
-    for _ in 0..RX_DRAIN {
-        match device.receive(rx_frame) {
-            Some(0) => continue,
-            Some(len) => {
-                stack.receive(&rx_frame[..len], now, &mut |out| {
-                    device.transmit(out) == Status::Ok
-                });
+        for _ in 0..RX_DRAIN {
+            match device.receive(rx_frame) {
+                Some(0) => continue,
+                Some(len) => {
+                    stack.receive(&rx_frame[..len], now, &mut |out| {
+                        device.transmit(out) == Status::Ok
+                    });
+                }
+                None => break,
             }
-            None => break,
+        }
+        stack.service(now, &mut |out| device.transmit(out) == Status::Ok);
+        let events = stack.event_seq();
+        if events != *last_events {
+            *last_events = events;
+            wake_count = stack.ready_handles(now, &mut wake);
         }
     }
-    stack.service(now, &mut |out| device.transmit(out) == Status::Ok);
+    // Never hold the network lock while taking the scheduler's slot locks
+    // (the same rule the stream and event wake paths follow).
+    for handle in &wake[..wake_count] {
+        crate::task::wake_net(*handle);
+    }
 }
 
 /// Stores the machine-wide IPv4 configuration.
@@ -455,9 +473,16 @@ pub fn send(handle: u64, owner: u64, data: &[u8]) -> Result<usize, Status> {
     }
     let now = clock::now_ns();
     let NetState { stack, device, .. } = &mut *guard;
-    stack.send(handle, owner, data, now, &mut |out| {
+    let result = stack.send(handle, owner, data, now, &mut |out| {
         device.transmit(out) == Status::Ok
-    })
+    });
+    match result {
+        Err(Status::WouldBlock) => {
+            let _ = stack.arm_wait(handle, owner, now, true);
+        }
+        _ => stack.finish_wait(handle, owner),
+    }
+    result
 }
 
 /// Receives queued socket data; `Ok(0)` is EOF and `WouldBlock` means nothing
@@ -467,7 +492,15 @@ pub fn recv(handle: u64, owner: u64, dst: &mut [u8]) -> Result<usize, Status> {
     if !guard.device.present() {
         return Err(Status::IoError);
     }
-    guard.stack.recv(handle, owner, dst)
+    let now = clock::now_ns();
+    let result = guard.stack.recv(handle, owner, dst);
+    match result {
+        Err(Status::WouldBlock) => {
+            let _ = guard.stack.arm_wait(handle, owner, now, false);
+        }
+        _ => guard.stack.finish_wait(handle, owner),
+    }
+    result
 }
 
 /// Closes a socket owned by `owner` (FIN for TCP, immediate for UDP).
@@ -490,7 +523,52 @@ pub fn accept(handle: u64, owner: u64) -> Result<u64, Status> {
     if !guard.device.present() {
         return Err(Status::IoError);
     }
-    guard.stack.accept(handle, owner)
+    let now = clock::now_ns();
+    let result = guard.stack.accept(handle, owner);
+    match result {
+        Err(Status::WouldBlock) => {
+            let _ = guard.stack.arm_wait(handle, owner, now, false);
+        }
+        _ => guard.stack.finish_wait(handle, owner),
+    }
+    result
+}
+
+/// Sets the per-socket deadline for the next blocking operation (spec 0020,
+/// N13; ADR 0050). `ms = 0` means "no timeout".
+pub fn timeout(handle: u64, owner: u64, ms: u64) -> Status {
+    let mut guard = NET.lock();
+    if !guard.device.present() {
+        return Status::IoError;
+    }
+    let now = clock::now_ns();
+    guard.stack.set_timeout(handle, owner, ms, now)
+}
+
+/// Consumes an expired deadline for `handle` (the interpreter's retry probe).
+pub fn timed_out(handle: u64, owner: u64) -> bool {
+    let mut guard = NET.lock();
+    guard.stack.take_timed_out(handle, owner)
+}
+
+/// Arms the read deadline for a socket in a blocking `core.next_any` set
+/// (spec 0020, N13). The stack's configured timeout or its default applies.
+pub fn arm_read_wait(handle: u64, owner: u64) -> Status {
+    let mut guard = NET.lock();
+    if !guard.device.present() {
+        return Status::IoError;
+    }
+    let now = clock::now_ns();
+    guard.stack.arm_wait(handle, owner, now, false)
+}
+
+/// Readiness of the operation that armed the deadline; the scheduler's
+/// post-block re-check uses it so a wake-up is never lost between the failed
+/// call and `block`.
+pub fn wait_ready(handle: u64, owner: u64) -> bool {
+    let guard = NET.lock();
+    let now = clock::now_ns();
+    guard.stack.wait_ready(handle, owner, now)
 }
 
 /// Reports whether a socket is readable (data, EOF, error, a completed

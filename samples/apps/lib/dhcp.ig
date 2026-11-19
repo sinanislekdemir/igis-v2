@@ -489,6 +489,14 @@ begin
     handle);
   if st <> Ok then
     return st;
+  // Each attempt is bounded by two seconds; an expired deadline returns
+  // `WouldBlock` and the loop's own `until` check decides whether to retry.
+  st := socket.set_timeout(handle, uint(2000));
+  if st <> Ok then
+  begin
+    socket.close(handle);
+    return st;
+  end;
 
   overall := core.clock() + uint(OverallNs);
   offered := uint(0);

@@ -18,7 +18,9 @@
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use abi::wait::{WaitSet, SOURCE_CONSOLE_BYTE, SOURCE_INPUT};
+use abi::wait::{
+    is_socket_source, socket_handle, socket_source, WaitSet, SOURCE_CONSOLE_BYTE, SOURCE_INPUT,
+};
 use abi::Status;
 use interpreter::Machine;
 
@@ -70,6 +72,15 @@ pub enum WaitFor {
     /// carries the whole set so both the interpreter and the scheduler see the
     /// same value.
     Any(WaitSet),
+    /// Data, space, EOF, an error or a deadline on the socket with this handle
+    /// (`core.socket_send`/`recv`/`accept`, spec 0020, N13; ADR 0050). The
+    /// interpreter retries the same builtin after the wake-up; the stack
+    /// records which direction (`arm_wait`) so the post-block probe matches.
+    Net(u64),
+    /// The monotonic clock reached this nanosecond value (`WaitFor::Deadline`,
+    /// spec 0020, N13). The 1 kHz tick marks expiry in the service opportunity;
+    /// the timer path never takes a slot lock.
+    Deadline(u64),
 }
 
 /// The scheduling class of a task (spec 0007, ADR 0016).
@@ -584,9 +595,11 @@ pub fn wake(child: u64) {
 fn waits_on_source(wait: WaitFor, source: u64) -> bool {
     match wait {
         WaitFor::Input => source == SOURCE_INPUT,
-        WaitFor::Stream(handle) => handle == source,
+        WaitFor::Stream(handle) => !is_socket_source(source) && handle == source,
+        WaitFor::Net(handle) => is_socket_source(source) && socket_handle(source) == handle,
         WaitFor::Any(set) => set.contains(source),
         WaitFor::Child(_) => false,
+        WaitFor::Deadline(_) => false,
     }
 }
 
@@ -636,6 +649,8 @@ fn source_ready(task: u64, source: u64) -> bool {
         input_queue_ready(task)
             || crate::window::has_expose(task)
             || crate::window::has_close(task)
+    } else if is_socket_source(source) {
+        crate::net::readable(socket_handle(source), task)
     } else {
         crate::stream::readable(task, source)
     }
@@ -695,6 +710,25 @@ pub fn wake_stream(handle: u64) {
 /// dropped so the slot locks are never nested inside the queue lock.
 pub fn wake_input() {
     wake_source(SOURCE_INPUT);
+}
+
+/// Makes every task blocked on socket `handle` runnable again (spec 0020,
+/// N13). A single `WaitFor::Net(handle)` matches directly; a `WaitFor::Any`
+/// set matches when it contains `SOURCE_SOCKET_BASE | handle`.
+///
+/// The network service calls this after dropping its lock, so the scheduler's
+/// slot locks are never nested inside the network lock.
+pub fn wake_net(handle: u64) {
+    wake_source(socket_source(handle));
+}
+
+/// Makes every task whose `WaitFor::Deadline(ns)` has expired runnable.
+///
+/// Bounded (one pass over the fixed slot table) and called from the service
+/// opportunity with the current `clock::now_ns()`; the timer interrupt itself
+/// never touches a slot lock.
+pub fn wake_deadlines(now_ns: u64) {
+    wake_matching(|wait| matches!(wait, WaitFor::Deadline(ns) if ns <= now_ns));
 }
 
 fn wake_matching(matches: impl Fn(WaitFor) -> bool) {

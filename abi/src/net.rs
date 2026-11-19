@@ -40,6 +40,11 @@ pub const MAX_ADDRESS: u64 = u32::MAX as u64;
 /// capacity; the caller reads more with another call.
 pub const RECV_CHUNK: usize = 2048;
 
+/// The largest accepted `core.socket_timeout` value in milliseconds (one hour).
+/// A larger operand is clamped rather than rejected, so an arithmetic slip in
+/// an application cannot wrap a deadline back into the past.
+pub const MAX_TIMEOUT_MS: u64 = 3_600_000;
+
 /// Validates the operands of `core.socket_open` (spec 0020, N12): `kind` must
 /// be [`KIND_TCP`], [`KIND_UDP`] or [`KIND_LISTEN`], `port` and `local` must be
 /// at most [`MAX_PORT`], and a listener must bind a nonzero `local` port.
@@ -80,6 +85,7 @@ mod tests {
         assert_eq!(MAX_PORT, 65535);
         assert_eq!(MAX_ADDRESS, 0xFFFF_FFFF);
         assert_eq!(RECV_CHUNK, 2048);
+        assert_eq!(MAX_TIMEOUT_MS, 3_600_000);
     }
 
     #[test]

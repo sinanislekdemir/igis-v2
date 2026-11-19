@@ -2913,3 +2913,17 @@ fn the_net_perf_sample_reports_the_host_path() {
     assert_eq!(result.reason, ExitReason::Ok);
     assert_eq!(result.output, b"net_perf: no device\n".to_vec());
 }
+
+/// `net_select` compiles the compiler-lowered `socket.source` and the
+/// `next_any` socket arm; `langhost` has no NIC, so both modes report the
+/// disabled-device contract and return at once (spec 0020, N13).
+#[test]
+fn the_net_select_sample_reports_the_host_path() {
+    let path = app_path("net_select");
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "net_select").expect("the net_select sample compiles");
+    let result =
+        langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies and runs");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"net_select: no device\n".to_vec());
+}

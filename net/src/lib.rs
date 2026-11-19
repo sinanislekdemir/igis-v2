@@ -91,6 +91,10 @@ pub(crate) const CONNECT_TIMEOUT_NS: u64 = 5_000_000_000;
 pub(crate) const INITIAL_RTO_NS: u64 = 1_000_000_000;
 /// Transmissions of one segment before the connection is declared dead.
 pub(crate) const MAX_ATTEMPTS: u8 = 5;
+/// Default deadline for a blocking send/receive/accept when the application did
+/// not call `core.socket_timeout` (spec 0020, "Blocking and readiness"). The
+/// connect handshake keeps its own [`CONNECT_TIMEOUT_NS`].
+pub const DEFAULT_OP_TIMEOUT_NS: u64 = 30_000_000_000;
 /// First ephemeral local port.
 const EPHEMERAL_START: u16 = 49152;
 /// Number of ephemeral ports.
@@ -180,6 +184,33 @@ struct Socket {
     /// first. Only a [`KIND_LISTEN`] slot fills this.
     pending: [u64; LISTEN_BACKLOG],
     pending_len: usize,
+
+    /// Configured per-operation deadline in nanoseconds (0 = block
+    /// indefinitely). Set by [`Stack::set_timeout`].
+    timeout_ns: u64,
+    /// True once the application called `core.socket_timeout`, so an explicit
+    /// `0` (indefinite) is distinguishable from the default.
+    timeout_set: bool,
+    /// Absolute deadline armed by the first `WouldBlock` of the operation in
+    /// progress; 0 = not armed.
+    op_deadline_ns: u64,
+    /// Direction of the operation that armed the deadline, so the scheduler's
+    /// post-block re-check probes the same readiness.
+    wait_op: WaitOp,
+    /// A deadline expired while the task was blocked. The interpreter consumes
+    /// this with `socket_timed_out` and reports `WouldBlock` without blocking.
+    timed_out: bool,
+}
+
+/// Which readiness a blocked socket operation is waiting for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WaitOp {
+    /// No blocking operation armed (a `next_any` read source, or idle).
+    None,
+    /// Data, EOF, an error or a pending listener connection.
+    Read,
+    /// Space in the transmit path and a resolved next hop.
+    Write,
 }
 
 impl Socket {
@@ -216,6 +247,11 @@ impl Socket {
         window_dirty: false,
         pending: [0; LISTEN_BACKLOG],
         pending_len: 0,
+        timeout_ns: 0,
+        timeout_set: false,
+        op_deadline_ns: 0,
+        wait_op: WaitOp::None,
+        timed_out: false,
     };
 }
 
@@ -231,6 +267,10 @@ pub struct Stack {
     ip_id: u16,
     isn: u32,
     next_port: u16,
+    /// Monotonic readiness-event counter: bumped whenever a frame changed a
+    /// socket, a connection failed, or a deadline expired. The kernel compares
+    /// it across service opportunities so it wakes waiters only after activity.
+    events: u64,
 }
 
 impl Stack {
@@ -260,6 +300,7 @@ impl Stack {
             ip_id: 0,
             isn: 0,
             next_port: 0,
+            events: 0,
         }
     }
 
@@ -286,6 +327,213 @@ impl Stack {
     /// Returns a snapshot of the bounded protocol counters.
     pub fn stats(&self) -> Stats {
         self.stats
+    }
+
+    /// Number of readiness events seen so far (frames that touched a socket,
+    /// connection failures and expired deadlines). The kernel uses it to avoid
+    /// walking the wake path on every service opportunity.
+    pub fn event_seq(&self) -> u64 {
+        self.events
+    }
+
+    /// Records one readiness-relevant transition.
+    fn note_event(&mut self) {
+        self.events = self.events.wrapping_add(1);
+    }
+
+    /// Sets the per-operation timeout in milliseconds (`0` = block
+    /// indefinitely) and clears any armed deadline (spec 0020, N13).
+    ///
+    /// The timeout applies to the next blocking operation and is re-armed
+    /// each time a send/receive/accept has to wait; an operation that completes
+    /// clears it. `now_ns` is accepted so the same signature serves a call that
+    /// wants to observe the clock, but the deadline is armed on the first
+    /// `WouldBlock` (see [`Stack::arm_wait`]).
+    pub fn set_timeout(
+        &mut self,
+        handle: u64,
+        owner: u64,
+        ms: u64,
+        _now_ns: u64,
+    ) -> Status {
+        let index = match self.lookup(handle, owner) {
+            Ok(index) => index,
+            Err(status) => return status,
+        };
+        let socket = &mut self.sockets[index];
+        socket.timeout_set = true;
+        socket.timeout_ns = ms
+            .min(abi::net::MAX_TIMEOUT_MS)
+            .saturating_mul(1_000_000);
+        socket.op_deadline_ns = 0;
+        socket.timed_out = false;
+        Status::Ok
+    }
+
+    /// Arms the deadline for a blocking operation that just returned
+    /// `WouldBlock`.
+    ///
+    /// `write` selects the send (space) direction; a receive or accept waits
+    /// for read readiness. The first call of an operation arms the deadline;
+    /// later retries keep it. An explicit `core.socket_timeout(id, 0)` leaves
+    /// the operation unbounded, as does the absence of a clock.
+    pub fn arm_wait(&mut self, handle: u64, owner: u64, now_ns: u64, write: bool) -> Status {
+        let index = match self.lookup(handle, owner) {
+            Ok(index) => index,
+            Err(status) => return status,
+        };
+        let socket = &mut self.sockets[index];
+        socket.wait_op = if write { WaitOp::Write } else { WaitOp::Read };
+        if socket.op_deadline_ns != 0 {
+            return Status::Ok;
+        }
+        let timeout = if socket.timeout_set {
+            socket.timeout_ns
+        } else {
+            DEFAULT_OP_TIMEOUT_NS
+        };
+        if timeout != 0 {
+            socket.op_deadline_ns = now_ns.saturating_add(timeout);
+        }
+        Status::Ok
+    }
+
+    /// Ends the operation in progress: clears the armed deadline and the
+    /// expiry flag. A completed or terminally failed call must not leave a
+    /// stale timeout for the next one.
+    pub fn finish_wait(&mut self, handle: u64, owner: u64) {
+        if let Ok(index) = self.lookup(handle, owner) {
+            let socket = &mut self.sockets[index];
+            socket.op_deadline_ns = 0;
+            socket.wait_op = WaitOp::None;
+            socket.timed_out = false;
+        }
+    }
+
+    /// Consumes an expired deadline for `handle`.
+    ///
+    /// Returns `true` once for an expiry, clearing the flag so the retry is
+    /// allowed to block again if the application ignores the `WouldBlock`.
+    pub fn take_timed_out(&mut self, handle: u64, owner: u64) -> bool {
+        let index = match self.lookup(handle, owner) {
+            Ok(index) => index,
+            Err(_) => return false,
+        };
+        let socket = &mut self.sockets[index];
+        let expired = socket.timed_out;
+        if expired {
+            socket.timed_out = false;
+            socket.op_deadline_ns = 0;
+            socket.wait_op = WaitOp::None;
+        }
+        expired
+    }
+
+    /// Readiness of the operation that armed the deadline: the scheduler's
+    /// post-block re-check. Expiry and a terminal error count as ready so the
+    /// retry can report them.
+    pub fn wait_ready(&self, handle: u64, owner: u64, now_ns: u64) -> bool {
+        let Ok(index) = self.lookup(handle, owner) else {
+            return true;
+        };
+        self.slot_wait_ready(&self.sockets[index], now_ns)
+    }
+
+    /// True when the armed operation would not block: the read direction uses
+    /// [`Stack::slot_recv_ready`] (not a bare established connect); the write
+    /// direction is sendable, expired, or failed (a `Closed`/error wake must
+    /// reach the blocked sender).
+    fn slot_wait_ready(&self, socket: &Socket, now_ns: u64) -> bool {
+        if socket.timed_out {
+            return true;
+        }
+        match socket.wait_op {
+            WaitOp::Write => {
+                socket.error || self.slot_sendable(socket, now_ns)
+            }
+            WaitOp::Read => self.slot_recv_ready(socket),
+            WaitOp::None => self.slot_readable(socket),
+        }
+    }
+
+    /// Fills `out` with the handles whose armed operation is ready (or whose
+    /// deadline expired), so the kernel can wake exactly those waiters after a
+    /// service opportunity. Returns the number written.
+    pub fn ready_handles(&self, now_ns: u64, out: &mut [u64; MAX_SOCKETS]) -> usize {
+        let mut count = 0;
+        for (index, socket) in self.sockets.iter().enumerate() {
+            if !socket.active {
+                continue;
+            }
+            let ready = self.slot_wait_ready(socket, now_ns);
+            if ready {
+                out[count] = (socket.generation << 8) | index as u64;
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Read readiness of one slot, without the owner check.
+    fn slot_readable(&self, socket: &Socket) -> bool {
+        if socket.kind == KIND_LISTEN {
+            return socket.pending_len > 0;
+        }
+        if socket.udp_ready || socket.rx_len > 0 || socket.eof || socket.error {
+            return true;
+        }
+        socket.kind == KIND_TCP && socket.state == TcpState::Established
+    }
+
+    /// True when a `recv` on this slot would not block.
+    ///
+    /// Unlike [`Stack::slot_readable`], a bare completed connect is not enough:
+    /// the first receive on an established, empty connection still waits for
+    /// data. The distinction matters because the scheduler's post-block probe
+    /// uses this predicate; treating `Established` as "receive ready" would
+    /// wake the task forever.
+    fn slot_recv_ready(&self, socket: &Socket) -> bool {
+        if socket.kind == KIND_LISTEN {
+            return socket.pending_len > 0;
+        }
+        if socket.udp_ready || socket.rx_len > 0 || socket.eof || socket.error {
+            return true;
+        }
+        socket.kind == KIND_TCP && socket.state == TcpState::Closed
+    }
+
+    /// True when a send on this socket can make progress: the TCP handshake is
+    /// complete with no unacknowledged segment, and the next hop's MAC is
+    /// resolved (or the destination is broadcast). Pure: it never sends an ARP
+    /// request, so it is safe in a readiness probe.
+    fn slot_sendable(&self, socket: &Socket, now_ns: u64) -> bool {
+        if socket.error || socket.kind == KIND_LISTEN {
+            return false;
+        }
+        if socket.kind == KIND_TCP
+            && (socket.state != TcpState::Established || socket.tx_sent || socket.fin_sent)
+        {
+            return false;
+        }
+        self.next_hop_resolved(socket.remote_ip, now_ns)
+    }
+
+    /// Pure form of the ARP next-hop check used by [`Stack::resolve_dst`].
+    fn next_hop_resolved(&self, dst_ip: u32, now_ns: u64) -> bool {
+        if dst_ip == BROADCAST_IP
+            || (self.config.mask != 0 && dst_ip == self.broadcast_ip())
+        {
+            return true;
+        }
+        if self.config.ip == 0 {
+            return false;
+        }
+        let next_hop = if self.on_link(dst_ip) {
+            dst_ip
+        } else {
+            self.config.gateway
+        };
+        next_hop != 0 && self.arp_lookup(next_hop, now_ns).is_some()
     }
 
     /// Opens a socket. `kind` is [`KIND_TCP`] (active open), [`KIND_UDP`] or
@@ -522,8 +770,14 @@ impl Stack {
         }
         let src = ethernet::mac_at(frame, 6);
         match ethernet::be16(frame, 12) {
-            ETHERTYPE_ARP => self.arp_receive(&frame[ETH_HEADER..], &src, now_ns, tx),
-            ETHERTYPE_IPV4 => self.ipv4_receive(&frame[ETH_HEADER..], &src, now_ns, tx),
+            ETHERTYPE_ARP => {
+                self.arp_receive(&frame[ETH_HEADER..], &src, now_ns, tx);
+                self.note_event();
+            }
+            ETHERTYPE_IPV4 => {
+                self.ipv4_receive(&frame[ETH_HEADER..], &src, now_ns, tx);
+                self.note_event();
+            }
             _ => self.count_drop(),
         }
     }
@@ -531,11 +785,18 @@ impl Stack {
     /// Drives handshake retransmission and the TCP/ARP timers.
     pub fn service(&mut self, now_ns: u64, tx: &mut dyn FnMut(&[u8]) -> bool) {
         self.arp_age(now_ns);
+        let mut expired = false;
         for index in 0..MAX_SOCKETS {
-            if !self.sockets[index].active || self.sockets[index].kind != KIND_TCP {
+            let socket = &mut self.sockets[index];
+            if socket.active && socket.op_deadline_ns != 0 && now_ns >= socket.op_deadline_ns {
+                socket.op_deadline_ns = 0;
+                socket.timed_out = true;
+                expired = true;
+            }
+            if !socket.active || socket.kind != KIND_TCP {
                 continue;
             }
-            match self.sockets[index].state {
+            match socket.state {
                 TcpState::SynSent => self.tcp_service_syn(index, now_ns, tx),
                 TcpState::SynReceived => self.tcp_service_syn_received(index, now_ns, tx),
                 TcpState::Established
@@ -545,6 +806,9 @@ impl Stack {
                 | TcpState::LastAck => self.tcp_service_data(index, now_ns, tx),
                 TcpState::Listen | TcpState::Closed => {}
             }
+        }
+        if expired {
+            self.note_event();
         }
     }
 
@@ -556,13 +820,9 @@ impl Stack {
             return false;
         };
         let socket = &self.sockets[index];
-        if socket.kind == KIND_LISTEN {
-            return socket.pending_len > 0;
-        }
-        if socket.udp_ready || socket.rx_len > 0 || socket.eof || socket.error {
-            return true;
-        }
-        socket.kind == KIND_TCP && socket.state == TcpState::Established
+        // An expired deadline is reported as readable so a `next_any`/read
+        // wait returns and the following operation can observe the timeout.
+        socket.timed_out || self.slot_readable(socket)
     }
 
     /// Finds a live slot for `handle`, checking the generation and the owner.

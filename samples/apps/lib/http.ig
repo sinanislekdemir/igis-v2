@@ -84,6 +84,15 @@ begin
   st := socket.tcp(ip, port, id);
   if st <> Ok then
     return st;
+  // Cap each blocking call at the same window the loops use, so a peer that
+  // stops responding surfaces as `WouldBlock` instead of sleeping to the
+  // stack's default deadline.
+  st := socket.set_timeout(id, uint(8000));
+  if st <> Ok then
+  begin
+    socket.close(id);
+    return st;
+  end;
 
   deadline := core.clock() + uint(DeadlineNs);
 

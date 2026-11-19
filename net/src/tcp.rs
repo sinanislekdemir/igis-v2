@@ -614,6 +614,8 @@ impl Stack {
         socket.tx_sent = false;
         socket.tx_len = 0;
         socket.fin_sent = false;
+        // A blocked sender or receiver must observe the failure.
+        self.note_event();
     }
 
     /// Drives the SYN retry and the connect deadline.

@@ -7948,7 +7948,12 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             "core.socket_send" => self.socket_send_call(args, line, column),
             "core.socket_recv" => self.socket_recv_call(args, line, column),
             "core.socket_close" => self.socket_close_call(args, line, column),
+            "core.socket_timeout" => self.socket_timeout_call(args, line, column),
             "core.socket_accept" => self.socket_accept_call(args, line, column),
+            // `core.socket_source(id) -> uint` (spec 0020, N13; ADR 0050).
+            // Compiler-lowered like `core.stream_source`: the handle is an
+            // ordinary `int` expression and the source is the tag bit ORed in.
+            "core.socket_source" => self.socket_source_call(args, line, column),
             // Terminal attach (spec 0014): bind the console's machine-wide
             // terminal grid to a window owned by the caller. The kernel host
             // supplies the task id; the compiler only checks the staged
@@ -8738,6 +8743,85 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         }
         self.one(opcodes::BUILTIN, builtin::SOCKET_CLOSE)?;
         self.pop(1)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// `core.socket_source(id) -> uint`.
+    ///
+    /// Compiler-lowered, like `core.stream_source`: the handle expression is
+    /// already a value, so the whole lowering is the tag constant plus an
+    /// unsigned add (a live handle is below `2^63`, so add is OR). Keeping it
+    /// out of `call`'s match keeps that large frame small.
+    fn socket_source_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 1 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!(
+                    "`core.socket_source` expects 1 argument, got {}",
+                    args.len()
+                ),
+            ));
+        }
+        let id = self.expr_scalar(args[0])?;
+        if id.kind != Kind::Int {
+            let found = self.type_name(id);
+            return Err(self.err_at(
+                args[0],
+                format_args!("`core.socket_source` expects an `int` socket id, found `{found}`"),
+            ));
+        }
+        self.const_i64(abi::wait::SOURCE_SOCKET_BASE as i64)?;
+        self.simple(opcodes::ADD_U)?;
+        self.pop(2)?;
+        self.push();
+        Ok(Some(Type::scalar(Kind::Uint)))
+    }
+
+    /// `core.socket_timeout(id, ms) -> Status`.
+    ///
+    /// `ms` is a `uint` (milliseconds; `0` = no timeout). The stack clamps a
+    /// value above `abi::net::MAX_TIMEOUT_MS`, so the compiler only checks the
+    /// staged type.
+    fn socket_timeout_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 2 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!(
+                    "`core.socket_timeout` expects 2 arguments, got {}",
+                    args.len()
+                ),
+            ));
+        }
+        let id = self.expr_scalar(args[0])?;
+        if id.kind != Kind::Int {
+            return Err(self.err_at(
+                args[0],
+                format_args!("`core.socket_timeout` expects an `int` socket id, found `{id}`"),
+            ));
+        }
+        let ms = self.expr_scalar(args[1])?;
+        if ms.kind != Kind::Uint {
+            let found = self.type_name(ms);
+            return Err(self.err_at(
+                args[1],
+                format_args!("`core.socket_timeout` expects a `uint` timeout in ms, found `{found}`"),
+            ));
+        }
+        self.one(opcodes::BUILTIN, builtin::SOCKET_TIMEOUT)?;
+        self.pop(2)?;
         self.push();
         Ok(Some(Type::enumeration(STATUS_ENUM)))
     }

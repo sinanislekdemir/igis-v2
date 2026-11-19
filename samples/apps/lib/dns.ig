@@ -274,6 +274,14 @@ begin
   st := socket.udp(server, uint(DnsPort), handle);
   if st <> Ok then
     return st;
+  // One query/response attempt is bounded by 2 s; the kernel reports the
+  // expiry as `WouldBlock`, which the retry loop below treats like a timeout.
+  st := socket.set_timeout(handle, uint(2000));
+  if st <> Ok then
+  begin
+    socket.close(handle);
+    return st;
+  end;
   deadline := core.clock() + uint(DeadlineNs);
 
   // Send the whole query; UDP `WouldBlock` means the next hop is not resolved

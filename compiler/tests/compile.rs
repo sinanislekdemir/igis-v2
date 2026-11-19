@@ -9089,6 +9089,7 @@ var
   tx: uint;
   drops: uint;
   errors: uint;
+  source: uint;
 procedure main(args: const string[1024]);
 begin
   status := core.net_config(uint(0), uint(0), uint(0), uint(0));
@@ -9100,6 +9101,8 @@ begin
   status := core.socket_send(id, text, sent);
   status := core.socket_recv(id, chunk, read);
   status := core.socket_close(id);
+  status := core.socket_timeout(id, uint(5000));
+  source := core.socket_source(id);
   status := core.socket_accept(id, peer);
 end;
 "#;
@@ -9113,6 +9116,7 @@ end;
         builtin::SOCKET_SEND,
         builtin::SOCKET_RECV,
         builtin::SOCKET_CLOSE,
+        builtin::SOCKET_TIMEOUT,
         builtin::SOCKET_ACCEPT,
     ] {
         assert!(builtin_count(&package, id) >= 1, "builtin {id} is emitted");
@@ -9128,9 +9132,10 @@ end;
             builtin::SOCKET_SEND,
             builtin::SOCKET_RECV,
             builtin::SOCKET_CLOSE,
+            builtin::SOCKET_TIMEOUT,
             builtin::SOCKET_ACCEPT,
         ),
-        (62, 63, 64, 73, 65, 66, 67, 68, 72)
+        (62, 63, 64, 73, 65, 66, 67, 68, 71, 72)
     );
     assert_eq!(builtin::effect(builtin::NET_CONFIG), Some((4, 1)));
     assert_eq!(builtin::effect(builtin::NET_INFO), Some((4, 1)));
@@ -9144,6 +9149,7 @@ end;
         "the destination capacity is staged as a fourth operand"
     );
     assert_eq!(builtin::effect(builtin::SOCKET_CLOSE), Some((1, 1)));
+    assert_eq!(builtin::effect(builtin::SOCKET_TIMEOUT), Some((2, 1)));
     assert_eq!(builtin::effect(builtin::SOCKET_ACCEPT), Some((2, 1)));
 
     // `socket_recv` stages the destination's declared capacity between the id
@@ -9153,6 +9159,16 @@ end;
         pair[0].0 == opcodes::CONST && pair[0].1 == [100, 0] && pair[1].0 == opcodes::REF_STATE
     });
     assert!(staged, "the `bytes[100]` capacity rides in a const operand");
+
+    // `core.socket_source` is compiler-lowered: the handle expression plus the
+    // high-bit tag constant and an unsigned add (the OR, since a live handle is
+    // below 2^63). No builtin is emitted for it.
+    let tagged = words.windows(2).any(|pair| {
+        pair[0].0 == opcodes::CONST
+            && pair[0].1 == [0, 0x8000_0000]
+            && pair[1].0 == opcodes::ADD_U
+    });
+    assert!(tagged, "the socket source sets bit 63 with ADD_U");
 
     let cases = [
         (
@@ -9382,6 +9398,54 @@ begin
 end;
 "#,
             "`core.net_stats` expects `var errors: uint`",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := core.socket_timeout(uint(1), uint(5000));
+end;
+"#,
+            "`core.socket_timeout` expects an `int` socket id",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; id: int;
+procedure main(args: const string[1024]);
+begin
+  status := core.socket_timeout(id, 5000);
+end;
+"#,
+            "`core.socket_timeout` expects a `uint` timeout in ms",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var source: uint;
+procedure main(args: const string[1024]);
+begin
+  source := core.socket_source(uint(1));
+end;
+"#,
+            "`core.socket_source` expects an `int` socket id",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var id: int; source: uint;
+procedure main(args: const string[1024]);
+begin
+  source := core.socket_source(id, id);
+end;
+"#,
+            "`core.socket_source` expects 1 argument",
         ),
     ];
     for (source, expected) in cases {

@@ -673,6 +673,18 @@ impl Host for KernelHost {
         crate::net::accept(handle, self.current)
     }
 
+    fn socket_timeout(&mut self, handle: u64, ms: u64) -> Status {
+        crate::net::timeout(handle, self.current, ms)
+    }
+
+    fn socket_timed_out(&mut self, handle: u64) -> bool {
+        crate::net::timed_out(handle, self.current)
+    }
+
+    fn socket_arm_wait(&mut self, handle: u64) -> Status {
+        crate::net::arm_read_wait(handle, self.current)
+    }
+
     fn socket_readable(&mut self, handle: u64) -> bool {
         crate::net::readable(handle, self.current)
     }
@@ -924,6 +936,32 @@ fn loop_body(core: usize) -> ! {
                                         task::wake_any_sources(set);
                                     }
                                 }
+                                WaitKind::Net(handle) => {
+                                    println!(
+                                        "sched: task {} blocked on socket {handle:#x}",
+                                        task.id
+                                    );
+                                    let id = task.id;
+                                    task::block(task, WaitFor::Net(handle));
+                                    // Data/space/EOF/close may have arrived
+                                    // between the failed call and the block;
+                                    // the same direction probe the retry uses
+                                    // closes the wire.
+                                    if crate::net::wait_ready(handle, id) {
+                                        task::wake_net(handle);
+                                    }
+                                }
+                                WaitKind::Deadline(ns) => {
+                                    println!(
+                                        "sched: task {} blocked until {ns} ns",
+                                        task.id
+                                    );
+                                    task::block(task, WaitFor::Deadline(ns));
+                                    let now = clock::now_ns();
+                                    if now >= ns {
+                                        task::wake_deadlines(now);
+                                    }
+                                }
                             }
                             break;
                         }
@@ -1097,6 +1135,7 @@ fn service() {
     crate::mouse::poll();
     crate::usb::poll();
     crate::net::service();
+    task::wake_deadlines(clock::now_ns());
     if console::has_byte() {
         task::wake_console_input();
     }
@@ -1130,6 +1169,7 @@ fn idle(core: usize) {
         crate::mouse::poll();
         crate::usb::poll();
         crate::net::service();
+        task::wake_deadlines(clock::now_ns());
 
         // Interrupts off for the check; `sti; hlt` is one atomic idle step, so
         // an IPI that arrives after the check is pending when `hlt` runs.

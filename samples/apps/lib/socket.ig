@@ -12,10 +12,12 @@ unit socket;
 //   st := socket.recv(id, chunk, read);
 //   socket.close(id);
 //
-// Sockets are non-blocking in this first slice: `send`/`recv` return
-// `WouldBlock` until the stack makes progress, and the caller retries with its
-// own `core.clock()` deadline. A send copies at most one TCP segment; a small
-// request fits in one call, and a larger buffer is an application choice.
+// Sockets block in the scheduler: `send`/`recv`/`accept` return `WouldBlock`
+// only when `socket.set_timeout` armed a deadline that expired (or when the
+// host has no network path); otherwise the task sleeps on the socket and the
+// same call resumes when data/space/EOF/close arrives. A send copies at most
+// one TCP segment; a small request fits in one call, and a larger buffer is an
+// application choice.
 //
 // The module owns no state and adds no opcode, builtin or `state`: the fixed
 // receive destination is the language's answer to a caller-owned capacity,
@@ -68,6 +70,25 @@ end;
 function close(id: int): Status;
 begin
   return core.socket_close(id);
+end;
+
+// Sets the deadline for the next blocking send/receive/accept (milliseconds;
+// `uint(0)` blocks indefinitely). A blocked call that expires returns
+// `WouldBlock` without sleeping again, so the caller can observe the timeout;
+// the kernel stack clamps a value above one hour. `set_timeout` itself is
+// `Ok` even when no call follows.
+function set_timeout(id: int; ms: uint): Status;
+begin
+  return core.socket_timeout(id, ms);
+end;
+
+// The `core.next_any`/`poll_any` source for a socket: `1 << 63 | handle`.
+// Readiness means data, EOF, an error, a completed connect or (for a listener)
+// a pending connection. It is compiler-lowered, so it costs one load and an
+// unsigned add; do not pass it to a stream primitive.
+function source(id: int): uint;
+begin
+  return core.socket_source(id);
 end;
 
 // Sends up to one TCP segment (or one UDP datagram) from a caller-owned buffer.

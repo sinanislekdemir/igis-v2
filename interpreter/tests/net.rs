@@ -12,7 +12,7 @@ use abi::{
     CodeHeader, FaultCode, Function, Status, ABI_VERSION, CODE_MAGIC, NO_DIAGNOSTIC, NO_NAME,
     PROFILE_X86_64_LE,
 };
-use interpreter::{ExitReason, Host, Machine, NetInfo, NetStats, Outcome};
+use interpreter::{ExitReason, Host, Machine, NetInfo, NetStats, Outcome, WaitKind};
 
 fn build(instructions: &[u8], constants: &[u8], state_size: u32) -> Vec<u8> {
     let header = CodeHeader {
@@ -88,12 +88,17 @@ struct NetHost {
     recv_bytes: Vec<u8>,
     close: Status,
     accept: Result<u64, Status>,
+    timeout: Status,
+    timed_out: bool,
+    readable: bool,
+    armed: bool,
     calls: usize,
     last_config: Option<(u32, u32, u32, u32)>,
     last_open: Option<(u64, u32, u16, u16)>,
     last_handle: u64,
     last_data: Vec<u8>,
     last_dst_len: usize,
+    last_timeout: Option<(u64, u64)>,
 }
 
 impl NetHost {
@@ -119,12 +124,17 @@ impl NetHost {
             recv_bytes: Vec::new(),
             close: Status::Ok,
             accept: Ok(0x0202),
+            timeout: Status::Ok,
+            timed_out: false,
+            readable: false,
+            armed: false,
             calls: 0,
             last_config: None,
             last_open: None,
             last_handle: 0,
             last_data: Vec::new(),
             last_dst_len: 0,
+            last_timeout: None,
         }
     }
 }
@@ -196,6 +206,34 @@ impl Host for NetHost {
         self.calls += 1;
         self.last_handle = handle;
         self.accept
+    }
+
+    fn socket_readable(&mut self, handle: u64) -> bool {
+        self.calls += 1;
+        self.last_handle = handle;
+        self.readable
+    }
+
+    fn socket_timeout(&mut self, handle: u64, ms: u64) -> Status {
+        self.calls += 1;
+        self.last_handle = handle;
+        self.last_timeout = Some((handle, ms));
+        self.timeout
+    }
+
+    fn socket_timed_out(&mut self, handle: u64) -> bool {
+        self.calls += 1;
+        self.last_handle = handle;
+        let expired = self.timed_out;
+        self.timed_out = false;
+        expired
+    }
+
+    fn socket_arm_wait(&mut self, handle: u64) -> Status {
+        self.calls += 1;
+        self.last_handle = handle;
+        self.armed = true;
+        Status::Ok
     }
 }
 
@@ -532,17 +570,38 @@ fn socket_send_writes_the_copied_count_and_passes_the_bytes() {
 }
 
 #[test]
-fn socket_send_would_block_leaves_the_count_untouched() {
+fn socket_send_would_block_blocks_on_the_socket_and_leaves_the_count_untouched() {
     let mut state = send_state();
     set_word(&mut state, 16, 99);
+    set_word(&mut state, 24, 0xDEAD_BEEF);
     let mut host = NetHost::new();
     host.send = Err(Status::WouldBlock);
+    // The machine restores the instruction boundary: the same builtin is
+    // retried with its operands intact after a socket wake-up.
+    assert_eq!(
+        run(&send_program(8), &mut state, &mut host),
+        Outcome::Blocked(WaitKind::Net(0x0101))
+    );
+    assert_eq!(state_word(&state, 16), 99, "`sent` is untouched");
+    assert_eq!(
+        state_word(&state, 24),
+        0xDEAD_BEEF,
+        "the status store never ran"
+    );
+}
+
+#[test]
+fn socket_send_timeout_reports_would_block_without_blocking_again() {
+    let mut state = send_state();
+    let mut host = NetHost::new();
+    host.send = Err(Status::WouldBlock);
+    host.timed_out = true;
     assert_eq!(
         run(&send_program(8), &mut state, &mut host),
         Outcome::Exited(ExitReason::Ok)
     );
-    assert_eq!(state_word(&state, 16), 99, "`sent` is untouched");
     assert_eq!(state_word(&state, 24), Status::WouldBlock as u64);
+    assert_eq!(host.last_handle, 0x0101, "the expiry probe names the socket");
 }
 
 #[test]
@@ -618,19 +677,35 @@ fn socket_recv_end_of_file_is_an_ok_with_zero_bytes() {
 }
 
 #[test]
-fn socket_recv_would_block_leaves_the_destination_and_count_untouched() {
+fn socket_recv_would_block_blocks_and_leaves_the_destination_and_count_untouched() {
     let mut state = vec![0u8; 32];
     set_word(&mut state, 0, 3);
     state[8..11].copy_from_slice(b"old");
     set_word(&mut state, 16, 77);
+    set_word(&mut state, 24, 0xDEAD_BEEF);
     let mut host = NetHost::new();
     host.recv = Err(Status::WouldBlock);
     assert_eq!(
         run(&recv_program(8), &mut state, &mut host),
-        Outcome::Exited(ExitReason::Ok)
+        Outcome::Blocked(WaitKind::Net(0x0101))
     );
     assert_eq!(state_word(&state, 0), 3);
     assert_eq!(&state[8..11], b"old");
+    assert_eq!(state_word(&state, 16), 77);
+    assert_eq!(state_word(&state, 24), 0xDEAD_BEEF);
+}
+
+#[test]
+fn socket_recv_timeout_reports_would_block_without_blocking_again() {
+    let mut state = vec![0u8; 32];
+    set_word(&mut state, 16, 77);
+    let mut host = NetHost::new();
+    host.recv = Err(Status::WouldBlock);
+    host.timed_out = true;
+    assert_eq!(
+        run(&recv_program(8), &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
     assert_eq!(state_word(&state, 16), 77);
     assert_eq!(state_word(&state, 24), Status::WouldBlock as u64);
 }
@@ -696,6 +771,34 @@ fn socket_recv_faults_when_the_destination_is_smaller_than_its_capacity() {
 }
 
 #[test]
+fn socket_timeout_passes_the_handle_and_milliseconds() {
+    let mut instructions = Vec::new();
+    op_const(&mut instructions, 0x0101);
+    op_const(&mut instructions, 5_000);
+    builtin(&mut instructions, opcodes::builtin::SOCKET_TIMEOUT);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op(&mut instructions, opcodes::RET);
+    let program = build(&instructions, &[], 8);
+
+    let mut state = vec![0u8; 8];
+    let mut host = NetHost::new();
+    assert_eq!(
+        run(&program, &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(host.last_timeout, Some((0x0101, 5_000)));
+    assert_eq!(state_word(&state, 0), Status::Ok as u64);
+
+    let mut denied = NetHost::new();
+    denied.timeout = Status::NotFound;
+    assert_eq!(
+        run(&program, &mut state, &mut denied),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(state_word(&state, 0), Status::NotFound as u64);
+}
+
+#[test]
 fn socket_close_returns_the_host_status() {
     let mut instructions = Vec::new();
     op_const(&mut instructions, 0x0101);
@@ -748,17 +851,33 @@ fn socket_accept_writes_the_peer_on_ok() {
 }
 
 #[test]
-fn socket_accept_would_block_leaves_the_peer_untouched() {
+fn socket_accept_would_block_blocks_and_leaves_the_peer_untouched() {
     let mut state = vec![0u8; 16];
     set_word(&mut state, 0, 0xAAAA);
+    set_word(&mut state, 8, 0xDEAD_BEEF);
     let mut host = NetHost::new();
     host.accept = Err(Status::WouldBlock);
     assert_eq!(
         run(&accept_program(0x0101), &mut state, &mut host),
-        Outcome::Exited(ExitReason::Ok)
+        Outcome::Blocked(WaitKind::Net(0x0101))
     );
     assert_eq!(host.last_handle, 0x0101);
     assert_eq!(state_word(&state, 0), 0xAAAA, "`peer` is untouched");
+    assert_eq!(state_word(&state, 8), 0xDEAD_BEEF);
+}
+
+#[test]
+fn socket_accept_timeout_reports_would_block_without_blocking_again() {
+    let mut state = vec![0u8; 16];
+    set_word(&mut state, 0, 0xAAAA);
+    let mut host = NetHost::new();
+    host.accept = Err(Status::WouldBlock);
+    host.timed_out = true;
+    assert_eq!(
+        run(&accept_program(0x0101), &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(state_word(&state, 0), 0xAAAA);
     assert_eq!(state_word(&state, 8), Status::WouldBlock as u64);
 }
 
@@ -786,6 +905,43 @@ fn socket_accept_faults_on_a_zero_peer() {
         Outcome::Exited(ExitReason::Faulted(FaultCode::IllegalOperation))
     );
     assert_eq!(state_word(&state, 0), 0);
+}
+
+#[test]
+fn next_any_accepts_a_socket_source_and_passes_the_handle() {
+    // sources[0] = 1 << 63 | 0x0101; count = 1; ready = -1.
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_const(&mut instructions, 1);
+    op_imm(&mut instructions, opcodes::REF_STATE, 8);
+    builtin(&mut instructions, opcodes::builtin::NEXT_ANY);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 16);
+    op(&mut instructions, opcodes::RET);
+    let program = build(&instructions, &[], 24);
+
+    let mut state = vec![0u8; 24];
+    set_word(&mut state, 0, abi::wait::socket_source(0x0101));
+    set_word(&mut state, 8, u64::MAX);
+
+    let mut host = NetHost::new();
+    host.readable = true;
+    assert_eq!(
+        run(&program, &mut state, &mut host),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    assert_eq!(host.last_handle, 0x0101, "the tag is stripped for the host");
+    assert_eq!(state_word(&state, 8), 0, "the ready index is written");
+    assert_eq!(state_word(&state, 16), Status::Ok as u64);
+
+    // Nothing ready: the same instruction blocks on the whole set.
+    let mut blocked = NetHost::new();
+    blocked.readable = false;
+    assert!(matches!(
+        run(&program, &mut state, &mut blocked),
+        Outcome::Blocked(WaitKind::Any(_))
+    ));
+    assert!(blocked.armed, "a blocked selector arms the socket deadline");
+    assert_eq!(blocked.last_handle, 0x0101);
 }
 
 #[test]

@@ -20,6 +20,34 @@ pub const SOURCE_CONSOLE_BYTE: u64 = 0;
 /// including a pending window `Expose`).
 pub const SOURCE_INPUT: u64 = 1;
 
+/// Tag bit that marks a [`WaitSet`] entry as a socket read source
+/// (`core.socket_source`, spec 0020, N13; ADR 0050).
+///
+/// A stream handle is `(generation << 8) | index` with a non-zero generation,
+/// so it is far below `2^63`; the high bit therefore separates a socket source
+/// from a stream handle without a second array element type.
+pub const SOURCE_SOCKET_BASE: u64 = 1 << 63;
+
+/// Builds the `next_any`/`poll_any` source value for a socket handle.
+///
+/// The handle itself is the low 63 bits; the caller must not pass the result to
+/// a stream primitive. `core.socket_source` is compiler-lowered to this OR
+/// (an unsigned add, because a live handle's high bit is always clear).
+pub const fn socket_source(handle: u64) -> u64 {
+    SOURCE_SOCKET_BASE | handle
+}
+
+/// True when `source` names a socket rather than the console, the input queue
+/// or a stream.
+pub const fn is_socket_source(source: u64) -> bool {
+    source & SOURCE_SOCKET_BASE != 0
+}
+
+/// The socket handle carried by a source; the inverse of [`socket_source`].
+pub const fn socket_handle(source: u64) -> u64 {
+    source & !SOURCE_SOCKET_BASE
+}
+
 /// A set of input sources named by `core.poll_any`/`core.next_any`.
 ///
 /// The first [`MAX_SOURCES`] entries of the caller's `array[uint, 8]` are
@@ -146,5 +174,34 @@ mod tests {
         let mut sources = a;
         sources.count = 1;
         assert_ne!(a, sources);
+    }
+
+    #[test]
+    fn a_socket_source_sets_the_high_bit_and_keeps_the_handle() {
+        for handle in [1, 0x0101, 0x00CD_0000_0000_0001, (1 << 62) | 7] {
+            let source = socket_source(handle);
+            assert!(is_socket_source(source), "{handle:#x}");
+            assert_eq!(socket_handle(source), handle, "{handle:#x}");
+            assert_eq!(source & !SOURCE_SOCKET_BASE, handle);
+        }
+        assert_eq!(SOURCE_SOCKET_BASE, 1 << 63);
+        assert_eq!(socket_source(0), SOURCE_SOCKET_BASE);
+    }
+
+    #[test]
+    fn stream_and_console_sources_are_never_socket_sources() {
+        for source in [SOURCE_CONSOLE_BYTE, SOURCE_INPUT, 256, 0x0101, (1 << 62) | 1] {
+            assert!(!is_socket_source(source), "{source:#x}");
+        }
+        // The two encodings cannot alias: a live socket handle and a stream
+        // handle are both below the tag bit.
+        let stream = (7u64 << 8) | 3;
+        assert_ne!(socket_source(stream), stream);
+        assert!(!is_socket_source(stream));
+        let mut set = WaitSet::empty();
+        assert!(set.is_empty());
+        set = WaitSet::single(socket_source(stream));
+        assert!(set.contains(socket_source(stream)));
+        assert!(!set.contains(stream));
     }
 }

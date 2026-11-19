@@ -163,6 +163,28 @@ fn connect(stack: &mut Stack, wire: &mut Wire, owner: u64) -> (u64, u16, u32) {
     (handle, local, isn)
 }
 
+/// An established connection with an empty receive arena reports a completed
+/// connect for `next_any`, but a blocked `recv` must not be readied by that
+/// alone: doing so would wake it forever (spec 0020, N13; ADR 0050).
+#[test]
+fn an_established_empty_socket_is_not_receive_ready() {
+    let mut stack = configured();
+    let mut wire = Wire::new();
+    let (handle, _, _) = connect(&mut stack, &mut wire, 1);
+    assert!(stack.readable(handle, 1), "the connect completed");
+
+    let mut buf = [0u8; 8];
+    assert_eq!(stack.recv(handle, 1, &mut buf), Err(Status::WouldBlock));
+    assert_eq!(stack.arm_wait(handle, 1, T0, false), Status::Ok);
+    assert!(
+        !stack.wait_ready(handle, 1, T0),
+        "an empty established socket is not receive-ready"
+    );
+
+    let mut out = [0u64; MAX_SOCKETS];
+    assert_eq!(stack.ready_handles(T0, &mut out), 0);
+}
+
 // ---------------------------------------------------------------------------
 // Packet builders (an independent reference implementation)
 // ---------------------------------------------------------------------------
