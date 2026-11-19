@@ -15,7 +15,7 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 ## Resume point (update this when a session ends)
 
 - **Current state:** **505 host tests**; specs 0001–0019 (0018 and 0019
-  Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1–M8.7 complete**. The
+  Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1–M8.8 complete**. The
   application image is a read-only ext2 tree (`lib`, `base`, `home`, `system`);
   `/home` is a separate 8 MiB ext2 image on an ATA disk, read-write through
   `ext2w` and one router, persistent across reboots. Write builtins are 53–57.
@@ -41,8 +41,10 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `scripts/input_routing_qmp.py` proves Browser, About and Calculator input with the
   desktop alive. M8.7 closes only the `Desktop` help panel when its close box is used;
   the shell keeps running, the Apple square reopens the window, and a lost desktop
-  window can no longer halt the boot system.
-- **Last commit:** `5c97e39` (M8.7) plus this docs commit. The tree is clean;
+  window can no longer halt the boot system. M8.8 adds a visible `Up` button to the
+  File Browser path line (the keys remain), so the parent directory is reachable with
+  the pointer alone.
+- **Last commit:** `c69e392` (M8.8) plus this docs commit. The tree is clean;
   `build/home.img` is reset.
 - **Next:** M8 is complete. Pick from the deferred backlog in
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) / the "Deferred" table below, or extend the
@@ -1526,6 +1528,31 @@ parent verifies each.
   asserts no `task 3: exit Ok`/idle summary/halt; it passes on `--cores 4` and
   `--cores 1`. `desktop_shell check` still prints `desktop_shell: ok` on
   `-smp 4`; no kernel/ABI change.
+
+- [x] **M8.8 A visible Up button in the file browser.**
+  User report: there is no way to go to the parent directory from the File
+  Browser. `Backspace`/`Ctrl+Up` already truncate `dir`, but the pointer-only
+  path had no visible control.
+  - **Fix (application-only):** `samples/apps/base/browser` computes a 44×18
+    `stdlib.ui_button` at the right of the path line (left of the
+    `home writable` label), draws it in `draw_path`, and a `PointerDown` on
+    `ui_button_hit` calls `go_up()` exactly like the keys. The status hint names
+    `Bksp up`. `compute_layout` owns the `up_x/up_y/up_w/up_h` geometry so a
+    moved window and a refreshed `Expose` keep it aligned; no ABI/kernel change.
+  - **Proof:** `browser check` draws the button, clicks it through the real
+    pointer path and requires the root listing, then re-enters `base` for the
+    existing Backspace/Ctrl+Up checks. `scripts/input_routing_qmp.py` clicks the
+    visible button after Enter navigation and requires the path line to match
+    the pre-navigation root exactly (0 differing pixels) on `-smp 4`/`-smp 1`
+    with the desktop alive.
+  - **Docs:** spec 0013 browser bullet/changelog, PLAN/AGENTS.
+  **Done (`c69e392`):** `up_x = rect.x + ContentW - 8 - text_width("home
+  writable") - 8 - 44`, `up_y = rect.y + 2`; `draw_path` draws `Up`, the pointer
+  handler checks it before the list/scrollbar, and the hint string names
+  `Bksp up`. `browser check` prints `browser: ok`; `input_routing_qmp.py`
+  reports `Up button returned to the parent path (0 pixels differ)` on both
+  core counts, with the existing Browser/About/Calculator/Desktop checks still
+  passing. No kernel, ABI or `stdlib` change.
 
 ## Deferred (not UI; pick up when they matter)
 
