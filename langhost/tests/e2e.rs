@@ -250,6 +250,13 @@ fn module_demo_imports_lib_math_on_the_host() {
 }
 
 #[test]
+fn dns_canned_packets_parse_on_the_host() {
+    let result = run_sample("dns_check.ig", b"");
+    assert_eq!(result.output, b"dns_check: ok\n");
+    assert_eq!(result.reason, ExitReason::Ok);
+}
+
+#[test]
 fn clock_app_prints_zeroed_time_with_the_mock_ports() {
     let path = app_path("clock");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
