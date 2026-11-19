@@ -15,7 +15,7 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 ## Resume point (update this when a session ends)
 
 - **Current state:** **505 host tests**; specs 0001–0019 (0018 and 0019
-  Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1–M8.8 complete**. The
+  Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1–M8.9 complete**. The
   application image is a read-only ext2 tree (`lib`, `base`, `home`, `system`);
   `/home` is a separate 8 MiB ext2 image on an ATA disk, read-write through
   `ext2w` and one router, persistent across reboots. Write builtins are 53–57.
@@ -43,8 +43,9 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   the shell keeps running, the Apple square reopens the window, and a lost desktop
   window can no longer halt the boot system. M8.8 adds a visible `Up` button to the
   File Browser path line (the keys remain), so the parent directory is reachable with
-  the pointer alone.
-- **Last commit:** `c69e392` (M8.8) plus this docs commit. The tree is clean;
+  the pointer alone. M8.9 makes the File Browser's scrollbar thumb draggable; the track
+  still pages and the selection stays visible.
+- **Last commit:** `d3087c6` (M8.9) plus this docs commit. The tree is clean;
   `build/home.img` is reset.
 - **Next:** M8 is complete. Pick from the deferred backlog in
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) / the "Deferred" table below, or extend the
@@ -1553,6 +1554,28 @@ parent verifies each.
   reports `Up button returned to the parent path (0 pixels differ)` on both
   core counts, with the existing Browser/About/Calculator/Desktop checks still
   passing. No kernel, ABI or `stdlib` change.
+
+- [x] **M8.9 Drag the file browser's scrollbar thumb.**
+  User request: can the scrollbar be grabbed and pulled down? The track already
+  paged on click, but the thumb was not draggable.
+  - **Fix (application-only):** `samples/apps/base/browser` adds
+    `scroll_dragging`/`scroll_grab_dy` and a `scrollbar_thumb` helper matching
+    `stdlib.ui_scrollbar` (track `BodyH-4`, 8-pixel floor, travel). A
+    pointer-down in hit class 3 records the offset; `PointerMove` with the
+    primary button held maps the desired thumb top onto `top` over the travel
+    and keeps the selection visible; `PointerUp` (or a move without the button)
+    ends the drag. `load_dir` cancels a stale drag. Track clicks still page.
+  - **Proof:** `browser check` grabs the thumb after `base` and drags it to the
+    bottom, requiring `top = entry_count - ListRows` and `not scroll_dragging`,
+    then resets the view. `scripts/input_routing_qmp.py` enters `base`, drags
+    the thumb from the top toward the bottom with a real QMP pointer drag and
+    requires the scrollbar and list regions to change (3,604 and 1,370 pixels
+    on both core counts) while the desktop stays alive; a screenshot is
+    written to `/home/sinan/Desktop/igis-input-routing.png`.
+  - **Docs:** spec 0013 browser bullet/changelog, PLAN/AGENTS. No kernel/ABI or
+    `stdlib` change.
+  **Done (`d3087c6`):** the browser drag code and the check/QMP proofs above;
+  `browser: ok` and `input_routing_qmp.py` pass on `-smp 4` and `-smp 1`.
 
 ## Deferred (not UI; pick up when they matter)
 
