@@ -70,11 +70,16 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   stack 174,328 B, both under the 1 MiB region caps; `editor check` proves the
   full `base/calculator` load and the file-dialog QMP harness proves the
   user-facing path.
-- **Last commit:** `142c0f2` (M9.4) plus this docs commit. The tree is clean;
-  `build/home.img` is reset.
-- **Next:** M9.4 is complete. Pick from the deferred backlog in
-  [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) / the "Deferred" table below, or extend the
-  desktop (a task switcher, submenus and interactive resize were deliberately left out).
+  **M10 implementation is in progress:** spec 0020 (Accepted) fixes the kernel
+  `net` crate, the `/lib/socket` unit on the program/interpreter side, virtio-net
+  first behind a `NetDevice` seam, static IPv4, UDP, a minimal TCP client,
+  DNS/HTTP in source and the M10 ticket split; ADRs 0048–0050 are Accepted.
+- **Last commit:** `142c0f2` (M9.4) plus the M10 planning docs commit. The tree is
+  clean; `build/home.img` is reset.
+- **Next:** **M10.1** (the `net` crate skeleton, PCI device discovery, virtio-net
+  bring-up and the `NetDevice` seam), then M10.2–M10.4 for the first HTTP proof.
+  The deferred backlog in
+  [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) remains available for non-network work.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
   `pointer` diagnostic app and Q49 measurement (`16cc308`/`93fedbf`), M2.2.3–2.2.5
@@ -1867,6 +1872,204 @@ parent verifies each.
   (`37802052…e9e81c9f`). Editor package: 203,136 B code (50 frames), 530,392 B
   state (130 frames), 174,328 B stack (43 frames).
 
+## M10 — networking
+
+> Governed by **spec 0020 (Accepted)** and **ADRs 0048–0050 (Accepted)**. M10.0 is
+> closed; implementation starts at M10.1. One ticket ≈ one session and one commit.
+> The wire stack lives in a new `net` crate; the application surface is the
+> `/lib/socket` unit on the program/interpreter side.
+
+### M10.0 — accept the network spec and decisions
+
+- [x] **M10.0 Accept spec 0020 and ADRs 0048–0050.**
+  The planning session wrote spec 0020 (kernel `net` crate, `/lib/socket` unit,
+  virtio-net first behind a `NetDevice` seam, static IPv4, UDP, minimal TCP,
+  DNS/HTTP in source, static configuration, M10 split), three ADRs, the new
+  OPEN-QUESTIONS Q52–Q58, and this backlog. The owner accepted the plan and
+  asked for implementation to continue as sub-agent work.
+  - **Acceptance:** the owner accepts spec 0020 and ADRs 0048–0050 (or names the
+    changes); `specs/README.md` and `adr/README.md` show the accepted status.
+  - **Proof:** document review only; no build change.
+  - **Docs:** spec 0020, ADRs 0048–0050, PLAN/AGENTS/OPEN-QUESTIONS/IDEAS.
+
+### M10.1 — the `net` crate, PCI discovery and virtio-net bring-up
+
+- [ ] **M10.1 Add the `net` crate skeleton and the first NIC driver.**
+  New allocation-free `net` crate (`no_std`, `#![forbid(unsafe_code)]`, depends on
+  `abi` only) with the `Link`/`Clock` seams and an empty `Stack`; a `NetDevice`
+  trait in `kernel/src/net/mod.rs`; a generalized `kernel/src/pci.rs` that returns
+  a device's vendor/device/class and BARs (the UHCI path keeps working); a
+  virtio-net legacy driver in `kernel/src/net/virtio.rs` (PCI I/O BAR0, legacy
+  status/feature/queue registers, one RX and one TX queue, 32/16 static 2 KiB
+  buffers, descriptor/avail/used tables in page-aligned `.bss`, `VIRTIO_NET_F_MAC`,
+  no offloads); boot selection and `net::service()` in the service opportunity.
+  `xtask` adds `-netdev user,id=n0` and
+  `-device virtio-net-pci,netdev=n0,disable-modern=on`, plus `--no-net`.
+  `samples/apps/base/net_probe` gains `mac` and `raw` modes.
+  - **Acceptance:** boot logs the device id, MAC, link state and the static DMA
+    cost; `net_probe mac` prints the MAC and `net: tx ok` proves one frame left the
+    TX ring; `--no-net` logs `net: no device` and returns a clean status; the
+    existing UHCI tablet path is unchanged.
+  - **Proof:** `net: link up`/`net: tx ok` and `net_probe: ok` on `-smp 4` and
+    `-smp 1`; `--no-net` on both; the visual golden is unchanged; no sample
+    regresses.
+  - **Docs:** spec 0020 N1–N4, ADR 0049; AGENTS/PLAN.
+
+### M10.2 — Ethernet, ARP, IPv4, ICMP and static configuration
+
+- [ ] **M10.2 Reach the gateway with ARP and ICMP echo.**
+  Add `net::{ethernet,arp,ipv4,icmp,checksum}` with a 16-entry ARP cache (60 s,
+  three requests, one queued packet), IPv4 validation/checksum/TTL, one address +
+  netmask + gateway, and ICMP echo reply. Add `core.net_config` (62),
+  `core.net_info` (63) and `core.net_mac` (64); the interpreter stages the scalar
+  operands and the host copies only on success. `net_probe config`/`ping` sets
+  `10.0.2.15/24`, gateway `10.0.2.2`, DNS `10.0.2.3`, resolves the gateway with ARP
+  and pings it.
+  - **Acceptance:** ARP resolves the gateway; an echo request is answered and
+    printed; malformed/foreign/fragmented frames are dropped and counted; a bad
+    checksum is rejected; `net_probe ping` prints `net: ping ok`.
+  - **Proof:** host tests for header build/parse, checksum vectors (including the
+    `0xFFFF` fold) and the ARP cache/queue; `net_probe check`/`ping` on `-smp 4` and
+    `-smp 1`; `--no-net` returns `IoError`; `cargo test -p net` joins the suite.
+  - **Docs:** spec 0005 (the three builtins), spec 0020 N5–N7/N18; AGENTS/PLAN.
+
+### M10.3 — UDP sockets, the host ABI and `lib/socket`
+
+- [ ] **M10.3 Open the first socket: UDP and the `socket` unit.**
+  Add a fixed socket table (8 slots, generation handles, owner task, 4 KiB RX/TX),
+  UDP demultiplexing with the per-datagram boundary rule, and builtins
+  `core.socket_open` (65, kind/remote-ip/remote-port/local-port), `socket_send`
+  (66), `socket_recv` (67), `socket_try_send` (68), `socket_try_recv` (69),
+  `socket_close` (70). Add
+  `WaitFor::Net(handle)`, `task::wake_net`, `Host::socket_readable` defaults,
+  `core.socket_source` (compiler-lowered, `1 << 63 | handle`), and the close-on-task-
+  termination rule. Write `samples/apps/lib/socket.ig` (`udp`, `udp_from`, `send`,
+  `send_text`, `recv`, `recv_line`, `close`, `source`; the TCP functions land in
+  M10.4) and a UDP proof.
+  `langhost` gets a deterministic loopback socket host; `net_probe udp` either
+  echoes through the host (QEMU `10.0.2.2`) or sends a DNS query if slirp does not
+  forward guest UDP to the host.
+  - **Acceptance:** a UDP datagram round-trips or a DNS query gets a response; a
+    foreign/stale handle is `Invalid`/`NotFound`; a full table is `Full`; a
+    closed/terminated owner wakes its peer with `Closed`; `next_any` selects a
+    socket source.
+  - **Proof:** host tests for the socket table, generation reuse, UDP demux and the
+    boundary rule; `net_probe udp` on `-smp 4` and `-smp 1`; a `langhost` socket
+    test; `socket: ok`/`net: udp ok`.
+  - **Docs:** spec 0005 (socket builtins/wait), spec 0020 N8/N12–N15, ADR 0050;
+    AGENTS/PLAN.
+
+### M10.4 — TCP client, deadlines and HTTP
+
+- [ ] **M10.4 A TCP client that can fetch a page.**
+  Add the TCP client state machine (active open, handshake, MSS 1460, fixed receive
+  window, one outstanding segment, 1 s RTO with exponential backoff and five
+  attempts, RST, FIN close), `WaitFor::Deadline(ns)` and `core.socket_timeout` (71).
+  Extend `lib/socket.ig` with `tcp`/`set_timeout` and write
+  `samples/apps/lib/http.ig` (`GET path HTTP/1.0`, `Host`, `Connection: close`,
+  body after the first `\r\n\r\n`, fixed 4096-byte result). The deterministic proof
+  starts a host TCP HTTP server and forwards a guest address to it (the exact
+  `guestfwd` form is fixed here); `net_probe http` fetches `/` and checks the body.
+  - **Acceptance:** the handshake completes; data and FIN arrive; a lost segment is
+    retransmitted and the transfer still completes; a refused connect and a
+    timeout return `Closed`; `net_probe http` prints the expected body and
+    `net: http ok`; no task exceeds its budget.
+  - **Proof:** host tests against a simulated peer for handshake/retransmit/FIN/
+    RST/timeout; `net_probe http` on `-smp 4` and `-smp 1`; an optional
+    `net_probe internet` run (not in the regression suite) resolves and fetches a
+    real page.
+  - **Docs:** spec 0005 (timeout/deadline), spec 0020 N9/N13/N16; AGENTS/PLAN.
+
+### M10.5 — DNS resolution in source
+
+- [ ] **M10.5 Resolve a name with `lib/dns.ig`.**
+  Write the DNS A-record resolver as ordinary source (transaction id, one question,
+  recursion desired, response validation, first A record, CNAME chain up to four,
+  two retries, 2 s deadline) over a UDP socket, and add `net_probe dns`. Host tests
+  parse canned queries/responses, including truncated and malformed messages. The
+  kernel proof uses QEMU's slirp DNS (`10.0.2.3`); a deterministic host responder is
+  used if guest UDP to `10.0.2.2` works, otherwise the DNS kernel run is optional and
+  the canned-packet host test is the deterministic proof.
+  - **Acceptance:** a known name resolves to its A record; a malformed or NXDOMAIN
+    response is `NotFound`/`Invalid` without touching the destination; the resolver
+    never spins.
+  - **Proof:** host tests for the parser and builder; `net_probe dns` (or the
+    documented offline arm) on `-smp 4` and `-smp 1`; `net: dns ok`.
+  - **Docs:** spec 0020 N16; AGENTS/PLAN. No kernel/ABI change.
+
+### M10.6 — NIC interrupts and network counters
+
+- [ ] **M10.6 Add INTx and prove the poll fallback.**
+  Route the NIC's PCI INTx (QEMU GSI 11) through the I/O APIC to the boot core as
+  vector `0x2D`; the handler drains the used ring into the SPSC ring and EOIs
+  (ADR 0023 rule) while `net::service()` does the protocol work. Add
+  `core.net_stats` (73) and `samples/apps/base/net_perf` (ping/HTTP latency idle and
+  under `realtime` + workers, min/avg/max with `core.clock()`). Keep the polling path
+  as the default when the route is absent and add `--no-net-irq` to force polling
+  for the proof.
+  - **Acceptance:** the boot log shows `ioapic: ... IRQ 11 -> vector 0x2d` and
+    `net: irq ok`; the same transfer completes with interrupts and with polling
+    only; the handler takes no kernel lock; counters move for RX/TX/drops/errors.
+  - **Proof:** `net_probe http` with IRQ and with the polled path on `-smp 4` and
+    `-smp 1`; `net_perf` numbers in the AGENTS status row; no regression.
+  - **Docs:** spec 0020 N4/N22, ADR 0023/0049; AGENTS/PLAN.
+
+### M10.7 — TCP listener and the in-guest echo server
+
+- [ ] **M10.7 Accept a connection and echo it back.**
+  Add `listen`/`accept` (`listen` is `socket_open` kind 3; `accept` is builtin 72;
+  a two-entry pending queue) and the `/lib/socket` functions. Write `samples/apps/base/net_echo`: listen on port 7,
+  echo lines from three sequential clients, close on FIN, print `net_echo: ok`.
+  `xtask`/the harness forward a host port to guest 7, and
+  `scripts/net_echo_qmp.py` connects, sends lines, checks the echoes and the exit.
+  - **Acceptance:** a listener accepts a connection; an empty pending queue is
+    `WouldBlock`; a third pending connection is `Full`; the echo is byte-exact;
+    closing the listener closes pending connections; the task exits `Ok`.
+  - **Proof:** `net_echo` plus the host harness on `-smp 4` and `-smp 1`; host
+    tests for the pending queue and the accept ownership transfer.
+  - **Docs:** spec 0020 N10; AGENTS/PLAN.
+
+### M10.8 — DHCP client in source
+
+- [ ] **M10.8 Configure the machine from a DHCP lease.**
+  Write `samples/apps/lib/dhcp.ig` over the UDP socket unit: broadcast DISCOVER from
+  local port 68 (kind 2 with `local = 68`), parse OFFER, send REQUEST, parse ACK,
+  apply address/netmask/gateway/DNS through `core.net_config`; bounded retries and a
+  lease timer; `net_probe dhcp` prints the lease. QEMU's slirp DHCP (`10.0.2.2:67`)
+  is the target; the socket accepts the OFFER/ACK from the server even though the
+  request went to the broadcast address, and the unit validates the transaction id
+  and offered address. Host tests cover message build/parse, option ordering and a
+  NAK.
+  - **Acceptance:** a cold boot that runs `net_probe dhcp` obtains `10.0.2.15/24`,
+    gateway `10.0.2.2`, DNS `10.0.2.3`, and the existing ping/HTTP probes then pass
+    without a static config; a missing server times out cleanly; a NAK restarts
+    discovery.
+  - **Proof:** `net_probe dhcp` followed by `ping`/`http` on `-smp 4` and `-smp 1`;
+    host tests for the parser; `--no-net` still returns cleanly.
+  - **Docs:** spec 0020 N18; AGENTS/PLAN. No kernel/ABI change (the unit uses the
+    existing socket surface).
+
+### M10.9 — e1000/e1000e behind the same seam
+
+- [ ] **M10.9 Prove the device seam with a second driver.**
+  Add an `e1000`/`e1000e` driver (MMIO BAR0 mapped uncached, TX/RX descriptor rings,
+  INTx or poll) behind `NetDevice`; `xtask` selects it with
+  `--net-device e1000`; `net_probe`/`net_echo` run unchanged. Record the VMware
+  mapping (VMware exposes `e1000`/`e1000e`/`VMXNET3`, not virtio-net) and keep
+  `VMXNET3` as a later option.
+  - **Acceptance:** the same `net_probe` suite passes on the e1000 device; the
+    protocol crate and `/lib` units are byte-identical; a machine with both devices
+    selects the requested one; `--no-net` still works.
+  - **Proof:** `net: e1000 ...`, `net_probe check/ping/http` on `-smp 4` and
+    `-smp 1`; the virtio run still passes; no regression.
+  - **Docs:** spec 0020 N2, ADR 0049; AGENTS/PLAN.
+
+**M10 definition of done (every ticket):** the standard verification in "How a
+ticket is verified" plus `cargo test -p net`; `-smp 4` and `-smp 1` transcripts;
+`--no-net` where the ticket can run without a device; the visual golden unchanged;
+`AGENTS.md` status/log row and this file updated. IPv6, TLS/HTTPS, Wi-Fi, multiple
+NICs and TCP congestion control remain out of scope (OPEN-QUESTIONS Q52–Q58).
+
 ## Deferred (not UI; pick up when they matter)
 
 | Item | Where | Trigger |
@@ -1885,6 +2088,13 @@ parent verifies each.
 | Module dead-code elimination: importing a module links all its functions (`ui_controls` +752 B for `inject`) | compiler | when package code size matters |
 | Guard table cache exhaustion (32 tables) | spec 0002/spec 0009 | long-lived workloads with many stacks |
 | `cargo fmt` drift in three pre-existing files + CI fmt/clippy | repo | housekeeping |
+| TLS/HTTPS (Q52) | OPEN-QUESTIONS Q52 | first real web application |
+| IPv6 / dual stack (Q53) | OPEN-QUESTIONS Q53 | an IPv6-only peer matters |
+| Wi-Fi / 802.11 (Q54) | OPEN-QUESTIONS Q54 | a laptop target |
+| Multiple NICs, routing table (Q55) | OPEN-QUESTIONS Q55 | a second device or a real gateway |
+| TCP backlog, multiple listeners (Q56) | OPEN-QUESTIONS Q56 | first real server application |
+| DHCP renewal, DNS cache, ICMP errors (Q57) | OPEN-QUESTIONS Q57 | M10.8 follow-up |
+| VMXNET3 and modern virtio | ADR 0049 | a VMware target without e1000e, or a modern-only hypervisor |
 
 ## How a ticket is verified (headless first)
 

@@ -4,8 +4,8 @@ Parked decisions for igis-v2. This is the working register; each spec's own
 "Open questions" section remains authoritative for that document. When an item is
 resolved, record the answer in the relevant spec or in a new ADR, then remove it here.
 
-**Status:** implementation phase. Last updated: 2026-11-17.
-**Snapshot:** specs 0001–0017, ADRs 0001–0035.
+**Status:** implementation phase. Last updated: 2026-11-19.
+**Snapshot:** specs 0001–0020, ADRs 0001–0050.
 
 ## How to use
 
@@ -80,6 +80,18 @@ self-check proves the rule (`stack: layout ok`). Spec 0004 C6, spec 0002 H2.
 | # | Question | Options / recommendation | Trigger |
 |---|----------|--------------------------|---------|
 | Q51 | Application file API: a handle model (writable save and subdirectories resolved) | Subdirectories/traversal are resolved by spec 0018 (M3.1/M3.4) and the writable save by spec 0019/ADR 0040 (a real ext2 writer on a dedicated home disk, M6.1–M6.4). What remains: every call still resolves a path (no per-open handle); ADR 0027 rejected handles for M2 and can be revisited if the per-call walk measures badly | if the path walk becomes measurable; never otherwise |
+
+## G. Networking
+
+| # | Question | Options / recommendation | Trigger |
+|---|----------|--------------------------|---------|
+| Q52 | TLS/HTTPS | Out of scope for M10: plain HTTP/1.0 only. TLS needs a crypto library (AES-GCM/ChaCha20, SHA-256, HKDF), an entropy source, a certificate/trust store and asynchronous record processing; none exists. The socket unit is the seam: a future `lib/tls.ig` + a kernel crypto primitive (or a Rust crate) can sit above it | first real web application; spec 0020 open question 1 |
+| Q53 | IPv6 and dual stack | Out of scope: M10 is IPv4 only, one address, one gateway. IPv6 adds neighbour discovery, SLAAC/DHCPv6, a second address family in the socket table and dual-stack listener rules | when an IPv6-only peer matters; spec 0020 open question 2 |
+| Q54 | Wi-Fi / 802.11 | Out of scope: a Wi-Fi driver needs firmware loading, association, WPA2/WPA3 and a different link layer. M10 assumes a wired/virtual Ethernet device | a laptop target; spec 0020 open question 3 |
+| Q55 | Multiple NICs, routing table, interface selection | M10 has one machine-wide device and one default gateway. A second device needs per-interface addresses, a route table, ARP scoping and a selection rule for sockets | a second device or a real gateway; spec 0020 open question 4 |
+| Q56 | TCP server backlog and multiple listeners | M10.7 gives a listener a two-entry pending queue and one listener slot; a real server may need a backlog, multiple listeners and `accept` fairness. The table size stays a build constant | first real server application; spec 0020 open question 5 |
+| Q57 | DHCP lease renewal, DNS caching, ICMP errors | M10.8 implements DISCOVER/OFFER/REQUEST/ACK and applies the lease; renewal, T1/T2 timers, a DNS cache and ICMP unreachable/time-exceeded reporting are follow-ups. A deterministic offline DNS responder is also open (slirp forwards DNS; guest UDP to the host alias is verified in M10.3) | M10.8 follow-up; spec 0020 open question 6 |
+| Q58 | Network trust model | No capability check (vision R14), so any task may reconfigure the single NIC and open sockets; sockets are owner-checked and there is no raw/promiscuous mode. A future multi-user or hostile-app model would need an authority rule | first multi-user or remote-service target |
 
 ## Decided in the 2026-11-16 guards session
 

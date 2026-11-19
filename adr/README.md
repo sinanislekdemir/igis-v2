@@ -71,3 +71,7 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0044 | [A modal popup input grab makes an app-drawn menu reachable over windows](0044-modal-popup-input-grab.md) | Accepted | 2026-11-18 |
 | 0045 | [A persistent pointer-region claim protects the menu bar's opening click](0045-persistent-pointer-region-claim.md) | Accepted | 2026-11-18 |
 | 0046 | [A topmost move copies a content snapshot; the client re-reads the content rectangle](0046-move-content-snapshot-and-client-rect-refresh.md) | Accepted | 2026-11-18 |
+| 0047 | [Deliver queued input to the owner of its window target](0047-window-addressed-input.md) | Accepted | 2026-11-18 |
+| 0048 | [Keep the IPv4 wire stack in the kernel and expose a `/lib/socket` unit](0048-kernel-net-stack-and-lib-socket.md) | Accepted | 2026-11-19 |
+| 0049 | [Start with virtio-net behind a device seam, not a virtio-specific stack](0049-virtio-net-first-device-seam.md) | Accepted | 2026-11-19 |
+| 0050 | [Sockets are owned opaque handles with blocking waits and deadlines](0050-socket-handles-and-blocking.md) | Accepted | 2026-11-19 |
