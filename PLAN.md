@@ -16,7 +16,7 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 - **Current state:** **505 host tests**; specs 0001–0019 (0018 and 0019
   Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1–M8.9 complete**,
-  plus **M9.1–M9.3**. The
+  plus **M9.1–M9.4**. The
   application image is a read-only ext2 tree (`lib`, `base`, `home`, `system`);
   `/home` is a separate 8 MiB ext2 image on an ATA disk, read-write through
   `ext2w` and one router, persistent across reboots. Write builtins are 53–57.
@@ -62,10 +62,17 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   image tree with keys, pointer, scrollbar and buttons, and returns a chosen
   regular-file path or a null-like `Invalid` cancel with the destination
   untouched; the editor loads the result through its existing `open_path`. No
-  kernel, ABI, opcode, builtin, file-API or `stdlib` change.
-- **Last commit:** `be544fa` (M9.3) plus this docs commit. The tree is clean;
+  kernel, ABI, opcode, builtin, file-API or `stdlib` change. M9.4 raises the
+  text editor's document buffer from 8 KiB to 131072 B (128 KiB, the spec 0008
+  per-unit source cap), so every current source sample opens; the reported
+  case was `base/calculator` (32,516 B) through the dialog, which the old
+  limit refused with a status line. The editor state is 530,392 B and its task
+  stack 174,328 B, both under the 1 MiB region caps; `editor check` proves the
+  full `base/calculator` load and the file-dialog QMP harness proves the
+  user-facing path.
+- **Last commit:** `142c0f2` (M9.4) plus this docs commit. The tree is clean;
   `build/home.img` is reset.
-- **Next:** M9.3 is complete. Pick from the deferred backlog in
+- **Next:** M9.4 is complete. Pick from the deferred backlog in
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) / the "Deferred" table below, or extend the
   desktop (a task switcher, submenus and interactive resize were deliberately left out).
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
@@ -107,8 +114,9 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `c69e392`), M8.9 (the browser's draggable scrollbar thumb, `d3087c6`),
   M9.1 (lexical syntax highlighting in the text editor, `a912765`) and
   M9.2 (the editor's cheap pointer path, draggable thumb and block-state
-  cache, `09dc57b`), and M9.3 (the `/lib` file-open dialog and the editor's
-  File > Open / Ctrl+O wiring, `be544fa`).
+  cache, `09dc57b`), M9.3 (the `/lib` file-open dialog and the editor's
+  File > Open / Ctrl+O wiring, `be544fa`), and M9.4 (the editor's 128 KiB
+  document buffer, `142c0f2`).
 - **Verified at that point (M3.4, independently by the parent):** **439 host tests**
   (abi 23, compiler 184, interpreter 150, langhost 81, 1 doctest); `cargo xtask
   build`/`image`/`image --shell` clean; boot `ext2: tree ok`. `run browser check`
@@ -1795,6 +1803,61 @@ parent verifies each.
   `desktop_shell check`, `boot_desktop_qmp.py` and the visual golden
   (`37802052…e9e81c9f`) pass; the editor package is 202,328 B of code
   (50 frames), 38,872 B of state and 51,416 B of stack.
+
+### M9.4 — the editor opens the real source files
+
+- [x] **M9.4 The editor's document buffer fits every source sample.**
+  User report: "I can open code like beat and deep, but not calculator the same
+  way; why? There is no error either."
+  - **Diagnosis:** the file dialog was correct (`base/calculator` came back
+    with `Ok`), but the editor's `BufferCapacity` was 8192 and `open_path`
+    returned `CapacityExceeded` with the status line `too large (8192 max)`.
+    The status was easy to miss, so the document simply stayed unchanged.
+    `beat` (554 B) and `deep` (874 B) are tiny; `base/calculator` is 32,516 B
+    and `base/editor` (81,509 B) is the largest current sample. This is an
+    editor application limit, not a language, kernel, file-API or dialog bug
+    (spec 0003 said 8192 was an app constant).
+  - **Capacity:** `BufferCapacity` is 131072 (128 KiB), matching the spec 0008
+    per-unit source cap; `LineStateCapacity` follows at 131073. `PathCapacity`
+    stays 256 and `TempCapacity` 260. The size refusal and the buffer-full
+    status read `too large (131072 max)` and `buffer full (131072 bytes)`.
+  - **State and stack:** the four 128 KiB buffers (`text`, `load_stage`,
+    `save_stage`, `line_states`) and the `ed_replace` local staging buffer grow
+    the manifest to 530,392 B of state (130 frames) and 174,328 B of stack
+    (43 frames), below the 1 MiB per-region caps. The check still runs in
+    2,120–2,123 claims across the `-smp 4` home/no-home runs and 2,120 on
+    `-smp 1`, with no budget fault. No kernel change was needed.
+  - **Proof:** `editor check` loads `base/calculator` after the existing error
+    classes, requires `Ok`, the `base/calculator` path, a length above 8192,
+    the exact `core.fs_size` length (32,516 B), valid UTF-8 and a known prefix,
+    then restores `base/child`; the full-buffer `ed_replace` boundary still
+    returns `CapacityExceeded`, and the M9.1/M9.2 highlighting, scroll and
+    thumb checks still pass in the same run.
+    `scripts/file_dialog_qmp.py` now opens `base/calculator` through the
+    dialog after the existing `lib/math.ig` proof: the `base` listing's
+    calculator row is selected (row 6, checked by its accent band), `Open`
+    closes the dialog (frame diff 40,199 px), the editor text changes by
+    27,137 px (22,720 non-white text pixels) and the path line grows to
+    `base/calculator` (15 cells, bbox 118 px); Escape then cancels with a
+    19-pixel text diff and Ctrl+Q exits `Ok` after 1,353 claims. The QMP
+    click hold is 0.35 s so a busy dialog cannot lose the USB tablet press
+    report. Screenshots: `igis-file-dialog.png`,
+    `igis-file-dialog-open.png` and `igis-file-dialog-large.png`.
+  - **Regressions:** 505 host tests; `cargo xtask build`/`image`/`image
+    --shell` clean; `editor: host ok`; `browser check` and
+    `desktop_shell check` pass; the visual golden is unchanged
+    (`37802052…e9e81c9f`) on `-smp 4` and `-smp 1`; `build/home.img` is reset.
+  - **Docs:** spec 0003 ("Application buffers above 256 bytes"), spec 0013
+    ("The text editor"), PLAN/AGENTS. No ADR: the editor's capacity is an
+    application constant, not a kernel or ABI decision. The dialog stays
+    generic (it does not filter by size).
+  **Done (`142c0f2`):** the 128 KiB `BufferCapacity`, the `base/calculator`
+  large-source check and the calculator step in `scripts/file_dialog_qmp.py`;
+  `editor: ok` on `-smp 4` and `-smp 1` (2,120–2,123 claims), `editor: host ok`,
+  505 host tests, the QMP dialog proof on both core counts, `browser check`,
+  `desktop_shell check`, and the unchanged visual golden
+  (`37802052…e9e81c9f`). Editor package: 203,136 B code (50 frames), 530,392 B
+  state (130 frames), 174,328 B stack (43 frames).
 
 ## Deferred (not UI; pick up when they matter)
 
