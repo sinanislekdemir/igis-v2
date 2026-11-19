@@ -98,6 +98,28 @@ pub const FS_NAME_CAP: usize = abi::fs::NAME_CAP;
 /// The fixed read chunk of `core.fs_read` (spec 0013).
 pub const FS_READ_CHUNK: usize = abi::fs::READ_CHUNK;
 
+/// The machine-wide IPv4 configuration returned by [`Host::net_info`]
+/// (spec 0020, "Configuration and name resolution").
+///
+/// Addresses are host order with the first octet in bits 24..31 (`10.0.2.15`
+/// is `0x0A00_020F`). The interpreter writes the four values into the caller's
+/// four `var uint` operands only on `Ok`, so a failure leaves them untouched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetInfo {
+    /// This machine's address.
+    pub ip: u32,
+    /// The network mask.
+    pub mask: u32,
+    /// The gateway used for destinations outside the mask.
+    pub gateway: u32,
+    /// The DNS server (unused by this milestone; spec 0020, N16).
+    pub dns: u32,
+}
+
+/// The fixed receive chunk of `core.socket_recv`: one call copies at most this
+/// many bytes, and the interpreter stages them in a local array (spec 0020).
+pub const NET_RECV_CHUNK: usize = abi::net::RECV_CHUNK;
+
 /// The host interface as far as this slice needs it (spec 0005).
 ///
 /// The kernel implements this over its own console, clock and REPL service;
@@ -541,6 +563,91 @@ pub trait Host {
     /// the path rule before the call. The default is `Invalid`.
     fn fs_truncate(&mut self, _path: &[u8], _size: u64) -> Result<(), Status> {
         Err(Status::Invalid)
+    }
+
+    // ---- networking (spec 0020; ADR 0048–0050) --------------------------
+    //
+    // The defaults model a machine with no network device: `net_config`,
+    // `socket_open`, `socket_send`, `socket_recv` and `socket_close` are
+    // `Invalid`, `net_info` is `Invalid`, `net_mac` is `0` and every socket is
+    // unreadable. That is also the kernel's state when no NIC was found, so a
+    // host mock, `langhost` and a disabled kernel behave the same way
+    // (spec 0020, "No NIC / link down").
+    //
+    // The kernel host supplies the calling task's id as the socket owner; the
+    // interpreter never sees it. This round is the non-blocking form: a send or
+    // receive reports `WouldBlock` instead of blocking, and the caller retries.
+
+    /// Sets the machine-wide IPv4 configuration (`core.net_config`,
+    /// spec 0020). The values are host order and any `u32` is a valid address.
+    /// `Ok` when the stack accepted them (last writer wins); `IoError` with no
+    /// device. The default is `Invalid`.
+    fn net_config(&mut self, _ip: u32, _mask: u32, _gateway: u32, _dns: u32) -> Status {
+        Status::Invalid
+    }
+
+    /// Reads the machine-wide IPv4 configuration (`core.net_info`, spec 0020).
+    /// The default is `Invalid`, the disabled-NIC result.
+    fn net_info(&mut self) -> Result<NetInfo, Status> {
+        Err(Status::Invalid)
+    }
+
+    /// The device address packed big-endian, or `0` when there is no device
+    /// (`core.net_mac`, spec 0020). The default is `0`.
+    fn net_mac(&mut self) -> u64 {
+        0
+    }
+
+    /// Opens a socket to `ip`:`port` (`core.socket_open`, spec 0020).
+    ///
+    /// `kind` is [`abi::net::KIND_TCP`] or [`abi::net::KIND_UDP`] and the
+    /// machine has already range-checked it with [`abi::net::validate_open`];
+    /// `local` is the local port, `0` for an ephemeral one. A successful call
+    /// returns the opaque owner-checked handle (`0` is never valid); the
+    /// default is `Invalid`, which is what a bare host and a device-less
+    /// kernel report.
+    fn socket_open(
+        &mut self,
+        _kind: u64,
+        _ip: u32,
+        _port: u16,
+        _local: u16,
+    ) -> Result<u64, Status> {
+        Err(Status::Invalid)
+    }
+
+    /// Sends `data` on socket `handle` (`core.socket_send`, spec 0020).
+    ///
+    /// Copies at most one TCP segment or one UDP datagram and returns the
+    /// copied byte count, which may be a prefix. `WouldBlock` means nothing was
+    /// queued; the caller retries. The default is `Invalid`.
+    fn socket_send(&mut self, _handle: u64, _data: &[u8]) -> Result<usize, Status> {
+        Err(Status::Invalid)
+    }
+
+    /// Receives into `dst` on socket `handle` (`core.socket_recv`, spec 0020).
+    ///
+    /// `dst` is at most [`NET_RECV_CHUNK`] bytes and never exceeds the
+    /// caller's declared buffer capacity. Returns the copied byte count;
+    /// `Ok(0)` is end of file (a TCP FIN) and `WouldBlock` means nothing is
+    /// queued, in which case the host must not modify `dst`. The default is
+    /// `Invalid`.
+    fn socket_recv(&mut self, _handle: u64, _dst: &mut [u8]) -> Result<usize, Status> {
+        Err(Status::Invalid)
+    }
+
+    /// Closes a socket owned by the calling task (`core.socket_close`,
+    /// spec 0020). Idempotent for the owner. The default is `Invalid`.
+    fn socket_close(&mut self, _handle: u64) -> Status {
+        Status::Invalid
+    }
+
+    /// Reports read readiness for a socket (`core.next_any` source tag,
+    /// spec 0020; ADR 0050). Data, EOF, an error, a completed connect or a
+    /// pending listener connection is readable. The default is `false`, so a
+    /// bare host and a disabled NIC keep `next_any` deterministic.
+    fn socket_readable(&mut self, _handle: u64) -> bool {
+        false
     }
 
     /// Requests a new application instance (`core.spawn`).
@@ -2608,6 +2715,214 @@ impl Machine {
                                 Err(status) => status as u64,
                             },
                         )?;
+                    }
+                    // Networking (spec 0020, N12–N17; ADR 0048–0050). The wire
+                    // stack lives in the kernel's `net` crate; the machine
+                    // checks the operand ranges the compiler and the host share
+                    // and publishes every out-parameter only on `Ok`, so a
+                    // retried non-blocking call never loses or duplicates a
+                    // result. This round never blocks: `socket_send` and
+                    // `socket_recv` may return `WouldBlock`.
+                    builtin::NET_CONFIG => {
+                        let dns = self.pop(stack)?;
+                        let gateway = self.pop(stack)?;
+                        let mask = self.pop(stack)?;
+                        let ip = self.pop(stack)?;
+                        // Any `u32` is a valid address; only the 64-bit range
+                        // is checked, and a rejected operand never reaches the
+                        // host (so the configuration stays unchanged).
+                        if abi::net::validate_address(ip) != Status::Ok
+                            || abi::net::validate_address(mask) != Status::Ok
+                            || abi::net::validate_address(gateway) != Status::Ok
+                            || abi::net::validate_address(dns) != Status::Ok
+                        {
+                            self.push(stack, Status::Invalid as u64)?;
+                        } else {
+                            let status =
+                                host.net_config(ip as u32, mask as u32, gateway as u32, dns as u32);
+                            self.push(stack, status as u64)?;
+                        }
+                    }
+                    builtin::NET_INFO => {
+                        let dns_bits = self.pop(stack)?;
+                        let gateway_bits = self.pop(stack)?;
+                        let mask_bits = self.pop(stack)?;
+                        let ip_bits = self.pop(stack)?;
+                        match host.net_info() {
+                            Ok(info) => {
+                                self.write_ref(
+                                    ip_bits,
+                                    u64::from(info.ip),
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.write_ref(
+                                    mask_bits,
+                                    u64::from(info.mask),
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.write_ref(
+                                    gateway_bits,
+                                    u64::from(info.gateway),
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.write_ref(
+                                    dns_bits,
+                                    u64::from(info.dns),
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.push(stack, Status::Ok as u64)?;
+                            }
+                            Err(status) => self.push(stack, status as u64)?,
+                        }
+                    }
+                    builtin::NET_MAC => {
+                        let mac = host.net_mac();
+                        self.push(stack, mac)?;
+                    }
+                    builtin::SOCKET_OPEN => {
+                        let id_bits = self.pop(stack)?;
+                        let local = self.pop(stack)?;
+                        let port = self.pop(stack)?;
+                        let ip = self.pop(stack)?;
+                        let kind = self.pop(stack)?;
+                        let check = abi::net::validate_open(kind, port, local);
+                        if check != Status::Ok {
+                            // The id stays untouched: no socket was created.
+                            self.push(stack, check as u64)?;
+                        } else if abi::net::validate_address(ip) != Status::Ok {
+                            self.push(stack, Status::Invalid as u64)?;
+                        } else {
+                            match host.socket_open(kind, ip as u32, port as u16, local as u16) {
+                                Ok(handle) => {
+                                    // `0` is never a valid handle; a host that
+                                    // returns it is broken, not the caller.
+                                    if handle == 0 {
+                                        return Err(FaultCode::IllegalOperation);
+                                    }
+                                    self.write_ref(id_bits, handle, state, stack, constants, args)?;
+                                    self.push(stack, Status::Ok as u64)?;
+                                }
+                                Err(status) => self.push(stack, status as u64)?,
+                            }
+                        }
+                    }
+                    builtin::SOCKET_SEND => {
+                        let sent_bits = self.pop(stack)?;
+                        let data_bits = self.pop(stack)?;
+                        let handle = self.pop(stack)?;
+                        let result = {
+                            // A `string` or `bytes` buffer; both are just bytes
+                            // to the wire, and the reference check is the same
+                            // one `core.write` and `core.fs_write` use.
+                            let data =
+                                self.resolve_text(data_bits, state, stack, constants, args)?;
+                            let requested = data.len();
+                            host.socket_send(handle, data)
+                                .map(|count| (count, requested))
+                        };
+                        match result {
+                            Ok((count, requested)) => {
+                                if count > requested {
+                                    return Err(FaultCode::IllegalOperation);
+                                }
+                                self.write_ref(
+                                    sent_bits,
+                                    count as u64,
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.push(stack, Status::Ok as u64)?;
+                            }
+                            // `WouldBlock` (and every other failure) leaves
+                            // `sent` untouched, so the caller can retry with the
+                            // same buffer.
+                            Err(status) => self.push(stack, status as u64)?,
+                        }
+                    }
+                    builtin::SOCKET_RECV => {
+                        let read_bits = self.pop(stack)?;
+                        let dst_bits = self.pop(stack)?;
+                        let capacity = self.pop(stack)?;
+                        let handle = self.pop(stack)?;
+
+                        // The declared capacity of the destination rides in a
+                        // scalar operand (a buffer stores only its runtime
+                        // length), so the copy can never run past the caller's
+                        // `bytes[N]` into a neighbouring variable. One call
+                        // copies at most `NET_RECV_CHUNK` bytes.
+                        let capacity =
+                            usize::try_from(capacity).map_err(|_| FaultCode::IllegalOperation)?;
+                        let limit = capacity.min(NET_RECV_CHUNK);
+                        if limit == 0 {
+                            return Err(FaultCode::IllegalOperation);
+                        }
+
+                        // The destination is a writable `bytes` data reference:
+                        // validate the region and the whole staged copy before
+                        // the host produces any byte (the `FS_READ` rule).
+                        let (dst_region, dst_offset) =
+                            self.resolve(dst_bits, state, stack, constants, args)?;
+                        if dst_region != refs::REGION_STATE && dst_region != refs::REGION_STACK {
+                            return Err(FaultCode::IllegalOperation);
+                        }
+                        if dst_offset < 8 {
+                            return Err(FaultCode::OutOfBounds);
+                        }
+                        let dst_end = dst_offset
+                            .checked_add(limit)
+                            .ok_or(FaultCode::OutOfBounds)?;
+                        if dst_end
+                            > region_len(dst_region, state, stack, constants, args)
+                                .ok_or(FaultCode::OutOfBounds)?
+                        {
+                            return Err(FaultCode::OutOfBounds);
+                        }
+
+                        let mut chunk = [0u8; NET_RECV_CHUNK];
+                        match host.socket_recv(handle, &mut chunk[..limit]) {
+                            Ok(count) => {
+                                if count > limit {
+                                    return Err(FaultCode::IllegalOperation);
+                                }
+                                self.write_buffer_ref(
+                                    dst_bits,
+                                    &chunk[..count],
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.write_ref(
+                                    read_bits,
+                                    count as u64,
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.push(stack, Status::Ok as u64)?;
+                            }
+                            Err(status) => self.push(stack, status as u64)?,
+                        }
+                    }
+                    builtin::SOCKET_CLOSE => {
+                        let handle = self.pop(stack)?;
+                        let status = host.socket_close(handle);
+                        self.push(stack, status as u64)?;
                     }
                     _ => return Err(FaultCode::IllegalOperation),
                 }

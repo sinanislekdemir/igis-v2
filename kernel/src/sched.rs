@@ -615,6 +615,54 @@ impl Host for KernelHost {
         }
     }
 
+    // Networking (spec 0020, N12–N18; ADR 0048–0050). The wire stack and the
+    // device live in `crate::net`; the host only supplies the calling task as
+    // the socket owner, so an application can never name another task's
+    // socket. This round is the non-blocking form: `socket_send` and
+    // `socket_recv` report `WouldBlock` and the caller retries.
+    fn net_config(&mut self, ip: u32, mask: u32, gateway: u32, dns: u32) -> Status {
+        crate::net::config(ip, mask, gateway, dns)
+    }
+
+    fn net_info(&mut self) -> Result<interpreter::NetInfo, Status> {
+        crate::net::info().map(|info| interpreter::NetInfo {
+            ip: info.ip,
+            mask: info.mask,
+            gateway: info.gateway,
+            dns: info.dns,
+        })
+    }
+
+    fn net_mac(&mut self) -> u64 {
+        crate::net::mac()
+    }
+
+    fn socket_open(
+        &mut self,
+        kind: u64,
+        ip: u32,
+        port: u16,
+        local: u16,
+    ) -> Result<u64, Status> {
+        crate::net::open(kind, ip, port, local, self.current)
+    }
+
+    fn socket_send(&mut self, handle: u64, data: &[u8]) -> Result<usize, Status> {
+        crate::net::send(handle, self.current, data)
+    }
+
+    fn socket_recv(&mut self, handle: u64, dst: &mut [u8]) -> Result<usize, Status> {
+        crate::net::recv(handle, self.current, dst)
+    }
+
+    fn socket_close(&mut self, handle: u64) -> Status {
+        crate::net::close(handle, self.current)
+    }
+
+    fn socket_readable(&mut self, handle: u64) -> bool {
+        crate::net::readable(handle, self.current)
+    }
+
     // Streams (spec 0006): the kernel table owns the buffer and the generation
     // check. The machine turns `WouldBlock` into a block for the blocking
     // opcodes and into a staged status for `try_*`; the host is always
@@ -1034,6 +1082,7 @@ fn service() {
     console::poll_input();
     crate::mouse::poll();
     crate::usb::poll();
+    crate::net::service();
     if console::has_byte() {
         task::wake_console_input();
     }
@@ -1066,6 +1115,7 @@ fn idle(core: usize) {
         console::poll_input();
         crate::mouse::poll();
         crate::usb::poll();
+        crate::net::service();
 
         // Interrupts off for the check; `sti; hlt` is one atomic idle step, so
         // an IPI that arrives after the check is pending when `hlt` runs.

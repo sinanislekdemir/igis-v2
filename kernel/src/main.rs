@@ -15,6 +15,7 @@ mod guard;
 mod mb2;
 mod module;
 mod mouse;
+mod net;
 mod pci;
 mod repl;
 mod sched;
@@ -320,6 +321,12 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
     // before the scheduler so the first claim sees the final pointer source.
     let usb_controller = pci::init();
     usb::init(usb_controller);
+
+    // The NIC (spec 0020, M10.1): one legacy virtio-net function behind the
+    // `net` device seam. It runs after the USB tablet so the tablet's PCI scan
+    // and enumeration order are unchanged, and before the scheduler so the
+    // service opportunity can drain frames from the first claim.
+    net::init();
 
     println!("memory map:");
     let mut available_bytes = 0u64;

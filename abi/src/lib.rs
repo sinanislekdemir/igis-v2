@@ -47,6 +47,7 @@
 
 pub mod fs;
 pub mod layout;
+pub mod net;
 pub mod opcodes;
 pub mod refs;
 pub mod wait;

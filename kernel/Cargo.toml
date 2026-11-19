@@ -9,6 +9,7 @@ abi = { path = "../abi" }
 compiler = { path = "../compiler" }
 ext2w = { path = "../ext2w" }
 interpreter = { path = "../interpreter" }
+net = { path = "../net" }
 
 [[bin]]
 name = "kernel"

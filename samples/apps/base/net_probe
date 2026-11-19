@@ -1,0 +1,97 @@
+unit net_probe;
+
+// Deterministic networking proof (spec 0020, N18/N20). It runs as an ordinary
+// application in the shell:
+//
+//   run net_probe http
+//
+// With QEMU user networking the guest is `10.0.2.15/24`, the host is
+// `10.0.2.2`, and a host `python3 -m http.server 6666` serves the directory
+// listing this probe fetches. QEMU's NAT answers ARP for the host alias, so the
+// exchange is a real TCP handshake, a real HTTP/1.0 request and a real
+// response; `net_probe: ok` is printed only after the body reached the
+// application. No window, no graphics, no DNS.
+//
+// The socket surface is non-blocking in this slice. `http.get` retries with a
+// `core.clock()` deadline and a retry cap, so a dead peer prints
+// `net_probe: timeout` and the task stays inside its CPU budget. A machine
+// without a NIC (the `--no-net` boot) reports `net_probe: no device`.
+
+uses core, stdlib, lib.socket, lib.http;
+
+const
+  BodyCapacity = 4096;
+  // QEMU user networking: the host alias, the probe's fixed port, and the
+  // static configuration from spec 0020 N18.
+  HostIp = 0x0A000202;
+  HostPort = 6666;
+  LocalIp = 0x0A00020F;
+  NetMask = 0xFFFFFF00;
+  GatewayIp = 0x0A000202;
+  DnsIp = 0x0A000203;
+
+var
+  body: string[BodyCapacity];
+
+// `net_probe: failed <ordinal>` when the exchange returned another status.
+procedure report_failure(st: Status);
+var
+  digits: bytes[32];
+  used: int;
+begin
+  used := core.format_int_into(digits, int(st), uint(10), uint(0));
+  core.write("net_probe: failed ");
+  core.write(digits);
+  core.write("\n");
+end;
+
+procedure main(args: const string[1024]);
+var
+  mac: uint;
+  digits: bytes[32];
+  used: int;
+  st: Status;
+  length: int;
+begin
+  // Only the HTTP proof exists in this slice; an empty tail is the same mode.
+  if int(core.len(args)) > 0 and not stdlib.contains_byte(args, byte(104)) then
+  begin
+    core.write("net_probe: unknown mode (use http)\n");
+    return;
+  end;
+
+  mac := core.net_mac();
+  used := core.format_int_into(digits, int(mac), uint(16), uint(0));
+  core.write("net_probe: mac 0x");
+  core.write(digits);
+  core.write("\n");
+
+  st := core.net_config(uint(LocalIp), uint(NetMask), uint(GatewayIp),
+    uint(DnsIp));
+  if st <> Ok then
+  begin
+    core.write("net_probe: no device\n");
+    return;
+  end;
+
+  st := http.get(uint(HostIp), uint(HostPort), "10.0.2.2", "/", body);
+  if st = Ok then
+  begin
+    length := http.body_length(body);
+    core.write(body);
+    if length = 0 or body[length - 1] <> byte(10) then
+      core.write("\n");
+    core.format_int_into(digits, length, uint(10), uint(0));
+    core.write("net_probe: body ");
+    core.write(digits);
+    core.write(" bytes\n");
+    core.write("net_probe: ok\n");
+  end
+  else
+  begin
+    if st = WouldBlock then
+      core.write("net_probe: timeout\n")
+    else
+      report_failure(st);
+  end;
+end;

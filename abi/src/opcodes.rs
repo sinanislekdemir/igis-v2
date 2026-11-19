@@ -868,6 +868,84 @@ pub mod builtin {
     /// claim. No operands.
     pub const REGION_RELEASE: u32 = 61;
 
+    // ---- networking (spec 0020, N12–N17; ADR 0048–0050) ----------------
+    //
+    // The wire stack (Ethernet, ARP, IPv4, ICMP, UDP, minimal TCP) lives in the
+    // kernel's `net` crate; these seven builtins are the whole application
+    // surface, and the program-side helper is the `lib/socket` unit. Addresses
+    // are `uint` in host order (first octet in bits 24..31), ports are `uint`
+    // in `0..=65535`, and a socket is an opaque owner-checked `int` handle
+    // (`0` never valid). No opcode is added: ABI v1 stays at 75.
+    //
+    // The first round is the **non-blocking** form: `socket_send` and
+    // `socket_recv` may return `WouldBlock` and the caller retries. Blocking
+    // (`WaitFor::Net`/`WaitFor::Deadline`) is M10.4. Every out-parameter is
+    // untouched on failure, the same rule the file and window builtins use,
+    // so a retry never loses data. The kernel host supplies the caller's task
+    // id for the socket owner; a bare host reports the disabled-NIC defaults.
+
+    /// `core.net_config(ip, mask, gateway, dns) -> Status`: set the
+    /// machine-wide IPv4 configuration (spec 0020, "Configuration"). The values
+    /// are host-order `uint`s and any `u32` bit pattern is a valid address.
+    /// `Ok` when the stack accepted them (last writer wins), `IoError` when
+    /// there is no device. An operand above `u32::MAX` is `Invalid` and the
+    /// interpreter rejects it before the host call. Operands:
+    /// `[ip][mask][gateway][dns]`.
+    pub const NET_CONFIG: u32 = 62;
+
+    /// `core.net_info(var ip, var mask, var gateway, var dns) -> Status`: read
+    /// the machine-wide IPv4 configuration. `Ok` writes all four host-order
+    /// `uint`s; a failure (`IoError` with no device) leaves all four untouched.
+    /// Operands: `[ip reference][mask reference][gateway reference][dns
+    /// reference]`.
+    pub const NET_INFO: u32 = 63;
+
+    /// `core.net_mac() -> uint`: the device address with the six bytes packed
+    /// big-endian (`52:54:00:12:34:56` is `0x5254_0012_3456`), or `0` when
+    /// there is no device. No operands.
+    pub const NET_MAC: u32 = 64;
+
+    /// `core.socket_open(kind, ip, port, local, var id) -> Status`: open a
+    /// socket to the peer `ip`:`port` (spec 0020, N12). `kind` is
+    /// [`crate::net::KIND_TCP`] (a TCP client; the handshake runs in the background,
+    /// so the first send may be `WouldBlock`) or [`crate::net::KIND_UDP`]; `local` is
+    /// the local port, `0` for an ephemeral one. `Ok` writes the opaque
+    /// owner-checked handle through `id`; `Invalid` for a bad kind, port or
+    /// address, `Full` when the socket table is full, `IoError` with no device.
+    /// A failure leaves `id` untouched. Operands: `[kind][ip][port][local][id
+    /// reference]`.
+    pub const SOCKET_OPEN: u32 = 65;
+
+    /// `core.socket_send(id, data, var sent) -> Status`: send `data`, a
+    /// `string` or `bytes` buffer, on the socket `id` (spec 0020, N12). TCP
+    /// copies one segment, UDP one datagram; a send larger than the socket's
+    /// transmit arena is `CapacityExceeded`. `Ok` writes the copied byte count
+    /// through `sent`, which may be a prefix for the non-blocking form;
+    /// `WouldBlock` means nothing was queued and `sent` is untouched, so the
+    /// caller retries. `NotFound` for a stale handle, `Invalid` for a foreign
+    /// one, `Closed` after a FIN/RST. Operands: `[id][data reference][sent
+    /// reference]`.
+    pub const SOCKET_SEND: u32 = 66;
+
+    /// `core.socket_recv(id, var dst, var read) -> Status`: receive up to the
+    /// destination capacity on the socket `id` (spec 0020, N12). `dst` is a
+    /// writable `bytes[N]`; the interpreter stages at most
+    /// [`crate::net::RECV_CHUNK`] bytes in a local chunk and publishes at most the
+    /// destination's declared capacity, which rides in a hidden scalar operand
+    /// (a buffer stores no capacity at run time). `Ok` sets the destination's
+    /// runtime length and writes `read` to the copied count; `Ok` with `read =
+    /// 0` is end of file (TCP FIN). `WouldBlock` means nothing is queued and
+    /// both destinations are untouched. Operands: `[id][capacity][dst
+    /// reference][read reference]`.
+    pub const SOCKET_RECV: u32 = 67;
+
+    /// `core.socket_close(id) -> Status`: close a socket owned by the calling
+    /// task (spec 0020, N12). A TCP socket sends FIN; a UDP socket frees its
+    /// slot. Idempotent for the owner (`Ok` on an already-closed handle);
+    /// `NotFound` for a stale handle and `Invalid` for another task's. No
+    /// out-parameters.
+    pub const SOCKET_CLOSE: u32 = 68;
+
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
         match id {
@@ -932,6 +1010,13 @@ pub mod builtin {
             POPUP_RELEASE => Some((0, 1)),
             REGION_CLAIM => Some((4, 1)),
             REGION_RELEASE => Some((0, 1)),
+            NET_CONFIG => Some((4, 1)),
+            NET_INFO => Some((4, 1)),
+            NET_MAC => Some((0, 1)),
+            SOCKET_OPEN => Some((5, 1)),
+            SOCKET_SEND => Some((3, 1)),
+            SOCKET_RECV => Some((4, 1)),
+            SOCKET_CLOSE => Some((1, 1)),
             _ => None,
         }
     }

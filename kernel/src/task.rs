@@ -378,6 +378,9 @@ impl Task {
         // is safe.
         crate::stream::close_task(self.id);
         crate::window::close_task(self.id);
+        // A task's sockets go with it (spec 0020, N14). The net stack takes its
+        // own lock and never a slot lock, so the order stays safe.
+        crate::net::close_task(self.id);
         self.regions.code.free();
         self.regions.state.free();
         self.regions.stack.free();

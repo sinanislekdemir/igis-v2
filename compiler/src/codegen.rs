@@ -7934,6 +7934,19 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             }
             "core.fs_rename" => self.fs_rename_call(args, line, column),
             "core.fs_truncate" => self.fs_truncate_call(args, line, column),
+            // Networking (spec 0020, N12–N17; ADR 0048–0050). Seven host
+            // builtins and no opcode: the compiler checks the staged operand
+            // kinds, the machine checks the ranges (`abi::net`) and the
+            // destination regions, and the kernel host owns the wire stack and
+            // the socket table. Each arm is a separate function for the same
+            // debug-build frame reason `core.fs_write` is.
+            "core.net_config" => self.net_config_call(args, line, column),
+            "core.net_info" => self.net_info_call(args, line, column),
+            "core.net_mac" => self.net_mac_call(args, line, column),
+            "core.socket_open" => self.socket_open_call(args, line, column),
+            "core.socket_send" => self.socket_send_call(args, line, column),
+            "core.socket_recv" => self.socket_recv_call(args, line, column),
+            "core.socket_close" => self.socket_close_call(args, line, column),
             // Terminal attach (spec 0014): bind the console's machine-wide
             // terminal grid to a window owned by the caller. The kernel host
             // supplies the task id; the compiler only checks the staged
@@ -8443,6 +8456,256 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         }
         self.one(opcodes::BUILTIN, builtin::FS_TRUNCATE)?;
         self.pop(2)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    // ---- networking (spec 0020, N12–N17; ADR 0048–0050) ----------------
+    //
+    // Addresses are `uint` host-order values and ports are `uint`s in
+    // `0..=65535`; the machine range-checks them with `abi::net` before the
+    // host call. A socket is an opaque owner-checked `int` handle whose `0` is
+    // never valid; the compiler treats it exactly like a task id. This round is
+    // the non-blocking form, so no arm blocks or retries.
+
+    /// `core.net_config(ip, mask, gateway, dns) -> Status`.
+    fn net_config_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 4 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`core.net_config` expects 4 arguments, got {}", args.len()),
+            ));
+        }
+        for (index, name) in ["ip", "mask", "gateway", "dns"].iter().enumerate() {
+            let value = self.expr_scalar(args[index])?;
+            if value.kind != Kind::Uint {
+                return Err(self.err_at(
+                    args[index],
+                    format_args!("`core.net_config` expects a `uint` {name}, found `{value}`"),
+                ));
+            }
+        }
+        self.one(opcodes::BUILTIN, builtin::NET_CONFIG)?;
+        self.pop(4)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// `core.net_info(var ip, var mask, var gateway, var dns) -> Status`.
+    fn net_info_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 4 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`core.net_info` expects 4 arguments, got {}", args.len()),
+            ));
+        }
+        for (index, name) in ["ip", "mask", "gateway", "dns"].iter().enumerate() {
+            let value = self.emit_scalar_ref(args[index])?;
+            if value.kind != Kind::Uint {
+                let found = self.type_name(value);
+                return Err(self.err_at(
+                    args[index],
+                    format_args!("`core.net_info` expects `var {name}: uint`, found `{found}`"),
+                ));
+            }
+        }
+        self.one(opcodes::BUILTIN, builtin::NET_INFO)?;
+        self.pop(4)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// `core.net_mac() -> uint`.
+    fn net_mac_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if !args.is_empty() {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`core.net_mac` expects 0 arguments, got {}", args.len()),
+            ));
+        }
+        self.one(opcodes::BUILTIN, builtin::NET_MAC)?;
+        self.push();
+        Ok(Some(Type::scalar(Kind::Uint)))
+    }
+
+    /// `core.socket_open(kind, ip, port, local, var id) -> Status`.
+    fn socket_open_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 5 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`core.socket_open` expects 5 arguments, got {}", args.len()),
+            ));
+        }
+        for (index, name) in ["kind", "ip", "port", "local"].iter().enumerate() {
+            let value = self.expr_scalar(args[index])?;
+            if value.kind != Kind::Uint {
+                return Err(self.err_at(
+                    args[index],
+                    format_args!("`core.socket_open` expects a `uint` {name}, found `{value}`"),
+                ));
+            }
+        }
+        let id = self.emit_scalar_ref(args[4])?;
+        if id.kind != Kind::Int {
+            let found = self.type_name(id);
+            return Err(self.err_at(
+                args[4],
+                format_args!("`core.socket_open` expects `var id: int`, found `{found}`"),
+            ));
+        }
+        self.one(opcodes::BUILTIN, builtin::SOCKET_OPEN)?;
+        self.pop(5)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// `core.socket_send(id, data, var sent) -> Status`.
+    fn socket_send_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 3 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`core.socket_send` expects 3 arguments, got {}", args.len()),
+            ));
+        }
+        let id = self.expr_scalar(args[0])?;
+        if id.kind != Kind::Int {
+            return Err(self.err_at(
+                args[0],
+                format_args!("`core.socket_send` expects an `int` socket id, found `{id}`"),
+            ));
+        }
+        // A send accepts either buffer kind: the wire sees bytes only.
+        let data = self.emit_ref(args[1], None)?;
+        if data.kind != Kind::String && data.kind != Kind::Bytes {
+            let found = self.type_name(data);
+            return Err(self.err_at(
+                args[1],
+                format_args!(
+                    "`core.socket_send` expects a `string` or `bytes` data buffer, found `{found}`"
+                ),
+            ));
+        }
+        let sent = self.emit_scalar_ref(args[2])?;
+        if sent.kind != Kind::Int {
+            let found = self.type_name(sent);
+            return Err(self.err_at(
+                args[2],
+                format_args!("`core.socket_send` expects `var sent: int`, found `{found}`"),
+            ));
+        }
+        self.one(opcodes::BUILTIN, builtin::SOCKET_SEND)?;
+        self.pop(3)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// `core.socket_recv(id, var dst, var read) -> Status`.
+    ///
+    /// The destination's declared capacity is staged as a hidden scalar
+    /// operand between the id and the data reference: a buffer stores only its
+    /// runtime length, so the interpreter cannot otherwise bound the copy to
+    /// the caller's `bytes[N]` and would have to accept the rest of the region
+    /// as room (spec 0020, "the compiler emits its capacity").
+    fn socket_recv_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 3 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`core.socket_recv` expects 3 arguments, got {}", args.len()),
+            ));
+        }
+        let id = self.expr_scalar(args[0])?;
+        if id.kind != Kind::Int {
+            return Err(self.err_at(
+                args[0],
+                format_args!("`core.socket_recv` expects an `int` socket id, found `{id}`"),
+            ));
+        }
+        let destination = self.var_buffer_place(args[1])?;
+        if destination.ty.kind != Kind::Bytes || destination.ty.cap < 1 {
+            let found = self.type_name(destination.ty);
+            return Err(self.err_at(
+                args[1],
+                format_args!(
+                    "`core.socket_recv` needs a writable `var bytes` destination, found `{found}`"
+                ),
+            ));
+        }
+        let capacity = destination.ty.cap;
+        self.const_i64(i64::from(capacity))?;
+        self.push_buffer_data_ref(&destination)?;
+        let read = self.emit_scalar_ref(args[2])?;
+        if read.kind != Kind::Int {
+            let found = self.type_name(read);
+            return Err(self.err_at(
+                args[2],
+                format_args!("`core.socket_recv` expects `var read: int`, found `{found}`"),
+            ));
+        }
+        self.one(opcodes::BUILTIN, builtin::SOCKET_RECV)?;
+        self.pop(4)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// `core.socket_close(id) -> Status`.
+    fn socket_close_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 1 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`core.socket_close` expects 1 argument, got {}", args.len()),
+            ));
+        }
+        let id = self.expr_scalar(args[0])?;
+        if id.kind != Kind::Int {
+            return Err(self.err_at(
+                args[0],
+                format_args!("`core.socket_close` expects an `int` socket id, found `{id}`"),
+            ));
+        }
+        self.one(opcodes::BUILTIN, builtin::SOCKET_CLOSE)?;
+        self.pop(1)?;
         self.push();
         Ok(Some(Type::enumeration(STATUS_ENUM)))
     }

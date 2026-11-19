@@ -9040,3 +9040,394 @@ end;
         assert!(error.message.contains(expected), "{}", error.message);
     }
 }
+
+/// Decodes the code section into `(opcode, immediates)` pairs.
+fn instruction_words(package: &Owned) -> Vec<(u8, Vec<u32>)> {
+    use abi::opcodes;
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+    let mut out = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        let mut immediates = Vec::new();
+        for index in 1..words {
+            let at = pc + index * 4;
+            immediates.push(u32::from_le_bytes(
+                instructions[at..at + 4].try_into().unwrap(),
+            ));
+        }
+        out.push((op, immediates));
+        pc += words * 4;
+    }
+    out
+}
+
+#[test]
+fn net_primitives_are_builtin_ids_62_to_68_and_check_their_signatures() {
+    use abi::opcodes::{self, builtin};
+
+    let source = r#"
+unit t;
+uses core;
+var
+  status: Status;
+  ip: uint;
+  mask: uint;
+  gateway: uint;
+  dns: uint;
+  id: int;
+  sent: int;
+  read: int;
+  mac: uint;
+  chunk: bytes[100];
+  text: string[16];
+procedure main(args: const string[1024]);
+begin
+  status := core.net_config(uint(0), uint(0), uint(0), uint(0));
+  status := core.net_info(ip, mask, gateway, dns);
+  mac := core.net_mac();
+  status := core.socket_open(uint(2), uint(0), uint(80), uint(0), id);
+  status := core.socket_send(id, chunk, sent);
+  status := core.socket_send(id, text, sent);
+  status := core.socket_recv(id, chunk, read);
+  status := core.socket_close(id);
+end;
+"#;
+    let package = compile(source.as_bytes(), "t.ig").expect("the network primitives compile");
+    for id in [
+        builtin::NET_CONFIG,
+        builtin::NET_INFO,
+        builtin::NET_MAC,
+        builtin::SOCKET_OPEN,
+        builtin::SOCKET_SEND,
+        builtin::SOCKET_RECV,
+        builtin::SOCKET_CLOSE,
+    ] {
+        assert!(builtin_count(&package, id) >= 1, "builtin {id} is emitted");
+    }
+    assert_eq!(builtin_count(&package, builtin::SOCKET_SEND), 2);
+    assert_eq!(
+        (
+            builtin::NET_CONFIG,
+            builtin::NET_INFO,
+            builtin::NET_MAC,
+            builtin::SOCKET_OPEN,
+            builtin::SOCKET_SEND,
+            builtin::SOCKET_RECV,
+            builtin::SOCKET_CLOSE,
+        ),
+        (62, 63, 64, 65, 66, 67, 68)
+    );
+    assert_eq!(builtin::effect(builtin::NET_CONFIG), Some((4, 1)));
+    assert_eq!(builtin::effect(builtin::NET_INFO), Some((4, 1)));
+    assert_eq!(builtin::effect(builtin::NET_MAC), Some((0, 1)));
+    assert_eq!(builtin::effect(builtin::SOCKET_OPEN), Some((5, 1)));
+    assert_eq!(builtin::effect(builtin::SOCKET_SEND), Some((3, 1)));
+    assert_eq!(
+        builtin::effect(builtin::SOCKET_RECV),
+        Some((4, 1)),
+        "the destination capacity is staged as a fourth operand"
+    );
+    assert_eq!(builtin::effect(builtin::SOCKET_CLOSE), Some((1, 1)));
+
+    // `socket_recv` stages the destination's declared capacity between the id
+    // and the data reference: `const 100` then the state reference.
+    let words = instruction_words(&package);
+    let staged = words.windows(2).any(|pair| {
+        pair[0].0 == opcodes::CONST && pair[0].1 == [100, 0] && pair[1].0 == opcodes::REF_STATE
+    });
+    assert!(staged, "the `bytes[100]` capacity rides in a const operand");
+
+    let cases = [
+        (
+            r#"
+unit t;
+uses core;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := core.net_config(uint(0), uint(0), uint(0));
+end;
+"#,
+            "`core.net_config` expects 4 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; ip: uint; mask: uint; gateway: uint; dns: uint;
+procedure main(args: const string[1024]);
+begin
+  status := core.net_config(uint(0), uint(0), uint(0), 0);
+end;
+"#,
+            "`core.net_config` expects a `uint` dns",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; ip: uint; mask: uint; gateway: uint; dns: int;
+procedure main(args: const string[1024]);
+begin
+  status := core.net_info(ip, mask, gateway, dns);
+end;
+"#,
+            "`core.net_info` expects `var dns: uint`",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; ip: uint; mask: uint; gateway: uint;
+procedure main(args: const string[1024]);
+begin
+  status := core.net_info(ip, mask, gateway);
+end;
+"#,
+            "`core.net_info` expects 4 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; ip: uint;
+procedure main(args: const string[1024]);
+begin
+  status := core.net_info(ip, ip, ip);
+end;
+"#,
+            "`core.net_info` expects 4 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; mac: uint;
+procedure main(args: const string[1024]);
+begin
+  mac := core.net_mac(uint(1));
+end;
+"#,
+            "`core.net_mac` expects 0 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; id: int;
+procedure main(args: const string[1024]);
+begin
+  status := core.socket_open(uint(1), uint(0), uint(80), uint(0));
+end;
+"#,
+            "`core.socket_open` expects 5 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; id: int;
+procedure main(args: const string[1024]);
+begin
+  status := core.socket_open(1, uint(0), uint(80), uint(0), id);
+end;
+"#,
+            "`core.socket_open` expects a `uint` kind",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; id: uint;
+procedure main(args: const string[1024]);
+begin
+  status := core.socket_open(uint(1), uint(0), uint(80), uint(0), id);
+end;
+"#,
+            "`core.socket_open` expects `var id: int`",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; id: int; mac: uint;
+procedure main(args: const string[1024]);
+begin
+  status := core.socket_send(id, mac, id);
+end;
+"#,
+            "`mac` is `uint`, not a buffer",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; id: int; chunk: bytes[8]; sent: uint;
+procedure main(args: const string[1024]);
+begin
+  status := core.socket_send(id, chunk, sent);
+end;
+"#,
+            "`core.socket_send` expects `var sent: int`",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; id: int; text: string[8]; read: int;
+procedure main(args: const string[1024]);
+begin
+  status := core.socket_recv(id, text, read);
+end;
+"#,
+            "`core.socket_recv` needs a writable `var bytes` destination",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; id: int; chunk: bytes[8]; read: uint;
+procedure main(args: const string[1024]);
+begin
+  status := core.socket_recv(id, chunk, read);
+end;
+"#,
+            "`core.socket_recv` expects `var read: int`",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; id: int; chunk: bytes[8]; read: int;
+procedure main(args: const string[1024]);
+begin
+  status := core.socket_close(chunk);
+end;
+"#,
+            "buffer `chunk` cannot be used as a scalar value",
+        ),
+    ];
+    for (source, expected) in cases {
+        let error = compile(source.as_bytes(), "t.ig").expect_err("must be a compile error");
+        assert!(
+            error.message.contains(expected),
+            "expected `{expected}`, got `{}`",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn socket_send_accepts_a_const_bytes_or_string_and_socket_recv_needs_a_var() {
+    let bytes_source = r#"
+unit t;
+uses core;
+var status: Status; id: int; sent: int; data: bytes[4];
+procedure main(args: const string[1024]);
+begin
+  status := core.socket_send(id, data, sent);
+end;
+"#;
+    compile(bytes_source.as_bytes(), "t.ig").expect("a `bytes` send compiles");
+
+    let text_source = r#"
+unit t;
+uses core;
+var status: Status; id: int; sent: int;
+procedure main(args: const string[1024]);
+begin
+  status := core.socket_send(id, "GET / HTTP/1.0", sent);
+end;
+"#;
+    compile(text_source.as_bytes(), "t.ig").expect("a `string` literal send compiles");
+
+    // A `const` buffer parameter is not a writable destination.
+    let mut source = Vec::new();
+    source.extend_from_slice(
+        br#"
+unit t;
+uses core;
+procedure take(data: const bytes[8]);
+var status: Status; id: int; read: int;
+begin
+  status := core.socket_recv(id, data, read);
+end;
+procedure main(args: const string[1024]);
+begin
+end;
+"#,
+    );
+    let error = compile(&source, "t.ig").expect_err("a const buffer is not writable");
+    assert!(
+        error
+            .message
+            .contains("cannot pass `const` parameter `data` as `var`"),
+        "{}",
+        error.message
+    );
+
+    // `socket_recv` accepts a one-byte destination; the capacity, not a minimum
+    // chunk, bounds the copy.
+    let tiny_source = r#"
+unit t;
+uses core;
+var status: Status; id: int; read: int; one: bytes[1];
+procedure main(args: const string[1024]);
+begin
+  status := core.socket_recv(id, one, read);
+end;
+"#;
+    compile(tiny_source.as_bytes(), "t.ig").expect("a one-byte destination compiles");
+
+    // The shape the `/lib/socket` unit uses: a `var bytes[N]` parameter whose
+    // declared capacity is what the interpreter stages.
+    let parameter_source = r#"
+unit t;
+uses core;
+function pull(id: int; dst: var bytes[1024]; read: var int): Status;
+begin
+  return core.socket_recv(id, dst, read);
+end;
+var status: Status; id: int; read: int; buffer: bytes[1024];
+procedure main(args: const string[1024]);
+begin
+  status := pull(id, buffer, read);
+end;
+"#;
+    compile(parameter_source.as_bytes(), "t.ig")
+        .expect("a `var bytes[N]` parameter is a valid destination");
+}
+
+#[test]
+fn net_mac_has_the_uint_result_type() {
+    let source = r#"
+unit t;
+uses core;
+var mac: uint;
+procedure main(args: const string[1024]);
+begin
+  mac := core.net_mac();
+end;
+"#;
+    compile(source.as_bytes(), "t.ig").expect("`core.net_mac()` is a `uint`");
+
+    let wrong = r#"
+unit t;
+uses core;
+var mac: int;
+procedure main(args: const string[1024]);
+begin
+  mac := core.net_mac();
+end;
+"#;
+    let error = compile(wrong.as_bytes(), "t.ig").expect_err("`uint` does not assign to `int`");
+    assert!(
+        error.message.contains("uint") || error.message.contains("cannot assign"),
+        "{}",
+        error.message
+    );
+}
