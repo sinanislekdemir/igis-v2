@@ -36,8 +36,12 @@ unit editor;
 // path switches to it. Without a home disk the save reports that and leaves the
 // document and path unchanged.
 //
-// The File menu's Open re-reads the current path (there is no file picker
-// until M2.5.4), Ctrl+O does the same, Ctrl+Q quits and Ctrl+A selects all.
+// The File menu's Open now runs a modal file-open dialog from `/lib`
+// (`lib.file_dialog.open_file`, M9.3) instead of re-reading the current path;
+// Ctrl+O does the same. The dialog starts in the current document's directory,
+// lets the user navigate the image tree and returns a regular-file path, or a
+// null-like cancel (`Invalid`) that leaves the document, path, caret,
+// selection and scroll untouched. Ctrl+Q quits and Ctrl+A selects all.
 // M9.1 adds lexical syntax highlighting for source files and a File > Highlight
 // toggle: `unit`, `var`, `if` and the other keywords are blue, type and
 // predeclared names dark red, strings dark green, comments gray and numbers
@@ -68,7 +72,7 @@ unit editor;
 // `langhost` and a kernel without a framebuffer model a disabled screen, so the
 // sample runs the same load/edit/line logic there and prints `editor: host ok`.
 
-uses core, stdlib, syslib, lib.out, lib.inject;
+uses core, stdlib, syslib, lib.out, lib.inject, lib.file_dialog;
 
 const
   WindowX = 180;
@@ -79,9 +83,11 @@ const
   // Document capacity. The ext2 sources the editor opens in the samples are
   // far below this; `widgets` (57 KiB) is the documented too-large case.
   BufferCapacity = 8192;
-  PathCapacity = 64;
+  // `abi::fs::PATH_MAX` (spec 0013 F2 / spec 0018 L6). The M9.3 file dialog
+  // publishes its whole 256-byte result here.
+  PathCapacity = 256;
   // A save path is `<target>.tmp`, so it can be four bytes longer than a path.
-  TempCapacity = 96;
+  TempCapacity = 260;
 
   // Client layout inside the content rectangle.
   MenuBarH = 22;
@@ -129,6 +135,7 @@ var
   load_stage: bytes[BufferCapacity];
   save_stage: bytes[BufferCapacity];
   path: string[PathCapacity];
+  dialog_path: string[PathCapacity];
   save_target: string[PathCapacity];
   save_temp: string[TempCapacity];
   status_line: string[128];
@@ -1469,12 +1476,33 @@ begin
     status_line := "syntax off";
 end;
 
+// File > Open and Ctrl+O (M9.3): run the `/lib` modal file-open dialog with
+// the current path as its start, then load the chosen regular file. A cancel
+// or any dialog failure leaves the document, path, caret, selection and view
+// untouched; the dialog's window close returns focus, and the editor raises
+// itself in case another window was above it when the dialog opened.
+procedure browse_open();
+var
+  value: Status;
+begin
+  value := file_dialog.open_file(path, dialog_path);
+  if value = Ok then
+  begin
+    st := open_path(dialog_path);
+    st := syslib.window_raise(id);
+  end
+  else if value = Invalid then
+    status_line := "open cancelled"
+  else
+    status_line := "open failed";
+end;
+
 procedure activate_menu(index: int);
 begin
   if index = 0 then
   begin
     close_menu();
-    st := open_path(path);
+    browse_open();
   end
   else if index = 1 then
   begin
@@ -1543,7 +1571,7 @@ begin
     end;
     if key = 0x6F or key = 0x4F then
     begin
-      st := open_path(path);
+      browse_open();
       return;
     end;
     if key = 0x61 or key = 0x41 then
@@ -2876,6 +2904,7 @@ begin
   top_line := 0;
   left_byte := 0;
   text := "";
+  dialog_path := "";
   refresh_line_states();
   status_line := "";
   black := stdlib.ui_black();
