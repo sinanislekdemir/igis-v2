@@ -14,8 +14,8 @@ var
   argv: string[256];
   // The shell's current directory in display form (`/`, `/base`, `/home/sub`).
   // `target` is the API path a `cd` resolves to; `app_path` and `external_args`
-  // stage a bare command's launch. The base apps receive
-  // `"<cwd display> <rest>"` (lib/path.ig `split_cwd`).
+  // stage a bare command's launch. The file commands receive
+  // `"<cwd display> <rest>"` (lib/path.ig `split_cwd`); other apps get `rest`.
   cwd: string[256];
   cd_arg: string[256];
   target: string[256];
@@ -24,6 +24,8 @@ var
   listed_name: string[64];
   listed_kind: uint;
   listed_size: uint;
+  // True when the staged external argument string does not fit.
+  too_long: bool;
   // Set by whichever builtin handled this line. The dispatch is then a
   // straight-line chain instead of a deep `else if` nest, which keeps the
   // compiler's recursive codegen within the host tests' stack.
@@ -213,6 +215,47 @@ end;
 // `fs_list` failing with `fs_size` returning `Invalid` is an empty one. A
 // regular file is `Invalid` from `fs_list` and `Ok` from `fs_size`; a missing
 // name is `NotFound` from both (spec 0013, F7/F13; spec 0019, A4).
+// The file commands need the current directory in their first argument; every
+// other application receives the raw tail exactly as typed. This keeps `nc`,
+// `purl`, `text`, `child` and the rest compatible with their original `run`
+// interfaces while the file commands can resolve relative paths.
+function is_file_command(name: const string[0]): bool;
+begin
+  return name = "ls" or name = "dir" or name = "pwd" or name = "cat"
+    or name = "head" or name = "tail" or name = "mkdir"
+    or name = "rmdir" or name = "rm";
+end;
+
+// Stages the argument string for a bare app. File commands get
+// `"<cwd> <rest>"`; every other app gets the raw tail. The procedure keeps this
+// branch out of `main`, whose body is already large enough to stress the host
+// compiler's test stack.
+procedure prepare_args(name: const string[0]; tail: const string[0]);
+var
+  copied: int;
+begin
+  if is_file_command(name) then
+  begin
+    if int(core.len(cwd)) + 1 + int(core.len(tail)) > ExternalArgsCapacity then
+      too_long := true
+    else
+    begin
+      external_args := cwd + " " + tail;
+      too_long := false;
+    end;
+  end
+  else
+  begin
+    if int(core.len(tail)) > ExternalArgsCapacity then
+      too_long := true
+    else
+    begin
+      copied := core.substr_into(external_args, tail, 0, int(core.len(tail)));
+      too_long := copied < 0;
+    end;
+  end;
+end;
+
 procedure change_dir(arg: const string[0]);
 var
   join_st: Status;
@@ -306,9 +349,10 @@ begin
   // into the command and its tail.
   //
   // The builtins are `help`, `echo`, `cd`, `run`, `exit` and `terminal`; any
-  // other word is an application under `base/` (then `system/`) invoked with
-  // `"<cwd> <rest>"`. The prompt shows the current directory, which starts at
-  // the image root.
+  // other word is an application under `base/` (then `system/`). The file
+  // commands receive `"<cwd> <rest>"`; every other app receives the raw tail
+  // exactly as typed, preserving its original `run` interface. The prompt shows
+  // the current directory, which starts at the image root.
   //
   // There is no `return` yet, so `main` ends by leaving the loop with `done`.
   sources[0] := uint(0);
@@ -520,33 +564,36 @@ begin
         out.say(cmd);
         out.say("\n");
       end
-      else if int(core.len(cwd)) + 1 + int(core.len(rest)) > ExternalArgsCapacity then
-      begin
-        out.say(cmd);
-        out.say(": arguments too long\n");
-      end
       else
       begin
-        external_args := cwd + " " + rest;
-        st := core.run(app_path, external_args, diag, reason);
-        if st <> Ok then
+        prepare_args(cmd, rest);
+        if too_long then
         begin
           out.say(cmd);
-          out.say(": ");
-          out.say(diag.message);
-          out.say("\n");
-        end
-        else if core.len(diag.message) > uint(0) then
-        begin
-          // A compile error the service finds after `spawn` returned reaches
-          // `run`'s diagnostic (spec 0005).
-          out.say(cmd);
-          out.say(": ");
-          out.say(diag.message);
-          out.say("\n");
+          out.say(": arguments too long\n");
         end
         else
-          report_app(cmd, reason);
+        begin
+          st := core.run(app_path, external_args, diag, reason);
+          if st <> Ok then
+          begin
+            out.say(cmd);
+            out.say(": ");
+            out.say(diag.message);
+            out.say("\n");
+          end
+          else if core.len(diag.message) > uint(0) then
+          begin
+            // A compile error the service finds after `spawn` returned reaches
+            // `run`'s diagnostic (spec 0005).
+            out.say(cmd);
+            out.say(": ");
+            out.say(diag.message);
+            out.say("\n");
+          end
+          else
+            report_app(cmd, reason);
+        end;
       end;
     end;
     end;
