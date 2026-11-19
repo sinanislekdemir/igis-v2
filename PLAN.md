@@ -88,11 +88,14 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   the path through the multiboot2 command line, `core.net_stats` (73) exposes the
   counters, and `base/net_perf` proves ten timed HTTP gets with them;
   `net_probe http`/`dns`/`dhcp` and `net_perf` pass with INTx and with polling on
-  `-smp 4`/`-smp 1` over virtio, e1000 and e1000e. `WaitFor::Net`/`Deadline`,
-  `socket_source` and the listener remain.
-- **Last commit:** `2051069` (M10.6) plus the docs commit. `build/home.img` is reset.
-- **Next:** M10.7 (listener/`accept` + `net_echo`) and the blocking
-  `WaitFor::Net`/`Deadline`/`socket_source` follow-up. The deferred backlog in
+  `-smp 4`/`-smp 1` over virtio, e1000 and e1000e. **M10.7 (done, `efeeadf`):**
+  `KIND_LISTEN` with a two-handle pending queue, inbound SYN/SYN-ACK/ACK,
+  `core.socket_accept` (72), `lib/socket.listen/accept` and the `net_echo` server
+  (three sequential host clients through `hostfwd`), proven over virtio, e1000 and
+  e1000e. `WaitFor::Net`/`Deadline` and `socket_source` remain.
+- **Last commit:** `efeeadf` (M10.7) plus the docs commit. `build/home.img` is reset.
+- **Next:** the blocking `WaitFor::Net`/`Deadline`/`socket_source` follow-up, then
+  the persistent DNS `langhost` test. The deferred backlog in
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) remains available for non-network work.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
   and composited cursor (`3cd9337`), M2.2.6 absolute USB tablet (`7c6e93f`), the
@@ -2074,7 +2077,7 @@ parent verifies each.
 
 ### M10.7 — TCP listener and the in-guest echo server
 
-- [ ] **M10.7 Accept a connection and echo it back.**
+- [x] **M10.7 Accept a connection and echo it back.**
   Add `listen`/`accept` (`listen` is `socket_open` kind 3; `accept` is builtin 72;
   a two-entry pending queue) and the `/lib/socket` functions. Write `samples/apps/base/net_echo`: listen on port 7,
   echo lines from three sequential clients, close on FIN, print `net_echo: ok`.
@@ -2086,6 +2089,13 @@ parent verifies each.
   - **Proof:** `net_echo` plus the host harness on `-smp 4` and `-smp 1`; host
     tests for the pending queue and the accept ownership transfer.
   - **Docs:** spec 0020 N10; AGENTS/PLAN.
+  **Done (`efeeadf`):** `net` gains `KIND_LISTEN`, a two-handle pending queue,
+  inbound SYN/SYN-ACK/final-ACK, backlog-full RST, SYN-ACK retry/expiry and
+  listener cleanup; `core.socket_accept` (builtin 72), `lib/socket.listen/accept`
+  and the `net_echo` app. `scripts/net_echo_qmp.py` forwards host 7007 to guest 7,
+  sends three sequential lines, checks byte-exact echoes and `net_echo: ok` on
+  `-smp 4`/`-smp 1` over virtio, e1000 and e1000e. HTTP/DNS/DHCP still pass; 590
+  host tests; golden unchanged.
 
 ### M10.8 — DHCP client in source
 
