@@ -238,11 +238,12 @@ tree view:
   status line and is not opened;
 - no browser action writes a file or adds a handle.
 
-### The text editor (M2.5.3; lexical highlighting M9.1)
+### The text editor (M2.5.3; lexical highlighting M9.1; pointer/scroll M9.2)
 
 `samples/apps/base/editor` records the application-level contract over the file
 API. The document, editing and save rules are in spec 0003 ("Application
-buffers above 256 bytes") and spec 0019 (E1); M9.1 adds only a view rule:
+buffers above 256 bytes") and spec 0019 (E1); M9.1 adds a view rule and M9.2 a
+drawing/drag rule:
 
 - a successfully opened path whose name starts with `base/`, `lib/` or
   `system/`, or whose last three bytes are `.ig`, enables **syntax
@@ -273,20 +274,51 @@ buffers above 256 bytes") and spec 0019 (E1); M9.1 adds only a view rule:
   or to the line end, matching the language's single-line literals. An
   unterminated string or block comment colours to the end of its line and, for
   a block comment, carries the comment state to following lines;
-- the block-comment state at the first visible line is computed by scanning the
-  document from byte 0 to that line's start once per frame, line by line (so a
-  `//` never swallows a later line's `{`), then carried through the visible
-  lines. The scan is allocation-free and O(document), bounded by the 8192-byte
-  buffer. With highlighting off the old all-black/all-white drawing path is
-  used exactly;
+- the block-comment state at every line start is cached in a `bytes[8193]`
+  table (M9.2), refreshed by one allocation-free line-by-line scan whenever the
+  document is published (an open or an edit), not once per frame. `draw_lines`
+  reads the entry for its first visible line and carries the state through the
+  visible rows, so a scrolled frame scans only the visible lines, never the
+  document from byte 0. The line-by-line scan still makes a `//` end at its own
+  newline, so it never swallows a later line's `{`. With highlighting off the
+  old all-black/all-white drawing path is used exactly;
+- a pointer event repaints only when it changes visible state (M9.2). A
+  no-button move over the text does nothing; a move with the File menu open
+  repaints only when the highlighted row changes; a thumb-drag move only when
+  `top_line` changes; a press or release only when it opens or closes the menu,
+  moves the caret or selection, pages the view, toggles a menu item or starts or
+  ends a visible drag (pressing the thumb itself need not repaint). Every event
+  is still delivered and handled; only the redundant frame is skipped. Key
+  events and an owner `Expose` still repaint as before;
+- the scrollbar thumb drags (M9.2, matching the browser's M8.9). A press in hit
+  class 3 records the grab offset; held primary-button moves map the thumb top
+  onto `top_line` over the travel `track - thumb` and clamp it, and a release or
+  a move without the button ends the drag. The geometry matches
+  `stdlib.ui_scrollbar` (track `ScrollH - 4`, visible fraction with an 8-pixel
+  floor, `Rows` visible against `line_count(text)`), and track clicks still
+  page. A page or drag clamps the caret into the visible lines so the next key
+  does not jump the view;
+- the normal-task CPU budget is unchanged. The user-reported
+  `Faulted(BudgetExceeded)` after 2,893 claims was the 10 s watchdog, not a
+  crash: before M9.2 every pointer event addressed to the editor repainted the
+  whole 640×480 panel and rescanned the document for the block state, so moving
+  the pointer over the editor spent the task's lifetime budget on frames whose
+  visible pixels did not change. M9.2 removes that work rather than raising the
+  budget (spec 0007);
 - token boundaries are whole UTF-8 code points and every drawn run still goes
   through `core.substr_into` and the existing `snap_boundary`, so a multi-byte
   code point is never split. Non-ASCII default text stays black;
 - no file API call, handle, opcode, builtin, `Host` method or `stdlib` function
   is added. `editor check` covers source-vs-plain detection, the menu check,
   every palette class, a block comment that spans lines and one that starts
-  above the visible first line, and that the toggle off leaves no palette
-  pixel; the host path has no screen and reports the same logical verdict.
+  above the visible first line, that the toggle off leaves no palette pixel,
+  and (M9.2) a scrollbar-thumb press and drag through the injected pointer path
+  to the bottom (`top_line = line_count - Rows`, the drag ended and the thumb
+  redrawn at the bottom); the host path has no screen and reports the same
+  logical verdict. `scripts/editor_scroll_qmp.py` proves the budget rule on the
+  real pointer path: a burst of no-button moves plus a held-button drag ends
+  `exit Ok` with no `BudgetExceeded`, while the pre-M9.2 editor faults on the
+  same burst.
 
 ## Interfaces
 
@@ -337,3 +369,4 @@ buffers above 256 bytes") and spec 0019 (E1); M9.1 adds only a view rule:
 | 2026-11-19 | M8.8: the file browser gains a visible `Up` button in the path line (44×18, left of the writability label) that goes to the parent through the real pointer path; `Backspace`/`Ctrl+Up` remain, and the status hint names `Bksp up`. `browser check` clicks the button, and `input_routing_qmp.py` requires the path to return to the pre-navigation root. No API change. |
 | 2026-11-19 | M8.9: the file browser's scrollbar thumb is draggable. A pointer-down on the thumb (hit class 3) records the grab offset; pointer moves with the primary button held map the thumb top onto `top` across the travel, clamp the selection visible, and release ends the drag; track clicks still page. `scrollbar_thumb` matches `stdlib.ui_scrollbar` (track `BodyH-4`, 8-pixel floor); `browser check` drags the thumb to the bottom and `input_routing_qmp.py` proves it with a real mouse drag. No API change. |
 | 2026-11-19 | M9.1: the text editor highlights source files lexically. `base/`, `lib/`, `system/` paths and `.ig` names start highlighted; other files stay plain. The File menu gains a checked `Highlight` row (five rows total) that toggles the view. Keywords are blue, type/predeclared names dark red, strings dark green, comments gray and numbers dark brown; selected text stays white on the accent band. `//` ends at its line, `{ ... }` spans lines without nesting, and strings do not span lines. The block-comment state is scanned line by line once per frame and carried through the visible rows; token runs use whole code points and the existing checked slices, and unhighlighted drawing is unchanged. No file API, opcode, builtin or `stdlib` change. |
+| 2026-11-19 | M9.2: the editor repaints a pointer event only when it changes visible state, and its scrollbar thumb drags. The block-comment state at every line start is cached in a `bytes[8193]` table refreshed once per document publication, so a frame scans only the visible lines; the drag matches `stdlib.ui_scrollbar` and track clicks still page. The reported `Faulted(BudgetExceeded)` after 2,893 claims was the normal 10 s CPU watchdog, caused by a full repaint (and O(document) block scan) per pointer move; the fix removes the waste and leaves the budget, scheduler and realtime policy unchanged. `editor check` drags the thumb through the injected pointer path and `scripts/editor_scroll_qmp.py` proves the burst ends `Ok` with no budget fault. No file API, opcode, builtin, `Host` or `stdlib` change. |

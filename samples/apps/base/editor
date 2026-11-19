@@ -47,9 +47,18 @@ unit editor;
 // points are never split because token runs use whole code points and the
 // drawing path still publishes slices through the checked `core.substr_into`.
 // The scrollbar uses `ui_scrollbar`/`ui_scrollbar_hit`: a click on the track
-// pages the view; dragging the thumb is not implemented (the M2.4 scrollbar
-// helper defers thumb dragging). Tab inserts two spaces, the repository's
-// source indentation.
+// pages the view and the thumb drags (M9.2, matching the browser's M8.9). Tab
+// inserts two spaces, the repository's source indentation.
+//
+// M9.2 keeps the pointer path cheap: a pointer event repaints only when it
+// changes visible state (a plain move over the text does nothing, a menu move
+// repaints only when the highlight row changes, a thumb drag only when
+// `top_line` changes). The M9.1 block-comment state at every line start is also
+// cached in `line_states` and refreshed once per document publication instead
+// of rescanning from byte 0 on every frame. Together these remove the full
+// repaint per pointer move that spent a normal task's 10 s CPU budget
+// (`Faulted(BudgetExceeded)`) when the user moved the mouse over the editor;
+// the budget itself is unchanged.
 //
 // Drawing is client content only: the window service owns the frame, this app
 // paints inside its content rectangle and never calls `syslib.clear`. Every
@@ -59,7 +68,7 @@ unit editor;
 // `langhost` and a kernel without a framebuffer model a disabled screen, so the
 // sample runs the same load/edit/line logic there and prints `editor: host ok`.
 
-uses core, stdlib, syslib, lib.out;
+uses core, stdlib, syslib, lib.out, lib.inject;
 
 const
   WindowX = 180;
@@ -107,6 +116,9 @@ const
   TokenCapacity = 16;
   KeywordCount = 33;
   TypeCount = 14;
+  // One cached block-comment state per line start: an 8192-byte document has
+  // at most 8193 lines (one per '\n' plus the final empty line).
+  LineStateCapacity = BufferCapacity + 1;
 
   HoldSeconds = 5;
   NanosPerSecond = 1000000000;
@@ -128,6 +140,9 @@ var
   anchor: int;
   top_line: int;
   left_byte: int;
+  // M9.2 scrollbar thumb drag: the grab offset is `pointer - thumb top`.
+  scroll_dragging: bool;
+  scroll_grab_dy: int;
 
   // File menu.
   open_menu: int;
@@ -145,6 +160,9 @@ var
   keywords: array[string[16], 40];
   type_names: array[string[16], 20];
   word_buf: string[TokenCapacity];
+  // M9.2: the block-comment state at each line start, refreshed when the
+  // document is published; `draw_lines` reads one entry per frame.
+  line_states: bytes[LineStateCapacity];
 
   // Window and absolute layout.
   id: int;
@@ -620,39 +638,53 @@ begin
   out_end := at + codepoint_length(t, at, stop);
 end;
 
-// Block-comment state at byte `up_to` (normally a line start), computed by a
-// single allocation-free scan from byte 0. O(document) per frame, bounded by
-// the 8192-byte buffer.
-function block_state_at(up_to: int): bool;
+// Recomputes the block-comment state at every line start (M9.2). This is one
+// allocation-free scan of the whole document - a `//` comment ends at its own
+// line's '\n', so one line's `//` never swallows a later line's `{` - and it
+// runs once whenever the text is published (`publish_staged` from an open or a
+// check-mode load, `ed_replace` from an edit), not once per frame. `draw_lines`
+// then reads the state for its first visible line from `line_states`, so
+// scrolling and dragging cost O(visible lines), not O(document).
+procedure refresh_line_states();
 var
+  length: int;
+  total: int;
+  start: int;
+  stop: int;
   i: int;
-  line_stop: int;
-  next_state: bool;
   finish: int;
   cls: int;
   state: bool;
+  next_state: bool;
+  line: int;
 begin
-  i := 0;
+  length := int(core.len(text));
+  total := line_count(text);
   state := false;
-  while i < up_to do
+  start := 0;
+  line := 0;
+  while line < total and line < LineStateCapacity do
   begin
-    // A `//` comment ends at its own line's '\n', so the state scan must not
-    // let one line's `//` swallow a later line's `{`.
-    line_stop := i;
-    while line_stop < up_to and text[line_stop] <> byte(10) do
-      line_stop := line_stop + 1;
-    while i < line_stop do
+    if state then
+      line_states[line] := byte(1)
+    else
+      line_states[line] := byte(0);
+    stop := line_end_of(text, start);
+    i := start;
+    while i < stop do
     begin
-      scan_token(text, i, line_stop, state, finish, cls, next_state);
+      scan_token(text, i, stop, state, finish, cls, next_state);
       if finish <= i then
         finish := i + 1;
       state := next_state;
       i := finish;
     end;
-    if i < up_to and text[i] = byte(10) then
-      i := i + 1;
+    if stop < length then
+      start := stop + 1
+    else
+      start := length;
+    line := line + 1;
   end;
-  return state;
 end;
 
 function class_color(cls: int): uint;
@@ -740,6 +772,9 @@ begin
   copied := core.substr_into(buf, raw, 0, new_length);
   if copied <> new_length then
     return Invalid;
+  // The editor's one document is `text`; refresh the cached per-line block
+  // states once per edit, never per frame (M9.2).
+  refresh_line_states();
   return Ok;
 end;
 
@@ -813,7 +848,10 @@ var
 begin
   got := core.substr_into(text, load_stage, 0, size);
   if got = size then
+  begin
+    refresh_line_states();
     return Ok;
+  end;
   if got = -6 then
     return CapacityExceeded;
   return Invalid;
@@ -1563,7 +1601,69 @@ end;
 
 // ---- pointer handling ----------------------------------------------------
 
-procedure click_text(px: int; py: int);
+// Sets the caret to the first line of the view when a scrollbar action moved
+// the view past it, or to the last visible line when it moved above it; the
+// selection collapses. Without this a page click or a thumb drag could leave
+// the caret line off screen and the next key would jump the view back (M9.2).
+procedure clamp_caret_to_view();
+var
+  line: int;
+begin
+  line := line_of_pos(text, caret);
+  if line < top_line then
+  begin
+    caret := line_start_of(text, top_line);
+    anchor := caret;
+  end
+  else if line >= top_line + Rows then
+  begin
+    line := top_line + Rows - 1;
+    caret := line_start_of(text, line);
+    anchor := caret;
+  end;
+end;
+
+// The current scrollbar thumb geometry, matching `stdlib.ui_scrollbar`: the
+// track is `ScrollH - 4` tall, the thumb is the visible fraction with an
+// 8-pixel floor (clamped to the track), and it travels over `track - thumb`.
+// The drag handler and the check-mode proof use the same arithmetic (M9.2).
+procedure scrollbar_thumb(thumb_y: var int; thumb_h: var int);
+var
+  track_h: int;
+  total: int;
+  max: int;
+  pos: int;
+  travel: int;
+begin
+  track_h := ScrollH - 4;
+  total := line_count(text);
+  if total <= 0 then
+    thumb_h := track_h
+  else
+  begin
+    if Rows <= 0 then
+      thumb_h := 8
+    else
+      thumb_h := (track_h * Rows) div total;
+    if thumb_h < 8 then
+      thumb_h := 8;
+    if thumb_h > track_h then
+      thumb_h := track_h;
+  end;
+  max := total - Rows;
+  if max < 0 then
+    max := 0;
+  pos := stdlib.ui_scrollbar_clamp(top_line, Rows, total);
+  travel := track_h - thumb_h;
+  thumb_y := scroll_y + 2;
+  if max > 0 and travel > 0 then
+    thumb_y := scroll_y + 2 + (travel * pos) div max;
+end;
+
+// Places the caret and returns true only when the caret, the selection or the
+// view actually changed, so a click that lands where the caret already is does
+// not repaint (M9.2).
+function click_text(px: int; py: int): bool;
 var
   row: int;
   line: int;
@@ -1572,7 +1672,15 @@ var
   stop: int;
   column: int;
   position: int;
+  was_caret: int;
+  was_anchor: int;
+  was_top: int;
+  was_left: int;
 begin
+  was_caret := caret;
+  was_anchor := anchor;
+  was_top := top_line;
+  was_left := left_byte;
   row := (py - text_y) div LineH;
   if row < 0 then
     row := 0;
@@ -1595,25 +1703,93 @@ begin
   position := snap_boundary(text, start, position);
   collapse_to(position);
   ensure_visible();
+  return caret <> was_caret or anchor <> was_anchor or
+    top_line <> was_top or left_byte <> was_left;
 end;
 
-procedure page_scroll(action: int);
+// A track click pages by `action`; returns whether the view (or the clamped
+// caret) moved.
+function page_scroll(action: int): bool;
 var
   total: int;
+  was_top: int;
+  was_caret: int;
+  was_anchor: int;
 begin
   total := line_count(text);
+  was_top := top_line;
+  was_caret := caret;
+  was_anchor := anchor;
   if action = 1 then
     top_line := stdlib.ui_scrollbar_clamp(top_line - Rows, Rows, total)
   else if action = 2 then
     top_line := stdlib.ui_scrollbar_clamp(top_line + Rows, Rows, total);
+  clamp_caret_to_view();
+  return top_line <> was_top or caret <> was_caret or anchor <> was_anchor;
 end;
 
-procedure handle_pointer();
+// Handles one pointer event and returns whether anything visible changed
+// (M9.2). The interactive loop repaints only on true: a no-button move over
+// the text and a move that keeps the same menu row are free, and a thumb drag
+// repaints only while `top_line` changes. A press on the thumb itself starts
+// the drag without repainting; release ends it without repainting.
+function handle_pointer(): bool;
 var
   bar: int;
   row: int;
   action: int;
+  was_menu: int;
+  was_selected: int;
+  was_top: int;
+  was_caret: int;
+  was_anchor: int;
+  thumb_y: int;
+  thumb_h: int;
+  travel: int;
+  max_top: int;
+  desired: int;
 begin
+  // A grabbed thumb follows the pointer while the primary button is held; a
+  // release or a move without the button ends the drag (M9.2, like M8.9).
+  if scroll_dragging then
+  begin
+    if ev.kind = PointerUp then
+    begin
+      scroll_dragging := false;
+      return false;
+    end;
+    if ev.kind = PointerMove then
+    begin
+      if ev.code mod uint(2) <> uint(1) then
+      begin
+        scroll_dragging := false;
+        return false;
+      end;
+      was_top := top_line;
+      was_caret := caret;
+      was_anchor := anchor;
+      scrollbar_thumb(thumb_y, thumb_h);
+      travel := (ScrollH - 4) - thumb_h;
+      max_top := line_count(text) - Rows;
+      if max_top < 0 then
+        max_top := 0;
+      if travel > 0 and max_top > 0 then
+      begin
+        desired := ev.y - scroll_grab_dy;
+        if desired < scroll_y + 2 then
+          desired := scroll_y + 2;
+        if desired > scroll_y + 2 + travel then
+          desired := scroll_y + 2 + travel;
+        top_line := ((desired - (scroll_y + 2)) * max_top) div travel;
+        top_line := stdlib.ui_scrollbar_clamp(
+          top_line, Rows, line_count(text));
+        clamp_caret_to_view();
+      end;
+      return top_line <> was_top or caret <> was_caret or anchor <> was_anchor;
+    end;
+    return false;
+  end;
+
   if ev.kind = PointerDown then
   begin
     bar := stdlib.ui_menu_bar_hit(rect.x, rect.y, ContentW, titles, 1, ev.x, ev.y);
@@ -1623,10 +1799,11 @@ begin
         close_menu()
       else
         open_file_menu();
-      return;
+      return true;
     end;
     if open_menu >= 0 then
     begin
+      was_selected := selected;
       row := stdlib.ui_menu_hit(
         rect.x + 4, rect.y + MenuBarH, MenuW, file_items, FileItemCount,
         ev.x, ev.y);
@@ -1637,26 +1814,31 @@ begin
       end
       else
         close_menu();
-      return;
+      return open_menu < 0 or selected <> was_selected;
     end;
     if stdlib.ui_rect_hit(text_x, text_y, TextW, ScrollH, ev.x, ev.y) then
-    begin
-      click_text(ev.x, ev.y);
-      return;
-    end;
+      return click_text(ev.x, ev.y);
     if stdlib.ui_rect_hit(scroll_x, scroll_y, ScrollW, ScrollH, ev.x, ev.y) then
     begin
       action := stdlib.ui_scrollbar_hit(
         scroll_x, scroll_y, ScrollW, ScrollH, ev.x, ev.y,
         top_line, Rows, line_count(text));
-      page_scroll(action);
-      return;
+      if action = 3 then
+      begin
+        scrollbar_thumb(thumb_y, thumb_h);
+        scroll_dragging := true;
+        scroll_grab_dy := ev.y - thumb_y;
+        return false;
+      end;
+      return page_scroll(action);
     end;
+    return false;
   end
   else if ev.kind = PointerUp then
   begin
     if open_menu >= 0 then
     begin
+      was_menu := open_menu;
       row := stdlib.ui_menu_hit(
         rect.x + 4, rect.y + MenuBarH, MenuW, file_items, FileItemCount,
         ev.x, ev.y);
@@ -1665,21 +1847,25 @@ begin
         activate_menu(row)
       else if row < 0 then
         close_menu();
-      return;
+      return open_menu <> was_menu;
     end;
+    return false;
   end
   else if ev.kind = PointerMove then
   begin
     if open_menu >= 0 then
     begin
+      was_selected := selected;
       row := stdlib.ui_menu_hit(
         rect.x + 4, rect.y + MenuBarH, MenuW, file_items, FileItemCount,
         ev.x, ev.y);
       if row >= 0 and stdlib.ui_menu_selectable(file_items[row], file_disabled, row) then
         selected := row;
+      return selected <> was_selected;
     end;
-    return;
+    return false;
   end;
+  return false;
 end;
 
 // ---- drawing -------------------------------------------------------------
@@ -1900,7 +2086,17 @@ begin
   total := line_count(text);
   start := line_start_of(text, top_line);
   if highlight then
-    block_open := block_state_at(start);
+  begin
+    // M9.2: the block-comment state at the first visible line was cached when
+    // the document was published; only the visible lines are scanned per
+    // frame, not the document from byte 0.
+    line := top_line;
+    if line < 0 then
+      line := 0;
+    if line >= total then
+      line := total - 1;
+    block_open := line_states[line] <> byte(0);
+  end;
   row := 0;
   while row < Rows do
   begin
@@ -2044,6 +2240,7 @@ var
   value: Status;
 begin
   text := "alpha\nbeta\ngamma";
+  refresh_line_states();
   verify("line count", line_count(text) = 3);
   verify("line starts",
     line_start_of(text, 0) = 0 and line_start_of(text, 1) = 6
@@ -2080,6 +2277,7 @@ begin
   verify("file end", caret = 16);
 
   text := "héllo";
+  refresh_line_states();
   verify("multibyte length", int(core.len(text)) = 6);
   verify("boundary start",
     stdlib.str_boundary(text, 0) and stdlib.str_boundary(text, 1));
@@ -2118,6 +2316,7 @@ begin
     int(core.len(text)) = BufferCapacity and text[0] = byte(97));
 
   text := "keep";
+  refresh_line_states();
   load_stage[0] := byte(0xC3);
   load_stage[1] := byte(0x28);
   value := publish_staged(2);
@@ -2221,6 +2420,68 @@ begin
   end;
 end;
 
+// ---- injection (the deterministic test hook) ------------------------------
+
+// Drains queued pointer events through the same handler the interactive loop
+// uses. The redraw result is ignored because check mode draws explicitly; an
+// owner `Expose` still refreshes the cached absolute layout.
+procedure pump_pointer_events();
+var
+  active: bool;
+  count: int;
+begin
+  active := true;
+  count := 0;
+  while active and count < 64 do
+  begin
+    st := syslib.poll_event(ev);
+    if st = Ok then
+    begin
+      count := count + 1;
+      if ev.kind = Expose then
+      begin
+        if ev.window = id then
+          refresh_layout();
+      end
+      else if ev.window = id then
+      begin
+        if ev.kind = PointerDown or ev.kind = PointerUp or
+           ev.kind = PointerMove then
+          handle_pointer();
+      end;
+    end
+    else
+      active := false;
+  end;
+end;
+
+procedure pointer_to(px: int; py: int);
+begin
+  st := inject.pointer_to(px, py);
+  pump_pointer_events();
+end;
+
+procedure pointer_down();
+begin
+  st := inject.pointer_down();
+  pump_pointer_events();
+end;
+
+procedure pointer_up();
+begin
+  st := inject.pointer_up();
+  pump_pointer_events();
+end;
+
+// Moves with the primary button held. `inject.pointer_to` would release the
+// button, so the delta goes directly through the debug pointer hook (M9.2).
+procedure pointer_drag_to(px: int; py: int);
+begin
+  st := syslib.inject_pointer(
+    px - syslib.pointer_x(), py - syslib.pointer_y(), uint(1));
+  pump_pointer_events();
+end;
+
 // ---- modes ---------------------------------------------------------------
 
 // The disabled-screen path: the same file, editing and view logic without a
@@ -2244,6 +2505,10 @@ var
   a: int;
   b: int;
   value: Status;
+  total: int;
+  thumb_y: int;
+  thumb_h: int;
+  travel: int;
 begin
   file_checks();
   scroll_checks();
@@ -2264,6 +2529,7 @@ begin
   // number and string; then a block comment that starts on one line and ends
   // on the next.
   text := "unit child; // note\nvar n: int; const k := 1;\nconst s := \"x\";";
+  refresh_line_states();
   highlight := true;
   file_checked := stdlib.ui_menu_set(file_checked, FileHighlightItem, true);
   collapse_to(int(core.len(text)));
@@ -2283,6 +2549,7 @@ begin
     region_has_color(text_x, text_y + 4 + 2 * LineH, 320, 8, string_color));
 
   text := "unit c; { note\nstill note } var n: int;";
+  refresh_line_states();
   collapse_to(int(core.len(text)));
   top_line := 0;
   left_byte := 0;
@@ -2296,6 +2563,7 @@ begin
   // The state at the first visible line must be computed line by line: the
   // earlier `//` ends at its newline and does not swallow the `{` on line 1.
   text := "// lead\n{ note\nstill note } var n: int;";
+  refresh_line_states();
   collapse_to(int(core.len(text)));
   top_line := 2;
   left_byte := 0;
@@ -2309,6 +2577,7 @@ begin
   // The toggle off leaves only black/white/accent in the text area and clears
   // the menu check. Use the same three coloured lines as the on-probes.
   text := "unit child; // note\nvar n: int; const k := 1;\nconst s := \"x\";";
+  refresh_line_states();
   collapse_to(int(core.len(text)));
   top_line := 0;
   left_byte := 0;
@@ -2330,6 +2599,7 @@ begin
 
   // A deterministic document for the drawing probes.
   text := "IGIS editor\nline two\nline three";
+  refresh_line_states();
   status_line := "check mode";
   collapse_to(0);
   top_line := 0;
@@ -2398,6 +2668,39 @@ begin
   delete_selection_or_backspace();
   verify("event undone", stdlib.starts_with(text, "IGIS"));
 
+  // M9.2: the scrollbar thumb drags through the real pointer path, matching the
+  // browser's M8.9. `base/child` has more lines than the 26-row view.
+  value := open_path("base/child");
+  verify("drag open", value = Ok and highlight);
+  top_line := 0;
+  left_byte := 0;
+  caret := 0;
+  anchor := 0;
+  draw_all();
+  present_frame();
+  total := line_count(text);
+  verify("drag scrollable", total > Rows);
+  scrollbar_thumb(thumb_y, thumb_h);
+  verify("drag starts on thumb",
+    stdlib.ui_scrollbar_hit(
+      scroll_x, scroll_y, ScrollW, ScrollH,
+      scroll_x + 8, thumb_y + thumb_h div 2,
+      top_line, Rows, total) = 3);
+  pointer_to(scroll_x + 8, thumb_y + thumb_h div 2);
+  pointer_down();
+  verify("drag grabs thumb", scroll_dragging);
+  pointer_drag_to(scroll_x + 8, scroll_y + ScrollH - 4);
+  verify("scrollbar drag down", top_line = total - Rows);
+  pointer_up();
+  verify("scrollbar drag ends",
+    not scroll_dragging and top_line = total - Rows);
+  draw_all();
+  present_frame();
+  scrollbar_thumb(thumb_y, thumb_h);
+  travel := (ScrollH - 4) - thumb_h;
+  verify("scrollbar thumb moved",
+    travel > 0 and syslib.get_pixel(scroll_x + 4, thumb_y + 2) = gray);
+
   st := syslib.window_close(id);
   if failed then
     out.say("editor: failed\n")
@@ -2448,9 +2751,12 @@ begin
     begin
       if ev.window = id then
       begin
-        handle_pointer();
-        draw_all();
-        present_frame();
+        // M9.2: only a pointer event that changed visible state repaints.
+        if handle_pointer() and running then
+        begin
+          draw_all();
+          present_frame();
+        end;
       end;
     end;
   end;
@@ -2501,8 +2807,8 @@ begin
         begin
           if ev.window = id then
           begin
-            handle_pointer();
-            dirty := true;
+            if handle_pointer() then
+              dirty := true;
           end;
         end;
         if not running then
@@ -2570,6 +2876,7 @@ begin
   top_line := 0;
   left_byte := 0;
   text := "";
+  refresh_line_states();
   status_line := "";
   black := stdlib.ui_black();
   white := stdlib.ui_white();
