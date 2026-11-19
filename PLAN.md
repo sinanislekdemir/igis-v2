@@ -81,7 +81,7 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `net_probe: ok` on `-smp 4` and `-smp 1` (1,406 body bytes); `net_probe dns`
   resolves `example.com` through `10.0.2.3`; `net_probe dhcp` obtains
   `10.0.2.15/24` from slirp and then fetches the page. Sockets are non-blocking
-  in this slice. **M10.6 (in the tree, uncommitted):** the NIC's PCI INTx line
+  in this slice. **M10.6 (done, `2051069`):** the NIC's PCI INTx line
   (GSI 11) is routed through the I/O APIC to the boot core as vector `0x2D`; the
   handler only sets a flag, acknowledges the device and EOIs, and the used-ring
   drain stays in `net::service` (ADR 0051). `xtask --net-irq intx|poll` selects
@@ -90,8 +90,7 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   `net_probe http`/`dns`/`dhcp` and `net_perf` pass with INTx and with polling on
   `-smp 4`/`-smp 1` over virtio, e1000 and e1000e. `WaitFor::Net`/`Deadline`,
   `socket_source` and the listener remain.
-- **Last commit:** `c7989c4` (M10.9 e1000/e1000e) plus the docs commit; M10.6 is
-  in the working tree for review and not yet committed. `build/home.img` is reset.
+- **Last commit:** `2051069` (M10.6) plus the docs commit. `build/home.img` is reset.
 - **Next:** M10.7 (listener/`accept` + `net_echo`) and the blocking
   `WaitFor::Net`/`Deadline`/`socket_source` follow-up. The deferred backlog in
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) remains available for non-network work.
