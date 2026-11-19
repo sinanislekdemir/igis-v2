@@ -2,7 +2,8 @@
 """Prove the M10 networking stack end to end through QEMU user networking.
 
 This is a verification harness, not part of the kernel. It boots the shell-entry
-ISO headless with one user-mode virtio-net NIC, waits for the `shell> ` prompt,
+ISO headless with one user-mode virtio-net NIC, waits for the shell prompt
+(`igis:/> `; the older `shell> ` still matches),
 runs `run net_probe http`, and requires `net_probe: ok` on the serial console
 (optionally plus a response-body marker). Spec 0020 N20 asks for proofs on
 `-smp 4` and `-smp 1`, so both core counts run by default, each in a fresh
@@ -185,7 +186,7 @@ def run_case(iso, cores, timeout, expect, home):
     )
     serial = Serial(process.stdout)
     try:
-        serial.wait_for(r"shell> ", timeout=timeout)
+        serial.wait_for(r"(?:shell> |igis:/[^>]*> )", timeout=timeout)
         start = len(serial.lines)
         if not send(process, "run net_probe http\n"):
             print_tail(serial)

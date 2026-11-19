@@ -3,7 +3,8 @@
 
 This is a verification harness, not part of the kernel. It boots the shell-entry
 ISO headless with one user-mode NIC whose host port 7007 is forwarded to guest
-port 7, waits for the `shell> ` prompt, runs `run net_echo`, then opens three
+port 7, waits for the shell prompt (`igis:/> ` or the older `shell> `),
+runs `run net_echo`, then opens three
 sequential Python TCP connections to 127.0.0.1:7007 and requires each line to
 come back byte-for-byte. `net_echo: ok` and the prompt must follow.
 
@@ -148,7 +149,7 @@ def run_case(iso, cores, timeout, net_device, no_net, host_port):
     )
     serial = Serial(process.stdout)
     try:
-        serial.wait_for(r"shell> ", timeout=timeout)
+        serial.wait_for(r"(?:shell> |igis:/[^>]*> )", timeout=timeout)
         start = len(serial.lines)
         if not send(process, "run net_echo\n"):
             print_tail(serial)
@@ -164,7 +165,7 @@ def run_case(iso, cores, timeout, net_device, no_net, host_port):
                 print(f"[echo] FAIL core {cores}: guest verdict {match.group(0)!r}")
                 print_tail(serial)
                 return 1
-            serial.wait_for(r"shell> ", timeout=timeout, start=verdict_index)
+            serial.wait_for(r"(?:shell> |igis:/[^>]*> )", timeout=timeout, start=verdict_index)
             print(f"[echo] core {cores}: net_echo: no device")
             return 0
 
@@ -186,7 +187,7 @@ def run_case(iso, cores, timeout, net_device, no_net, host_port):
             return 1
 
         # The app must have exited and the shell must take the next command.
-        serial.wait_for(r"shell> ", timeout=min(timeout, 20.0), start=verdict_index)
+        serial.wait_for(r"(?:shell> |igis:/[^>]*> )", timeout=min(timeout, 20.0), start=verdict_index)
         print(f"[echo] core {cores}: net_echo: ok")
         for line in serial.lines:
             if line.startswith("net_echo:"):

@@ -215,7 +215,7 @@ def main():
     qmp = None
     try:
         qmp = Qmp(socket_path, timeout=args.timeout)
-        serial.wait_for(r"shell> ", timeout=args.timeout)
+        serial.wait_for(r"(?:shell> |igis:/[^>]*> )", timeout=args.timeout)
         process.stdin.write(b"run font shot\n")
         process.stdin.flush()
         serial.wait_for(r"font: ready", timeout=args.timeout)

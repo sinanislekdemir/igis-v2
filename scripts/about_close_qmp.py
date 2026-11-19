@@ -225,7 +225,7 @@ def main():
         # The desktop must still be interactive: launch the terminal and use it.
         click(qmp, *TERMINAL_ITEM, width, height)
         serial.wait_for(r"desktop_shell: launched shell task", timeout=args.timeout)
-        serial.wait_for(r"shell> ", timeout=args.timeout)
+        serial.wait_for(r"(?:shell> |igis:/[^>]*> )", timeout=args.timeout)
         process.stdin.write(b"terminal\n")
         process.stdin.flush()
         serial.wait_for(r"terminal: ok", timeout=args.timeout)

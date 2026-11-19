@@ -28,7 +28,7 @@ sys.dont_write_bytecode = True
 
 from tablet_qmp import Serial  # noqa: E402
 
-PROMPT = r"shell> "
+PROMPT = r"(?:shell> |igis:/[^>]*> )"
 
 
 def main():

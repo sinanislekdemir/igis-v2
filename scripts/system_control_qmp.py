@@ -70,7 +70,7 @@ def boot(iso, cores, reboot, timeout):
         stderr=subprocess.STDOUT,
     )
     serial = Serial(process.stdout)
-    serial.wait_for(r"shell> ", timeout=timeout)
+    serial.wait_for(r"(?:shell> |igis:/[^>]*> )", timeout=timeout)
     return process, serial
 
 

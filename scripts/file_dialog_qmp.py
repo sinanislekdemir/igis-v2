@@ -359,7 +359,7 @@ def run(args):
     qmp = None
     try:
         qmp = Qmp(socket_path, timeout=args.timeout)
-        serial.wait_for(r"shell> ", timeout=args.timeout)
+        serial.wait_for(r"(?:shell> |igis:/[^>]*> )", timeout=args.timeout)
         graphics, _ = serial.wait_for(r"graphics: (\d+)x(\d+)", timeout=10)
         width, height = int(graphics.group(1)), int(graphics.group(2))
         print(f"[harness] screen {width}x{height}, cores {args.cores}")
@@ -632,7 +632,7 @@ def run(args):
         task_id = parsed.group(1)
         outcome = parsed.group(2)
         claims = int(parsed.group(4))
-        serial.wait_for(r"shell> ", timeout=args.timeout, start=exit_cursor)
+        serial.wait_for(r"(?:shell> |igis:/[^>]*> )", timeout=args.timeout, start=exit_cursor)
         budget_faults = [line for line in serial.lines if "BudgetExceeded" in line]
         summary = halted(serial)
         print(

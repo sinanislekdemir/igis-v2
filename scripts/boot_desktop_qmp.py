@@ -162,13 +162,13 @@ def main():
         qmp.send_absolute(hid_x, hid_y, left=False)
 
         serial.wait_for(r"desktop_shell: launched shell task", timeout=args.timeout)
-        serial.wait_for(r"shell> ", timeout=args.timeout)
+        serial.wait_for(r"(?:shell> |igis:/[^>]*> )", timeout=args.timeout)
         print("[harness] shell launched from the Terminal menu")
 
         process.stdin.write(b"terminal\n")
         process.stdin.flush()
         serial.wait_for(r"terminal: ok", timeout=args.timeout)
-        serial.wait_for(r"shell> ", timeout=args.timeout)
+        serial.wait_for(r"(?:shell> |igis:/[^>]*> )", timeout=args.timeout)
         # Give the final present time to reach the framebuffer.
         time.sleep(0.4)
 

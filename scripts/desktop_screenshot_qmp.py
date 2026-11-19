@@ -215,7 +215,7 @@ def main():
     qmp = None
     try:
         qmp = Qmp(socket_path, timeout=args.timeout)
-        serial.wait_for(r"shell> ", timeout=args.timeout)
+        serial.wait_for(r"(?:shell> |igis:/[^>]*> )", timeout=args.timeout)
         process.stdin.write(b"run desktop_shell\n")
         process.stdin.flush()
         serial.wait_for(r"desktop_shell: ready", timeout=args.timeout)

@@ -283,7 +283,8 @@ fn shell_spawns_and_waits_for_the_child_on_the_host() {
         "child: args hello\n",
         "child: bye\n",
         "child: ok\n",
-        "shell: help, echo <text>, run <app> [args], exit\n",
+        "shell: help, echo <text>, cd [dir], run <app> [args], exit\n",
+        "shell: base apps: ls dir pwd cat head tail mkdir rmdir rm\n",
         "child: args world\n",
         "hi there\n",
     ] {
@@ -292,22 +293,26 @@ fn shell_spawns_and_waits_for_the_child_on_the_host() {
     // The host console scripts `help`, `run child world`, `echo hi there`,
     // `exit`, so the same command loop the kernel runs prints four prompts and
     // exits without an unknown command. The shell, not the kernel, now echoes
-    // each typed byte, so the typed text appears after the prompt.
+    // each typed byte, and the prompt carries the current directory (`/` at
+    // boot).
     assert_eq!(
-        text.matches("shell> ").count(),
+        text.matches("igis:/> ").count(),
         4,
         "the shell prompts once per scripted line: {text:?}"
     );
     assert!(
-        text.contains("shell> help\nshell: help, echo <text>, run <app> [args], exit\n"),
+        text.contains(
+            "igis:/> help\nshell: help, echo <text>, cd [dir], run <app> [args], exit\n\
+             shell: base apps: ls dir pwd cat head tail mkdir rmdir rm\n"
+        ),
         "{text:?}"
     );
     assert!(
-        text.contains("shell> echo hi there\nhi there\n"),
+        text.contains("igis:/> echo hi there\nhi there\n"),
         "{text:?}"
     );
     assert!(
-        text.ends_with("shell> exit\nbye\n"),
+        text.ends_with("igis:/> exit\nbye\n"),
         "the shell exits after the scripted `exit`: {text:?}"
     );
     assert!(!text.contains("unknown"), "{text:?}");
@@ -331,11 +336,51 @@ fn shell_edits_the_line_with_backspace_on_the_host() {
     let text = String::from_utf8(result.output).expect("UTF-8 output");
     assert!(
         text.contains(
-            "shell> helpzz\x08 \x08\x08 \x08\nshell: help, echo <text>, run <app> [args], exit\n"
+            "igis:/> helpzz\x08 \x08\x08 \x08\nshell: help, echo <text>, cd [dir], run <app> [args], exit\n\
+             shell: base apps: ls dir pwd cat head tail mkdir rmdir rm\n"
         ),
         "the shell echoes the deletion and runs the edited line: {text:?}"
     );
-    assert!(text.ends_with("shell> exit\nbye\n"), "{text:?}");
+    assert!(text.ends_with("igis:/> exit\nbye\n"), "{text:?}");
+}
+
+#[test]
+fn shell_walks_the_tree_with_cd_and_bare_commands_on_the_host() {
+    let path = app_path("shell");
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
+    let package = langhost::compile(&source, "shell").expect("shell compiles");
+    let input = b"pwd\nls\ncd base\npwd\nls\ncat child\nhead 3 child\ntail 3 child\n\
+cd /home\npwd\nmkdir nctest\nls\nrmdir nctest\ncd ..\npwd\ncd /\npwd\n\
+cd /base/cat\ncd /nope\ncd ~\npwd\ncd .\npwd\ncd /\nrun ls /home\nunknown\nhelp\nexit\n";
+    let result = langhost::run_with_input(&package.code, b"", input, langhost::DEFAULT_BUDGET)
+        .expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    let text = String::from_utf8(result.output).expect("UTF-8 output");
+    for line in [
+        // `pwd` is the external `base/pwd`, which prints the shell's directory.
+        "igis:/> pwd\n/\n",
+        "igis:/base> pwd\n/base\n",
+        "igis:/home> pwd\n/home\n",
+        // Bare commands are resolved under `base/` and receive `<cwd> <rest>`.
+        "igis:/base> cat child\nunit child;\n",
+        "igis:/base> head 3 child\nunit child;\n",
+        "igis:/base> tail 3 child\n",
+        // `home` is writable: `mkdir` creates and `rmdir` removes under it.
+        "mkdir: created /home/nctest\n",
+        "d nctest\n",
+        "rmdir: removed /home/nctest\n",
+        // `cd` refuses a file and a missing name, and `~`/`.`/`..` resolve.
+        "cd: not a directory\n",
+        "cd: no such file or directory\n",
+        // The explicit `run` builtin keeps its old form and messages.
+        "igis:/> run ls /home\nf readme.txt 238\nchild: ok\n",
+        "unknown command: unknown\n",
+        "shell: help, echo <text>, cd [dir], run <app> [args], exit\n",
+        "shell: base apps: ls dir pwd cat head tail mkdir rmdir rm\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in {text:?}");
+    }
+    assert!(text.ends_with("igis:/> exit\nbye\n"), "{text:?}");
 }
 
 #[test]

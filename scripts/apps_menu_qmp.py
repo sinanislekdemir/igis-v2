@@ -279,7 +279,7 @@ def main():
         serial.wait_for(
             r"desktop_shell: launched shell task", timeout=args.timeout, start=cursor
         )
-        serial.wait_for(r"shell> ", timeout=args.timeout)
+        serial.wait_for(r"(?:shell> |igis:/[^>]*> )", timeout=args.timeout)
         process.stdin.write(b"terminal\n")
         process.stdin.flush()
         serial.wait_for(r"terminal: ok", timeout=args.timeout)

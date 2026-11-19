@@ -1,6 +1,9 @@
 unit shell;
 
-uses core, stdlib, syslib, lib.out;
+uses core, stdlib, syslib, lib.out, lib.path, lib.cli;
+
+const
+  ExternalArgsCapacity = 512;
 
 var
   banner: string[32];
@@ -9,6 +12,22 @@ var
   rest: string[256];
   path: string[256];
   argv: string[256];
+  // The shell's current directory in display form (`/`, `/base`, `/home/sub`).
+  // `target` is the API path a `cd` resolves to; `app_path` and `external_args`
+  // stage a bare command's launch. The base apps receive
+  // `"<cwd display> <rest>"` (lib/path.ig `split_cwd`).
+  cwd: string[256];
+  cd_arg: string[256];
+  target: string[256];
+  app_path: string[256];
+  external_args: string[512];
+  listed_name: string[64];
+  listed_kind: uint;
+  listed_size: uint;
+  // Set by whichever builtin handled this line. The dispatch is then a
+  // straight-line chain instead of a deep `else if` nest, which keeps the
+  // compiler's recursive codegen within the host tests' stack.
+  handled: bool;
   st: Status;
   id: int;
   space: int;
@@ -136,6 +155,107 @@ begin
   end;
 end;
 
+// Reports a bare command's non-Ok termination. `run` keeps `report`; a bare
+// command prints only its own output when it exits `Ok` and names itself
+// otherwise (`<cmd>: killed`, `<cmd>: faulted <code>`).
+procedure report_app(name: const string[0]; why: const ExitReason);
+begin
+  case why of
+    Ok: begin end
+    Killed:
+    begin
+      out.say(name);
+      out.say(": killed\n");
+    end;
+    Faulted(code):
+    begin
+      out.say(name);
+      out.say(": faulted ");
+      if code = FaultCode.DivideByZero then
+        out.say("DivideByZero")
+      else if code = FaultCode.Overflow then
+        out.say("Overflow")
+      else if code = FaultCode.CapacityExceeded then
+        out.say("CapacityExceeded")
+      else if code = FaultCode.StackOverflow then
+        out.say("StackOverflow")
+      else if code = FaultCode.WatchdogTimeout then
+        out.say("WatchdogTimeout")
+      else if code = FaultCode.IoError then
+        out.say("IoError")
+      else
+        out.say("other");
+      out.say("\n");
+    end;
+  end;
+end;
+
+// Adopts the resolved API path in `target` as the current directory: the prompt
+// shows its display form. `display` needs one byte more than the API path, so a
+// 256-byte target is refused explicitly instead of leaving `cwd` stale.
+procedure enter();
+var
+  shown: Status;
+begin
+  shown := path.display(target, cwd);
+  if shown <> Ok then
+  begin
+    out.say("cd: ");
+    cli.status_name(shown);
+    out.say("\n");
+  end;
+end;
+
+// `cd [dir]`: an empty argument means `~` (home); otherwise `lib.path.join`
+// resolves `/`, `~`, `.`, `..` and relative names against `cwd`. Only a
+// directory is accepted. There is no stat primitive, so a directory is proved
+// two ways: `core.fs_list` succeeding at index 0 is a non-empty directory, and
+// `fs_list` failing with `fs_size` returning `Invalid` is an empty one. A
+// regular file is `Invalid` from `fs_list` and `Ok` from `fs_size`; a missing
+// name is `NotFound` from both (spec 0013, F7/F13; spec 0019, A4).
+procedure change_dir(arg: const string[0]);
+var
+  join_st: Status;
+  list_st: Status;
+  size_st: Status;
+begin
+  join_st := path.join(cwd, arg, target);
+  if join_st <> Ok then
+  begin
+    out.say("cd: ");
+    cli.status_name(join_st);
+    out.say("\n");
+    return;
+  end;
+
+  list_st := core.fs_list(target, uint(0), listed_name, listed_kind, listed_size);
+  if list_st = Ok then
+  begin
+    enter();
+    return;
+  end;
+
+  size_st := core.fs_size(target, listed_size);
+  if size_st = Ok then
+  begin
+    out.say("cd: not a directory\n");
+    return;
+  end;
+  if size_st = Invalid then
+  begin
+    enter();
+    return;
+  end;
+  if size_st = NotFound then
+  begin
+    out.say("cd: no such file or directory\n");
+    return;
+  end;
+  out.say("cd: ");
+  cli.status_name(size_st);
+  out.say("\n");
+end;
+
 procedure main(args: const string[1024]);
 begin
   // The REPL's terminal is an ordinary task-owned window (spec 0014). Open it
@@ -185,9 +305,17 @@ begin
   // `core.find` locates the first space and `core.substr_into` splits the line
   // into the command and its tail.
   //
+  // The builtins are `help`, `echo`, `cd`, `run`, `exit` and `terminal`; any
+  // other word is an application under `base/` (then `system/`) invoked with
+  // `"<cwd> <rest>"`. The prompt shows the current directory, which starts at
+  // the image root.
+  //
   // There is no `return` yet, so `main` ends by leaving the loop with `done`.
   sources[0] := uint(0);
   sources[1] := uint(1);
+  // The shell starts at the image root; the prompt shows it in display form
+  // (`igis:/> `).
+  cwd := "/";
   done := false;
   while not done do
   begin
@@ -195,7 +323,9 @@ begin
     cursor := 0;
     submitted := false;
     cancelled := false;
-    out.say("shell> ");
+    out.say("igis:");
+    out.say(cwd);
+    out.say("> ");
     while not submitted and not cancelled do
     begin
       ready := -1;
@@ -240,14 +370,29 @@ begin
       split := core.substr_into(rest, line, space + 1, int(core.len(line)) - space - 1);
     end;
 
+    handled := false;
     if cmd = "help" then
-      out.say("shell: help, echo <text>, run <app> [args], exit\n")
-    else if cmd = "echo" then
+    begin
+      out.say("shell: help, echo <text>, cd [dir], run <app> [args], exit\n");
+      out.say("shell: base apps: ls dir pwd cat head tail mkdir rmdir rm\n");
+      handled := true;
+    end;
+    if cmd = "echo" then
     begin
       out.say(rest);
       out.say("\n");
-    end
-    else if cmd = "run" then
+      handled := true;
+    end;
+    if cmd = "cd" then
+    begin
+      // `cd` with no argument (or only spaces) means `~`, the home directory.
+      split := stdlib.trim_into(cd_arg, rest);
+      if int(core.len(cd_arg)) = 0 then
+        cd_arg := "~";
+      change_dir(cd_arg);
+      handled := true;
+    end;
+    if cmd = "run" then
     begin
       // `rest` is `<app> [args]`; split its tail at the first space so the
       // kernel receives an unparsed application path and argument string.
@@ -289,8 +434,9 @@ begin
           out.say("\n");
         end;
       end;
-    end
-    else if cmd = "terminal" then
+      handled := true;
+    end;
+    if cmd = "terminal" then
     begin
       // Terminal-window proof (spec 0014): report the attached id, check a
       // refused unknown id, verify a foreground and a background pixel in the
@@ -345,11 +491,64 @@ begin
       end
       else
         out.say("terminal: not attached\n");
-    end
-    else if cmd = "exit" then
-      done := true
-    else
-      out.say("unknown\n");
+      handled := true;
+    end;
+    if cmd = "exit" then
+    begin
+      done := true;
+      handled := true;
+    end;
+    if not handled then
+    begin
+      // A bare word that is not a builtin is an application under `base/`,
+      // falling back to `system/`. The base commands expect
+      // `args = "<cwd display> <rest>"` (lib/path.ig `split_cwd`), so `pwd`
+      // prints the directory the prompt shows and `ls`/`cat` resolve their
+      // target against it. Only a regular file is runnable; `fs_size` says
+      // `Ok` for one and fails for a directory or a missing name.
+      app_path := "base/" + cmd;
+      st := core.fs_size(app_path, listed_size);
+      if st <> Ok then
+      begin
+        app_path := "system/" + cmd;
+        st := core.fs_size(app_path, listed_size);
+      end;
+
+      if st <> Ok then
+      begin
+        out.say("unknown command: ");
+        out.say(cmd);
+        out.say("\n");
+      end
+      else if int(core.len(cwd)) + 1 + int(core.len(rest)) > ExternalArgsCapacity then
+      begin
+        out.say(cmd);
+        out.say(": arguments too long\n");
+      end
+      else
+      begin
+        external_args := cwd + " " + rest;
+        st := core.run(app_path, external_args, diag, reason);
+        if st <> Ok then
+        begin
+          out.say(cmd);
+          out.say(": ");
+          out.say(diag.message);
+          out.say("\n");
+        end
+        else if core.len(diag.message) > uint(0) then
+        begin
+          // A compile error the service finds after `spawn` returned reaches
+          // `run`'s diagnostic (spec 0005).
+          out.say(cmd);
+          out.say(": ");
+          out.say(diag.message);
+          out.say("\n");
+        end
+        else
+          report_app(cmd, reason);
+      end;
+    end;
     end;
   end;
 

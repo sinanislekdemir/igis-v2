@@ -198,7 +198,7 @@ def boot_and_run(cores, command, verdict_label, timeout):
         qmp = Qmp(socket_path, timeout=timeout)
         boot_start = time.time()
         serial.wait_for(r"ext2w: home ok", timeout=timeout)
-        serial.wait_for(r"shell> ", timeout=timeout)
+        serial.wait_for(r"(?:shell> |igis:/[^>]*> )", timeout=timeout)
         boot_seconds = time.time() - boot_start
 
         command_start = time.time()

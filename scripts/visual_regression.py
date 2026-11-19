@@ -415,7 +415,7 @@ def boot_and_capture(iso, cores, timeout, scratch):
     qmp = None
     try:
         qmp = Qmp(socket_path, timeout=timeout)
-        serial.wait_for(r"shell> ", timeout=timeout)
+        serial.wait_for(r"(?:shell> |igis:/[^>]*> )", timeout=timeout)
         process.stdin.write(b"run visual shot\n")
         process.stdin.flush()
         first = serial.wait_for(r"visual: (ok|FAIL)", timeout=timeout)
