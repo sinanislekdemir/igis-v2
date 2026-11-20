@@ -28,9 +28,10 @@ topmost-first enumeration.
 
 `window_raise` restores a minimized window: it clears the flag, moves the
 window to the top, focuses it and marks its content `Expose`. The desktop's
-`File` Window List already enumerates every window; its rows are now clickable
-and call `window_raise`, so the list is also the restore UI. Owner-`0` kernel
-windows may be minimized.
+`Windows` pull-down lists every live window in topmost-first order and marks a
+minimized row with `min`; selecting a row calls `window_raise`. The `File`
+Window List is clickable for the same purpose and marks minimized rows with `*`.
+Owner-`0` kernel windows may be minimized.
 
 The System Log writer keeps updating its grid and the serial mirror while the
 log is minimized or while an app-drawn pull-down holds the modal grab, but it
@@ -42,7 +43,7 @@ is restored, so kernel output never draws over the menu.
 - **Close the System Log.** Kernel diagnostics would lose their window and there
   would be no owner to reopen it.
 - **A taskbar or dock.** A new desktop surface and layout model for one button;
-  the existing window list already enumerates everything.
+  the existing window enumeration plus the Windows pull-down is enough.
 - **Off-screen minimize.** The window would still be hit-testable or would need
   saved geometry; the z-order bottom plus a flag is simpler and keeps the
   geometry intact.

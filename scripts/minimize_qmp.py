@@ -2,8 +2,9 @@
 """Prove the window minimize box and the window-list restore path.
 
 Boots the product image, presses the System Log's minimize box, checks that the
-log pixels are gone (the desktop shows through), opens `File > Window List`,
-clicks the `System Log` row and checks that the log is painted again.
+log pixels are gone (the desktop shows through), sweeps the pointer over the
+Apps menu (the log must not overdraw it), opens `Windows`, clicks the marked
+`System Log` row and checks that the log is painted again.
 
 The same service box appears on every window title bar; this script uses the
 kernel log because it is always present at boot.
@@ -33,11 +34,10 @@ LOG_HIDE = (995 + 4, 26 + 8)
 APPS_LABEL = (64, 10)
 APPS_MENU_PIXEL = (265, 100)
 OUTSIDE = (700, 400)
-# The desktop `File` item starts at x = 24 and is 26 px wide.
-FILE_LABEL = (30, 10)
-# The Window List opens content 460x300 at (320, 140); the first row is
-# `Desktop`, the second (minimized bottom) is `System Log`.
-WINDOW_LIST_SYSTEM_LOG = (400, 184)
+# The `Windows` label starts at x = 94; its pull-down frame is
+# (90, 22, 220, count*16+2). The minimized System Log is the last row.
+WINDOWS_LABEL = (110, 10)
+WINDOWS_SYSTEM_LOG_ROW = (150, 47)
 # A blank lower-right log pixel; the log background is 0xf0f0f0.
 LOG_PIXEL = (900, 700)
 
@@ -175,11 +175,10 @@ def run(args):
             print("[harness] FAIL: the log repainted while minimized")
             return 1
 
-        # File -> Window List -> the System Log row restores it.
-        click(qmp, *FILE_LABEL, width, height)
-        serial.wait_for(r"desktop_shell: window list open", timeout=args.timeout)
-        time.sleep(0.3)
-        click(qmp, *WINDOW_LIST_SYSTEM_LOG, width, height)
+        # Windows -> the marked `*System Log` row restores it.
+        click(qmp, *WINDOWS_LABEL, width, height)
+        time.sleep(0.2)
+        click(qmp, *WINDOWS_SYSTEM_LOG_ROW, width, height)
         serial.wait_for(r"desktop_shell: raised window", timeout=args.timeout)
         time.sleep(0.6)
         restored = capture(qmp, os.path.join(scratch, "restored.png"))

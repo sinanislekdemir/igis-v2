@@ -7295,6 +7295,23 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::enumeration(STATUS_ENUM)))
             }
+            "syslib.window_minimized" => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`syslib.window_minimized` expects 1 argument, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                self.window_id(target, args[0])?;
+                self.one(opcodes::BUILTIN, builtin::WINDOW_MINIMIZED)?;
+                self.pop(1)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Bool)))
+            }
             // Read-only enumeration (spec 0011, W19; spec 0012, D15). Index 0
             // is the topmost window; the title destination is compile-checked
             // at the service's 64-byte cap so the interpreter needs no capacity

@@ -448,6 +448,10 @@ impl Host for KernelHost {
         crate::window::present(self.current, id)
     }
 
+    fn window_minimized(&mut self, id: u64) -> bool {
+        crate::window::is_minimized(id)
+    }
+
     // Window service (spec 0011). The kernel table owns the geometry, z-order,
     // focus and ownership; the host supplies the calling task id as the owner,
     // because the interpreter has no task identity. A disabled screen makes

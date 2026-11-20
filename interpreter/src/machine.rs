@@ -454,6 +454,12 @@ pub trait Host {
         Status::Invalid
     }
 
+    /// Whether `id` is minimized (`syslib.window_minimized`, spec 0011 W30).
+    /// The default is `false`, the disabled-window-service result.
+    fn window_minimized(&mut self, _id: u64) -> bool {
+        false
+    }
+
     /// Reads one window snapshot by z-order index (`syslib.window_info`,
     /// spec 0011, W19; spec 0012, D15): index `0` is the topmost live window.
     /// The default is a disabled service (`None`, reported as `NotFound`).
@@ -2168,6 +2174,11 @@ impl Machine {
                         let window = self.pop(stack)?;
                         let status = host.window_present(window);
                         self.push(stack, status as u64)?;
+                    }
+                    builtin::WINDOW_MINIMIZED => {
+                        let window = self.pop(stack)?;
+                        let minimized = host.window_minimized(window);
+                        self.push(stack, u64::from(minimized))?;
                     }
                     // Modal popup input grab (spec 0011, W26; ADR 0044). The
                     // machine rejects a non-positive extent before the host

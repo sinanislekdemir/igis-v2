@@ -105,8 +105,8 @@ resize. Those are M2.4/M2.5.
   a white bar 22 pixels high, a black 8×8 Apple square, the labels `File`, `Apps`,
   `Windows` and `System`, a black baseline on row 21, and the `core.clock()` `HH:MM`
   right-aligned. The bar is application-drawn and is presented after it is drawn and
-  redrawn after every event. `File` and `Windows` are direct items; `Apps` (M8.3, D20)
-  and `System` (M2.6.4) are pull-down menus. A pull-down's label is
+  redrawn after every event. `File` is a direct item; `Apps` (M8.3, D20), `Windows`
+  (M11) and `System` (M2.6.4) are pull-down menus. A pull-down's label is
   inverted while its menu is open. Both pull-downs are app-drawn and have no window, so
   opening one takes the machine-wide modal popup input grab (spec 0011, W26; ADR 0044)
   and closing it releases the grab; a bar click on the other pull-down switches menus.
@@ -118,8 +118,9 @@ resize. Those are M2.4/M2.5.
     W30);
   - `Apps` toggles the application pull-down (D20). It does not launch anything when it
     opens; a row activates, and an outside click dismisses the menu;
-  - `Windows` raises the topmost window titled `Terminal` (the "bring the terminal
-    forward" affordance without a dropdown);
+  - `Windows` opens a pull-down listing every live window in topmost-first order; a
+    minimized window is listed last with a `min` shortcut label and selecting any row
+    raises it (restoring a minimized window);
   - the Apple square raises the shell's own window.
 
   A launched application is never waited for: the shell uses `core.spawn`, not

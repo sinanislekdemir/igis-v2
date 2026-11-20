@@ -76,6 +76,7 @@ The interface is split into two namespaces:
 | `session_close` | `fn session_close(id: u64) -> Status` | no; owner-checked (spec 0021, builtin 75) |
 | `session_send` | `fn session_send(id: u64, data: &[u8]) -> Result<usize, Status>` | no; non-blocking, `WouldBlock` when the input ring is full (spec 0021, builtin 76) |
 | `session_recv` | `fn session_recv(id: u64, dst: &mut [u8]) -> Result<usize, Status>` | no; non-blocking, `WouldBlock` when empty, `Closed` after finish (spec 0021, builtin 77) |
+| `window_minimized` | `fn window_minimized(id: u64) -> bool` | no; true when the window is minimized (spec 0011 W30, builtin 78) |
 | `halt` | `fn halt() -> Status` | no; stops the machine (never returns on the kernel), `Invalid` on a bare host |
 | `reboot` | `fn reboot() -> Status` | no; resets the machine, `Invalid` on a bare host |
 | `net_config` | `fn net_config(ip: u32, mask: u32, gateway: u32, dns: u32) -> Status` | no; machine-wide static IPv4 configuration (`core.net_config`, builtin 62) |
@@ -378,6 +379,16 @@ grid.
   `core.read_input`/source `0` route through it. Serial input is routed to the focused
   window owner's session. `println!` stays in the System Log. The detail is spec 0021.
 
+#### Implemented ABI: window minimize probe (M11)
+
+| Primitive | Implemented signature | Result |
+|-----------|-----------------------|--------|
+| `syslib.window_minimized` | `(id: int) -> bool` | true when the id names a live minimized window; false for a live visible or missing window |
+
+`Host::window_minimized(id) -> bool` defaults to `false`; the kernel maps it to
+`window::is_minimized`. This is the one read-only query the desktop needs to
+mark the Windows pull-down and the File window list (spec 0011 W30).
+
 #### Implemented ABI: system control (M2.6.4)
 
 | Primitive | Implemented signature | Result |
@@ -624,3 +635,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-19 | `Host::socket_readable` is selector readiness: data, EOF, an error, a pending listener connection or an expired deadline; a bare completed TCP connect is excluded (the first blocking receive still waits for data). `Stack::readable` keeps the connect-completion meaning for other callers. No opcode; ABI v1 stays 75. |
 | 2026-11-17 | Q44 resolved (ADR 0037): the kernel line discipline is gone. COM1 drains into a 512-byte raw ring (newest byte dropped and counted when full, no echo); PS/2 key presses go only to the event queue. `Host::read_input(dst) -> usize` (non-blocking, `0` when empty) behind `core.read_input(var bytes[N]) -> int` replaces `Host::read_line`; it reuses the `READ_LINE` opcode slot as `READ_INPUT` (`0x42`), so ABI v1 stays at 75. Source `0` is now "a console byte is available" and the probe is `Host::console_byte_ready`. The shell echoes and edits its own `string[256]` with the `stdlib.str_*` helpers and blocks in `core.next_any`; `langhost` drains a scripted byte queue. |
 | 2026-11-20 | M11 console sessions (spec 0021, ADR 0053): `Host::session_open`/`session_close`/`session_send`/`session_recv` (builtins 74–77, `Invalid`/`false` defaults) and compiler-lowered `core.session_source` (`1 << 62 | id`). A child inherits the requester session; `core.write`/`read_input` route through it. Serial input follows the focused window owner. `Host::terminal_attach` is retired. No opcode; ABI v1 stays 75. |
+| 2026-11-20 | M11 minimize query (spec 0011 W30, ADR 0054): `Host::window_minimized(id) -> bool` (builtin 78, default `false`) backs `syslib.window_minimized`; the kernel maps it to `window::is_minimized`. It is the read-only query behind the Windows pull-down's `min` marker and the File list's `*` marker. No opcode; ABI v1 stays 75. |

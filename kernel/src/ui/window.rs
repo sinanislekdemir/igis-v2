@@ -1831,6 +1831,15 @@ pub fn is_visible(id: u64) -> bool {
     !table.windows[table.order[pos]].minimized
 }
 
+/// Whether window `id` is minimized (`syslib.window_minimized`, W30).
+pub fn is_minimized(id: u64) -> bool {
+    let table = TABLE.lock();
+    let Some(pos) = table.position(id) else {
+        return false;
+    };
+    table.windows[table.order[pos]].minimized
+}
+
 /// Closes every window owned by a terminating task and repairs the screen once.
 /// Called from `Task::reclaim`, so it covers normal exit, kill, fault, a failed
 /// spawn and a stale-slot eviction (W8). A terminating task's modal popup grab

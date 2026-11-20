@@ -1139,6 +1139,7 @@ core.session_send(id: int; data: const string[0] or const bytes[N];
                   var sent: int) -> Status
 core.session_recv(id: int; var dst: bytes[N]; var read: int) -> Status
 core.session_source(id: int) -> uint
+syslib.window_minimized(id: int) -> bool
 ```
 
 Builtins 74–77 plus a compiler-lowered source helper; no opcode is added (ABI v1 stays
@@ -1147,8 +1148,10 @@ writes keystrokes with `session_send` and reads screen bytes with `session_recv`
 spawned child inherits it, so its `core.write` lands in the output ring and its
 `core.read_input`/source `0` reads the input ring. `session_source` is a `next_any`
 source ready on output data or finish/close. `core.terminal_attach` is retired.
-`println!`/`print!` stay in the System Log; `core.write` never feeds it. The exact
-status table and failure modes are spec 0021 and ADR 0053.
+`println!`/`print!` stay in the System Log; `core.write` never feeds it.
+`syslib.window_minimized` (builtin 78) is the read-only minimize query used by the
+desktop's Windows pull-down. The exact status table and failure modes are spec 0021
+and ADR 0053.
 
 ### System control (M2.6.4)
 
@@ -2225,3 +2228,4 @@ controls and input dialog for the QMP screenshot harness.
 | 2026-11-18 | M8.4 adds the persistent pointer-region claim surface (spec 0011 W27, ADR 0045): `syslib.region_claim(x: int, y: int, w: int, h: int) -> Status` and `syslib.region_release() -> Status`. The claim is machine-wide and task-owned; while it is held and no modal grab is active, a queued `PointerDown` with `window = 0` inside the rectangle belongs only to the owner, and a new press there starts no service drag and posts no close request. `Ok`/`Full`/`Invalid` on take (a repeat by the owner updates the rectangle), `Ok`/`NotFound`/`Invalid` on release. Host builtins 60/61, no opcode; the machine rejects a non-positive extent before the host call. |
 | 2026-11-19 | M9.4 raises the editor's application buffer from 8192 to 131072 bytes (128 KiB, the spec 0008 per-unit source cap; `LineStateCapacity` follows at 131073). The M2.5.3 rules are unchanged — boundary-checked replacement, app-local `bytes[BufferCapacity]` staging, one strict-UTF-8 publish, `CapacityExceeded` without a partial write — and the size check now refuses only files over 131072 with `too large (131072 max)`. Every current source sample fits (the largest is `editor` at 81,509 B); the user-visible failure was the file-open dialog correctly returning `base/calculator` (32,516 B) while the editor's 8 KiB cap refused it silently. No language, ABI, opcode, builtin or file-API change. |
 | 2026-11-20 | M11 replaces the terminal-window surface with console sessions (spec 0021, ADR 0053): `core.session_open`/`close`/`send`/`recv` are builtins 74–77 and `core.session_source` is compiler-lowered; `core.terminal_attach` (44) is retired. The terminal is an application emulator. A `#`-prefixed menu label is a non-selectable section header (`stdlib.ui_menu_is_header`). No opcode is added; ABI v1 stays 75. |
+| 2026-11-20 | M11 minimize query: `syslib.window_minimized(id: int) -> bool` (builtin 78) reports whether a live window is minimized. The Windows pull-down marks such rows with `min`; the File window list marks them with `*`. No opcode; ABI v1 stays 75. |

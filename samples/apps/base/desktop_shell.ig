@@ -58,6 +58,7 @@ const
   SysMenuCount = 4;
   AppMenuWidth = 220;
   AppMenuCount = 11;
+  WindowMenuWidth = 220;
   WindowListCapacity = 16;
   AboutContentW = 420;
   AboutContentH = 200;
@@ -129,6 +130,18 @@ var
   apps_opened: int;
   apps_closed: int;
   grab_status: Status;
+
+  // The Windows pull-down (M11): one row per live window in topmost-first
+  // order; a minimized window is marked with a leading `*`. Selecting a row
+  // raises/restores it.
+  window_items: array[string[64], 16];
+  window_keys: array[string[32], 16];
+  window_menu_ids: array[int, 16];
+  window_count: int;
+  windows_open: bool;
+  windows_selected: int;
+  windows_runs: int;
+  menu_label: string[64];
 
   // The System pull-down (M2.6.4, spec 0017). The app owns the open state, the
   // highlight and the item tables; the helpers draw and hit-test only.
@@ -289,7 +302,13 @@ begin
   end
   else
     status := syslib.draw_text_prop(menu_apps_x, 7, "Apps", black);
-  status := syslib.draw_text_prop(menu_windows_x, 7, "Windows", black);
+  if windows_open then
+  begin
+    status := syslib.fill_rect(menu_windows_x - 4, 2, tw("Windows") + 8, MenuHeight - 4, black);
+    status := syslib.draw_text_prop(menu_windows_x, 7, "Windows", white);
+  end
+  else
+    status := syslib.draw_text_prop(menu_windows_x, 7, "Windows", black);
   if system_open then
   begin
     status := syslib.fill_rect(menu_system_x - 4, 2, tw("System") + 8, MenuHeight - 4, black);
@@ -394,6 +413,8 @@ begin
     split := core.format_int_into(digits, win_id, uint(10), uint(0));
     status := stdlib.str_insert_into(win_line, int(core.len(win_line)), digits);
     status := stdlib.str_insert_into(win_line, int(core.len(win_line)), " \"");
+    if syslib.window_minimized(win_id) then
+      status := stdlib.str_insert_into(win_line, int(core.len(win_line)), "*");
     status := stdlib.str_insert_into(win_line, int(core.len(win_line)), win_title);
     status := stdlib.str_insert_into(win_line, int(core.len(win_line)), "\" ");
     split := core.format_int_into(digits, win_rect.x, uint(10), uint(0));
@@ -577,6 +598,8 @@ procedure open_system_menu();
 begin
   if app_open then
     close_apps_menu();
+  if windows_open then
+    close_windows_menu();
   system_open := true;
   system_selected := stdlib.ui_menu_first(SysMenuCount, sys_items, sys_disabled);
   system_runs := system_runs + 1;
@@ -584,6 +607,170 @@ begin
     menu_system_x - 4, MenuHeight, SysMenuWidth, SysMenuCount * 16 + 2);
   draw_menu_bar();
   draw_system_menu();
+end;
+
+// ---- the Windows pull-down (M11) ----------------------------------------
+//
+// One row per live window in `window_info` order (topmost first). A minimized
+// window is listed at the end and prefixed with `*`; activating any row raises
+// it, which restores a minimized window (spec 0011, W30).
+
+procedure build_windows_menu();
+begin
+  window_count := 0;
+  pos := 0;
+  status := syslib.window_info(uint(pos), win_id, win_rect, win_title);
+  while status = Ok and pos < 32 and window_count < 16 do
+  begin
+    window_menu_ids[window_count] := win_id;
+    window_items[window_count] := win_title;
+    if syslib.window_minimized(win_id) then
+      window_keys[window_count] := "min"
+    else
+      window_keys[window_count] := "";
+    window_count := window_count + 1;
+    pos := pos + 1;
+    status := syslib.window_info(uint(pos), win_id, win_rect, win_title);
+  end;
+end;
+
+procedure draw_windows_menu();
+begin
+  if window_count <= 0 then
+    return;
+  status := stdlib.ui_menu_dropdown(
+    menu_windows_x - 4, MenuHeight, WindowMenuWidth,
+    window_items, window_keys, window_count, windows_selected, uint(0), uint(0), true);
+  status := syslib.present(
+    menu_windows_x - 4, MenuHeight, WindowMenuWidth, window_count * 16 + 2);
+end;
+
+procedure open_windows_menu();
+begin
+  if app_open then
+    close_apps_menu();
+  if system_open then
+    close_system_menu();
+  build_windows_menu();
+  if window_count <= 0 then
+    return;
+  windows_open := true;
+  windows_selected := stdlib.ui_menu_first(window_count, window_items, uint(0));
+  windows_runs := windows_runs + 1;
+  out.say("desktop_shell: windows menu open\n");
+  grab_status := syslib.popup_grab(
+    menu_windows_x - 4, MenuHeight, WindowMenuWidth, window_count * 16 + 2);
+  draw_menu_bar();
+  draw_windows_menu();
+end;
+
+procedure close_windows_menu();
+begin
+  if not windows_open then
+    return;
+  windows_open := false;
+  windows_selected := -1;
+  out.say("desktop_shell: windows menu closed\n");
+  status := syslib.popup_release();
+  repair_menu_area(
+    menu_windows_x - 4, MenuHeight, WindowMenuWidth, window_count * 16 + 2);
+  draw_menu_bar();
+  draw_shell_window();
+end;
+
+procedure update_windows_highlight();
+begin
+  hit_row := stdlib.ui_menu_hit(
+    menu_windows_x - 4, MenuHeight, WindowMenuWidth,
+    window_items, window_count, ev.x, ev.y);
+  if hit_row >= 0 and hit_row <> windows_selected then
+  begin
+    windows_selected := hit_row;
+    draw_windows_menu();
+  end;
+end;
+
+procedure activate_window_item();
+var
+  target: int;
+begin
+  if windows_selected < 0 or windows_selected >= window_count then
+    return;
+  target := window_menu_ids[windows_selected];
+  close_windows_menu();
+  status := syslib.window_raise(target);
+  if status = Ok then
+  begin
+    raised_id := target;
+    out.say("desktop_shell: raised window ");
+    out.say_int(target);
+    out.say("\n");
+  end;
+end;
+
+procedure handle_windows_key(code: uint);
+var
+  key: int;
+begin
+  key := stdlib.ui_key_code(code);
+  if key = 0x128 then
+  begin
+    close_windows_menu();
+    open_apps_menu();
+    return;
+  end;
+  if key = 0x129 then
+  begin
+    close_windows_menu();
+    open_system_menu();
+    return;
+  end;
+  action := stdlib.ui_menu_key(code, windows_open);
+  if action = 6 then
+    close_windows_menu()
+  else if action = 1 then
+  begin
+    windows_selected := stdlib.ui_menu_move(
+      windows_selected, window_count, -1, window_items, uint(0));
+    draw_windows_menu();
+  end
+  else if action = 2 then
+  begin
+    windows_selected := stdlib.ui_menu_move(
+      windows_selected, window_count, 1, window_items, uint(0));
+    draw_windows_menu();
+  end
+  else if action = 5 then
+    activate_window_item()
+  else if action = 3 then
+  begin
+    close_windows_menu();
+    open_apps_menu();
+  end
+  else if action = 4 then
+  begin
+    close_windows_menu();
+    open_system_menu();
+  end;
+end;
+
+procedure handle_windows_menu_click();
+begin
+  if ev.y < MenuHeight then
+    handle_menu(ev.x, ev.y)
+  else
+  begin
+    hit_row := stdlib.ui_menu_hit(
+      menu_windows_x - 4, MenuHeight, WindowMenuWidth,
+      window_items, window_count, ev.x, ev.y);
+    if hit_row >= 0 then
+    begin
+      windows_selected := hit_row;
+      activate_window_item();
+    end
+    else
+      close_windows_menu();
+  end;
 end;
 
 // ---- the Apps pull-down (M8.3/M11, spec 0012 D20) -----------------------
@@ -644,6 +831,8 @@ procedure open_apps_menu();
 begin
   if system_open then
     close_system_menu();
+  if windows_open then
+    close_windows_menu();
   app_open := true;
   app_selected := stdlib.ui_menu_first(AppMenuCount, app_items, uint(0));
   apps_opened := apps_opened + 1;
@@ -745,17 +934,23 @@ begin
   launches := launches + 1;
   if launch_status = Ok then
   begin
-    out.say("desktop_shell: launched ");
-    out.say(label);
-    out.say(" task ");
-    out.say_int(last_task);
-    out.say("\n");
+    win_line := "";
+    status := stdlib.str_insert_into(win_line, 0, "desktop_shell: launched ");
+    status := stdlib.str_insert_into(win_line, int(core.len(win_line)), label);
+    status := stdlib.str_insert_into(win_line, int(core.len(win_line)), " task ");
+    split := core.format_int_into(digits, last_task, uint(10), uint(0));
+    status := stdlib.str_insert_into(win_line, int(core.len(win_line)), digits);
+    status := stdlib.str_insert_into(win_line, int(core.len(win_line)), "\n");
+    out.say(win_line);
   end
   else
   begin
-    out.say("desktop_shell: launch failed: ");
-    out.say(diag.message);
-    out.say("\n");
+    win_line := "";
+    status := stdlib.str_insert_into(win_line, 0, "desktop_shell: launch failed: ");
+    status := stdlib.str_insert_into(
+      win_line, int(core.len(win_line)), diag.message);
+    status := stdlib.str_insert_into(win_line, int(core.len(win_line)), "\n");
+    out.say(win_line);
   end;
 end;
 
@@ -1116,15 +1311,23 @@ begin
   if launch_status = Ok then
   begin
     shell_launched := true;
-    out.say("desktop_shell: launched terminal task ");
-    out.say_int(shell_task);
-    out.say("\n");
+    win_line := "";
+    status := stdlib.str_insert_into(
+      win_line, 0, "desktop_shell: launched terminal task ");
+    split := core.format_int_into(digits, shell_task, uint(10), uint(0));
+    status := stdlib.str_insert_into(win_line, int(core.len(win_line)), digits);
+    status := stdlib.str_insert_into(win_line, int(core.len(win_line)), "\n");
+    out.say(win_line);
   end
   else
   begin
-    out.say("desktop_shell: terminal launch failed: ");
-    out.say(diag.message);
-    out.say("\n");
+    win_line := "";
+    status := stdlib.str_insert_into(
+      win_line, 0, "desktop_shell: terminal launch failed: ");
+    status := stdlib.str_insert_into(
+      win_line, int(core.len(win_line)), diag.message);
+    status := stdlib.str_insert_into(win_line, int(core.len(win_line)), "\n");
+    out.say(win_line);
   end;
 end;
 
@@ -1182,9 +1385,10 @@ begin
     end
     else if x >= menu_windows_x - 4 and x < menu_system_x - 4 then
     begin
-      if system_open then close_system_menu();
-      if app_open then close_apps_menu();
-      raise_terminal();
+      if windows_open then
+        close_windows_menu()
+      else
+        open_windows_menu();
       window_runs := window_runs + 1;
       handled := true;
     end
@@ -1378,16 +1582,36 @@ begin
     verify("escape closes apps", not app_open);
     verify("apps grab released after switching", syslib.popup_release() = NotFound);
 
-    // Windows: raise the topmost terminal; focus and z-order follow.
+    // Windows: the pull-down lists every live window; activating the Terminal
+    // row raises it (and would restore it if it had been minimized).
     handle_menu(menu_windows_x + 4, 10);
-    verify("windows item handled", handled and window_runs = 1);
     verify(
-      "terminal raised",
-      raised_id > 0 and raised_id <> own and syslib.window_focus() = raised_id);
-    status := syslib.window_info(uint(0), win_id, win_rect, win_title);
-    verify(
-      "raised window is the terminal",
-      status = Ok and win_id = raised_id and win_title = "Terminal");
+      "windows menu open",
+      handled and windows_open and window_runs = 1 and windows_runs = 1);
+    verify("windows menu lists windows", window_count >= 3);
+    pos := 0;
+    raised_id := 0;
+    while pos < window_count and raised_id = 0 do
+    begin
+      if window_items[pos] = "Terminal" or window_items[pos] = "*Terminal" then
+      begin
+        windows_selected := pos;
+        raised_id := window_menu_ids[pos];
+      end;
+      pos := pos + 1;
+    end;
+    verify("terminal row found", raised_id > 0);
+    if raised_id > 0 then
+    begin
+      activate_window_item();
+      verify(
+        "terminal raised from windows menu",
+        not windows_open and syslib.window_focus() = raised_id);
+      status := syslib.window_info(uint(0), win_id, win_rect, win_title);
+      verify(
+        "raised window is the terminal",
+        status = Ok and win_id = raised_id and win_title = "Terminal");
+    end;
 
     // Enumeration boundary and the sanctioned presentation path.
     status := syslib.window_info(uint(999), win_id, win_rect, win_title);
@@ -1633,6 +1857,8 @@ begin
           handle_system_key(ev.code)
         else if app_open then
           handle_apps_key(ev.code)
+        else if windows_open then
+          handle_windows_key(ev.code)
         else if ev.window = own or ev.window = 0 then
           handle_shortcut(ev.code);
       end
@@ -1642,6 +1868,8 @@ begin
           handle_system_menu_click()
         else if app_open then
           handle_apps_menu_click()
+        else if windows_open then
+          handle_windows_menu_click()
         else if ev.window = 0 then
           handle_menu(ev.x, ev.y)
         else if ev.window = winlist_id then
@@ -1654,7 +1882,9 @@ begin
         if system_open then
           update_menu_highlight()
         else if app_open then
-          update_apps_highlight();
+          update_apps_highlight()
+        else if windows_open then
+          update_windows_highlight();
       end;
       // Keep the bar visible after every event; no window starts above it.
       draw_menu_bar();

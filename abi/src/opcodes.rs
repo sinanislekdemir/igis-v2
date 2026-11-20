@@ -989,6 +989,10 @@ pub mod builtin {
     /// reference][read reference]`.
     pub const SESSION_RECV: u32 = 77;
 
+    /// `syslib.window_minimized(id) -> bool`: true when the window exists and
+    /// is minimized (M11 minimize). A missing window is false. Operands: `[id]`.
+    pub const WINDOW_MINIMIZED: u32 = 78;
+
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
         match id {
@@ -1066,6 +1070,7 @@ pub mod builtin {
             SESSION_CLOSE => Some((1, 1)),
             SESSION_SEND => Some((3, 1)),
             SESSION_RECV => Some((4, 1)),
+            WINDOW_MINIMIZED => Some((1, 1)),
             _ => None,
         }
     }

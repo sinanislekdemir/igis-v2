@@ -30,7 +30,7 @@ decisions in `adr/`, and work items in `PLAN.md`.
 - Specs 0001–0021 are accepted; **M2–M11 are complete** (desktop, language,
   filesystems, networking, terminal emulator). Current milestone work is tracked in
   `PLAN.md`.
-- **609 host tests** (531 language + 56 `net` + 22 `ext2w`); ABI v1 has **75 opcodes**.
+- **610 host tests** (532 language + 56 `net` + 22 `ext2w`); ABI v1 has **75 opcodes**.
 - Boot: GRUB/multiboot2 → `system/entrypoint` (the desktop shell), falling back to
   `base/shell`; a graphics-less boot keeps a serial REPL.
 - Filesystems: a read-only ext2 application image (`lib`, `base`, `apps`, `home`,
@@ -42,8 +42,8 @@ decisions in `adr/`, and work items in `PLAN.md`.
   font, one kernel System Log window, a terminal emulator
   (`apps/utilities/terminal`) over kernel console sessions, and source apps (`editor`,
   `browser`, `calculator`, `minesweeper`, `clock_window`, `widgets`). Every terminal
-  instance has its own session, shell and cwd; `File` opens a clickable window list that
-  restores minimized windows.
+  instance has its own session, shell and cwd; the `Windows` pull-down lists every
+  window (minimized rows marked `min`) and `File` opens a clickable window list.
 
 ## Ground rules
 
