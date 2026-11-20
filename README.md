@@ -6,6 +6,23 @@ general personal system built on the same thesis: the kernel is a language runti
 owns the machine, applications are source text compiled in the kernel, and everything runs
 at ring 0 in one address space.
 
+![igis-v2 desktop: dark terminal, calculator and clock](docs/screenshots/desktop.png)
+
+*Real QEMU framebuffer. The terminal is running `ifconfig dhcp`, `nslookup example.com`
+and `net_probe dns`; Calculator and Clock are ordinary source applications.*
+
+## Screenshots
+
+| Networking | Apps |
+|---|---|
+| ![Terminal showing ifconfig, nslookup and net_probe](docs/screenshots/network.png) | ![Apps pull-down with the application categories](docs/screenshots/apps.png) |
+
+| Widgets | Editor |
+|---|---|
+| ![Widgets control gallery](docs/screenshots/widgets.png) | ![Editor with highlighted source](docs/screenshots/editor.png) |
+
+## Implementation
+
 x86_64 first, with architecture-specific code isolated so other ISAs can follow
 ([ADR 0013](adr/0013-x86_64-first-multi-arch.md)). Boot is GRUB + multiboot2 with a
 hand-written long-mode transition ([ADR 0014](adr/0014-grub-multiboot2-boot.md)).
@@ -15,9 +32,9 @@ is pinned ([ADR 0011](adr/0011-work-stealing-interpreters.md)). The shell is its
 application: a kernel REPL service compiles it at boot and starts it, and applications
 start others through a `run`/`spawn` request queue ([ADR 0017](adr/0017-repl-spawn-service.md)).
 
-**Status: implementation.** Specs 0001–0020 are accepted; milestones M2–M10 are complete
-(desktop, language, filesystems, networking), 608 host tests pass, and ABI v1 has 75
-opcodes. See [`AGENTS.md`](AGENTS.md) for the current state and
+**Status: implementation.** Specs 0001–0021 are accepted; milestones M2–M11 are complete
+(desktop, language, filesystems, networking, terminal emulator), 612 host tests pass, and
+ABI v1 has 75 opcodes. See [`AGENTS.md`](AGENTS.md) for the current state and
 [`PLAN.md`](PLAN.md) for what is next.
 
 | Document | Purpose |
