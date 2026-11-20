@@ -3,3 +3,6 @@
 
 # Python bytecode caches from the screenshot harnesses
 __pycache__/
+*.py[cod]
+
+# Harness scratch (screenshots, ISO images, home disk) is under build/
