@@ -41,7 +41,7 @@ application: a kernel REPL service compiles it at boot and starts it, and applic
 start others through a `run`/`spawn` request queue ([ADR 0017](adr/0017-repl-spawn-service.md)).
 
 **Status: implementation.** Specs 0001–0021 are accepted; milestones M2–M11 are complete
-(desktop, language, filesystems, networking, terminal emulator), 612 host tests pass, and
+(desktop, language, filesystems, networking, terminal emulator), 613 host tests pass, and
 ABI v1 has 75 opcodes. See [`AGENTS.md`](AGENTS.md) for the current state and
 [`PLAN.md`](PLAN.md) for what is next.
 

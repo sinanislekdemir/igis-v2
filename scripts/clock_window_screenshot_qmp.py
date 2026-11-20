@@ -200,6 +200,8 @@ def main():
         "none",
         "-no-reboot",
         "-no-shutdown",
+        "-rtc",
+        "base=localtime",
         "-accel",
         "tcg",
         "-vga",
@@ -221,8 +223,12 @@ def main():
     try:
         qmp = Qmp(socket_path, timeout=args.timeout)
         serial.wait_for(r"(?:shell> |igis:/[^>]*> )", timeout=args.timeout)
-        process.stdin.write(b"run clock_window shot\n")
-        process.stdin.flush()
+        # Type one byte at a time: a single burst can be reordered or dropped by
+        # the serial poll under load, and the shell would see a different word.
+        for byte in b"run clock_window shot\n":
+            process.stdin.write(bytes([byte]))
+            process.stdin.flush()
+            time.sleep(0.02)
         serial.wait_for(r"clock_window: ready", timeout=args.timeout)
         # Give the first full present time to reach the framebuffer.
         time.sleep(0.4)

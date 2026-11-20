@@ -993,6 +993,14 @@ pub mod builtin {
     /// is minimized (M11 minimize). A missing window is false. Operands: `[id]`.
     pub const WINDOW_MINIMIZED: u32 = 78;
 
+    /// `core.sleep(ms)`: block the caller until at least `ms` milliseconds of
+    /// wall time have passed, then push `Ok`. The wait is the scheduler's
+    /// generic deadline (`WaitFor::Deadline`), so blocked time does not count
+    /// against the task budget and the caller can safely loop once per second.
+    /// `ms = 0` is an immediate `Ok`. A host without a scheduler (mocks,
+    /// `langhost`) also returns `Ok` immediately. Operands: `[ms]`.
+    pub const SLEEP: u32 = 79;
+
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
         match id {
@@ -1071,6 +1079,7 @@ pub mod builtin {
             SESSION_SEND => Some((3, 1)),
             SESSION_RECV => Some((4, 1)),
             WINDOW_MINIMIZED => Some((1, 1)),
+            SLEEP => Some((1, 1)),
             _ => None,
         }
     }

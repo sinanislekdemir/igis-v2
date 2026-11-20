@@ -225,6 +225,11 @@ impl Host for KernelHost {
         }
     }
 
+    fn blocking_sleep(&mut self, _ms: u64) -> bool {
+        // The scheduler has the generic deadline wait (`WaitKind::Deadline`).
+        true
+    }
+
     // `syslib` graphics (spec 0009). The machine has already checked extents
     // and colours; the kernel's `gfx` module clips to the clip region and the
     // screen and serialises drawing with its own lock, so an application on any
@@ -984,10 +989,6 @@ fn loop_body(core: usize) -> ! {
                                     }
                                 }
                                 WaitKind::Deadline(ns) => {
-                                    println!(
-                                        "sched: task {} blocked until {ns} ns",
-                                        task.id
-                                    );
                                     task::block(task, WaitFor::Deadline(ns));
                                     let now = clock::now_ns();
                                     if now >= ns {

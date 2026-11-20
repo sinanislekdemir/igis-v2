@@ -6504,6 +6504,9 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::scalar(Kind::Uint)))
             }
+            // `core.sleep(ms) -> Status`: block on the scheduler's generic
+            // deadline; the kernel host blocks, mocks/`langhost` return `Ok`.
+            "core.sleep" => self.sleep_call(args, line, column),
             // Staged formatting primitive (spec 0003, "Standard library"):
             // integer formatting ultimately lives in `core`/`stdlib`, and the
             // opcode keeps it a pure buffer operation with no host call. Both
@@ -8505,6 +8508,34 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         }
         self.one(opcodes::BUILTIN, builtin::NET_CONFIG)?;
         self.pop(4)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// `core.sleep(ms) -> Status`.
+    fn sleep_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 1 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`core.sleep` expects 1 argument, got {}", args.len()),
+            ));
+        }
+        let ms = self.expr_scalar(args[0])?;
+        if ms.kind != Kind::Uint {
+            let found = self.type_name(ms);
+            return Err(self.err_at(
+                args[0],
+                format_args!("`core.sleep` expects a `uint` duration, found `{found}`"),
+            ));
+        }
+        self.one(opcodes::BUILTIN, builtin::SLEEP)?;
+        self.pop(1)?;
         self.push();
         Ok(Some(Type::enumeration(STATUS_ENUM)))
     }

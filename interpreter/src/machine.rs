@@ -214,6 +214,14 @@ pub trait Host {
     /// no-op by default, so host mocks are unaffected (spec 0007, ADR 0016).
     fn heartbeat(&mut self) {}
 
+    /// Whether `core.sleep(ms)` can block the caller on a scheduler deadline.
+    ///
+    /// The kernel returns `true`; host mocks and `langhost` return `false`, so
+    /// `core.sleep` is an immediate `Ok` there and a host test never hangs.
+    fn blocking_sleep(&mut self, _ms: u64) -> bool {
+        false
+    }
+
     // ---- `syslib` graphics (spec 0009) ---------------------------------
     //
     // The defaults model a machine with no screen: a 0x0 size, `Invalid` for
@@ -924,6 +932,10 @@ pub struct Machine {
     /// the wait without spawning a second child, and so the host stays
     /// stateless across scheduler quanta.
     pending_run: Option<u64>,
+    /// The absolute nanosecond deadline of an in-progress `core.sleep`. The
+    /// retry after the scheduler wake must not arm a new deadline, so the
+    /// machine holds the original until the clock reaches it.
+    sleep_deadline: Option<u64>,
 }
 
 impl Default for Machine {
@@ -948,6 +960,7 @@ impl Machine {
             yield_requested: false,
             executed: 0,
             pending_run: None,
+            sleep_deadline: None,
         }
     }
 
@@ -1623,6 +1636,32 @@ impl Machine {
                     builtin::CLOCK => {
                         let now = host.clock();
                         self.push(stack, now)?;
+                    }
+                    builtin::SLEEP => {
+                        // `core.sleep(ms) -> Status`: the first execution arms
+                        // the deadline and blocks; the scheduler retries the
+                        // instruction after its wake, and the machine returns
+                        // `Ok` once the clock has reached the same deadline.
+                        let ms = self.pop(stack)?;
+                        if let Some(deadline) = self.sleep_deadline {
+                            if host.clock() >= deadline {
+                                self.sleep_deadline = None;
+                                self.push(stack, Status::Ok as u64)?;
+                            } else {
+                                self.pc = pc;
+                                self.sp = saved_sp;
+                                return Ok(Step::Blocked(WaitKind::Deadline(deadline)));
+                            }
+                        } else if ms == 0 || !host.blocking_sleep(ms) {
+                            self.push(stack, Status::Ok as u64)?;
+                        } else {
+                            let deadline =
+                                host.clock().saturating_add(ms.saturating_mul(1_000_000));
+                            self.sleep_deadline = Some(deadline);
+                            self.pc = pc;
+                            self.sp = saved_sp;
+                            return Ok(Step::Blocked(WaitKind::Deadline(deadline)));
+                        }
                     }
                     builtin::SPAWN => {
                         // `core.spawn(path, args, var diag, var id) -> Status`:

@@ -14,7 +14,7 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Current state (M11):** **612 host tests**; specs 0001–0021 (0020 and 0021
+- **Current state (M11):** **613 host tests**; specs 0001–0021 (0020 and 0021
   Implemented); ABI v1 at 75 opcodes; **M2–M11 complete**. The terminal is an
   application emulator over kernel console sessions (spec 0021, ADR 0053), the
   image has top-level `apps/<category>/`, and the Apps pull-down is sectioned.

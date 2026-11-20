@@ -30,7 +30,7 @@ decisions in `adr/`, and work items in `PLAN.md`.
 - Specs 0001–0021 are accepted; **M2–M11 are complete** (desktop, language,
   filesystems, networking, terminal emulator). Current milestone work is tracked in
   `PLAN.md`.
-- **612 host tests** (534 language + 56 `net` + 22 `ext2w`); ABI v1 has **75 opcodes**.
+- **613 host tests** (535 language + 56 `net` + 22 `ext2w`); ABI v1 has **75 opcodes**.
 - Boot: GRUB/multiboot2 → `system/entrypoint` (the desktop shell), falling back to
   `base/shell`; a graphics-less boot keeps a serial REPL.
 - Filesystems: a read-only ext2 application image (`lib`, `base`, `apps`, `home`,

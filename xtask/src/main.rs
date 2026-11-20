@@ -518,6 +518,10 @@ fn run(args: &[String]) -> ExitCode {
         .arg("none")
         .arg("-no-reboot")
         .arg("-no-shutdown")
+        // Expose the host local wall clock through the CMOS RTC, so the
+        // clock application can sync instead of counting from boot.
+        .arg("-rtc")
+        .arg("base=localtime")
         .arg("-accel")
         .arg("tcg")
         .arg("-vga")

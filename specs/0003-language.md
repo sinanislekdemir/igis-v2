@@ -1097,6 +1097,18 @@ realtime task. `heartbeat` has no result and is a no-op on a normal task; a real
 must call it at least once per second of non-blocked time or the kernel terminates it with
 `FaultCode.WatchdogTimeout`.
 
+The generic blocking wait is one more primitive:
+
+```text
+core.sleep(ms: uint) -> Status
+```
+
+It blocks the caller until at least `ms` milliseconds of wall time have passed and then
+returns `Ok`. Blocked time does not count against the total CPU/step budget, so a periodic
+application can loop with one sleep per tick without spinning a core. `ms` zero is an
+immediate `Ok`; a host without a scheduler (mocks, `langhost`) also returns `Ok`
+immediately.
+
 ### Application files (M2.5.1)
 
 Applications read the read-only application image through three `core` builtins (spec
@@ -2229,3 +2241,4 @@ controls and input dialog for the QMP screenshot harness.
 | 2026-11-19 | M9.4 raises the editor's application buffer from 8192 to 131072 bytes (128 KiB, the spec 0008 per-unit source cap; `LineStateCapacity` follows at 131073). The M2.5.3 rules are unchanged — boundary-checked replacement, app-local `bytes[BufferCapacity]` staging, one strict-UTF-8 publish, `CapacityExceeded` without a partial write — and the size check now refuses only files over 131072 with `too large (131072 max)`. Every current source sample fits (the largest is `editor` at 81,509 B); the user-visible failure was the file-open dialog correctly returning `base/calculator` (32,516 B) while the editor's 8 KiB cap refused it silently. No language, ABI, opcode, builtin or file-API change. |
 | 2026-11-20 | M11 replaces the terminal-window surface with console sessions (spec 0021, ADR 0053): `core.session_open`/`close`/`send`/`recv` are builtins 74–77 and `core.session_source` is compiler-lowered; `core.terminal_attach` (44) is retired. The terminal is an application emulator. A `#`-prefixed menu label is a non-selectable section header (`stdlib.ui_menu_is_header`). No opcode is added; ABI v1 stays 75. |
 | 2026-11-20 | M11 minimize query: `syslib.window_minimized(id: int) -> bool` (builtin 78) reports whether a live window is minimized. The Windows pull-down marks such rows with `min`; the File window list marks them with `*`. No opcode; ABI v1 stays 75. |
+| 2026-11-21 | `core.sleep(ms: uint) -> Status` (builtin 79): block until at least `ms` milliseconds of wall time, then `Ok`. Blocked time does not count against the budget; `ms = 0` and hosts without a scheduler return `Ok` immediately. No opcode; ABI v1 stays 75. |

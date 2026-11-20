@@ -62,7 +62,7 @@ The interface is split into two namespaces:
 | `receive` | `fn receive(ep: Endpoint, buf: &mut [u8]) -> Result<usize, Status>` | yes if empty |
 | `try_receive` | `fn try_receive(ep: Endpoint, buf: &mut [u8]) -> Result<usize, Status>` | no |
 | `clock` | `fn monotonic_ns() -> u64` | no |
-| `sleep_until` | `fn sleep_until(deadline_ns: u64)` | yes, until deadline |
+| `sleep` | `fn sleep(ms: u64) -> Status` | yes, until the deadline |
 | `realtime_on` | `fn realtime_on() -> Status` | no; `Full` if no core is available |
 | `heartbeat` | `fn heartbeat()` | no; resets the realtime deadline |
 | `run` | `fn run(path: &str, args: &str, diag: &mut Diagnostic, reason: &mut ExitReason) -> Status` | yes, until the child terminates |
@@ -244,6 +244,23 @@ implemented with the shapes above:
   deadline terminates with `Faulted(WatchdogTimeout)`; the admission slot is
   released only at termination, so a blocked controller keeps its place. See
   `0007-scheduler.md`, "Realtime tasks".
+
+#### Implemented ABI: sleep
+
+`core.sleep(ms)` (builtin 79) is the generic blocking deadline:
+
+| Primitive | Implemented signature | Result |
+|-----------|-----------------------|--------|
+| `core.sleep` | `(ms: uint) -> Status` | `Ok` after at least `ms` milliseconds; `ms = 0` is immediate |
+
+- `Host::blocking_sleep(&mut self, ms: u64) -> bool` defaults to `false`, so
+  host mocks and `langhost` return `Ok` immediately; the kernel returns `true`.
+  The interpreter keeps the absolute deadline in the `Machine` and returns
+  `Outcome::Blocked(WaitKind::Deadline(deadline))`; the retry after the
+  scheduler wake returns `Ok` once `Host::clock()` reaches it.
+- The kernel blocks the task with `WaitFor::Deadline(ns)`; the 1 kHz service
+  opportunity (`task::wake_deadlines`) makes it runnable. Blocked time is not
+  charged to the CPU/step budget, and the task does not spin a core.
 
 #### Implemented ABI: stream send/receive
 
@@ -636,3 +653,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-17 | Q44 resolved (ADR 0037): the kernel line discipline is gone. COM1 drains into a 512-byte raw ring (newest byte dropped and counted when full, no echo); PS/2 key presses go only to the event queue. `Host::read_input(dst) -> usize` (non-blocking, `0` when empty) behind `core.read_input(var bytes[N]) -> int` replaces `Host::read_line`; it reuses the `READ_LINE` opcode slot as `READ_INPUT` (`0x42`), so ABI v1 stays at 75. Source `0` is now "a console byte is available" and the probe is `Host::console_byte_ready`. The shell echoes and edits its own `string[256]` with the `stdlib.str_*` helpers and blocks in `core.next_any`; `langhost` drains a scripted byte queue. |
 | 2026-11-20 | M11 console sessions (spec 0021, ADR 0053): `Host::session_open`/`session_close`/`session_send`/`session_recv` (builtins 74–77, `Invalid`/`false` defaults) and compiler-lowered `core.session_source` (`1 << 62 | id`). A child inherits the requester session; `core.write`/`read_input` route through it. Serial input follows the focused window owner. `Host::terminal_attach` is retired. No opcode; ABI v1 stays 75. |
 | 2026-11-20 | M11 minimize query (spec 0011 W30, ADR 0054): `Host::window_minimized(id) -> bool` (builtin 78, default `false`) backs `syslib.window_minimized`; the kernel maps it to `window::is_minimized`. It is the read-only query behind the Windows pull-down's `min` marker and the File list's `*` marker. No opcode; ABI v1 stays 75. |
+| 2026-11-21 | `core.sleep(ms) -> Status` (builtin 79): the generic scheduler deadline. `Host::blocking_sleep` defaults to `false` (mocks and `langhost` return `Ok` immediately); the kernel returns `true` and the machine arms `WaitKind::Deadline`, holding the absolute deadline across the retry. Blocked time is not charged to the CPU/step budget; `ms = 0` is immediate. Used by the clock's live tick. No opcode; ABI v1 stays 75. |

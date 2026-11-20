@@ -62,6 +62,16 @@ const
   WindowListCapacity = 16;
   AboutContentW = 420;
   AboutContentH = 200;
+  SecondsPerDay = 86400;
+
+  // CMOS RTC ports and registers for the menu-bar clock.
+  RtcIndex = 0x70;
+  RtcData = 0x71;
+  RtcStatusA = 0x0A;
+  RtcStatusB = 0x0B;
+  RtcSeconds = 0x00;
+  RtcMinutes = 0x02;
+  RtcHours = 0x04;
 
 var
   white: uint;
@@ -197,6 +207,9 @@ var
   now: uint;
   minutes: uint;
   hours: uint;
+  rtc_base: int;
+  mono_base: int;
+  synced: bool;
   focus: int;
   pos: int;
   xx: int;
@@ -238,15 +251,125 @@ end;
 // HH:MM from the monotonic clock, right-aligned in the menu bar. The width is
 // the proportional measurement (spec 0015), so the digits and the colon sit
 // tight to the right edge instead of assuming 8-pixel cells.
+procedure rtc_select(register: uint);
+begin
+  syslib.port_out8(uint(RtcIndex), register);
+end;
+
+function rtc_read(register: uint): uint;
+begin
+  rtc_select(register);
+  return syslib.port_in8(uint(RtcData));
+end;
+
+function rtc_bcd(value: uint): int;
+begin
+  return int((value div uint(16)) * uint(10) + (value mod uint(16)));
+end;
+
+// Reads the CMOS RTC as seconds since midnight (status-B binary/24-hour
+// aware), waiting out the update window and proving the fields are stable.
+function rtc_read_time(total: var int): bool;
+var
+  status_b: uint;
+  binary: bool;
+  hour24: bool;
+  pm: bool;
+  rtc_sec: uint;
+  rtc_min: uint;
+  rtc_hour: uint;
+  rtc_again: uint;
+  rtc_guard: uint;
+  rtc_tries: int;
+  hour: int;
+  minute: int;
+  second: int;
+begin
+  total := 0;
+  status_b := rtc_read(uint(RtcStatusB));
+  binary := (status_b div uint(4)) mod uint(2) = uint(1);
+  hour24 := (status_b div uint(2)) mod uint(2) = uint(1);
+  rtc_tries := 0;
+  while rtc_tries < 16 do
+  begin
+    rtc_guard := uint(0);
+    while rtc_read(uint(RtcStatusA)) >= uint(0x80) and rtc_guard < uint(1000000) do
+      rtc_guard := rtc_guard + uint(1);
+    rtc_sec := rtc_read(uint(RtcSeconds));
+    rtc_min := rtc_read(uint(RtcMinutes));
+    rtc_hour := rtc_read(uint(RtcHours));
+    rtc_again := rtc_read(uint(RtcSeconds));
+    if rtc_sec = rtc_again then
+    begin
+      pm := false;
+      if not hour24 then
+      begin
+        pm := (rtc_hour div uint(0x80)) mod uint(2) = uint(1);
+        rtc_hour := rtc_hour mod uint(0x80);
+      end;
+      if binary then
+      begin
+        hour := int(rtc_hour);
+        minute := int(rtc_min);
+        second := int(rtc_sec);
+      end
+      else
+      begin
+        hour := rtc_bcd(rtc_hour);
+        minute := rtc_bcd(rtc_min);
+        second := rtc_bcd(rtc_sec);
+      end;
+      if not hour24 then
+      begin
+        if pm and hour < 12 then
+          hour := hour + 12;
+        if not pm and hour = 12 then
+          hour := 0;
+      end;
+      if hour >= 0 and hour < 24 and minute >= 0 and minute < 60
+         and second >= 0 and second < 60 then
+      begin
+        total := hour * 3600 + minute * 60 + second;
+        return true;
+      end;
+      return false;
+    end;
+    rtc_tries := rtc_tries + 1;
+  end;
+  return false;
+end;
+
+procedure sync_clock();
+var
+  total: int;
+begin
+  synced := false;
+  if rtc_read_time(total) then
+  begin
+    rtc_base := total;
+    mono_base := int(core.clock() div uint(1000000000));
+    synced := true;
+  end;
+end;
+
+function clock_seconds(): int;
+var
+  seconds: int;
+begin
+  seconds := int(core.clock() div uint(1000000000));
+  if synced then
+    return (rtc_base + (seconds - mono_base)) mod SecondsPerDay;
+  return seconds mod SecondsPerDay;
+end;
+
 procedure draw_clock(right: int);
 var
   clock_x: int;
   clock_w: int;
 begin
-  now := core.clock();
-  minutes := (now div uint(1000000000)) div uint(60);
-  hours := (minutes div uint(60)) mod uint(24);
-  minutes := minutes mod uint(60);
+  now := uint(clock_seconds());
+  minutes := (now div uint(60)) mod uint(60);
+  hours := (now div uint(3600)) mod uint(24);
   used := core.format_int_into(clk_h, int(hours), uint(10), uint(2));
   used := core.format_int_into(clk_m, int(minutes), uint(10), uint(2));
   clock_w := tw(clk_h) + tw(":") + tw(clk_m);
@@ -925,7 +1048,13 @@ end;
 // own text; the path is the image name resolved under `base/`.
 procedure launch_app(name: const string[0]; label: const string[0]);
 begin
-  launch_status := core.spawn(name, "", diag, last_task);
+  // Check mode launches the deterministic `check` path so the child exits and
+  // `core.wait` can reap it; a normal desktop launch has no arguments and the
+  // application stays live (Clock, for example, is a live window now).
+  if probe_spawn then
+    launch_status := core.spawn(name, "check", diag, last_task)
+  else
+    launch_status := core.spawn(name, "", diag, last_task);
   launches := launches + 1;
   if launch_status = Ok then
   begin
@@ -1919,6 +2048,7 @@ begin
   black := uint(0x000000);
   screen_w := int(syslib.screen_width());
   screen_h := int(syslib.screen_height());
+  sync_clock();
   shell_launched := false;
   probe_spawn := false;
   terminal_runs := 0;

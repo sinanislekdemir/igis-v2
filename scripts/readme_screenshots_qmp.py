@@ -155,6 +155,8 @@ def run(args):
         "none",
         "-no-reboot",
         "-no-shutdown",
+        "-rtc",
+        "base=localtime",
         "-accel",
         "tcg",
         "-vga",

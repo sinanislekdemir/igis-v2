@@ -1,21 +1,20 @@
 unit clock_window;
 
-// M2.5.2 clock: a windowed analog face and digital readout, ticking from the
-// monotonic `core.clock()`.
+// M2.5.2 clock: a windowed analog face and digital readout. The time is read
+// once from the CMOS RTC (host wall clock) and then advanced by the monotonic
+// `core.clock()`; a machine without a usable RTC falls back to time since boot.
 //
 //   run clock_window          // live window; stays until its close box
 //   run clock_window check    // deterministic check at 10:08:30, prints `clock_window: ok`
 //   run clock_window shot     // live clock, holds ~5 s and prints
 //                             // `clock_window: ready` for the QMP harness
 //
-// The live window promotes to realtime so its once-per-second redraw loop is
-// exempt from the normal CPU/step budget; `core.heartbeat()` feeds the realtime
-// watchdog. When the realtime slot is unavailable (a single-core boot where
-// the desktop shell already holds it) it falls back to blocking on window
-// events and repaints the current time whenever it is exposed or receives an
-// event. Every redraw paints the whole face and presents once with
-// `window_present`, so a presented frame is never half drawn. An owner
-// `Expose` repaints the whole content.
+// The live loop blocks in `core.sleep(250)`, so blocked time is not charged to
+// the normal CPU/step budget, it does not spin a core and it cannot starve
+// input. It repaints only when the displayed second changes and drains queued
+// window events after each wake. Every redraw paints the whole face and
+// presents once with `window_present`, so a presented frame is never half
+// drawn. An owner `Expose` repaints the whole content.
 //
 // Geometry is integer-only: a midpoint circle for the rim, a 60-entry
 // fixed-point direction table (built once by rotating 6 degrees per step) for
@@ -68,6 +67,16 @@ const
 
   LiveSeconds = 5;
   NanosPerSecond = 1000000000;
+  SecondsPerDay = 86400;
+
+  // CMOS RTC ports and registers (QEMU and a PC RTC).
+  RtcIndex = 0x70;
+  RtcData = 0x71;
+  RtcStatusA = 0x0A;
+  RtcStatusB = 0x0B;
+  RtcSeconds = 0x00;
+  RtcMinutes = 0x02;
+  RtcHours = 0x04;
 
 var
   failed: bool;
@@ -102,6 +111,13 @@ var
   now_s: int;
   last_s: int;
   end_s: int;
+
+  // Wall-clock sync: the RTC seconds-of-day at boot and the monotonic second
+  // that goes with it. When synced the clock advances from the host RTC
+  // instead of showing seconds since boot.
+  rtc_base: int;
+  mono_base: int;
+  synced: bool;
 
   px: int;
   py: int;
@@ -139,6 +155,122 @@ begin
   out_hour := (total div 3600) mod 24;
   out_minute := (total div 60) mod 60;
   out_second := total mod 60;
+end;
+
+procedure rtc_select(register: uint);
+begin
+  syslib.port_out8(uint(RtcIndex), register);
+end;
+
+function rtc_read(register: uint): uint;
+begin
+  rtc_select(register);
+  return syslib.port_in8(uint(RtcData));
+end;
+
+// BCD to binary: (v div 16) * 10 + (v mod 16).
+function rtc_bcd(value: uint): int;
+begin
+  return int((value div uint(16)) * uint(10) + (value mod uint(16)));
+end;
+
+// Reads the CMOS RTC as seconds since midnight. Handles the status-B binary
+// and 24-hour flags, waits out the update-in-progress window and re-reads the
+// seconds to prove the fields are stable. False when the RTC does not settle
+// or the fields are out of range.
+function rtc_read_time(total: var int): bool;
+var
+  status_b: uint;
+  binary: bool;
+  hour24: bool;
+  pm: bool;
+  seconds: uint;
+  minutes: uint;
+  hours: uint;
+  again: uint;
+  guard: uint;
+  tries: int;
+  hour: int;
+  minute: int;
+  second: int;
+begin
+  total := 0;
+  status_b := rtc_read(uint(RtcStatusB));
+  binary := (status_b div uint(4)) mod uint(2) = uint(1);
+  hour24 := (status_b div uint(2)) mod uint(2) = uint(1);
+  tries := 0;
+  while tries < 16 do
+  begin
+    guard := uint(0);
+    while rtc_read(uint(RtcStatusA)) >= uint(0x80) and guard < uint(1000000) do
+      guard := guard + uint(1);
+    seconds := rtc_read(uint(RtcSeconds));
+    minutes := rtc_read(uint(RtcMinutes));
+    hours := rtc_read(uint(RtcHours));
+    again := rtc_read(uint(RtcSeconds));
+    if seconds = again then
+    begin
+      pm := false;
+      if not hour24 then
+      begin
+        pm := (hours div uint(0x80)) mod uint(2) = uint(1);
+        hours := hours mod uint(0x80);
+      end;
+      if binary then
+      begin
+        hour := int(hours);
+        minute := int(minutes);
+        second := int(seconds);
+      end
+      else
+      begin
+        hour := rtc_bcd(hours);
+        minute := rtc_bcd(minutes);
+        second := rtc_bcd(seconds);
+      end;
+      if not hour24 then
+      begin
+        if pm and hour < 12 then
+          hour := hour + 12;
+        if not pm and hour = 12 then
+          hour := 0;
+      end;
+      if hour >= 0 and hour < 24 and minute >= 0 and minute < 60
+         and second >= 0 and second < 60 then
+      begin
+        total := hour * 3600 + minute * 60 + second;
+        return true;
+      end;
+      return false;
+    end;
+    tries := tries + 1;
+  end;
+  return false;
+end;
+
+procedure sync_clock();
+var
+  total: int;
+begin
+  synced := false;
+  if rtc_read_time(total) then
+  begin
+    rtc_base := total;
+    mono_base := int(core.clock() div uint(NanosPerSecond));
+    synced := true;
+  end;
+end;
+
+// Seconds since midnight: the host RTC at sync time advanced by the monotonic
+// clock, or the monotonic time since boot when the RTC is not available.
+function clock_seconds(): int;
+var
+  now: int;
+begin
+  now := int(core.clock() div uint(NanosPerSecond));
+  if synced then
+    return (rtc_base + (now - mono_base)) mod SecondsPerDay;
+  return now mod SecondsPerDay;
 end;
 
 // Rounds `value / scale` to nearest (away from zero on a tie), which keeps the
@@ -480,7 +612,7 @@ begin
       if ev.kind = Expose and ev.window = id then
       begin
         refresh_geometry();
-        now_s := int(core.clock() div uint(NanosPerSecond));
+        now_s := clock_seconds();
         split(now_s, hour, minute, second);
         draw_clock(hour, minute, second);
         present_clock();
@@ -496,22 +628,33 @@ begin
   end;
 end;
 
-// Live mode: derive the time from the monotonic nanosecond clock, redraw once
-// per second, and never block (the scheduler preempts the spin at the
-// quantum). `shot` holds the last frame for the screenshot harness.
+procedure say_ready();
+begin
+  out.say("clock_window: ready ");
+  out.say(hh);
+  out.say(":");
+  out.say(mm);
+  out.say(":");
+  out.say(ss);
+  out.say("\n");
+end;
+
+// Live shot: draw the current time, hold the frame for the screenshot harness
+// and repaint once per second. `core.sleep` supplies the tick without a spin.
 procedure shot_mode();
 begin
-  now_s := int(core.clock() div uint(NanosPerSecond));
+  now_s := clock_seconds();
   last_s := now_s;
   end_s := now_s + LiveSeconds;
   quit := false;
   split(now_s, hour, minute, second);
   draw_clock(hour, minute, second);
   present_clock();
-  out.say("clock_window: ready\n");
+  say_ready();
   while now_s <= end_s and not quit do
   begin
-    now_s := int(core.clock() div uint(NanosPerSecond));
+    status := core.sleep(uint(250));
+    now_s := clock_seconds();
     if now_s <> last_s then
     begin
       last_s := now_s;
@@ -528,57 +671,32 @@ begin
     out.say("clock_window: done\n");
 end;
 
-// The normal window: a live clock until the close box. The once-per-second
-// redraw loop promotes to realtime so it is not charged to the normal-task
-// budget; the heartbeat keeps the realtime watchdog fed. A single-core boot
-// where the desktop shell already holds the realtime slot falls back to a
-// blocking event loop and redraws the current time on each event.
+// The normal window: a live clock until the close box. `core.sleep` blocks on
+// the scheduler's generic deadline, so blocked time is not charged to the
+// task budget and the loop does not spin a core or starve input. It wakes four
+// times a second to service events and repaints only when the displayed second
+// changes.
 procedure live_mode();
 begin
-  status := core.realtime_on();
   quit := false;
-  now_s := int(core.clock() div uint(NanosPerSecond));
+  now_s := clock_seconds();
   last_s := now_s;
   split(now_s, hour, minute, second);
   draw_clock(hour, minute, second);
   present_clock();
-  out.say("clock_window: ready\n");
-  if status = Ok then
+  say_ready();
+  while not quit do
   begin
-    while not quit do
+    status := core.sleep(uint(250));
+    now_s := clock_seconds();
+    if now_s <> last_s then
     begin
-      core.heartbeat();
-      now_s := int(core.clock() div uint(NanosPerSecond));
-      if now_s <> last_s then
-      begin
-        last_s := now_s;
-        split(now_s, hour, minute, second);
-        draw_clock(hour, minute, second);
-        present_clock();
-      end;
-      drain_events();
+      last_s := now_s;
+      split(now_s, hour, minute, second);
+      draw_clock(hour, minute, second);
+      present_clock();
     end;
-  end
-  else
-  begin
-    while not quit do
-    begin
-      status := syslib.next_event(ev);
-      if status = Ok then
-      begin
-        if ev.kind = Close and ev.window = id then
-          quit := true
-        else
-        begin
-          if ev.kind = Expose and ev.window = id then
-            refresh_geometry();
-          now_s := int(core.clock() div uint(NanosPerSecond));
-          split(now_s, hour, minute, second);
-          draw_clock(hour, minute, second);
-          present_clock();
-        end;
-      end;
-    end;
+    drain_events();
   end;
   ignored := syslib.window_close(id);
   out.say("clock_window: closed\n");
@@ -660,6 +778,7 @@ begin
         out.say("clock_window: no content rect\n")
       else
       begin
+        sync_clock();
         if stdlib.starts_with(args, "shot") then
           shot_mode()
         else if stdlib.starts_with(args, "check") then
