@@ -23,9 +23,9 @@ the interactive editor (it opens `base/child`) and drives the M9.3 dialog:
 
 The dialog is an ordinary task-owned window from `samples/apps/lib/file_dialog.ig`;
 nothing here is kernel-specific. The final frames are written to
-`/home/sinan/Desktop/igis-file-dialog.png` (dialog open),
-`/home/sinan/Desktop/igis-file-dialog-open.png` (the editor after `lib/math.ig`
-loaded) and `/home/sinan/Desktop/igis-file-dialog-large.png` (after
+`build/screenshots/igis-file-dialog.png` (dialog open),
+`build/screenshots/igis-file-dialog-open.png` (the editor after `lib/math.ig`
+loaded) and `build/screenshots/igis-file-dialog-large.png` (after
 `base/calculator` loaded). Pillow reads the captures for pixel diffs only;
 images are never displayed.
 
@@ -49,9 +49,13 @@ sys.dont_write_bytecode = True
 
 from tablet_qmp import Qmp, Serial  # noqa: E402
 
-DIALOG_OUTPUT = "/home/sinan/Desktop/igis-file-dialog.png"
-OPENED_OUTPUT = "/home/sinan/Desktop/igis-file-dialog-open.png"
-LARGE_OUTPUT = "/home/sinan/Desktop/igis-file-dialog-large.png"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SHOT_DIR = os.environ.get("IGIS_SHOT_DIR", os.path.join(ROOT, "build", "screenshots"))
+os.makedirs(SHOT_DIR, exist_ok=True)
+
+DIALOG_OUTPUT = os.path.join(SHOT_DIR, "igis-file-dialog.png")
+OPENED_OUTPUT = os.path.join(SHOT_DIR, "igis-file-dialog-open.png")
+LARGE_OUTPUT = os.path.join(SHOT_DIR, "igis-file-dialog-large.png")
 
 # `samples/apps/base/editor` opens content 640x480 at frame origin (180, 90), so
 # the content origin is (181, 106). Text/Dialog constants mirror the samples.

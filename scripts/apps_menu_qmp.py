@@ -47,7 +47,11 @@ sys.dont_write_bytecode = True
 
 from tablet_qmp import Qmp, Serial  # noqa: E402
 
-DEFAULT_OUTPUT = "/home/sinan/Desktop/igis-apps-menu.png"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SHOT_DIR = os.environ.get("IGIS_SHOT_DIR", os.path.join(ROOT, "build", "screenshots"))
+os.makedirs(SHOT_DIR, exist_ok=True)
+
+DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-apps-menu.png")
 
 # `desktop_shell` layout_menu: File starts at x = 24, so Apps starts at x = 56
 # and the pull-down frame is (52, 22, 176, 98). Row 4 (`Clock`) is at

@@ -52,7 +52,11 @@ sys.dont_write_bytecode = True
 
 from tablet_qmp import Qmp, Serial  # noqa: E402
 
-DEFAULT_OUTPUT = "/home/sinan/Desktop/igis-editor-scroll.png"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SHOT_DIR = os.environ.get("IGIS_SHOT_DIR", os.path.join(ROOT, "build", "screenshots"))
+os.makedirs(SHOT_DIR, exist_ok=True)
+
+DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-editor-scroll.png")
 
 # `samples/apps/base/editor` opens content 640x480 at frame origin (180, 90), so
 # the content origin is (181, 106). TextLeft 4 / TextTop 38 / ScrollLeft 620 /

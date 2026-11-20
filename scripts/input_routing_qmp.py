@@ -28,7 +28,7 @@ and proves, with the desktop and the Browser both live:
 
 It never displays the image: Pillow reads the captured framebuffer for the
 pixel diffs only. The final capture is written to
-`/home/sinan/Desktop/igis-input-routing.png`.
+`build/screenshots/igis-input-routing.png`.
 
 Usage:
     cargo xtask image
@@ -50,7 +50,11 @@ sys.dont_write_bytecode = True
 
 from tablet_qmp import Qmp, Serial  # noqa: E402
 
-DEFAULT_OUTPUT = "/home/sinan/Desktop/igis-input-routing.png"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SHOT_DIR = os.environ.get("IGIS_SHOT_DIR", os.path.join(ROOT, "build", "screenshots"))
+os.makedirs(SHOT_DIR, exist_ok=True)
+
+DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-input-routing.png")
 
 # `desktop_shell` menu geometry: `File` starts at x = 24, `Apps` at x = 56 and
 # its pull-down frame is (52, 22, 176, 98). Row 3 (`File Browser`) is

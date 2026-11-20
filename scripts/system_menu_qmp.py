@@ -33,7 +33,11 @@ sys.dont_write_bytecode = True
 
 from tablet_qmp import Qmp, Serial  # noqa: E402
 
-DEFAULT_OUTPUT = "/home/sinan/Desktop/igis-system-menu.png"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SHOT_DIR = os.environ.get("IGIS_SHOT_DIR", os.path.join(ROOT, "build", "screenshots"))
+os.makedirs(SHOT_DIR, exist_ok=True)
+
+DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-system-menu.png")
 
 # The menu bar's `System` label sits after `Terminal` (measured prop widths:
 # File 24, Apps 56, Windows 94, Terminal 153..194, System starts at 208). Its
