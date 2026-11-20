@@ -9568,3 +9568,124 @@ end;
         error.message
     );
 }
+
+#[test]
+fn session_builtins_are_74_to_77_and_check_their_signatures() {
+    use abi::opcodes::{self, builtin};
+
+    let source = r#"
+unit t;
+uses core;
+var
+  status: Status;
+  id: int;
+  sent: int;
+  read: int;
+  data: string[16];
+  dst: bytes[16];
+  sources: array[uint, 8];
+  ready: int;
+procedure main(args: const string[1024]);
+begin
+  status := core.session_open(id);
+  status := core.session_send(id, data, sent);
+  status := core.session_recv(id, dst, read);
+  status := core.session_close(id);
+  sources[0] := core.session_source(id);
+  status := core.next_any(sources, 1, ready);
+end;
+"#;
+    let package = compile(source.as_bytes(), "t.ig").expect("session builtins compile");
+    let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
+    let start = 40 + 24 * header.function_count as usize;
+    let instructions = &package.code[start..start + header.code_len as usize];
+    let mut seen = Vec::new();
+    let mut pc = 0;
+    while pc + 4 <= instructions.len() {
+        let op = instructions[pc];
+        let words = opcodes::instruction_words(op).expect("known opcode") as usize;
+        if op == opcodes::BUILTIN {
+            seen.push(u32::from_le_bytes(
+                instructions[pc + 4..pc + 8].try_into().unwrap(),
+            ));
+        }
+        pc += words * 4;
+    }
+    assert_eq!(
+        seen,
+        vec![
+            builtin::SESSION_OPEN,
+            builtin::SESSION_SEND,
+            builtin::SESSION_RECV,
+            builtin::SESSION_CLOSE,
+            builtin::NEXT_ANY,
+        ]
+    );
+    assert_eq!(builtin::SESSION_OPEN, 74);
+    assert_eq!(builtin::SESSION_CLOSE, 75);
+    assert_eq!(builtin::SESSION_SEND, 76);
+    assert_eq!(builtin::SESSION_RECV, 77);
+
+    let cases = [
+        (
+            r#"
+unit t;
+uses core;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := core.session_open();
+end;
+"#,
+            "`core.session_open` expects 1 argument",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := core.session_close(uint(1));
+end;
+"#,
+            "`core.session_close` expects an `int` session id",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var
+  status: Status;
+  id: int;
+  sent: int;
+  mac: uint;
+procedure main(args: const string[1024]);
+begin
+  status := core.session_send(id, mac, sent);
+end;
+"#,
+            "`mac` is `uint`, not a buffer",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var
+  status: Status;
+  id: int;
+  read: int;
+  dst: string[16];
+procedure main(args: const string[1024]);
+begin
+  status := core.session_recv(id, dst, read);
+end;
+"#,
+            "`core.session_recv` needs a writable `var bytes` destination",
+        ),
+    ];
+    for (source, expected) in cases {
+        let error = compile(source.as_bytes(), "t.ig").expect_err("must be a compile error");
+        assert!(error.message.contains(expected), "{}", error.message);
+    }
+}

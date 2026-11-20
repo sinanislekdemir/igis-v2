@@ -37,8 +37,36 @@ pub const fn socket_source(handle: u64) -> u64 {
     SOURCE_SOCKET_BASE | handle
 }
 
-/// True when `source` names a socket rather than the console, the input queue
-/// or a stream.
+/// Tag bit that marks a [`WaitSet`] entry as a console-session output source
+/// (`core.session_source`, spec 0021).
+///
+/// A stream handle is `(generation << 8) | index` with a non-zero generation,
+/// so it is far below `2^62`; a socket source uses bit 63. The three encodings
+/// therefore cannot alias.
+pub const SOURCE_SESSION_BASE: u64 = 1 << 62;
+
+/// Builds the `next_any`/`poll_any` source value for a console session.
+///
+/// The session id is the low 62 bits. `core.session_source` is compiler-lowered
+/// to this OR (an unsigned add, because a live session id is always clear of the
+/// tag bit).
+pub const fn session_source(id: u64) -> u64 {
+    SOURCE_SESSION_BASE | id
+}
+
+/// True when `source` names a console session rather than the console, the input
+/// queue, a stream or a socket.
+pub const fn is_session_source(source: u64) -> bool {
+    source & SOURCE_SESSION_BASE != 0 && source & SOURCE_SOCKET_BASE == 0
+}
+
+/// The session id carried by a source; the inverse of [`session_source`].
+pub const fn session_id(source: u64) -> u64 {
+    source & !SOURCE_SESSION_BASE
+}
+
+/// True when `source` names a socket rather than the console, the input queue,
+/// a stream or a session.
 pub const fn is_socket_source(source: u64) -> bool {
     source & SOURCE_SOCKET_BASE != 0
 }
@@ -186,6 +214,21 @@ mod tests {
         }
         assert_eq!(SOURCE_SOCKET_BASE, 1 << 63);
         assert_eq!(socket_source(0), SOURCE_SOCKET_BASE);
+    }
+
+    #[test]
+    fn a_session_source_sets_bit_62_and_keeps_the_id() {
+        for id in [1, 7, 0x0101, (1 << 61) | 3] {
+            let source = session_source(id);
+            assert!(is_session_source(source), "{id:#x}");
+            assert!(!is_socket_source(source), "{id:#x}");
+            assert_eq!(session_id(source), id, "{id:#x}");
+            assert_eq!(source & !SOURCE_SESSION_BASE, id);
+        }
+        assert_eq!(SOURCE_SESSION_BASE, 1 << 62);
+        assert_eq!(session_source(0), SOURCE_SESSION_BASE);
+        assert!(!is_session_source(0));
+        assert!(!is_session_source(SOURCE_INPUT));
     }
 
     #[test]

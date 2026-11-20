@@ -98,6 +98,10 @@ pub const FS_NAME_CAP: usize = abi::fs::NAME_CAP;
 /// The fixed read chunk of `core.fs_read` (spec 0013).
 pub const FS_READ_CHUNK: usize = abi::fs::READ_CHUNK;
 
+/// The fixed receive chunk of `core.session_recv` (spec 0021): one call copies
+/// at most this many bytes; the interpreter stages them in a local array.
+pub const SESSION_RECV_CHUNK: usize = 256;
+
 /// The machine-wide IPv4 configuration returned by [`Host::net_info`]
 /// (spec 0020, "Configuration and name resolution").
 ///
@@ -709,6 +713,39 @@ pub trait Host {
     /// `Invalid`, so a host without sockets keeps `next_any` unchanged.
     fn socket_arm_wait(&mut self, _handle: u64) -> Status {
         Status::Invalid
+    }
+
+    /// Opens a console session owned by the calling task (`core.session_open`,
+    /// spec 0021). A successful call returns a fresh positive id; the default
+    /// is `Invalid`, the disabled-service result.
+    fn session_open(&mut self) -> Result<u64, Status> {
+        Err(Status::Invalid)
+    }
+
+    /// Closes the caller's console session (`core.session_close`, spec 0021).
+    /// Idempotent for the owner; the default is `Invalid`.
+    fn session_close(&mut self, _id: u64) -> Status {
+        Status::Invalid
+    }
+
+    /// Copies `data` into a session input ring (`core.session_send`,
+    /// spec 0021). Returns the copied count; `WouldBlock` means nothing was
+    /// copied. The default is `Invalid`.
+    fn session_send(&mut self, _id: u64, _data: &[u8]) -> Result<usize, Status> {
+        Err(Status::Invalid)
+    }
+
+    /// Copies from a session output ring into `dst` (`core.session_recv`,
+    /// spec 0021). Returns the copied count; `WouldBlock` when empty, `Closed`
+    /// after finish. The default is `Invalid`.
+    fn session_recv(&mut self, _id: u64, _dst: &mut [u8]) -> Result<usize, Status> {
+        Err(Status::Invalid)
+    }
+
+    /// Reports selector readiness for a session source (`core.session_source`,
+    /// spec 0021). Data, finish or close is ready; the default is `false`.
+    fn session_readable(&mut self, _id: u64) -> bool {
+        false
     }
 
     /// Requests a new application instance (`core.spawn`).
@@ -2916,6 +2953,111 @@ impl Machine {
                             Err(status) => self.push(stack, status as u64)?,
                         }
                     }
+                    builtin::SESSION_OPEN => {
+                        let id_bits = self.pop(stack)?;
+                        match host.session_open() {
+                            Ok(id) => {
+                                if id == 0 {
+                                    return Err(FaultCode::IllegalOperation);
+                                }
+                                self.write_ref(id_bits, id, state, stack, constants, args)?;
+                                self.push(stack, Status::Ok as u64)?;
+                            }
+                            Err(status) => self.push(stack, status as u64)?,
+                        }
+                    }
+                    builtin::SESSION_CLOSE => {
+                        let id = self.pop(stack)?;
+                        let status = host.session_close(id);
+                        self.push(stack, status as u64)?;
+                    }
+                    builtin::SESSION_SEND => {
+                        let sent_bits = self.pop(stack)?;
+                        let data_bits = self.pop(stack)?;
+                        let id = self.pop(stack)?;
+                        let result = {
+                            let data =
+                                self.resolve_text(data_bits, state, stack, constants, args)?;
+                            let requested = data.len();
+                            host.session_send(id, data)
+                                .map(|count| (count, requested))
+                        };
+                        match result {
+                            Ok((count, requested)) => {
+                                if count > requested {
+                                    return Err(FaultCode::IllegalOperation);
+                                }
+                                self.write_ref(
+                                    sent_bits,
+                                    count as u64,
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.push(stack, Status::Ok as u64)?;
+                            }
+                            Err(status) => self.push(stack, status as u64)?,
+                        }
+                    }
+                    builtin::SESSION_RECV => {
+                        let read_bits = self.pop(stack)?;
+                        let dst_bits = self.pop(stack)?;
+                        let capacity = self.pop(stack)?;
+                        let id = self.pop(stack)?;
+
+                        let capacity =
+                            usize::try_from(capacity).map_err(|_| FaultCode::IllegalOperation)?;
+                        let limit = capacity.min(SESSION_RECV_CHUNK);
+                        if limit == 0 {
+                            return Err(FaultCode::IllegalOperation);
+                        }
+
+                        let (dst_region, dst_offset) =
+                            self.resolve(dst_bits, state, stack, constants, args)?;
+                        if dst_region != refs::REGION_STATE && dst_region != refs::REGION_STACK {
+                            return Err(FaultCode::IllegalOperation);
+                        }
+                        if dst_offset < 8 {
+                            return Err(FaultCode::OutOfBounds);
+                        }
+                        let dst_end = dst_offset
+                            .checked_add(limit)
+                            .ok_or(FaultCode::OutOfBounds)?;
+                        if dst_end
+                            > region_len(dst_region, state, stack, constants, args)
+                                .ok_or(FaultCode::OutOfBounds)?
+                        {
+                            return Err(FaultCode::OutOfBounds);
+                        }
+
+                        let mut chunk = [0u8; SESSION_RECV_CHUNK];
+                        match host.session_recv(id, &mut chunk[..limit]) {
+                            Ok(count) => {
+                                if count > limit {
+                                    return Err(FaultCode::IllegalOperation);
+                                }
+                                self.write_buffer_ref(
+                                    dst_bits,
+                                    &chunk[..count],
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.write_ref(
+                                    read_bits,
+                                    count as u64,
+                                    state,
+                                    stack,
+                                    constants,
+                                    args,
+                                )?;
+                                self.push(stack, Status::Ok as u64)?;
+                            }
+                            Err(status) => self.push(stack, status as u64)?,
+                        }
+                    }
                     builtin::SOCKET_OPEN => {
                         let id_bits = self.pop(stack)?;
                         let local = self.pop(stack)?;
@@ -4196,6 +4338,9 @@ impl Machine {
                 wait::SOURCE_INPUT => host.input_ready(),
                 value if wait::is_socket_source(value) => {
                     host.socket_readable(wait::socket_handle(value))
+                }
+                value if wait::is_session_source(value) => {
+                    host.session_readable(wait::session_id(value))
                 }
                 handle => host.stream_readable(handle),
             };

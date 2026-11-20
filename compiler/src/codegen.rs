@@ -7954,6 +7954,15 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             // Compiler-lowered like `core.stream_source`: the handle is an
             // ordinary `int` expression and the source is the tag bit ORed in.
             "core.socket_source" => self.socket_source_call(args, line, column),
+            // Terminal emulator console sessions (spec 0021; ADR 0053). The
+            // compiler checks the staged kinds; the kernel host owns the
+            // session table and the task's binding. `session_source` is
+            // compiler-lowered to the tag bit.
+            "core.session_open" => self.session_open_call(args, line, column),
+            "core.session_close" => self.session_close_call(args, line, column),
+            "core.session_send" => self.session_send_call(args, line, column),
+            "core.session_recv" => self.session_recv_call(args, line, column),
+            "core.session_source" => self.session_source_call(args, line, column),
             // Terminal attach (spec 0014): bind the console's machine-wide
             // terminal grid to a window owned by the caller. The kernel host
             // supplies the task id; the compiler only checks the staged
@@ -8664,6 +8673,183 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         self.pop(3)?;
         self.push();
         Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// `core.session_open(var id: int) -> Status` (spec 0021).
+    fn session_open_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 1 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`core.session_open` expects 1 argument, got {}", args.len()),
+            ));
+        }
+        let id = self.emit_scalar_ref(args[0])?;
+        if id.kind != Kind::Int {
+            let found = self.type_name(id);
+            return Err(self.err_at(
+                args[0],
+                format_args!("`core.session_open` expects `var id: int`, found `{found}`"),
+            ));
+        }
+        self.one(opcodes::BUILTIN, builtin::SESSION_OPEN)?;
+        self.pop(1)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// `core.session_close(id) -> Status` (spec 0021).
+    fn session_close_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 1 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`core.session_close` expects 1 argument, got {}", args.len()),
+            ));
+        }
+        let id = self.expr_scalar(args[0])?;
+        if id.kind != Kind::Int {
+            return Err(self.err_at(
+                args[0],
+                format_args!("`core.session_close` expects an `int` session id, found `{id}`"),
+            ));
+        }
+        self.one(opcodes::BUILTIN, builtin::SESSION_CLOSE)?;
+        self.pop(1)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// `core.session_send(id, data, var sent) -> Status` (spec 0021).
+    fn session_send_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 3 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`core.session_send` expects 3 arguments, got {}", args.len()),
+            ));
+        }
+        let id = self.expr_scalar(args[0])?;
+        if id.kind != Kind::Int {
+            return Err(self.err_at(
+                args[0],
+                format_args!("`core.session_send` expects an `int` session id, found `{id}`"),
+            ));
+        }
+        let data = self.emit_ref(args[1], None)?;
+        if data.kind != Kind::String && data.kind != Kind::Bytes {
+            let found = self.type_name(data);
+            return Err(self.err_at(
+                args[1],
+                format_args!(
+                    "`core.session_send` expects a `string` or `bytes` data buffer, found `{found}`"
+                ),
+            ));
+        }
+        let sent = self.emit_scalar_ref(args[2])?;
+        if sent.kind != Kind::Int {
+            let found = self.type_name(sent);
+            return Err(self.err_at(
+                args[2],
+                format_args!("`core.session_send` expects `var sent: int`, found `{found}`"),
+            ));
+        }
+        self.one(opcodes::BUILTIN, builtin::SESSION_SEND)?;
+        self.pop(3)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// `core.session_recv(id, var dst, var read) -> Status` (spec 0021).
+    fn session_recv_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 3 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`core.session_recv` expects 3 arguments, got {}", args.len()),
+            ));
+        }
+        let id = self.expr_scalar(args[0])?;
+        if id.kind != Kind::Int {
+            return Err(self.err_at(
+                args[0],
+                format_args!("`core.session_recv` expects an `int` session id, found `{id}`"),
+            ));
+        }
+        let destination = self.var_buffer_place(args[1])?;
+        if destination.ty.kind != Kind::Bytes || destination.ty.cap < 1 {
+            let found = self.type_name(destination.ty);
+            return Err(self.err_at(
+                args[1],
+                format_args!(
+                    "`core.session_recv` needs a writable `var bytes` destination, found `{found}`"
+                ),
+            ));
+        }
+        let capacity = destination.ty.cap;
+        self.const_i64(i64::from(capacity))?;
+        self.push_buffer_data_ref(&destination)?;
+        let read = self.emit_scalar_ref(args[2])?;
+        if read.kind != Kind::Int {
+            let found = self.type_name(read);
+            return Err(self.err_at(
+                args[2],
+                format_args!("`core.session_recv` expects `var read: int`, found `{found}`"),
+            ));
+        }
+        self.one(opcodes::BUILTIN, builtin::SESSION_RECV)?;
+        self.pop(4)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// `core.session_source(id) -> uint` (spec 0021).
+    fn session_source_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 1 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`core.session_source` expects 1 argument, got {}", args.len()),
+            ));
+        }
+        let id = self.expr_scalar(args[0])?;
+        if id.kind != Kind::Int {
+            let found = self.type_name(id);
+            return Err(self.err_at(
+                args[0],
+                format_args!("`core.session_source` expects an `int` session id, found `{found}`"),
+            ));
+        }
+        self.const_i64(abi::wait::SOURCE_SESSION_BASE as i64)?;
+        self.simple(opcodes::ADD_U)?;
+        self.pop(2)?;
+        self.push();
+        Ok(Some(Type::scalar(Kind::Uint)))
     }
 
     /// `core.socket_recv(id, var dst, var read) -> Status`.

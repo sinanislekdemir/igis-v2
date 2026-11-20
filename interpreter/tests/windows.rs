@@ -861,3 +861,123 @@ fn the_default_region_claim_and_release_are_the_disabled_service() {
     assert_eq!(state_word(&state, 0), Status::Invalid as u64);
     assert_eq!(state_word(&state, 8), Status::Invalid as u64);
 }
+
+/// A mock console-session service (spec 0021).
+struct SessionHost {
+    sent: Vec<u8>,
+    receive: Vec<u8>,
+}
+
+impl Host for SessionHost {
+    fn console_write(&mut self, _bytes: &[u8]) {}
+
+    fn clock(&mut self) -> u64 {
+        0
+    }
+
+    fn session_open(&mut self) -> Result<u64, Status> {
+        Ok(5)
+    }
+
+    fn session_close(&mut self, _id: u64) -> Status {
+        Status::Ok
+    }
+
+    fn session_send(&mut self, _id: u64, data: &[u8]) -> Result<usize, Status> {
+        self.sent.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn session_recv(&mut self, _id: u64, dst: &mut [u8]) -> Result<usize, Status> {
+        let count = self.receive.len().min(dst.len());
+        dst[..count].copy_from_slice(&self.receive[..count]);
+        self.receive.drain(..count);
+        Ok(count)
+    }
+
+    fn session_readable(&mut self, _id: u64) -> bool {
+        !self.receive.is_empty()
+    }
+}
+
+#[test]
+fn session_builtins_decode_and_publish_their_housekeeping() {
+    let mut instructions = Vec::new();
+    // id := session_open()
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::SESSION_OPEN,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 8);
+    // sent := session_send(5, "abc", var sent)
+    op_const(&mut instructions, 5);
+    op_imm(&mut instructions, opcodes::REF_STATE, 32);
+    op_imm(&mut instructions, opcodes::REF_STATE, 48);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::SESSION_SEND,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 56);
+    // read := session_recv(5, var dst, var read)
+    op_const(&mut instructions, 5);
+    op_const(&mut instructions, 16);
+    op_imm(&mut instructions, opcodes::REF_STATE, 80);
+    op_imm(&mut instructions, opcodes::REF_STATE, 96);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::SESSION_RECV,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 104);
+    op(&mut instructions, opcodes::RET);
+
+    let code = build(&instructions, &[], 256);
+    let mut state = vec![0u8; 256];
+    // "abc" at offset 32; its length word is at 24.
+    state[24..32].copy_from_slice(&3u64.to_le_bytes());
+    state[32..35].copy_from_slice(b"abc");
+    let mut host = SessionHost {
+        sent: Vec::new(),
+        receive: b"hi".to_vec(),
+    };
+    assert_eq!(
+        run(&code, &mut state, &mut host),
+        Outcome::Exited(interpreter::ExitReason::Ok)
+    );
+    assert_eq!(state_word(&state, 0), 5);
+    assert_eq!(state_word(&state, 8), Status::Ok as u64);
+    assert_eq!(host.sent, b"abc");
+    assert_eq!(state_word(&state, 48), 3);
+    assert_eq!(state_word(&state, 56), Status::Ok as u64);
+    assert_eq!(state_word(&state, 96), 2);
+    assert_eq!(state_word(&state, 104), Status::Ok as u64);
+    // The receive destination publishes its runtime length and bytes.
+    assert_eq!(state_word(&state, 72), 2);
+    assert_eq!(&state[80..82], b"hi");
+}
+
+#[test]
+fn the_default_session_service_is_disabled() {
+    let mut instructions = Vec::new();
+    op_imm(&mut instructions, opcodes::REF_STATE, 0);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::SESSION_OPEN,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 8);
+    op(&mut instructions, opcodes::RET);
+
+    let code = build(&instructions, &[], 64);
+    let mut state = vec![0u8; 64];
+    let mut host = DisabledHost;
+    assert_eq!(
+        run(&code, &mut state, &mut host),
+        Outcome::Exited(interpreter::ExitReason::Ok)
+    );
+    assert_eq!(state_word(&state, 0), 0, "the id stays untouched");
+    assert_eq!(state_word(&state, 8), Status::Invalid as u64);
+}

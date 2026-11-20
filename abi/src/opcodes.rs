@@ -974,6 +974,38 @@ pub mod builtin {
     /// reference][errors reference]`.
     pub const NET_STATS: u32 = 73;
 
+    // ---- terminal emulator console sessions (spec 0021; ADR 0053) --------
+    //
+    // The kernel owns an owner-checked pair of byte rings. The emulator holds
+    // the session, sends keystrokes and receives screen bytes; a child spawned
+    // by the owner inherits it, so `core.write`/`core.read_input` become its
+    // standard byte stream. No opcode is added: ABI v1 stays at 75.
+
+    /// `core.session_open(var id: int) -> Status`: create a console session
+    /// owned by the calling task. `Ok` writes a fresh positive id; `Full` when
+    /// the table or the caller's one live session is used; `Invalid` for a host
+    /// without sessions. Operands: `[id reference]`.
+    pub const SESSION_OPEN: u32 = 74;
+
+    /// `core.session_close(id) -> Status`: close the caller's session, discard
+    /// both rings and wake waiters. `Ok` for the owner (idempotent), `NotFound`
+    /// for a stale id, `Invalid` for a foreign one. Operands: `[id]`.
+    pub const SESSION_CLOSE: u32 = 75;
+
+    /// `core.session_send(id, data, var sent) -> Status`: copy `data`, a
+    /// `string` or `bytes` buffer, into the session input ring. `Ok` writes the
+    /// copied count; `WouldBlock` when the ring is full (nothing copied);
+    /// `Closed` after finish/close. Operands: `[id][data reference][sent
+    /// reference]`.
+    pub const SESSION_SEND: u32 = 76;
+
+    /// `core.session_recv(id, var dst, var read) -> Status`: copy up to the
+    /// destination capacity from the session output ring. `Ok` writes the count
+    /// and publishes the destination length; `WouldBlock` when empty; `Closed`
+    /// when finished/closed and empty. Operands: `[id][capacity][dst
+    /// reference][read reference]`.
+    pub const SESSION_RECV: u32 = 77;
+
     /// Returns the number of operands popped and pushed for a builtin.
     pub const fn effect(id: u32) -> Option<(u8, u8)> {
         match id {
@@ -1048,6 +1080,10 @@ pub mod builtin {
             SOCKET_TIMEOUT => Some((2, 1)),
             SOCKET_ACCEPT => Some((2, 1)),
             NET_STATS => Some((4, 1)),
+            SESSION_OPEN => Some((1, 1)),
+            SESSION_CLOSE => Some((1, 1)),
+            SESSION_SEND => Some((3, 1)),
+            SESSION_RECV => Some((4, 1)),
             _ => None,
         }
     }
