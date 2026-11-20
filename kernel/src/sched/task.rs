@@ -19,7 +19,8 @@
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use abi::wait::{
-    is_socket_source, socket_handle, socket_source, WaitSet, SOURCE_CONSOLE_BYTE, SOURCE_INPUT,
+    is_session_source, is_socket_source, session_id, session_source, socket_handle, socket_source,
+    WaitSet, SOURCE_CONSOLE_BYTE, SOURCE_INPUT,
 };
 use abi::Status;
 use interpreter::Machine;
@@ -311,6 +312,9 @@ pub struct Task {
     pub kill_requested: bool,
     /// Claims so far, printed at termination.
     pub claims: u64,
+    /// Console session inherited at spawn (`0` = none, spec 0021). A bound
+    /// task's `core.write`/`read_input` use it.
+    pub session: u64,
     /// Releases so far (quantum expiry), printed at termination.
     pub yields: u64,
     /// Accumulated time between claim and release, in nanoseconds.
@@ -361,6 +365,7 @@ impl Task {
             heartbeats: 0,
             kill_requested: false,
             claims: 0,
+            session: 0,
             yields: 0,
             budget_ns: 0,
             args: [0; 8 + ARGS_BYTES],
@@ -389,6 +394,7 @@ impl Task {
         // is safe.
         crate::stream::close_task(self.id);
         crate::window::close_task(self.id);
+        crate::session::task_ended(self.id, self.session);
         // A task's sockets go with it (spec 0020, N14). The net stack takes its
         // own lock and never a slot lock, so the order stays safe.
         crate::net::close_task(self.id);
@@ -595,7 +601,9 @@ pub fn wake(child: u64) {
 fn waits_on_source(wait: WaitFor, source: u64) -> bool {
     match wait {
         WaitFor::Input => source == SOURCE_INPUT,
-        WaitFor::Stream(handle) => !is_socket_source(source) && handle == source,
+        WaitFor::Stream(handle) => {
+            !is_socket_source(source) && !is_session_source(source) && handle == source
+        }
         WaitFor::Net(handle) => is_socket_source(source) && socket_handle(source) == handle,
         WaitFor::Any(set) => set.contains(source),
         WaitFor::Child(_) => false,
@@ -637,9 +645,9 @@ pub fn input_queue_ready(task: u64) -> bool {
 }
 
 /// True when one source is ready for `task` (`core.next_any`).
-fn source_ready(task: u64, source: u64) -> bool {
+fn source_ready(task: u64, session: u64, source: u64) -> bool {
     if source == SOURCE_CONSOLE_BYTE {
-        crate::console::has_byte()
+        crate::console::has_byte_for(session)
     } else if source == SOURCE_INPUT {
         // `syslib.next_event` also returns a pending `Expose` and a `Close`
         // (spec 0011, W16/W25), so the input source means "next_event would
@@ -651,6 +659,8 @@ fn source_ready(task: u64, source: u64) -> bool {
             || crate::window::has_close(task)
     } else if is_socket_source(source) {
         crate::net::select_ready(socket_handle(source), task)
+    } else if is_session_source(source) {
+        crate::session::readable(task, session_id(source))
     } else {
         crate::stream::readable(task, source)
     }
@@ -659,12 +669,12 @@ fn source_ready(task: u64, source: u64) -> bool {
 /// True when any source in `set` is ready for `task`. The scheduler calls this
 /// after putting a task to sleep on `WaitFor::Any`, closing the window between
 /// the failed probe and the block (spec 0007).
-pub fn wait_any_ready(task: u64, set: WaitSet) -> bool {
+pub fn wait_any_ready(task: u64, session: u64, set: WaitSet) -> bool {
     for index in 0..set.len() {
         let Some(source) = set.get(index) else {
             break;
         };
-        if source_ready(task, source) {
+        if source_ready(task, session, source) {
             return true;
         }
     }
@@ -720,6 +730,28 @@ pub fn wake_input() {
 /// slot locks are never nested inside the network lock.
 pub fn wake_net(handle: u64) {
     wake_source(socket_source(handle));
+}
+
+/// Makes every task blocked on session `id`'s output source runnable
+/// (spec 0021). A `WaitFor::Any` set matches when it contains
+/// `SOURCE_SESSION_BASE | id`.
+pub fn wake_session(id: u64) {
+    wake_source(session_source(id));
+}
+
+/// The session bound to `id` while it is parked in its slot, or 0. A claimed
+/// task is not in the slot; callers that need a running task's binding get it
+/// from the host (spec 0021).
+pub fn session_of_task(id: u64) -> u64 {
+    for slot in SLOTS.iter() {
+        let guard = slot.lock();
+        if let Some(task) = guard.as_ref() {
+            if task.id == id {
+                return task.session;
+            }
+        }
+    }
+    0
 }
 
 /// Makes every task whose `WaitFor::Deadline(ns)` has expired runnable.

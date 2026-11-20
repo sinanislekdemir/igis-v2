@@ -533,7 +533,16 @@ pub fn _print(args: fmt::Arguments<'_>) {
 /// All cells of the call are drawn first and the terminal's dirty rectangle is
 /// presented once, so a line costs one present instead of one per cell
 /// (spec 0016).
-pub fn write_bytes(bytes: &[u8]) {
+pub fn write_bytes(session: u64, bytes: &[u8]) {
+    // A bound task's bytes go to its session output ring; serial is still the
+    // mirror (spec 0021, S7). Unbound output keeps the pre-M11 console path.
+    if session != 0 {
+        for byte in bytes {
+            serial::write_byte(*byte);
+        }
+        let _ = crate::session::write_output(session, bytes);
+        return;
+    }
     let mut console = CONSOLE.lock();
     if !console.enabled {
         return;
@@ -652,7 +661,7 @@ pub fn route_self_check() -> Result<bool, u32> {
         return Ok(false);
     }
 
-    write_bytes(b"console: terminal ok\n");
+    write_bytes(0, b"console: terminal ok\n");
     _print(format_args!("console: log ok\n"));
 
     let mut console = CONSOLE.lock();
@@ -767,13 +776,28 @@ static INPUT: SpinLock<Input> = SpinLock::new(Input::new());
 /// the keyboard is events**. Feeding keyboard bytes into the ring too would
 /// make a shell that reads both see every key twice.
 pub fn poll_input() {
-    {
-        let mut input = INPUT.lock();
-        for _ in 0..64 {
-            match serial::try_read_byte() {
-                Some(byte) => input.push(byte),
-                None => break,
+    // Serial bytes belong to the focused window owner's console session when
+    // it has one; otherwise they enter the global ring (spec 0021, S10).
+    let focus = window::focus();
+    let owner = if focus == 0 {
+        0
+    } else {
+        window::owner_of(focus)
+    };
+    let session = if owner == 0 {
+        0
+    } else {
+        crate::session::owned_by(owner)
+            .unwrap_or_else(|| crate::task::session_of_task(owner))
+    };
+    for _ in 0..64 {
+        match serial::try_read_byte() {
+            Some(byte) => {
+                if session == 0 || !crate::session::input_push(session, byte) {
+                    INPUT.lock().push(byte);
+                }
             }
+            None => break,
         }
     }
     keyboard::poll(|decoded| {
@@ -787,11 +811,24 @@ pub fn poll_input() {
 /// Copies the console input bytes that are waiting into `out` and returns the
 /// count (`0` when none). Raw and non-blocking: the caller sleeps on source
 /// `0` with `core.next_any` (spec 0003, "Multi-source waits").
-pub fn read_input(out: &mut [u8]) -> usize {
+pub fn read_input(session: u64, out: &mut [u8]) -> usize {
+    if session != 0 {
+        return crate::session::read_input(session, out);
+    }
     INPUT.lock().pop(out)
 }
 
-/// True when at least one console input byte is waiting.
+/// True when the task's console input source has a byte waiting: its session
+/// input ring when bound, otherwise the global serial ring.
+pub fn has_byte_for(session: u64) -> bool {
+    if session != 0 {
+        crate::session::input_ready(session)
+    } else {
+        has_byte()
+    }
+}
+
+/// True when at least one global console input byte is waiting.
 pub fn has_byte() -> bool {
     INPUT.lock().count != 0
 }

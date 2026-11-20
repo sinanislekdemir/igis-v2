@@ -21,7 +21,7 @@ mod vfs;
 pub(crate) use mm::{frame, guard};
 pub(crate) use platform::x86_64::{ata, mouse, pci, smp, usb};
 pub(crate) use sched::task;
-pub(crate) use ui::{console, font, font8x8, gfx, window};
+pub(crate) use ui::{console, font, font8x8, gfx, session, window};
 pub(crate) use vfs::{ext2, fs};
 
 use arch_x86_64::{apic, gdt, idt, ioapic, keyboard, serial};
@@ -70,6 +70,16 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
         Ok(()) => println!("console: input ok"),
         Err(step) => {
             println!("console: input FAIL at step {step}");
+            arch_x86_64::halt();
+        }
+    }
+
+    // Console sessions keep the newest output and refuse an oversized input
+    // buffer atomically (spec 0021). The check uses scratch rings.
+    match session::self_check() {
+        Ok(()) => println!("console: session ok"),
+        Err(step) => {
+            println!("console: session FAIL at step {step}");
             arch_x86_64::halt();
         }
     }

@@ -5,4 +5,5 @@ pub mod console;
 pub mod font;
 pub mod font8x8;
 pub mod gfx;
+pub mod session;
 pub mod window;

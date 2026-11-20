@@ -141,6 +141,10 @@ static EXITS: [AtomicU64; smp::MAX_CORES] = [const { AtomicU64::new(0) }; smp::M
 /// the optional home mount.
 struct KernelHost {
     current: u64,
+    /// Console session inherited at spawn (`0` for an unbound task). A terminal
+    /// emulator reads/writes its session through the `session_*` builtins; a
+    /// shell child uses it for `core.write`/`read_input` (spec 0021).
+    session: u64,
     /// The task's class at quantum start. A `realtime_on` on an already
     /// realtime task is a no-op that consumes no second admission slot.
     class: TaskClass,
@@ -163,11 +167,11 @@ struct KernelHost {
 
 impl Host for KernelHost {
     fn console_write(&mut self, bytes: &[u8]) {
-        crate::console::write_bytes(bytes);
+        crate::console::write_bytes(self.session, bytes);
     }
 
     fn read_input(&mut self, dst: &mut [u8]) -> usize {
-        console::read_input(dst)
+        console::read_input(self.session, dst)
     }
 
     fn clock(&mut self) -> u64 {
@@ -421,7 +425,7 @@ impl Host for KernelHost {
     // the same readiness functions the scheduler's post-block recheck uses, so
     // a source cannot be "ready" for the builtin and "not ready" for the wake.
     fn console_byte_ready(&mut self) -> bool {
-        crate::console::has_byte()
+        crate::console::has_byte_for(self.session)
     }
 
     fn input_ready(&mut self) -> bool {
@@ -509,6 +513,28 @@ impl Host for KernelHost {
 
     fn region_release(&mut self) -> Status {
         crate::window::region_release(self.current)
+    }
+
+    // Terminal emulator console sessions (spec 0021, ADR 0053). The owner is
+    // the caller; the host supplies the task id so the language needs none.
+    fn session_open(&mut self) -> Result<u64, Status> {
+        crate::session::open(self.current)
+    }
+
+    fn session_close(&mut self, id: u64) -> Status {
+        crate::session::close(self.current, id)
+    }
+
+    fn session_send(&mut self, id: u64, data: &[u8]) -> Result<usize, Status> {
+        crate::session::send(self.current, id, data)
+    }
+
+    fn session_recv(&mut self, id: u64, dst: &mut [u8]) -> Result<usize, Status> {
+        crate::session::recv(self.current, id, dst)
+    }
+
+    fn session_readable(&mut self, id: u64) -> bool {
+        crate::session::readable(self.current, id)
     }
 
     // Terminal attach (spec 0014): the host knows the executing task id, so the
@@ -704,7 +730,12 @@ impl Host for KernelHost {
     }
 
     fn spawn(&mut self, path: &[u8], args: &[u8], diag: &mut [u8]) -> Result<u64, Status> {
-        repl::request_spawn(self.current, path, args, diag)
+        let session = if self.session != 0 {
+            self.session
+        } else {
+            crate::session::owned_by(self.current).unwrap_or(0)
+        };
+        repl::request_spawn(self.current, session, path, args, diag)
     }
 
     fn wait(&mut self, id: u64) -> WaitOutcome {
@@ -930,11 +961,12 @@ fn loop_body(core: usize) -> ! {
                                         set.len()
                                     );
                                     let id = task.id;
+                                    let session = task.session;
                                     task::block(task, WaitFor::Any(set));
                                     // A source may have become ready between
                                     // the failed probe and the block; the
                                     // wake-up path then found nobody to wake.
-                                    if task::wait_any_ready(id, set) {
+                                    if task::wait_any_ready(id, session, set) {
                                         task::wake_any_sources(set);
                                     }
                                 }
@@ -1031,6 +1063,7 @@ fn run_quantum(core: usize, task: &mut Task) -> Quantum {
     let Task {
         id,
         class,
+        session,
         regions,
         machine,
         args,
@@ -1052,6 +1085,7 @@ fn run_quantum(core: usize, task: &mut Task) -> Quantum {
 
     let mut host = KernelHost {
         current: *id,
+        session: *session,
         class: *class,
         promoted: false,
         heartbeats: 0,

@@ -133,6 +133,8 @@ fn valid_stream_name(name: &[u8]) -> bool {
 struct Request {
     reserved_id: u64,
     requester: u64,
+    /// Console session inherited by the child (0 = none, spec 0021).
+    session: u64,
     path_len: u16,
     args_len: u16,
     path: [u8; PATH_BYTES],
@@ -142,6 +144,7 @@ struct Request {
 const EMPTY_REQUEST: Request = Request {
     reserved_id: 0,
     requester: 0,
+    session: 0,
     path_len: 0,
     args_len: 0,
     path: [0; PATH_BYTES],
@@ -365,7 +368,7 @@ pub fn boot() -> u64 {
     for name in ["system/entrypoint", "base/shell"] {
         let id = task::reserve_id();
         let mut diag = [0u8; DIAG_BYTES];
-        if load(name, id, &[], &mut diag).is_ok() {
+        if load(name, id, 0, &[], &mut diag).is_ok() {
             return id;
         }
     }
@@ -420,6 +423,7 @@ fn resolve_launch(path: &str, out: &mut [u8; PATH_BYTES]) -> Result<usize, Statu
 /// caller's `diag` (spec 0005, "Implemented ABI").
 pub fn request_spawn(
     requester: u64,
+    session: u64,
     path: &[u8],
     args: &[u8],
     diag: &mut [u8],
@@ -503,6 +507,7 @@ pub fn request_spawn(
     let mut request = EMPTY_REQUEST;
     request.reserved_id = id;
     request.requester = requester;
+    request.session = session;
     request.path_len = resolved_len as u16;
     request.path[..resolved_len].copy_from_slice(&resolved_buf[..resolved_len]);
     request.args_len = args.len() as u16;
@@ -555,7 +560,14 @@ pub fn service() {
     );
     let args = &request.args[..8 + request.args_len as usize];
     let mut diag = [0u8; DIAG_BYTES];
-    if load(name, request.reserved_id, args, &mut diag).is_err() {
+    if load(
+        name,
+        request.reserved_id,
+        request.session,
+        args,
+        &mut diag,
+    )
+    .is_err() {
         // The caller already has the id and may already be blocked in `run`.
         // A synthetic fault record wakes it; the diagnostic rides along so a
         // `run` caller can report the compiler's message. The regions were
@@ -620,7 +632,7 @@ pub fn has_pending() -> bool {
 /// `Err(())` means "not runnable": a missing file, an over-cap source, a
 /// failed compile and a rejected package are all reported and treated the same
 /// way. On `Ok`, the task is in the runnable set and the scheduler owns it.
-fn load(name: &str, id: u64, args: &[u8], diag: &mut [u8]) -> Result<(), ()> {
+fn load(name: &str, id: u64, session: u64, args: &[u8], diag: &mut [u8]) -> Result<(), ()> {
     let describe = |diag: &mut [u8], message: &[u8]| {
         layout::diagnostic::write(diag, b"", message, 0, 0);
     };
@@ -786,6 +798,7 @@ fn load(name: &str, id: u64, args: &[u8], diag: &mut [u8]) -> Result<(), ()> {
             return Err(());
         }
     };
+    task.session = crate::session::bind(session);
     task.regions.code.as_slice_mut()[..code_len].copy_from_slice(package.code);
     // The state prefix is `8 * endpoint_count` bytes; descriptor `i` pairs with
     // `state[i * 8]` (spec 0008).

@@ -1751,6 +1751,13 @@ pub fn focus() -> u64 {
     TABLE.lock().focus
 }
 
+/// The task owner of window `id`, or 0 for an unknown or kernel window.
+/// Kernel-internal: the console routes serial bytes to the focused window's
+/// console session (spec 0021, S10).
+pub fn owner_of(id: u64) -> u64 {
+    TABLE.lock().owner_of(id).unwrap_or(0)
+}
+
 /// Closes every window owned by a terminating task and repairs the screen once.
 /// Called from `Task::reclaim`, so it covers normal exit, kill, fault, a failed
 /// spawn and a stale-slot eviction (W8). A terminating task's modal popup grab
