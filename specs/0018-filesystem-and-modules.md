@@ -54,6 +54,10 @@ mount table. `stdlib` stays embedded and is not moved into the image.
 - **L9 (MUST):** The reader validates every directory entry and inode it walks
   (name length, inode bounds, size, block pointers) as today; an invalid tree is a
   mount or lookup failure, never a fault.
+- **L10 (MUST):** Test-only sources live under `samples/tests/apps/{base,system}` in
+  the repository and are staged to the same image paths only for the test image
+  (`xtask image --shell`). The product image carries only `samples/apps`. A test file
+  name that collides with a shipped name is a staging error, not a silent shadow.
 
 ### Modules and `uses`
 
@@ -126,13 +130,16 @@ mount table. `stdlib` stays embedded and is not moved into the image.
 
 ### Build and host
 
-- **X1 (MUST):** `xtask image` stages `samples/apps/{lib,base,home,system}` to the
-  same paths in the image, creating real directories. No file is staged at the
-  image root.
-- **X2 (MUST):** `xtask image --shell` omits `system/entrypoint`, so the fallback
-  boot (`base/shell`) is exercised.
-- **X3 (MUST):** `home` must exist in the image even when empty; if the stager
-  cannot create an empty directory, a small `home/readme.txt` is staged.
+- **X1 (MUST):** `xtask image` stages the shipped corpus `samples/apps` to the same
+  paths in the image and fills `home/` from `samples/home`, creating real
+  directories. No file is staged at the image root.
+- **X2 (MUST):** `xtask image --shell` stages the test corpus `samples/tests/apps`
+  over the shipped one (colliding names are an error) and omits `system/entrypoint`,
+  so the fallback boot (`base/shell`) is exercised and every proof app is reachable.
+  The product image never carries the test corpus.
+- **X3 (MUST):** `home` must exist in the image even when the seed is empty;
+  `samples/home/readme.txt` is the single seed for both the app image's `home/` and
+  the writable disk.
 - **X4 (MUST):** The desktop source stays an ordinary base application
   (`base/desktop_shell`) and is staged once more as `system/entrypoint` for the
   boot path; its unit name stays `desktop_shell`.
@@ -156,6 +163,12 @@ The ext2 subset (1 or 4 KiB blocks, direct/single/double indirect, validated
 metadata) is unchanged; only the "root only" restriction goes away. The reader
 gains a path walk with an 8-component depth cap and a per-directory entry scan
 that already exists for the root.
+
+The source side splits into the shipped corpus (`samples/apps/{lib,base,system}`)
+and the test-only corpus (`samples/tests/apps/{base,system}`); `samples/home` is
+the single seed for the image's `home` directory and the writable disk. Only the
+`--shell` test image overlays `samples/tests/apps`, so the product image contains
+just the shipped applications.
 
 ### Resolution and validation
 
@@ -303,3 +316,4 @@ window and task that host it, and the caller's own window stays behind.
 | 2026-11-17 | Initial draft, decided with the project owner: `uses lib.x` dotted imports, header-name qualification, read-only `/home`, embedded `stdlib`, same-image `/system`, short names resolving under `base`, caps 384 KiB / 16 MiB. |
 | 2026-11-18 | Implemented: M3.1 (tree, ext2 paths, boot, short names), M3.2 (compiler `SourceReader`/units/caps), M3.3 (kernel `ImageReader`, `module_demo`) and M3.4 (browser navigation). The kernel keeps a 128 KiB application-source buffer and copies module sources into the 16 MiB arena; `abi::MAX_UNIT_ID` is 16. |
 | 2026-11-19 | M9.3 adds `lib/file_dialog.ig`: a module with one public function, `file_dialog.open_file(initial, chosen) -> Status`, that opens a task-owned, screen-centred `Open File` window, lists up to 96 image entries, navigates with keys/pointer/scrollbar and writes a regular-file path only on `Ok` (`Invalid` cancel, `CapacityExceeded` when the caller's 256-byte destination cannot hold it; both leave `chosen` untouched). It follows the M5 (`stdlib` import) and M6 (no `main`/state/stream) module rules and adds no opcode, builtin, file API or `stdlib` function. |
+| 2026-11-20 | L10/X1–X3 separate the shipped and test corpora: `samples/apps` holds only applications a user launches, `samples/tests/apps` holds proofs, helper children and negative fixtures, and `samples/home` is the single `home/` seed. `xtask image` builds the product image from the shipped corpus; `xtask image --shell` overlays the test corpus (collisions are errors) and remains the boot for the QMP regression suite. |

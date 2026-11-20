@@ -848,7 +848,7 @@ application's package. One ticket per session; the parent verifies each.
 - [x] **M3.1 The image tree, ext2 path traversal and boot from the tree.**
   Move `samples/apps/*` into `samples/apps/base/` (applications) and
   `samples/apps/system/` (`entrypoint`, `system_probe`, `terminal_probe`); add
-  `samples/apps/home/readme.txt`; create `samples/apps/lib/` (empty until M3.2).
+  `samples/home/readme.txt`; create `samples/apps/lib/` (empty until M3.2).
   - `abi::fs`: one L6 path rule for every call site (`validate_path`), plus
     `validate_dir`; delete `validate_root`/`validate_root_name`; update tests.
   - `kernel/src/ext2.rs`: `find(path)`, `list(path, index, name)`,
@@ -1095,7 +1095,7 @@ parent verifies each.
   blocks/inodes (bitmap → group descriptor → superblock), plans capacity before
   mutating, writes data/inode/dirent in order; `core.fs_write` (builtin 53) is
   `fs_write_call` in codegen, `validate_writable` in `abi::fs`, a router
-  create-on-offset-0; `samples/apps/base/home_write` prints nine step lines then
+  create-on-offset-0; `samples/tests/apps/base/home_write` prints nine step lines then
   `home_write: ok` on `-smp 4`/`-smp 1` and on `langhost` (which now has a
   temporary home), and `home_write: no writable home` without the disk;
   `e2fsck -fn` exits 0 after the writes (12 → 13 files, 563 → 564 blocks) and
@@ -1147,7 +1147,7 @@ parent verifies each.
   capacity (full disk `CapacityExceeded`, no change); a directory is `Invalid`,
   a missing path `NotFound`, the current size an `Ok` no-op. Builtin 57
   (`core.fs_truncate(path, size) -> Status`, only `home/*`) with compiler,
-  interpreter, `Host`, router and `langhost` wiring. Add `samples/apps/base/home_truncate`
+  interpreter, `Host`, router and `langhost` wiring. Add `samples/tests/apps/base/home_truncate`
   (write 3000 bytes, shrink to 1000 and verify size/content, extend to 4000 and
   verify zeros, shrink to 0, idempotent, error paths) and `ext2w` host tests with
   `e2fsck -fn`. The editor keeps its temporary-file + rename save (ADR 0041).
@@ -1187,7 +1187,7 @@ parent verifies each.
   never held across `request_kill`. Boot self-check `window: drag ok` covers the
   pure rules (title-bar vs close-box vs content, grab offset, clamp, release,
   owner-0 exemption, drag cancellation).
-  Proof: `samples/apps/base/windows_drag` (+ `windows_drag_victim`) injects real
+  Proof: `samples/tests/apps/base/windows_drag` (+ `windows_drag_victim`) injects real
   pointer events, drags its own window by the title bar, checks the frame
   rectangle after each step, both screen clamps, release, the restored desktop
   and the repainted content after the `Expose`, verifies a title-bar press is
@@ -1996,7 +1996,7 @@ parent verifies each.
   `send`/`recv`/`accept` that returns `WouldBlock`, `net::service` wakes on
   data/space/EOF/close/timeout after dropping its lock, and the post-block recheck
   closes the lost-wake window. `core.socket_source` (`1 << 63 | handle`) feeds
-  `core.next_any`/`poll_any`; `samples/apps/base/net_select` proves the selector,
+  `core.next_any`/`poll_any`; `samples/tests/apps/base/net_select` proves the selector,
   a 300 ms recv timeout and a 300 ms select timeout. `kill_stress` is still
   300/300 and `mouse` 600/600.
 
@@ -2067,7 +2067,7 @@ parent verifies each.
   used-ring drain and the protocol work (ADR 0051 refines ADR 0023's "no lock in a
   handler" rule; the rings are not SPSC-safe against the service path, so a flag is
   the bounded handler). Add `core.net_stats` (73) and
-  `samples/apps/base/net_perf` (ten timed HTTP GETs, min/avg/max from
+  `samples/tests/apps/base/net_perf` (ten timed HTTP GETs, min/avg/max from
   `core.clock()`, counters before/after). Polling stays the default when the route
   is absent, when the device refuses to unmask, or when the boot asks for it:
   `xtask --net-irq intx|poll` writes `igis.net_irq=poll` into the multiboot2 command

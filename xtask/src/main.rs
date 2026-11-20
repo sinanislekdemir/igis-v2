@@ -153,8 +153,10 @@ fn image(shell: bool, reset_home: bool, net_irq: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Builds the read-only ext2 application image from `samples/apps/`.
+/// Builds the read-only ext2 application image.
 ///
+/// The shipped corpus is `samples/apps/`. The `home` fallback comes from
+/// `samples/home/`, the same seed the writable disk uses, so it has one source.
 /// The staging directory and the image live under `build/`; `mke2fs -d` copies
 /// the staged tree into a fresh 4 MiB ext2 filesystem with 1 KiB blocks. The
 /// image carries source files only (ADR 0019) and preserves the source tree
@@ -164,15 +166,19 @@ fn image(shell: bool, reset_home: bool, net_irq: &str) -> ExitCode {
 /// The boot entry is `system/entrypoint` (spec 0018, A3): `base/desktop_shell`
 /// is staged a second time under that name so the boot unit can be the desktop
 /// without a duplicate source. The file name is the load path; the
-/// `unit desktop_shell;` name is only diagnostic identity. `--shell` omits the
-/// alias so the REPL falls back to `base/shell`, exactly as an older image
-/// would.
+/// `unit desktop_shell;` name is only diagnostic identity.
+///
+/// `--shell` selects the test image (spec 0018, X2): it overlays
+/// `samples/tests/apps/` into the same directories so proofs and negative
+/// fixtures are reachable with their usual names, and it omits the
+/// `system/entrypoint` alias so the REPL falls back to `base/shell`, exactly as
+/// an older image would. The product image never carries the test corpus.
 fn apps_image(shell: bool) -> Result<PathBuf, String> {
     let source = root().join("samples").join("apps");
     if !source.is_dir() {
         return Err(format!("{} is not a directory", source.display()));
     }
-    // Spec 0018, L1: the source root holds exactly the four directories.
+    // Spec 0018, L1: the source root holds only image directories.
     let top_level = ["lib", "base", "home", "system"];
     let entries =
         fs::read_dir(&source).map_err(|error| format!("{}: {error}", source.display()))?;
@@ -203,9 +209,44 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
         fs::remove_dir_all(&staging).map_err(|error| format!("{}: {error}", staging.display()))?;
     }
     fs::create_dir_all(&staging).map_err(|error| format!("{}: {error}", staging.display()))?;
-    stage_tree(&source, &staging)?;
-    // X3: the four top-level directories exist even when empty (lib is empty
-    // until M3.2).
+    stage_tree(&source, &staging, false)?;
+
+    // X3: `home` is the read-only fallback and shares one seed with the
+    // writable disk image (spec 0018, X1; spec 0019, H2).
+    let home_seed = root().join("samples").join("home");
+    if !home_seed.is_dir() {
+        return Err(format!("{} is not a directory", home_seed.display()));
+    }
+    stage_tree(&home_seed, &staging.join("home"), false)?;
+
+    // X2: the test corpus is present only in the `--shell` image.
+    if shell {
+        let tests = root().join("samples").join("tests").join("apps");
+        if !tests.is_dir() {
+            return Err(format!("{} is not a directory", tests.display()));
+        }
+        for entry in fs::read_dir(&tests).map_err(|error| format!("{}: {error}", tests.display()))? {
+            let path = entry
+                .map_err(|error| format!("{}: {error}", tests.display()))?
+                .path();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if name.starts_with('.') {
+                continue;
+            }
+            if !path.is_dir() || !["base", "system"].contains(&name) {
+                return Err(format!(
+                    "{}: the test root holds only base and system",
+                    path.display()
+                ));
+            }
+        }
+        stage_tree(&tests, &staging, true)?;
+    }
+
+    // The four top-level directories exist even when empty.
     for name in top_level {
         fs::create_dir_all(staging.join(name))
             .map_err(|error| format!("{}: {error}", staging.join(name).display()))?;
@@ -271,7 +312,7 @@ fn home_image(reset: bool) -> Result<PathBuf, String> {
         fs::remove_dir_all(&staging).map_err(|error| format!("{}: {error}", staging.display()))?;
     }
     fs::create_dir_all(&staging).map_err(|error| format!("{}: {error}", staging.display()))?;
-    stage_tree(&source, &staging)?;
+    stage_tree(&source, &staging, false)?;
 
     let status = Command::new("mke2fs")
         .arg("-q")
@@ -296,9 +337,13 @@ fn home_image(reset: bool) -> Result<PathBuf, String> {
 /// Copies the tree under `source` into `destination`, creating real
 /// directories (spec 0018, X1).
 ///
-/// Files whose name starts with `.` are repository bookkeeping (`.gitkeep`),
-/// not image content, and are skipped.
-fn stage_tree(source: &Path, destination: &Path) -> Result<(), String> {
+/// With `overlay` false a later file replaces an earlier one; the shipped
+/// corpus and the home seed are staged that way. With `overlay` true (the test
+/// corpus) a file may not replace an existing image file, so a test name that
+/// collides with a shipped name is a staging error instead of silently
+/// shadowing it. Files whose name starts with `.` are repository bookkeeping
+/// (`.gitkeep`), not image content, and are skipped.
+fn stage_tree(source: &Path, destination: &Path, overlay: bool) -> Result<(), String> {
     fs::create_dir_all(destination)
         .map_err(|error| format!("{}: {error}", destination.display()))?;
     let entries = fs::read_dir(source).map_err(|error| format!("{}: {error}", source.display()))?;
@@ -314,8 +359,14 @@ fn stage_tree(source: &Path, destination: &Path) -> Result<(), String> {
         }
         let target = destination.join(name);
         if path.is_dir() {
-            stage_tree(&path, &target)?;
+            stage_tree(&path, &target, overlay)?;
         } else if path.is_file() {
+            if overlay && target.exists() {
+                return Err(format!(
+                    "{}: test source collides with an image file",
+                    target.display()
+                ));
+            }
             fs::copy(&path, &target).map_err(|error| format!("{}: {error}", path.display()))?;
         }
     }

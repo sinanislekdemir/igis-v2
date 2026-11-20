@@ -208,6 +208,10 @@ struct ConsoleHost {
     output: Vec<u8>,
     depth: u32,
     source_dir: PathBuf,
+    /// The test-only corpus (`samples/tests/apps`) overlaid on `source_dir`,
+    /// mirroring `xtask image --shell` (spec 0018, L10/X2). Missing when the
+    /// host runs outside the repository.
+    test_dir: PathBuf,
     /// The temporary directory that stands in for the home disk (spec 0019,
     /// A6). `home` and `home/...` resolve here; the top-level host owns it and
     /// removes it on drop, a child shares the parent's directory.
@@ -232,6 +236,7 @@ impl ConsoleHost {
             output: Vec::new(),
             depth: self.depth + 1,
             source_dir: self.source_dir.clone(),
+            test_dir: self.test_dir.clone(),
             home_dir: self.home_dir.clone(),
             home_owned: false,
             children: HashMap::new(),
@@ -243,21 +248,28 @@ impl ConsoleHost {
     }
 
     /// Resolves an image path under the sample tree (spec 0018, L6) or, for
-    /// `home`, under this run's home directory (spec 0019, A6).
+    /// `home`, under this run's home directory (spec 0019, A6). The shipped
+    /// corpus wins; the test-only corpus is the fallback (L10).
     fn resolve_path(&self, path: &str) -> Result<PathBuf, Status> {
         match home_local(path) {
             Some(local) => resolve_in(&self.home_dir, local),
-            None => resolve_in(&self.source_dir, path),
+            None => match resolve_in(&self.source_dir, path) {
+                Ok(target) => Ok(target),
+                Err(Status::NotFound) => resolve_in(&self.test_dir, path),
+                Err(status) => Err(status),
+            },
         }
     }
 
     fn with_input(depth: u32, input: &[u8]) -> Self {
         let source_dir = app_dir();
+        let test_dir = test_dir_for(&source_dir);
         let home_dir = make_home_dir(&source_dir);
         ConsoleHost {
             output: Vec::new(),
             depth,
             source_dir,
+            test_dir,
             home_dir,
             home_owned: true,
             children: HashMap::new(),
@@ -287,9 +299,20 @@ fn home_local(path: &str) -> Option<&str> {
     }
 }
 
+/// The test-only corpus next to the shipped one: `<parent>/tests/apps`, which
+/// is `samples/tests/apps` for the default tree. A missing directory simply
+/// contributes no entries (spec 0018, L10).
+fn test_dir_for(source_dir: &std::path::Path) -> PathBuf {
+    source_dir
+        .parent()
+        .map(|parent| parent.join("tests").join("apps"))
+        .unwrap_or_default()
+}
+
 /// Creates this run's home directory under the system temp directory and seeds
-/// it from the image's `home` tree, so `home/readme.txt` reads the same file on
-/// the host as in the guest (spec 0019, A6).
+/// it from `samples/home`, the same seed the application image and the writable
+/// disk use, so `home/readme.txt` reads the same file on the host as in the
+/// guest (spec 0018, X3; spec 0019, A6).
 fn make_home_dir(source_dir: &std::path::Path) -> PathBuf {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -300,7 +323,11 @@ fn make_home_dir(source_dir: &std::path::Path) -> PathBuf {
     if std::fs::create_dir_all(&path).is_err() {
         return path;
     }
-    let seed = source_dir.join("home");
+    let seed = source_dir
+        .parent()
+        .map(|parent| parent.join("home"))
+        .filter(|seed| seed.is_dir())
+        .unwrap_or_else(|| source_dir.join("home"));
     if let Ok(entries) = std::fs::read_dir(&seed) {
         for entry in entries.flatten() {
             let Ok(kind) = entry.file_type() else {
@@ -471,7 +498,22 @@ impl Host for ConsoleHost {
             return Err(status);
         }
 
-        let source = match std::fs::read(self.source_dir.join(&resolved)) {
+        let target = match self.resolve_path(&resolved) {
+            Ok(target) => target,
+            Err(status) => {
+                eprintln!("langhost: spawn `{resolved}`: not in the sample tree");
+                describe(
+                    diag,
+                    if status == Status::NotFound {
+                        b"No such application"
+                    } else {
+                        b"application file cannot be read"
+                    },
+                );
+                return Err(status);
+            }
+        };
+        let source = match std::fs::read(&target) {
             Ok(source) => source,
             Err(error) => {
                 let status = if error.kind() == std::io::ErrorKind::NotFound {
@@ -549,49 +591,75 @@ impl Host for ConsoleHost {
             return Err(status);
         }
         let index = usize::try_from(index).map_err(|_| Status::NotFound)?;
-        let directory = match home_local(path) {
-            Some(local) => resolve_in(&self.home_dir, local)?,
+        let directories: Vec<PathBuf> = match home_local(path) {
+            Some(local) => vec![resolve_in(&self.home_dir, local)?],
             None => {
-                if path.is_empty() || path == "." {
-                    self.source_dir.clone()
-                } else {
-                    self.source_dir.join(path)
+                let mut directories = Vec::new();
+                let mut resolved_file = false;
+                for root in [&self.source_dir, &self.test_dir] {
+                    match resolve_in(root, path) {
+                        Ok(directory) => {
+                            if directory.is_dir() {
+                                directories.push(directory);
+                            } else {
+                                resolved_file = true;
+                            }
+                        }
+                        Err(Status::NotFound) => {}
+                        Err(status) => return Err(status),
+                    }
                 }
+                if directories.is_empty() {
+                    return Err(if resolved_file {
+                        Status::Invalid
+                    } else {
+                        Status::NotFound
+                    });
+                }
+                directories
             }
         };
-        let mut entries = Vec::new();
-        let read_dir = std::fs::read_dir(&directory).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                Status::NotFound
-            } else if error.kind() == std::io::ErrorKind::NotADirectory {
-                Status::Invalid
-            } else {
-                Status::IoError
+        // Merge the shipped and test-only directories; a name present in both
+        // takes the test entry (an image collision is a staging error, so this
+        // only matters for a hand-made tree).
+        let mut entries = std::collections::BTreeMap::new();
+        for directory in directories {
+            let read_dir = std::fs::read_dir(&directory).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    Status::NotFound
+                } else if error.kind() == std::io::ErrorKind::NotADirectory {
+                    Status::Invalid
+                } else {
+                    Status::IoError
+                }
+            })?;
+            for entry in read_dir {
+                let entry = entry.map_err(|_| Status::IoError)?;
+                let entry_name = entry
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| Status::Invalid)?;
+                // The image stager skips repository bookkeeping (`.gitkeep`),
+                // so the host view does too.
+                if entry_name.starts_with('.') {
+                    continue;
+                }
+                let file_type = entry.file_type().map_err(|_| Status::IoError)?;
+                let kind = if file_type.is_file() {
+                    abi::fs::KIND_FILE
+                } else if file_type.is_dir() {
+                    abi::fs::KIND_DIR
+                } else {
+                    abi::fs::KIND_OTHER
+                };
+                let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+                entries.insert(entry_name, (kind, size));
             }
-        })?;
-        for entry in read_dir {
-            let entry = entry.map_err(|_| Status::IoError)?;
-            let entry_name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| Status::Invalid)?;
-            // The image stager skips repository bookkeeping (`.gitkeep`), so
-            // the host view does too.
-            if entry_name.starts_with('.') {
-                continue;
-            }
-            let file_type = entry.file_type().map_err(|_| Status::IoError)?;
-            let kind = if file_type.is_file() {
-                abi::fs::KIND_FILE
-            } else if file_type.is_dir() {
-                abi::fs::KIND_DIR
-            } else {
-                abi::fs::KIND_OTHER
-            };
-            let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
-            entries.push((entry_name, kind, size));
         }
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let entries: Vec<(String, u64, u64)> = entries
+            .into_iter()
+            .map(|(name, (kind, size))| (name, kind, size))
+            .collect();
         let Some((entry_name, kind, size)) = entries.get(index) else {
             return Err(Status::NotFound);
         };

@@ -9,16 +9,20 @@ fn sample(name: &str) -> Vec<u8> {
 }
 
 /// Path of a staged application sample (spec 0018): applications live under
-/// `samples/apps/base`, kernel/boot-owned probes under `samples/apps/system`.
+/// `samples/apps/base` (shipped) or `samples/tests/apps/base` (test-only), and
+/// kernel/boot-owned probes under `samples/apps/system`. The shipped corpus
+/// wins, matching the `--shell` overlay order.
 fn app_path(name: &str) -> String {
-    let root = format!("{}/../samples/apps", env!("CARGO_MANIFEST_DIR"));
-    for directory in ["base", "system"] {
-        let path = format!("{root}/{directory}/{name}");
-        if std::path::Path::new(&path).is_file() {
-            return path;
+    let root = format!("{}/..", env!("CARGO_MANIFEST_DIR"));
+    for tree in ["samples/apps", "samples/tests/apps"] {
+        for directory in ["base", "system"] {
+            let path = format!("{root}/{tree}/{directory}/{name}");
+            if std::path::Path::new(&path).is_file() {
+                return path;
+            }
         }
     }
-    panic!("sample `{name}` is not under samples/apps/base or samples/apps/system")
+    panic!("sample `{name}` is not under samples/apps or samples/tests/apps")
 }
 
 fn run_sample(name: &str, args: &[u8]) -> langhost::RunResult {
@@ -218,7 +222,6 @@ fn stage_app_samples_compile_with_the_spawn_builtins() {
         "frame_out",
         "floats",
         "text",
-        "desktop",
         "ui_layout",
         "module_demo",
     ] {
