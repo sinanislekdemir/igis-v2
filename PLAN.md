@@ -2187,10 +2187,10 @@ apps live under `/apps/<category>`, and the Apps menu has sections.
 - [x] **M11.4 Terminal emulator and shell.** `apps/utilities/terminal.ig`, the
   session shell (`base/shell`), `terminal_probe`, the retirement of the kernel
   terminal window, and the one-window System Log.
-- [ ] **M11.5 `/apps` tree.** Move the six GUI app sources to
+- [x] **M11.5 `/apps` tree.** Move the six GUI app sources to
   `apps/accessories|games|productivity`, add the top-level `apps` directory to
   xtask/ext2/langhost, and implement the bare-name search order.
-- [ ] **M11.6 Apps menu.** `stdlib.ui_menu_is_header` / header rendering,
+- [x] **M11.6 Apps menu.** `stdlib.ui_menu_is_header` / header rendering,
   section table, Terminal item, direct `Terminal` removal, File window list and
   the desktop check.
 - [ ] **M11.7 Regression and proof.** Host tests, `-smp 4`/`-smp 1` transcripts,

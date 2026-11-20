@@ -385,7 +385,9 @@ def run(args):
             return list_x + 40, list_y + 1 + index * LINE_H + 8
 
         math_row, lib_names = staged_row(iso, "lib", "math.ig", 2)
-        calculator_row, base_names = staged_row(iso, "base", "calculator", 6)
+        calculator_row, base_names = staged_row(
+            iso, "apps/accessories", "calculator", 0
+        )
         print(
             f"[harness] dialog frame ({dialog_x}, {dialog_y}), content "
             f"({content_x}, {content_y}); lib row {math_row} "
@@ -440,7 +442,7 @@ def run(args):
         # 2. base -> root -> lib -> math.ig -> Open.
         send_key(qmp, "backspace")
         time.sleep(0.3)
-        tablet.click(*row_center(3))  # root row 3 is `lib`
+        tablet.click(*row_center(4))  # root order: lost+found, apps, base, home, lib
         time.sleep(0.2)
         send_key(qmp, "ret")
         time.sleep(0.4)
@@ -491,14 +493,19 @@ def run(args):
             print("[harness] FAIL: the editor path is not the chosen file")
             return 1
 
-        # 3. Ctrl+O (starts in `lib`), root -> `base` (row 1, after lost+found)
-        #    -> `calculator` -> Open. The M9.4 editor must open the 32,516-byte
-        #    source that the old 8 KiB buffer refused.
+        # 3. Ctrl+O (starts in `lib`), root -> `apps` (row 1, after
+        #    lost+found) -> `accessories` (row 0) -> `calculator` -> Open.
+        #    The M9.4 editor must open the 32,516-byte source that the old
+        #    8 KiB buffer refused.
         send_combo(qmp, "ctrl", "o")
         time.sleep(0.8)
         send_key(qmp, "backspace")
         time.sleep(0.3)
         tablet.click(*row_center(1))
+        time.sleep(0.2)
+        send_key(qmp, "ret")
+        time.sleep(0.4)
+        tablet.click(*row_center(0))
         time.sleep(0.2)
         send_key(qmp, "ret")
         time.sleep(0.4)
@@ -586,11 +593,11 @@ def run(args):
         if large_path_changed < 30:
             print("[harness] FAIL: the editor path did not change to calculator")
             return 1
-        # `apps/accessories/calculator` is fifteen 8-pixel cells (the old `lib/math.ig` path
-        # is eleven), so a 110-pixel ink bbox proves the whole chosen path.
+        # `apps/accessories/calculator` is twenty-seven 8-pixel cells, so a
+        # 150-pixel ink bbox proves the whole chosen path.
         if (
             large_path_text is None
-            or large_path_text[2] - large_path_text[0] < 110
+            or large_path_text[2] - large_path_text[0] < 150
         ):
             print("[harness] FAIL: the editor path is not apps/accessories/calculator")
             return 1

@@ -56,8 +56,9 @@ const
   MenuHeight = 22;
   SysMenuWidth = 224;
   SysMenuCount = 4;
-  AppMenuWidth = 176;
-  AppMenuCount = 6;
+  AppMenuWidth = 220;
+  AppMenuCount = 11;
+  WindowListCapacity = 16;
   AboutContentW = 420;
   AboutContentH = 200;
 
@@ -116,8 +117,6 @@ var
   menu_file_x: int;
   menu_apps_x: int;
   menu_windows_x: int;
-  menu_terminal_x: int;
-  menu_terminal_end: int;
   menu_system_x: int;
   menu_system_end: int;
 
@@ -140,6 +139,14 @@ var
   system_open: bool;
   system_selected: int;
   system_runs: int;
+
+  // The `File` window list (M11): an ordinary desktop-owned read-only window.
+  winlist_open: bool;
+  winlist_id: int;
+  winlist_rect: Rect;
+  win_lines: array[string[256], WindowListCapacity];
+  win_line_count: int;
+  win_line: string[256];
 
   // The About window (M2.6.4): an ordinary desktop-owned window whose content
   // is the alert panel. `about_runs` counts activations for the check.
@@ -165,6 +172,7 @@ var
 
   // Scratch.
   digits: string[16];
+  split: int;
   clk_h: string[2];
   clk_m: string[2];
   used: int;
@@ -248,9 +256,7 @@ begin
   menu_file_x := 24;
   menu_apps_x := menu_file_x + tw("File") + 14;
   menu_windows_x := menu_apps_x + tw("Apps") + 14;
-  menu_terminal_x := menu_windows_x + tw("Windows") + 14;
-  menu_terminal_end := menu_terminal_x + tw("Terminal");
-  menu_system_x := menu_terminal_end + 14;
+  menu_system_x := menu_windows_x + tw("Windows") + 14;
   menu_system_end := menu_system_x + tw("System");
 end;
 
@@ -274,7 +280,6 @@ begin
   else
     status := syslib.draw_text_prop(menu_apps_x, 7, "Apps", black);
   status := syslib.draw_text_prop(menu_windows_x, 7, "Windows", black);
-  status := syslib.draw_text_prop(menu_terminal_x, 7, "Terminal", black);
   if system_open then
   begin
     status := syslib.fill_rect(menu_system_x - 4, 2, tw("System") + 8, MenuHeight - 4, black);
@@ -371,22 +376,32 @@ begin
   saw_desktop := false;
   count := 0;
   pos := 0;
+  win_line_count := 0;
   status := syslib.window_info(uint(pos), win_id, win_rect, win_title);
   while status = Ok and pos < 32 do
   begin
-    out.say("window ");
-    out.say_int(win_id);
-    out.say(" \"");
-    out.say(win_title);
-    out.say("\" ");
-    out.say_int(win_rect.x);
-    out.say(",");
-    out.say_int(win_rect.y);
-    out.say(" ");
-    out.say_int(win_rect.w);
-    out.say("x");
-    out.say_int(win_rect.h);
-    out.say("\n");
+    win_line := "";
+    split := core.format_int_into(digits, win_id, uint(10), uint(0));
+    status := stdlib.str_insert_into(win_line, int(core.len(win_line)), digits);
+    status := stdlib.str_insert_into(win_line, int(core.len(win_line)), " \"");
+    status := stdlib.str_insert_into(win_line, int(core.len(win_line)), win_title);
+    status := stdlib.str_insert_into(win_line, int(core.len(win_line)), "\" ");
+    split := core.format_int_into(digits, win_rect.x, uint(10), uint(0));
+    status := stdlib.str_insert_into(win_line, int(core.len(win_line)), digits);
+    status := stdlib.str_insert_into(win_line, int(core.len(win_line)), ",");
+    split := core.format_int_into(digits, win_rect.y, uint(10), uint(0));
+    status := stdlib.str_insert_into(win_line, int(core.len(win_line)), digits);
+    status := stdlib.str_insert_into(win_line, int(core.len(win_line)), " ");
+    split := core.format_int_into(digits, win_rect.w, uint(10), uint(0));
+    status := stdlib.str_insert_into(win_line, int(core.len(win_line)), digits);
+    status := stdlib.str_insert_into(win_line, int(core.len(win_line)), "x");
+    split := core.format_int_into(digits, win_rect.h, uint(10), uint(0));
+    status := stdlib.str_insert_into(win_line, int(core.len(win_line)), digits);
+    if win_line_count < WindowListCapacity then
+    begin
+      win_lines[win_line_count] := win_line;
+      win_line_count := win_line_count + 1;
+    end;
     if win_title = "Terminal" then
       saw_terminal := true
     else if win_title = "System Log" then
@@ -397,6 +412,65 @@ begin
     pos := pos + 1;
     status := syslib.window_info(uint(pos), win_id, win_rect, win_title);
   end;
+end;
+
+// Paints the desktop-owned window list. It re-reads the content rectangle on
+// every call so a dragged list follows its frame (spec 0011, W28).
+procedure draw_window_list();
+begin
+  if winlist_id <= 0 then
+    return;
+  status := syslib.window_content_rect(winlist_id, winlist_rect);
+  if status <> Ok then
+    return;
+  status := syslib.fill_rect(
+    winlist_rect.x, winlist_rect.y, winlist_rect.w, winlist_rect.h, white);
+  pos := 0;
+  while pos < win_line_count do
+  begin
+    status := syslib.draw_text(
+      winlist_rect.x + 8, winlist_rect.y + 8 + pos * 16, win_lines[pos], black);
+    pos := pos + 1;
+  end;
+  status := syslib.window_present(winlist_id);
+end;
+
+// The `File` action: enumerate into the list buffer and open (or raise) the
+// desktop-owned "Windows" window. It no longer writes through a kernel
+// terminal (spec 0021, M4).
+procedure show_window_list();
+begin
+  list_windows();
+  if winlist_id > 0 then
+  begin
+    status := syslib.window_raise(winlist_id);
+    draw_window_list();
+    return;
+  end;
+  status := syslib.window_open(320, 140, 460, 300, "Windows", winlist_id);
+  if status = Ok then
+  begin
+    winlist_open := true;
+    out.say("desktop_shell: window list open\n");
+    draw_window_list();
+  end
+  else
+  begin
+    winlist_id := 0;
+    out.say("desktop_shell: window list failed\n");
+  end;
+end;
+
+procedure close_window_list();
+begin
+  if not winlist_open then
+    return;
+  if winlist_id > 0 then
+    status := syslib.window_close(winlist_id);
+  winlist_id := 0;
+  winlist_open := false;
+  out.say("desktop_shell: window list closed\n");
+  draw_shell_window();
 end;
 
 // Raises the terminal window: the "Windows" direct item's action. Enumeration
@@ -471,28 +545,38 @@ begin
   draw_system_menu();
 end;
 
-// ---- the Apps pull-down (M8.3, spec 0012 D20) ----------------------------
+// ---- the Apps pull-down (M8.3/M11, spec 0012 D20) -----------------------
 //
-// Item order (0-based, the order drawn and the order Up/Down traverses):
+// Item order (0-based; `#` rows are section headers and never selectable):
 //
-//   0  Calculator       (calculator)
-//   1  Minesweeper      (minesweeper)
-//   2  Text Editor      (editor)
-//   3  File Browser     (browser)
-//   4  Clock            (clock_window)
-//   5  Widgets          (widgets)
+//   0  #Accessories
+//   1  Calculator       apps/accessories/calculator
+//   2  Clock            apps/accessories/clock_window
+//   3  Widgets          apps/accessories/widgets
+//   4  #Games
+//   5  Minesweeper      apps/games/minesweeper
+//   6  #Productivity
+//   7  Text Editor      apps/productivity/editor
+//   8  File Browser     apps/productivity/browser
+//   9  #Utilities
+//  10  Terminal         apps/utilities/terminal (always a new instance)
 //
 // Every item is a non-blocking `core.spawn`; the shell never waits. The menu
-// frame is `(menu_apps_x - 4, MenuHeight, AppMenuWidth, 6 * 16 + 2)`.
+// frame is `(menu_apps_x - 4, MenuHeight, AppMenuWidth, 11 * 16 + 2)`.
 
 procedure init_apps_menu();
 begin
-  app_items[0] := "Calculator";
-  app_items[1] := "Minesweeper";
-  app_items[2] := "Text Editor";
-  app_items[3] := "File Browser";
-  app_items[4] := "Clock";
-  app_items[5] := "Widgets";
+  app_items[0] := "#Accessories";
+  app_items[1] := "Calculator";
+  app_items[2] := "Clock";
+  app_items[3] := "Widgets";
+  app_items[4] := "#Games";
+  app_items[5] := "Minesweeper";
+  app_items[6] := "#Productivity";
+  app_items[7] := "Text Editor";
+  app_items[8] := "File Browser";
+  app_items[9] := "#Utilities";
+  app_items[10] := "Terminal";
   pos := 0;
   while pos < AppMenuCount do
   begin
@@ -639,20 +723,27 @@ begin
   action := app_selected;
   if action < 0 or action >= AppMenuCount then
     return;
+  if not stdlib.ui_menu_selectable(app_items[action], uint(0), action) then
+    return;
   app_runs := app_runs + 1;
   close_apps_menu();
-  if action = 0 then
-    launch_app("calculator", "Calculator")
-  else if action = 1 then
-    launch_app("minesweeper", "Minesweeper")
+  if action = 1 then
+    launch_app("apps/accessories/calculator", "Calculator")
   else if action = 2 then
-    launch_app("editor", "Text Editor")
+    launch_app("apps/accessories/clock_window", "Clock")
   else if action = 3 then
-    launch_app("browser", "File Browser")
-  else if action = 4 then
-    launch_app("clock_window", "Clock")
+    launch_app("apps/accessories/widgets", "Widgets")
   else if action = 5 then
-    launch_app("widgets", "Widgets");
+    launch_app("apps/games/minesweeper", "Minesweeper")
+  else if action = 7 then
+    launch_app("apps/productivity/editor", "Text Editor")
+  else if action = 8 then
+    launch_app("apps/productivity/browser", "File Browser")
+  else if action = 10 then
+  begin
+    terminal_runs := terminal_runs + 1;
+    launch_shell();
+  end;
 end;
 
 procedure handle_apps_key(code: uint);
@@ -1031,7 +1122,7 @@ begin
     begin
       if system_open then close_system_menu();
       if app_open then close_apps_menu();
-      list_windows();
+      show_window_list();
       file_runs := file_runs + 1;
       handled := true;
     end
@@ -1043,20 +1134,12 @@ begin
         open_apps_menu();
       handled := true;
     end
-    else if x >= menu_windows_x - 4 and x < menu_terminal_x - 4 then
+    else if x >= menu_windows_x - 4 and x < menu_system_x - 4 then
     begin
       if system_open then close_system_menu();
       if app_open then close_apps_menu();
       raise_terminal();
       window_runs := window_runs + 1;
-      handled := true;
-    end
-    else if x >= menu_terminal_x - 4 and x < menu_terminal_end + 4 then
-    begin
-      if system_open then close_system_menu();
-      if app_open then close_apps_menu();
-      launch_shell();
-      terminal_runs := terminal_runs + 1;
       handled := true;
     end
     else if x >= menu_system_x - 4 and x < menu_system_end + 4 then
@@ -1133,37 +1216,50 @@ begin
     verify("system log listed", saw_log);
     verify("desktop listed", saw_desktop);
     verify("at least three windows", count >= 3);
+    verify(
+      "window list open",
+      winlist_open and winlist_id > 0 and win_line_count >= 3);
 
-    // ---- Apps pull-down (M8.3, spec 0012 D20) -------------------------
-    // The labels and order are the app's contract; every item launches a
-    // different source application with `core.spawn`.
+    // ---- Apps pull-down (M8.3/M11, spec 0012 D20) ---------------------
+    // Section headers are non-selectable; the selectable rows are the app
+    // contract and launch explicit /apps paths.
+    verify(
+      "apps section headers",
+      stdlib.ui_menu_is_header(app_items[0])
+        and stdlib.ui_menu_is_header(app_items[4])
+        and stdlib.ui_menu_is_header(app_items[6])
+        and stdlib.ui_menu_is_header(app_items[9]));
     verify(
       "apps item labels",
-      app_items[0] = "Calculator" and app_items[1] = "Minesweeper"
-        and app_items[2] = "Text Editor" and app_items[3] = "File Browser"
-        and app_items[4] = "Clock" and app_items[5] = "Widgets");
+      app_items[1] = "Calculator" and app_items[2] = "Clock"
+        and app_items[3] = "Widgets" and app_items[5] = "Minesweeper"
+        and app_items[7] = "Text Editor" and app_items[8] = "File Browser"
+        and app_items[10] = "Terminal");
     verify(
-      "apps menu has no separators",
-      not stdlib.ui_menu_is_separator(app_items[0])
-        and not stdlib.ui_menu_is_separator(app_items[5]));
+      "apps headers not selectable",
+      not stdlib.ui_menu_selectable(app_items[0], uint(0), 0)
+        and not stdlib.ui_menu_selectable(app_items[4], uint(0), 4)
+        and not stdlib.ui_menu_selectable(app_items[9], uint(0), 9));
     verify(
       "apps items are selectable",
-      stdlib.ui_menu_selectable(app_items[0], uint(0), 0)
-        and stdlib.ui_menu_selectable(app_items[5], uint(0), 5));
+      stdlib.ui_menu_selectable(app_items[1], uint(0), 1)
+        and stdlib.ui_menu_selectable(app_items[10], uint(0), 10));
     // Opening the menu takes the modal grab and launches nothing.
     handle_menu(menu_apps_x + 4, 10);
     verify("apps menu open", handled and app_open and not system_open);
-    verify("apps menu first item", app_selected = 0);
+    verify("apps menu first item", app_selected = 1);
     verify("apps menu grab", grab_status = Ok and apps_opened = 1);
     verify("apps menu opens no app", launches = 0);
+    draw_apps_menu();
     verify(
       "apps accent row",
-      syslib.get_pixel(menu_apps_x + 56, MenuHeight + 13) = uint(0x000080));
+      syslib.get_pixel(menu_apps_x + 4, MenuHeight + 1 + 16 + 13)
+        = uint(0x000080));
     verify("apps frame", syslib.get_pixel(menu_apps_x - 4, MenuHeight) = black);
-    // Row 1 (Minesweeper) is not selected: its label is black ink on white.
+    // Row 2 (Clock) is not selected: its label is black ink on white.
     ink_found := false;
-    yy := MenuHeight + 1 + 16;
-    while yy < MenuHeight + 1 + 32 and not ink_found do
+    yy := MenuHeight + 1 + 32;
+    while yy < MenuHeight + 1 + 48 and not ink_found do
     begin
       xx := menu_apps_x + 16;
       while xx < menu_apps_x + AppMenuWidth - 8 and not ink_found do
@@ -1174,20 +1270,16 @@ begin
       yy := yy + 1;
     end;
     verify("apps item ink", ink_found);
-    // Down/Up move the highlight without wrapping or launching.
+    // Down/Up move the highlight across selectable rows without launching.
     handle_apps_key(uint(0x1130000));
-    verify("apps down", app_selected = 1 and launches = 0);
+    verify("apps down", app_selected = 2 and launches = 0);
     handle_apps_key(uint(0x1120000));
-    verify("apps up", app_selected = 0 and launches = 0);
+    verify("apps up", app_selected = 1 and launches = 0);
     // Enter on Clock: one non-blocking spawn, the menu closes and the grab is
     // released. `clock_window` runs its deterministic check and exits, so the
-    // shell reaps it with `core.wait` and no child is left behind (a kill right
-    // after `spawn` can race the compile window, spec 0007).
+    // shell reaps it with `core.wait` and no child is left behind.
     handle_apps_key(uint(0x1130000));
-    handle_apps_key(uint(0x1130000));
-    handle_apps_key(uint(0x1130000));
-    handle_apps_key(uint(0x1130000));
-    verify("apps clock selected", app_selected = 4);
+    verify("apps clock selected", app_selected = 2);
     handle_apps_key(uint(0x1030000));
     verify(
       "apps launch",
@@ -1207,6 +1299,21 @@ begin
     handle_apps_menu_click();
     verify("outside click closes apps", not app_open);
     verify("outside click releases the grab", syslib.popup_release() = NotFound);
+    // The Terminal row goes through launch_shell; check mode skips the real
+    // emulator so no long-lived child is left behind.
+    handle_menu(menu_apps_x + 4, 10);
+    pos := 0;
+    while pos < 9 do
+    begin
+      handle_apps_key(uint(0x1130000));
+      pos := pos + 1;
+    end;
+    verify("apps terminal selected", app_selected = 10);
+    handle_apps_key(uint(0x1030000));
+    verify(
+      "apps terminal launches",
+      launch_status = Ok and terminal_runs = 1 and probe_spawn);
+    verify("apps terminal menu closed", not app_open);
     // F9/F10 toggle their own menu and switch between them; Left/Right switch
     // too. Every close path releases the grab.
     handle_shortcut(uint(0x1280000));
@@ -1225,7 +1332,7 @@ begin
     verify("escape closes apps", not app_open);
     verify("apps grab released after switching", syslib.popup_release() = NotFound);
 
-    // Windows: raise the terminal; focus and the top of the z-order follow.
+    // Windows: raise the topmost terminal; focus and z-order follow.
     handle_menu(menu_windows_x + 4, 10);
     verify("windows item handled", handled and window_runs = 1);
     verify(
@@ -1235,14 +1342,6 @@ begin
     verify(
       "raised window is the terminal",
       status = Ok and win_id = raised_id and win_title = "Terminal");
-
-    // Terminal: every activation goes through launch_shell; check mode skips
-    // the spawn so no emulator is left running.
-    handle_menu(menu_terminal_x + 4, 10);
-    verify("terminal item handled", handled and terminal_runs = 1);
-    verify(
-      "terminal item launches",
-      launch_status = Ok and shell_launched and probe_spawn);
 
     // Enumeration boundary and the sanctioned presentation path.
     status := syslib.window_info(uint(999), win_id, win_rect, win_title);
@@ -1303,7 +1402,11 @@ begin
     verify(
       "about is topmost",
       status = Ok and win_id = about_id and win_title = "About igis-v2");
+    draw_about();
+    status := syslib.window_info(uint(0), win_id, win_rect, win_title);
+    verify("about still topmost", status = Ok and win_id = about_id);
     status := syslib.window_content_rect(about_id, about_rect);
+    
     verify(
       "about content white",
       status = Ok
@@ -1404,6 +1507,7 @@ begin
         and syslib.get_pixel(about_rect.x + about_rect.w - 4, about_rect.y + about_rect.h - 4)
           = black);
 
+    close_window_list();
     if probe_term > 0 then
       status := syslib.window_close(probe_term);
     probe_term := 0;
@@ -1461,6 +1565,8 @@ begin
       begin
         if about_open and ev.window = about_id then
           close_about()
+        else if ev.window = winlist_id then
+          close_window_list()
         else if ev.window = own then
           close_desktop_window();
       end
@@ -1470,7 +1576,10 @@ begin
         handle_about_event()
       else if ev.kind = Expose then
       begin
-        if ev.window = own then draw_shell_window();
+        if ev.window = own then
+          draw_shell_window()
+        else if ev.window = winlist_id then
+          draw_window_list();
       end
       else if ev.kind = KeyDown then
       begin
@@ -1522,6 +1631,9 @@ begin
   terminal_runs := 0;
   init_apps_menu();
   init_system_menu();
+  winlist_open := false;
+  winlist_id := 0;
+  win_line_count := 0;
   about_open := false;
   about_id := 0;
   about_runs := 0;

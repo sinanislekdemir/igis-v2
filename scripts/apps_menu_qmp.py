@@ -53,18 +53,18 @@ os.makedirs(SHOT_DIR, exist_ok=True)
 
 DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-apps-menu.png")
 
-# `desktop_shell` layout_menu: File starts at x = 24, so Apps starts at x = 56
-# and the pull-down frame is (52, 22, 176, 98). Row 4 (`Clock`) is at
-# y = 23 + 4*16 = 87..102; its centre is y = 94, inside the kernel Terminal
-# window (frame y >= 26). That overlap is the regression the grab fixes.
+# `desktop_shell` layout_menu: File starts at x = 24, Apps at x = 56,
+# Windows at x = 94 and System at x = 153 (measured prop widths). The Apps
+# frame is (52, 22, 220, 178). `Clock` is row 2
+# (y = 22 + 1 + 2*16 + 8 = 63) and `File Browser` row 8 (y = 159); both lie
+# over live windows, which is the regression the grab fixes.
 APPS_LABEL = (64, 10)
-CLOCK_ROW = (140, 94)
-# `File Browser` is row 3: y = 22 + 3 * 16 + 8 = 78, also over the Terminal.
-BROWSER_ROW = (140, 78)
-SYSTEM_LABEL = (224, 10)
+CLOCK_ROW = (140, 63)
+BROWSER_ROW = (140, 159)
+SYSTEM_LABEL = (170, 10)
 OUTSIDE = (700, 400)
-# The desktop's direct `Terminal` item (measured prop widths, x 153..194).
-TERMINAL_ITEM = (170, 10)
+# `Terminal` is the last Apps row: y = 22 + 1 + 10*16 + 8 = 191.
+TERMINAL_ROW = (140, 191)
 
 
 def hid_axis(pixel, extent):
@@ -279,9 +279,13 @@ def main():
 
         # The desktop must still be interactive: the live browser is blocked in
         # next_event, and the bar claim is what keeps this press for the shell.
-        click(qmp, *TERMINAL_ITEM, width, height)
-        serial.wait_for(
-            r"desktop_shell: launched shell task", timeout=args.timeout, start=cursor
+        click(qmp, *APPS_LABEL, width, height)
+        time.sleep(0.2)
+        click(qmp, *TERMINAL_ROW, width, height)
+        _, cursor = serial.wait_for(
+            r"repl: apps/utilities/terminal: spawned as task",
+            timeout=args.timeout,
+            start=cursor,
         )
         serial.wait_for(r"(?:shell> |igis:/[^>]*> )", timeout=args.timeout)
         process.stdin.write(b"terminal\n")
@@ -299,7 +303,7 @@ def main():
         if "repl: apps/productivity/browser: spawned as task" not in transcript:
             print("[harness] FAIL: the browser was not spawned")
             return 1
-        if "desktop_shell: launched shell" not in transcript:
+        if "desktop_shell: launched terminal task" not in transcript:
             print("[harness] FAIL: no `desktop_shell: launched shell` line")
             return 1
 

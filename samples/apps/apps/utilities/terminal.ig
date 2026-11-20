@@ -27,6 +27,9 @@ const
 var
   term: int;
   rect: Rect;
+  top_id: int;
+  top_rect: Rect;
+  top_title: string[64];
   st: Status;
   ev: Event;
   diag: Diagnostic;
@@ -72,6 +75,12 @@ procedure draw_screen();
 begin
   if term <= 0 then
     return;
+  st := syslib.window_info(uint(0), top_id, top_rect, top_title);
+  if st <> Ok or top_id <> term then
+  begin
+    st := syslib.window_present(term);
+    return;
+  end;
   st := syslib.window_content_rect(term, rect);
   if st <> Ok then
     return;

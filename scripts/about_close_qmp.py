@@ -41,13 +41,14 @@ DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-about-close.png")
 # Menu bar geometry from `desktop_shell` (measured prop widths): the `System`
 # label starts at x = 208, and its pull-down frame is (204, 22, 224, 66); row 0
 # (`About igis-v2`) is y 23..38. See scripts/system_menu_qmp.py.
-SYSTEM_LABEL = (224, 10)
+SYSTEM_LABEL = (170, 10)
 # Row 0 is clicked at y = 24, above the kernel Terminal frame (y >= 26). A
 # title-bar press is the service-owned drag since M8.1 (W22) and is consumed
 # before the client, so a click at y = 30 would never reach the menu.
 ABOUT_ROW = (260, 24)
 # The desktop's direct `Terminal` item (x range 180..256, y 0..22).
-TERMINAL_ITEM = (170, 10)
+APPS_LABEL = (64, 10)
+TERMINAL_ROW = (140, 191)
 
 MENU_HEIGHT = 22
 ABOUT_W = 420
@@ -227,8 +228,12 @@ def main():
             return 1
 
         # The desktop must still be interactive: launch the terminal and use it.
-        click(qmp, *TERMINAL_ITEM, width, height)
-        serial.wait_for(r"desktop_shell: launched shell task", timeout=args.timeout)
+        click(qmp, *APPS_LABEL, width, height)
+        time.sleep(0.2)
+        click(qmp, *TERMINAL_ROW, width, height)
+        serial.wait_for(
+            r"repl: apps/utilities/terminal: spawned as task", timeout=args.timeout
+        )
         serial.wait_for(r"(?:shell> |igis:/[^>]*> )", timeout=args.timeout)
         process.stdin.write(b"terminal\n")
         process.stdin.flush()

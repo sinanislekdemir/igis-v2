@@ -49,7 +49,7 @@ DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-browser-drag.png")
 # its pull-down frame is (52, 22, 176, 98). Row 3 (`File Browser`) is
 # y = 23 + 3*16 = 71..86; its centre is y = 78.
 APPS_LABEL = (64, 10)
-BROWSER_ROW = (140, 78)
+BROWSER_ROW = (140, 159)
 
 # `samples/apps/apps/productivity/browser.ig` opens content 680x480 at (160, 90); the frame is
 # content + (2, 17). The title bar grab is 300 pixels from the frame's left edge

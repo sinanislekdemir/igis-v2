@@ -44,7 +44,7 @@ DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-system-menu.png")
 # pull-down frame is (204, 22, 224, 66); row 0 (About) is y 23..38. Click it at
 # y = 24, above the kernel Terminal frame (y >= 26): since M8.1 a title-bar
 # press is the service-owned drag (W22) and is consumed before the client.
-SYSTEM_LABEL = (224, 10)
+SYSTEM_LABEL = (170, 10)
 ABOUT_ROW = (260, 24)
 
 

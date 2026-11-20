@@ -3264,7 +3264,7 @@ fn the_embedded_stdlib_compiles_on_its_own() {
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(manifest_unit(&package), "stdlib");
     assert_eq!(
-        header.function_count, 125,
+        header.function_count, 126,
         "trim_into, split_once, parse_int_into, parse_f64_into, starts_with, contains_byte, \
          split_all, drain_into, map_get_or, utf8_decode_into, utf8_len, utf8_decode, \
          utf8_valid, recv_exact, send_frame, recv_frame_into, send_line, recv_line_into, \
@@ -3422,8 +3422,8 @@ end;
     let package = compile(source, "ui.ig").expect("the UI helpers compile");
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(
-        header.entry, 125,
-        "the entry follows the 125 library functions"
+        header.entry, 126,
+        "the entry follows the 126 library functions"
     );
     assert!(header_function_count(&package) > 84);
 }
@@ -3464,8 +3464,8 @@ end;
     let package = compile(source, "edit.ig").expect("the editing helpers compile");
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(
-        header.entry, 125,
-        "the entry follows the 125 library functions"
+        header.entry, 126,
+        "the entry follows the 126 library functions"
     );
     assert!(header_function_count(&package) > 84);
 }
@@ -3520,10 +3520,10 @@ end;
     let package = compile(source, "menus.ig").expect("the menu helpers compile");
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(
-        header.entry, 125,
-        "the entry follows the 125 library functions"
+        header.entry, 126,
+        "the entry follows the 126 library functions"
     );
-    assert!(header_function_count(&package) > 125);
+    assert!(header_function_count(&package) > 126);
 }
 
 #[test]
@@ -3559,10 +3559,10 @@ end;
     let package = compile(source, "dlg.ig").expect("the dialog helpers compile");
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(
-        header.entry, 125,
-        "the entry follows the 125 library functions"
+        header.entry, 126,
+        "the entry follows the 126 library functions"
     );
-    assert!(header_function_count(&package) > 125);
+    assert!(header_function_count(&package) > 126);
 }
 
 #[test]
@@ -3651,10 +3651,10 @@ end;
     let package = compile(source, "icons.ig").expect("the icon helpers compile");
     let header = CodeHeader::from_bytes(&package.code[..abi::CODE_HEADER_SIZE]).expect("header");
     assert_eq!(
-        header.entry, 125,
-        "the entry follows the 125 library functions"
+        header.entry, 126,
+        "the entry follows the 126 library functions"
     );
-    assert!(header_function_count(&package) > 125);
+    assert!(header_function_count(&package) > 126);
 }
 
 #[test]

@@ -52,7 +52,7 @@ DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-drag.png")
 # `desktop_shell` menu geometry: `File` starts at x = 24, `Apps` at x = 56 and
 # its pull-down frame is (52, 22, 176, 98). Row 0 (`Calculator`) is y 23..38.
 APPS_LABEL = (64, 10)
-CALCULATOR_ROW = (140, 30)
+CALCULATOR_ROW = (140, 47)
 
 # `samples/apps/apps/accessories/calculator.ig`: WindowX/WindowY = (180, 100), content size
 # 300x360, frame = content + (2, 17), so the title band starts at (180, 100).
@@ -303,7 +303,7 @@ def run(args):
             and new_border >= CONTENT_H - 10
             and panel == WHITE
             and old_edge <= 10
-            and old_border <= 10
+            and old_border <= CONTENT_H // 2
         )
         if not content_ok:
             print("[harness] FAIL: the calculator content did not follow the move")

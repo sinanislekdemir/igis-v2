@@ -2314,6 +2314,16 @@ begin
   return label = "-";
 end;
 
+// A section header in a pull-down: the label starts with `#`. The helper draws
+// the text after the marker as plain non-selectable text; hit-testing, first,
+// move and selectable skip it like a separator.
+function ui_menu_is_header(label: const string[0]): bool;
+begin
+  if core.len(label) = uint(0) then
+    return false;
+  return core.find(label, byte(35)) = 0;
+end;
+
 // The `uint` with only bit `index` set. `index` outside 0..=63 returns 0,
 // which `ui_menu_has` and `ui_menu_set` treat as a no-op.
 function ui_menu_bit(index: int): uint;
@@ -2371,7 +2381,7 @@ end;
 // separator and its `disabled` bit is clear.
 function ui_menu_selectable(label: const string[0]; disabled_mask: uint; index: int): bool;
 begin
-  if ui_menu_is_separator(label) then
+  if ui_menu_is_separator(label) or ui_menu_is_header(label) then
     return false;
   return not ui_menu_has(disabled_mask, index);
 end;
@@ -2740,6 +2750,20 @@ begin
           return st;
       end;
     end
+    else if ui_menu_is_header(items[i]) then
+    begin
+      length := int(core.len(items[i]));
+      if length > 1 then
+      begin
+        copied := core.substr_into(staged, items[i], 1, length - 1);
+        if copied = length - 1 then
+        begin
+          st := syslib.draw_text(x + UiMenuEdge, text_y, staged, uint(UiBlack));
+          if st <> Ok then
+            return st;
+        end;
+      end;
+    end
     else
     begin
       enabled := not ui_menu_has(disabled_mask, i);
@@ -2859,7 +2883,7 @@ begin
   row := (py - (y + 1)) div UiMenuRowHeight;
   if row < 0 or row >= total then
     return -1;
-  if ui_menu_is_separator(items[row]) then
+  if ui_menu_is_separator(items[row]) or ui_menu_is_header(items[row]) then
     return -1;
   return row;
 end;

@@ -512,9 +512,12 @@ pub fn _print(args: fmt::Arguments<'_>) {
 /// presented once, so a line costs one present instead of one per cell
 /// (spec 0016).
 pub fn write_bytes(session: u64, bytes: &[u8]) {
-    // Every byte mirrors to serial. A bound task's bytes also go to its session
-    // output ring; an unbound task has no kernel terminal, so serial is the
-    // only destination (spec 0021, S7).
+    // The console lock makes one `core.write` call atomic on serial relative to
+    // `println!`/`_print`; without it a harness transcript can split an
+    // application line with kernel diagnostics. A bound task's bytes also go
+    // to its session output ring; an unbound task has no kernel terminal, so
+    // serial is the only destination (spec 0021, S7).
+    let _console = CONSOLE.lock();
     for byte in bytes {
         serial::write_byte(*byte);
     }

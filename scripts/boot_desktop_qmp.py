@@ -37,8 +37,10 @@ os.makedirs(SHOT_DIR, exist_ok=True)
 
 DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-boot-desktop.png")
 
-# Centre of the desktop's direct `Terminal` item (x range 180..256, y 0..22).
-TERMINAL_ITEM = (170, 10)
+# The desktop bar is `File / Apps / Windows / System`; Terminal is the last
+# Apps row (row 10: y = 22 + 1 + 10*16 + 8 = 191).
+APPS_LABEL = (64, 10)
+TERMINAL_ROW = (140, 191)
 
 
 def hid_axis(pixel, extent):
@@ -158,16 +160,17 @@ def main():
         width, height = int(graphics.group(1)), int(graphics.group(2))
         print(f"[harness] screen {width}x{height}")
 
-        x, y = TERMINAL_ITEM
-        hid_x = hid_axis(x, width)
-        hid_y = hid_axis(y, height)
-        qmp.send_absolute(hid_x, hid_y, left=False)
-        qmp.send_absolute(hid_x, hid_y, left=True)
-        qmp.send_absolute(hid_x, hid_y, left=False)
+        for x, y in (APPS_LABEL, TERMINAL_ROW):
+            hid_x = hid_axis(x, width)
+            hid_y = hid_axis(y, height)
+            qmp.send_absolute(hid_x, hid_y, left=False)
+            qmp.send_absolute(hid_x, hid_y, left=True)
+            qmp.send_absolute(hid_x, hid_y, left=False)
+            time.sleep(0.2)
 
         serial.wait_for(r"repl: apps/utilities/terminal: spawned as task", timeout=args.timeout)
         serial.wait_for(r"(?:shell> |igis:/[^>]*> )", timeout=args.timeout)
-        print("[harness] shell launched from the Terminal menu")
+        print("[harness] terminal launched from Apps > Utilities > Terminal")
 
         process.stdin.write(b"terminal\n")
         process.stdin.flush()
