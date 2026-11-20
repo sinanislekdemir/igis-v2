@@ -1,20 +1,21 @@
 unit clock_window;
 
-// M2.5.2 proof: a windowed clock with an analog face and a digital readout,
-// ticking from the monotonic `core.clock()`.
+// M2.5.2 clock: a windowed analog face and digital readout, ticking from the
+// monotonic `core.clock()`.
 //
-//   run clock_window          // deterministic check at 10:08:30, prints `clock_window: ok`
-//   run clock_window check    // the same check
-//   run clock_window shot     // live clock from core.clock(), holds ~5 s and
-//                             // prints `clock_window: ready` for the QMP harness
+//   run clock_window          // live window; stays until its close box
+//   run clock_window check    // deterministic check at 10:08:30, prints `clock_window: ok`
+//   run clock_window shot     // live clock, holds ~5 s and prints
+//                             // `clock_window: ready` for the QMP harness
 //
-// The app is an ordinary (non-realtime) task over the window service. It
-// draws only inside its own content rectangle, never calls `syslib.clear`,
-// and never blocks in `syslib.next_event`: a bounded poll/redraw loop spins
-// on `core.clock()` and is preempted by the scheduler at the quantum. Every
-// redraw paints the whole face and presents once with `window_present`, so a
-// presented frame is never half drawn. An owner `Expose` repaints the whole
-// content.
+// The live window promotes to realtime so its once-per-second redraw loop is
+// exempt from the normal CPU/step budget; `core.heartbeat()` feeds the realtime
+// watchdog. When the realtime slot is unavailable (a single-core boot where
+// the desktop shell already holds it) it falls back to blocking on window
+// events and repaints the current time whenever it is exposed or receives an
+// event. Every redraw paints the whole face and presents once with
+// `window_present`, so a presented frame is never half drawn. An owner
+// `Expose` repaints the whole content.
 //
 // Geometry is integer-only: a midpoint circle for the rim, a 60-entry
 // fixed-point direction table (built once by rotating 6 degrees per step) for
@@ -527,6 +528,62 @@ begin
     out.say("clock_window: done\n");
 end;
 
+// The normal window: a live clock until the close box. The once-per-second
+// redraw loop promotes to realtime so it is not charged to the normal-task
+// budget; the heartbeat keeps the realtime watchdog fed. A single-core boot
+// where the desktop shell already holds the realtime slot falls back to a
+// blocking event loop and redraws the current time on each event.
+procedure live_mode();
+begin
+  status := core.realtime_on();
+  quit := false;
+  now_s := int(core.clock() div uint(NanosPerSecond));
+  last_s := now_s;
+  split(now_s, hour, minute, second);
+  draw_clock(hour, minute, second);
+  present_clock();
+  out.say("clock_window: ready\n");
+  if status = Ok then
+  begin
+    while not quit do
+    begin
+      core.heartbeat();
+      now_s := int(core.clock() div uint(NanosPerSecond));
+      if now_s <> last_s then
+      begin
+        last_s := now_s;
+        split(now_s, hour, minute, second);
+        draw_clock(hour, minute, second);
+        present_clock();
+      end;
+      drain_events();
+    end;
+  end
+  else
+  begin
+    while not quit do
+    begin
+      status := syslib.next_event(ev);
+      if status = Ok then
+      begin
+        if ev.kind = Close and ev.window = id then
+          quit := true
+        else
+        begin
+          if ev.kind = Expose and ev.window = id then
+            refresh_geometry();
+          now_s := int(core.clock() div uint(NanosPerSecond));
+          split(now_s, hour, minute, second);
+          draw_clock(hour, minute, second);
+          present_clock();
+        end;
+      end;
+    end;
+  end;
+  ignored := syslib.window_close(id);
+  out.say("clock_window: closed\n");
+end;
+
 // The disabled-screen path: time decomposition, formatting and the direction
 // table are pure and must agree on every host.
 procedure host_path();
@@ -605,8 +662,10 @@ begin
       begin
         if stdlib.starts_with(args, "shot") then
           shot_mode()
+        else if stdlib.starts_with(args, "check") then
+          check_mode()
         else
-          check_mode();
+          live_mode();
       end;
     end;
   end;
