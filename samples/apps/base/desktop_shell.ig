@@ -207,6 +207,15 @@ begin
   return int(syslib.text_width_prop(text));
 end;
 
+// True when `target` is the topmost window. A client has no per-task clip in
+// M2, so a full-content repaint is only safe while it cannot cover a higher
+// window (spec 0011, W18/W28).
+function is_topmost(target: int): bool;
+begin
+  status := syslib.window_info(uint(0), win_id, win_rect, win_title);
+  return status = Ok and win_id = target;
+end;
+
 // The menu bar is app-drawn and has no window either, but unlike a pull-down it
 // is permanent: the press that opens a menu arrives before any modal grab
 // exists, and another client blocked in `next_event` can otherwise take it
@@ -420,6 +429,11 @@ procedure draw_window_list();
 begin
   if winlist_id <= 0 then
     return;
+  if not is_topmost(winlist_id) then
+  begin
+    status := syslib.window_present(winlist_id);
+    return;
+  end;
   status := syslib.window_content_rect(winlist_id, winlist_rect);
   if status <> Ok then
     return;
@@ -941,6 +955,11 @@ var
 begin
   if about_id = 0 then
     return;
+  if not is_topmost(about_id) then
+  begin
+    status := syslib.window_present(about_id);
+    return;
+  end;
   status := syslib.window_content_rect(about_id, about_rect);
   if status = Ok then
   begin
