@@ -493,15 +493,6 @@ pub trait Host {
         Status::Invalid
     }
 
-    /// Attaches the console's terminal grid to a window owned by the calling
-    /// task (`core.terminal_attach`, spec 0014). The host supplies the caller's
-    /// task id and validates the window ownership itself. The default is
-    /// `Invalid`: a host without a console service (a bare mock or `langhost`)
-    /// has no terminal window.
-    fn terminal_attach(&mut self, _window: u64) -> Status {
-        Status::Invalid
-    }
-
     /// Requests a machine-wide halt (`core.halt`, spec 0017). A live kernel
     /// stops every other online core and halts the calling one, so this call
     /// never returns there; the default `Invalid` is what a host without
@@ -2216,14 +2207,6 @@ impl Machine {
                     }
                     builtin::REGION_RELEASE => {
                         let status = host.region_release();
-                        self.push(stack, status as u64)?;
-                    }
-                    // Terminal attach (spec 0014): the kernel host supplies the
-                    // caller's task id, so the machine only stages the window
-                    // id and the status. No opcode is added.
-                    builtin::TERMINAL_ATTACH => {
-                        let window = self.pop(stack)?;
-                        let status = host.terminal_attach(window);
                         self.push(stack, status as u64)?;
                     }
                     // System control (spec 0017). No operands: the host owns

@@ -39,7 +39,7 @@
 
 use core::fmt::{self, Write};
 
-use abi::{Rect, Status};
+use abi::Rect;
 use arch_x86_64::{keyboard, serial};
 
 use crate::font8x8::FONT8X8_BASIC;
@@ -67,16 +67,12 @@ const MAX_ROWS: usize = 128;
 /// gap between the two windows.
 const MARGIN: i64 = 8;
 const TOP: i64 = 26;
-const GAP: i64 = 8;
 
 /// Desktop colours, matching the window service (spec 0011, W11).
 const DESKTOP_BASE: u32 = 0x00FF_FFFF;
 const DESKTOP_DITHER: u32 = 0x0000_0000;
 
-/// Terminal ink: black on white.
-const TERM_FG: u32 = 0x0000_0000;
-const TERM_BG: u32 = 0x00FF_FFFF;
-/// System-log ink: black on a light grey, so the two windows read differently.
+/// System-log ink: black on a light grey.
 const LOG_FG: u32 = 0x0000_0000;
 const LOG_BG: u32 = 0x00F0_F0F0;
 
@@ -167,16 +163,6 @@ impl Terminal {
         self.y = y;
         self.cols = cols;
         self.rows = rows;
-    }
-
-    /// Drops the attachment; text then reaches serial only until the next
-    /// attach (spec 0014).
-    fn detach(&mut self) {
-        self.id = 0;
-        self.owner = 0;
-        self.attached = false;
-        self.generation = 0;
-        self.dirty = None;
     }
 
     /// Re-reads the window's content rectangle and follows a move (spec 0014).
@@ -441,28 +427,27 @@ impl Write for Terminal {
     }
 }
 
-/// The two kernel text windows and the gate that keeps pre-init output off the
-/// screen.
+/// The kernel System Log and the gate that keeps pre-init output off the
+/// screen. Application output is a console session, not a kernel grid
+/// (spec 0021, ADR 0053).
 struct Console {
     enabled: bool,
-    term: Terminal,
     log: Terminal,
 }
 
 const EMPTY_CONSOLE: Console = Console {
     enabled: false,
-    term: EMPTY_TERMINAL,
     log: EMPTY_TERMINAL,
 };
 
 static CONSOLE: SpinLock<Console> = SpinLock::new(EMPTY_CONSOLE);
 
 impl Console {
-    /// Derives the two content rectangles from the screen and opens both
-    /// windows (spec 0012 D1/D7). A screen too small for two 8×8 windows
-    /// leaves both unattached; output stays on serial.
+    /// Derives the System Log's content rectangle from the screen and opens the
+    /// one kernel text window (spec 0012 D1/D7). A screen too small for an 8×8
+    /// window leaves it unattached; kernel output stays on serial.
     fn open_windows(&mut self, width: i64, height: i64) {
-        let mut content_w = (width - (MARGIN * 2 + GAP + 4)) / 2;
+        let mut content_w = width - (MARGIN * 2 + 2);
         let mut content_h = height - TOP - MARGIN - 17;
         // Round down to whole cells, then clamp to the static grid bound.
         content_w = (content_w / CELL) * CELL;
@@ -474,27 +459,21 @@ impl Console {
         }
         let content_w = cols * CELL;
         let content_h = rows * CELL;
-        let second_x = MARGIN + content_w + 2 + GAP;
-        if second_x + content_w + 2 + MARGIN > width || TOP + content_h + 17 + MARGIN > height {
+        if TOP + content_h + 17 + MARGIN > height {
             return;
         }
-
         let cols = cols as usize;
         let rows = rows as usize;
-        if let Ok(id) = window::open(0, MARGIN, TOP, content_w, content_h, b"Terminal") {
-            self.term.attach(0, id, MARGIN + 1, TOP + 16, cols, rows);
-        }
-        if let Ok(id) = window::open(0, second_x, TOP, content_w, content_h, b"System Log") {
-            self.log.attach(0, id, second_x + 1, TOP + 16, cols, rows);
+        if let Ok(id) = window::open(0, MARGIN, TOP, content_w, content_h, b"System Log") {
+            self.log.attach(0, id, MARGIN + 1, TOP + 16, cols, rows);
         }
     }
 }
 
-/// Initialises the console: paints the desktop, opens the terminal and system
-/// log windows, and paints their empty grids (spec 0012 D1).
+/// Initialises the console: paints the desktop, opens the System Log and paints
+/// its empty grid (spec 0012 D1).
 pub fn init() {
     let mut console = CONSOLE.lock();
-    console.term.reset(TERM_FG, TERM_BG);
     console.log.reset(LOG_FG, LOG_BG);
 
     let (width, height) = gfx::size();
@@ -505,7 +484,6 @@ pub fn init() {
         let _ = gfx::fill_dither(0, 0, width as i64, height as i64, DESKTOP_DITHER);
         let _ = gfx::present(0, 0, width as i64, height as i64);
         console.open_windows(width as i64, height as i64);
-        console.term.repaint();
         console.log.repaint();
     }
     console.enabled = true;
@@ -534,112 +512,36 @@ pub fn _print(args: fmt::Arguments<'_>) {
 /// presented once, so a line costs one present instead of one per cell
 /// (spec 0016).
 pub fn write_bytes(session: u64, bytes: &[u8]) {
-    // A bound task's bytes go to its session output ring; serial is still the
-    // mirror (spec 0021, S7). Unbound output keeps the pre-M11 console path.
-    if session != 0 {
-        for byte in bytes {
-            serial::write_byte(*byte);
-        }
-        let _ = crate::session::write_output(session, bytes);
-        return;
-    }
-    let mut console = CONSOLE.lock();
-    if !console.enabled {
-        return;
-    }
+    // Every byte mirrors to serial. A bound task's bytes also go to its session
+    // output ring; an unbound task has no kernel terminal, so serial is the
+    // only destination (spec 0021, S7).
     for byte in bytes {
-        console.term.put_byte(*byte);
+        serial::write_byte(*byte);
     }
-    console.term.flush();
+    if session != 0 {
+        let _ = crate::session::write_output(session, bytes);
+    }
 }
 
-/// Attaches the console's machine-wide terminal grid to a window owned by
-/// `owner` (`core.terminal_attach`, spec 0014).
-///
-/// The kernel host supplies the caller's task id. The check and the geometry
-/// read happen under the console lock and the window lock in that order
-/// (`CONSOLE → WINDOW`); closing the kernel's boot Terminal runs the ordinary
-/// repair (`WINDOW → SCREEN`) and never calls back into the console.
-///
-/// Only one task may hold the terminal. The kernel's boot Terminal is released
-/// by the first successful attach; a later attach by a different live task is
-/// `Full` until the holder's window is closed (task termination). The same
-/// owner may rebind to another of its windows.
-pub fn attach(owner: u64, id: u64) -> Status {
-    let mut console = CONSOLE.lock();
-    if !console.enabled {
-        return Status::Invalid;
-    }
-    let rect = match window::owned_content_rect(owner, id) {
-        Ok(rect) => rect,
-        Err(status) => return status,
-    };
-    let cols = (rect.w / CELL).clamp(0, MAX_COLS as i64) as usize;
-    let rows = (rect.h / CELL).clamp(0, MAX_ROWS as i64) as usize;
-    if cols < 1 || rows < 1 {
-        return Status::Invalid;
-    }
-    // A prior owner whose task already terminated is detached even if the
-    // service opportunity has not run [`pump`] yet.
-    if console.term.attached && console.term.owner != 0 && !window::exists(console.term.id) {
-        console.term.detach();
-    }
-    if console.term.attached {
-        if console.term.owner == owner {
-            if console.term.id == id {
-                return Status::Ok;
-            }
-            // The same task may move its terminal to another window it owns.
-        } else if console.term.owner != 0 {
-            return Status::Full;
-        } else {
-            // The kernel's boot terminal steps aside for the first task. Its
-            // record and grid are dropped; the window itself is closed through
-            // the ordinary owner-0 path.
-            let old = console.term.id;
-            console.term.detach();
-            if old != 0 {
-                let _ = window::close(0, old);
-            }
-        }
-    }
-    console.term.reset(TERM_FG, TERM_BG);
-    console.term.attach(owner, id, rect.x, rect.y, cols, rows);
-    console.term.generation = window::generation();
-    console.term.repaint();
-    Status::Ok
-}
-
-/// Pulls pending `Expose` flags and repaints the matching grid (spec 0012 D4,
-/// spec 0014): the attached terminal by **id** (which may be any task's window)
-/// and the System Log by owner `0`. Taking the terminal's own expose by id
-/// leaves the owner's other windows' exposes in the service queue.
-///
-/// A terminal whose window disappeared (its task terminated) is detached here;
-/// output then reaches serial only until the next attach. Called at the end of
-/// [`poll_input`], so every service opportunity and idle-poll cycle repairs the
-/// console windows.
+/// Pulls the System Log's pending `Expose` and follows a moved window
+/// (spec 0012 D4). The log is the only kernel-owned text window from M11; a
+/// terminal is an application emulator (spec 0021). Called at the end of
+/// [`poll_input`], so every service opportunity and idle-poll cycle repairs it.
 pub fn pump() {
     let mut console = CONSOLE.lock();
     if !console.enabled {
         return;
     }
-    if console.term.attached && console.term.owner != 0 && !window::exists(console.term.id) {
-        console.term.detach();
-    }
-    if console.term.attached {
-        let id = console.term.id;
-        if window::take_expose_id(id) {
-            console.term.sync();
-            console.term.repaint();
-        } else if window::generation() != console.term.generation && console.term.sync() {
-            console.term.repaint();
-        }
-    }
     while let Some(id) = window::take_expose(0) {
         if console.log.attached && console.log.id == id {
             console.log.repaint();
         }
+    }
+    if console.log.attached
+        && window::generation() != console.log.generation
+        && console.log.sync()
+    {
+        console.log.repaint();
     }
 }
 
@@ -655,27 +557,22 @@ pub fn pump() {
 pub fn route_self_check() -> Result<bool, u32> {
     let attached = {
         let console = CONSOLE.lock();
-        console.enabled && console.term.attached && console.log.attached
+        console.enabled && console.log.attached
     };
     if !attached {
         return Ok(false);
     }
 
-    write_bytes(0, b"console: terminal ok\n");
     _print(format_args!("console: log ok\n"));
 
     let mut console = CONSOLE.lock();
-    // Each stream reached only its own grid. Byte 9 distinguishes the two
-    // probes: `t` in "terminal", `l` in "log".
-    if &console.term.grid[0][..7] != b"console" || console.term.grid[0][9] != b't' {
+    // The probe reached the one kernel grid. Byte 9 is `l` in "log".
+    if &console.log.grid[0][..7] != b"console" || console.log.grid[0][9] != b'l' {
         return Err(1);
     }
-    if &console.log.grid[0][..7] != b"console" || console.log.grid[0][9] != b'l' {
-        return Err(2);
-    }
     // The second row is blank again after the probe's newline.
-    if console.term.grid[1][0] != 0 || console.log.grid[1][0] != 0 {
-        return Err(3);
+    if console.log.grid[1][0] != 0 {
+        return Err(2);
     }
 
     // The first glyph cell is really painted in the shadow: one foreground
@@ -696,20 +593,14 @@ pub fn route_self_check() -> Result<bool, u32> {
         }
     }
     let (Some((ink_x, ink_y)), Some((paper_x, paper_y))) = (ink, paper) else {
-        return Err(4);
+        return Err(3);
     };
-    if gfx::get_pixel(console.term.x + ink_x, console.term.y + ink_y) != console.term.fg
-        || gfx::get_pixel(console.term.x + paper_x, console.term.y + paper_y) != console.term.bg
-    {
-        return Err(5);
-    }
     if gfx::get_pixel(console.log.x + ink_x, console.log.y + ink_y) != console.log.fg
         || gfx::get_pixel(console.log.x + paper_x, console.log.y + paper_y) != console.log.bg
     {
-        return Err(6);
+        return Err(4);
     }
 
-    console.term.clear_contents();
     console.log.clear_contents();
     console.enabled = true;
     while window::take_expose(0).is_some() {}

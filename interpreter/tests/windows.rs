@@ -91,7 +91,6 @@ struct WindowHost {
     closed: Vec<u64>,
     raised: Vec<u64>,
     presented: Vec<u64>,
-    attached: Vec<u64>,
     grab: Option<(i64, i64, i64, i64)>,
     last_grab: Option<(i64, i64, i64, i64)>,
     released: u32,
@@ -117,7 +116,6 @@ impl WindowHost {
             closed: Vec::new(),
             raised: Vec::new(),
             presented: Vec::new(),
-            attached: Vec::new(),
             grab: None,
             last_grab: None,
             released: 0,
@@ -181,15 +179,6 @@ impl Host for WindowHost {
             self.info
         } else {
             None
-        }
-    }
-
-    fn terminal_attach(&mut self, window: u64) -> Status {
-        self.attached.push(window);
-        if window == 0 {
-            Status::NotFound
-        } else {
-            Status::Ok
         }
     }
 
@@ -621,59 +610,6 @@ fn the_default_window_info_is_the_disabled_service() {
         0,
         "the disabled default writes nothing"
     );
-}
-
-#[test]
-fn terminal_attach_pops_the_window_and_pushes_the_status() {
-    let mut instructions = Vec::new();
-    op_const(&mut instructions, 12);
-    op_imm(
-        &mut instructions,
-        opcodes::BUILTIN,
-        opcodes::builtin::TERMINAL_ATTACH,
-    );
-    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
-    op_const(&mut instructions, 0);
-    op_imm(
-        &mut instructions,
-        opcodes::BUILTIN,
-        opcodes::builtin::TERMINAL_ATTACH,
-    );
-    op_imm(&mut instructions, opcodes::STORE_STATE, 8);
-    op(&mut instructions, opcodes::RET);
-
-    let code = build(&instructions, &[], 64);
-    let mut state = vec![0u8; 64];
-    let mut host = WindowHost::new();
-    assert_eq!(
-        run(&code, &mut state, &mut host),
-        Outcome::Exited(interpreter::ExitReason::Ok)
-    );
-    assert_eq!(host.attached, vec![12, 0]);
-    assert_eq!(state_word(&state, 0), Status::Ok as u64);
-    assert_eq!(state_word(&state, 8), Status::NotFound as u64);
-}
-
-#[test]
-fn the_default_terminal_attach_is_the_disabled_service() {
-    let mut instructions = Vec::new();
-    op_const(&mut instructions, 3);
-    op_imm(
-        &mut instructions,
-        opcodes::BUILTIN,
-        opcodes::builtin::TERMINAL_ATTACH,
-    );
-    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
-    op(&mut instructions, opcodes::RET);
-
-    let code = build(&instructions, &[], 64);
-    let mut state = vec![0u8; 64];
-    let mut host = DisabledHost;
-    assert_eq!(
-        run(&code, &mut state, &mut host),
-        Outcome::Exited(interpreter::ExitReason::Ok)
-    );
-    assert_eq!(state_word(&state, 0), Status::Invalid as u64);
 }
 
 #[test]

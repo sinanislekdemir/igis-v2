@@ -2178,13 +2178,13 @@ apps live under `/apps/<category>`, and the Apps menu has sections.
 
 - [x] **M11.1 Specs and ADR.** Spec 0021, ADR 0053, the supersession of 0014/0028,
   and the amendments to 0012/0018/0005/0003. No code.
-- [ ] **M11.2 Session ABI and interpreter.** `core.session_open/close/send/recv`
+- [x] **M11.2 Session ABI and interpreter.** `core.session_open/close/send/recv`
   (builtins 74–77), compiler-lowered `core.session_source`, `Host` defaults, the
   `abi::wait` source tag, and host tests. Retire `core.terminal_attach`.
-- [ ] **M11.3 Kernel sessions and routing.** A static session table sized from
+- [x] **M11.3 Kernel sessions and routing.** A static session table sized from
   `MAX_TASKS`, task session inheritance, `core.write`/`read_input` routing,
   focused-session serial input, wake paths and `Task::reclaim` cleanup.
-- [ ] **M11.4 Terminal emulator and shell.** `apps/utilities/terminal.ig`, the
+- [x] **M11.4 Terminal emulator and shell.** `apps/utilities/terminal.ig`, the
   session shell (`base/shell`), `terminal_probe`, the retirement of the kernel
   terminal window, and the one-window System Log.
 - [ ] **M11.5 `/apps` tree.** Move the six GUI app sources to

@@ -93,6 +93,12 @@ var
   // successful spawn; later Terminal clicks raise the live window instead.
   shell_launched: bool;
   shell_task: int;
+  // Check mode must not leave a real emulator running; the direct Terminal
+  // item still goes through the same handler but skips the spawn.
+  probe_spawn: bool;
+  // Check mode opens a plain window titled `Terminal` so the Windows raise
+  // path is testable even when the check runs from a serial shell.
+  probe_term: int;
   running: bool;
 
   // Menu bookkeeping.
@@ -957,37 +963,31 @@ begin
   end;
 end;
 
-// Non-blocking shell launch (M2.5.6). The desktop is the boot entry, so the
-// first Terminal click spawns `shell` with `core.spawn` and keeps pumping; the
-// shell opens its own terminal window and attaches it (spec 0014). A later
-// click raises the existing Terminal window instead of starting a second shell
-// that could not hold the one terminal. If the window is gone (the shell
-// exited), the click spawns a fresh one.
+// Non-blocking terminal launch (M11). Every activation starts a fresh
+// emulator; the emulator owns its own session and spawns its shell. There is
+// no raise-the-existing-terminal path (spec 0021, T5).
 procedure launch_shell();
 begin
-  raised_id := 0;
-  if shell_launched then
-    raise_terminal();
-  if raised_id > 0 then
+  if probe_spawn then
   begin
-    out.say("desktop_shell: terminal raised\n");
+    launch_status := Ok;
+    shell_launched := true;
+    out.say("desktop_shell: terminal spawn skipped in check\n");
+    return;
+  end;
+  launch_status := core.spawn("terminal", "", diag, shell_task);
+  if launch_status = Ok then
+  begin
+    shell_launched := true;
+    out.say("desktop_shell: launched terminal task ");
+    out.say_int(shell_task);
+    out.say("\n");
   end
   else
   begin
-    launch_status := core.spawn("shell", "", diag, shell_task);
-    if launch_status = Ok then
-    begin
-      shell_launched := true;
-      out.say("desktop_shell: launched shell task ");
-      out.say_int(shell_task);
-      out.say("\n");
-    end
-    else
-    begin
-      out.say("desktop_shell: shell launch failed: ");
-      out.say(diag.message);
-      out.say("\n");
-    end;
+    out.say("desktop_shell: terminal launch failed: ");
+    out.say(diag.message);
+    out.say("\n");
   end;
 end;
 
@@ -1087,8 +1087,9 @@ begin
   terminal_runs := 0;
   launches := 0;
   raised_id := 0;
-  // `check` is run from a shell that already holds the one terminal, so the
-  // Terminal item must raise that window, not spawn a second shell.
+  // A real emulator would run forever; the handler is still exercised, but
+  // the spawn is skipped in check mode.
+  probe_spawn := true;
   shell_launched := true;
   // The claim is `Ok` on an image without the boot desktop and `Full` when the
   // running boot desktop already holds the bar, which is the expected result
@@ -1117,6 +1118,12 @@ begin
     verify(
       "content marker",
       syslib.get_pixel(rect.x + rect.w - 4, rect.y + rect.h - 4) = black);
+
+    // A plain Terminal-titled window makes the raise path deterministic in a
+    // serial boot too; it is closed before the final screen.
+    probe_term := 0;
+    status := syslib.window_open(700, 500, 200, 100, "Terminal", probe_term);
+    verify("probe terminal window", status = Ok and probe_term > 0);
 
     // File: enumerate. The kernel terminal and system log must be present,
     // together with this shell's window.
@@ -1229,17 +1236,13 @@ begin
       "raised window is the terminal",
       status = Ok and win_id = raised_id and win_title = "Terminal");
 
-    // Terminal: the live boot shell already holds the terminal, so this item
-    // reuses and raises it rather than spawning a second shell (M2.5.6).
+    // Terminal: every activation goes through launch_shell; check mode skips
+    // the spawn so no emulator is left running.
     handle_menu(menu_terminal_x + 4, 10);
     verify("terminal item handled", handled and terminal_runs = 1);
     verify(
-      "terminal item reuses the terminal",
-      raised_id > 0 and raised_id <> own and syslib.window_focus() = raised_id);
-    status := syslib.window_info(uint(0), win_id, win_rect, win_title);
-    verify(
-      "terminal item raised the terminal",
-      status = Ok and win_id = raised_id and win_title = "Terminal");
+      "terminal item launches",
+      launch_status = Ok and shell_launched and probe_spawn);
 
     // Enumeration boundary and the sanctioned presentation path.
     status := syslib.window_info(uint(999), win_id, win_rect, win_title);
@@ -1401,6 +1404,12 @@ begin
         and syslib.get_pixel(about_rect.x + about_rect.w - 4, about_rect.y + about_rect.h - 4)
           = black);
 
+    if probe_term > 0 then
+      status := syslib.window_close(probe_term);
+    probe_term := 0;
+    if own > 0 then
+      status := syslib.window_raise(own);
+
     // Leave the bar and the window composed for the final screen.
     draw_menu_bar();
     draw_shell_window();
@@ -1509,6 +1518,7 @@ begin
   screen_w := int(syslib.screen_width());
   screen_h := int(syslib.screen_height());
   shell_launched := false;
+  probe_spawn := false;
   terminal_runs := 0;
   init_apps_menu();
   init_system_menu();

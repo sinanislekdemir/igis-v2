@@ -537,12 +537,6 @@ impl Host for KernelHost {
         crate::session::readable(self.current, id)
     }
 
-    // Terminal attach (spec 0014): the host knows the executing task id, so the
-    // language needs no task id and the console verifies window ownership.
-    fn terminal_attach(&mut self, window: u64) -> Status {
-        crate::console::attach(self.current, window)
-    }
-
     // System control (spec 0017): the two primitives never return on a live
     // kernel, because the requesting task's core is the one that halts/resets.
     // A `Status` return type keeps the ABI uniform; it is unreachable here.

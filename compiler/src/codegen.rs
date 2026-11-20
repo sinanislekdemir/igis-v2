@@ -7963,27 +7963,6 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             "core.session_send" => self.session_send_call(args, line, column),
             "core.session_recv" => self.session_recv_call(args, line, column),
             "core.session_source" => self.session_source_call(args, line, column),
-            // Terminal attach (spec 0014): bind the console's machine-wide
-            // terminal grid to a window owned by the caller. The kernel host
-            // supplies the task id; the compiler only checks the staged
-            // signature and the status result.
-            "core.terminal_attach" => {
-                if args.len() != 1 {
-                    return Err(self.err(
-                        line,
-                        column,
-                        format_args!(
-                            "`core.terminal_attach` expects 1 argument, got {}",
-                            args.len()
-                        ),
-                    ));
-                }
-                self.window_id(target, args[0])?;
-                self.one(opcodes::BUILTIN, builtin::TERMINAL_ATTACH)?;
-                self.pop(1)?;
-                self.push();
-                Ok(Some(Type::enumeration(STATUS_ENUM)))
-            }
             // System control (spec 0017): both take no operands and return a
             // `Status`. The kernel host owns the stop/reset path; a bare host
             // reports `Invalid`.

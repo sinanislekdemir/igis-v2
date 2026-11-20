@@ -1687,31 +1687,6 @@ pub fn content_rect(id: u64) -> Result<Rect, Status> {
     TABLE.lock().content_rect(id)
 }
 
-/// The content rectangle of `id` if `owner` owns it (spec 0014): `NotFound`
-/// for an unknown id, `Invalid` for another task's window or disabled
-/// graphics. Kernel-internal: the terminal attach checks ownership and reads
-/// the destination geometry in one table lock.
-pub fn owned_content_rect(owner: u64, id: u64) -> Result<Rect, Status> {
-    if gfx::size().0 == 0 {
-        return Err(Status::Invalid);
-    }
-    let table = TABLE.lock();
-    let Some(pos) = table.position(id) else {
-        return Err(Status::NotFound);
-    };
-    let window = &table.windows[table.order[pos]];
-    if window.owner != owner {
-        return Err(Status::Invalid);
-    }
-    Ok(window.content())
-}
-
-/// Whether `id` is a live window. Kernel-internal: the console uses it to drop
-/// a terminal attachment whose window a terminating task closed (spec 0014).
-pub fn exists(id: u64) -> bool {
-    TABLE.lock().position(id).is_some()
-}
-
 /// One read-only window snapshot by z-order index, topmost first (spec 0011,
 /// W19; spec 0012, D15). `None` for an index at or past the live count.
 pub fn info(index: u64) -> Option<Info> {
@@ -1872,20 +1847,6 @@ pub fn take_close(owner: u64) -> Option<u64> {
 /// block re-check includes it, so a close genuinely wakes a blocked owner.
 pub fn has_close(owner: u64) -> bool {
     TABLE.lock().has_close(owner)
-}
-
-/// Takes the pending whole-content `Expose` of exactly `id`, if any, clearing
-/// it (spec 0014). Kernel-internal: the console pulls its attached terminal's
-/// expose without taking another task's exposes from the queue.
-pub fn take_expose_id(id: u64) -> bool {
-    let mut table = TABLE.lock();
-    let Some(pos) = table.position(id) else {
-        return false;
-    };
-    let slot = table.order[pos];
-    let pending = table.windows[slot].expose_pending;
-    table.windows[slot].expose_pending = false;
-    pending
 }
 
 /// Routes a pointer-down at `(x, y)`: hit-tests the topmost frame, raises and

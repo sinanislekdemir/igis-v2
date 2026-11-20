@@ -695,23 +695,6 @@ pub mod builtin {
     /// `CapacityExceeded` with no change. Operands: `[path reference][size]`.
     pub const FS_TRUNCATE: u32 = 57;
 
-    // ---- terminal window (spec 0014) ------------------------------------
-    //
-    // `core.terminal_attach` binds the machine-wide console terminal grid to a
-    // window owned by the calling task. The kernel host supplies the caller's
-    // task id; there is no application-visible task id or window-content
-    // primitive. No opcode is added: the machine only stages the window id and
-    // the kernel performs the ownership check and the geometry derivation.
-
-    /// `core.terminal_attach(window_id) -> Status`: attach the console's
-    /// machine-wide terminal grid to a window owned by the calling task
-    /// (spec 0014). `Ok` on success; `NotFound` for an unknown window;
-    /// `Invalid` for a foreign window, disabled graphics or a content rectangle
-    /// too small for one 8×8 cell; `Full` when another task already holds the
-    /// one terminal. A repeated attach by the current owner is `Ok`.
-    /// Operands: `[window id]`.
-    pub const TERMINAL_ATTACH: u32 = 44;
-
     // ---- proportional font (spec 0015) ----------------------------------
     //
     // The font lives in the kernel (`kernel/src/font.rs`); these three
@@ -1057,7 +1040,6 @@ pub mod builtin {
             FS_MKDIR => Some((1, 1)),
             FS_RENAME => Some((2, 1)),
             FS_TRUNCATE => Some((2, 1)),
-            TERMINAL_ATTACH => Some((1, 1)),
             TEXT_WIDTH_PROP => Some((1, 1)),
             TEXT_HEIGHT_PROP => Some((0, 1)),
             DRAW_TEXT_PROP => Some((4, 1)),

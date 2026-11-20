@@ -1,6 +1,6 @@
 unit shell;
 
-uses core, stdlib, syslib, lib.out, lib.path, lib.cli;
+uses core, stdlib, lib.out, lib.path, lib.cli;
 
 const
   ExternalArgsCapacity = 512;
@@ -37,13 +37,6 @@ var
   done: bool;
   diag: Diagnostic;
   reason: ExitReason;
-  term: int;
-  term_status: Status;
-  term_rect: Rect;
-  found_white: bool;
-  found_ink: bool;
-  px: int;
-  py: int;
   // Console input is a raw byte stream (spec 0005, ADR 0037). The shell keeps
   // the line buffer, the cursor and the echo itself; `one` is the one-byte
   // read destination so a burst of typed bytes stays in the kernel ring until
@@ -56,7 +49,6 @@ var
   got: int;
   submitted: bool;
   cancelled: bool;
-  ev: Event;
   edit_st: Status;
 
 // Inserts one printable byte at the cursor through the M2.4.1 helpers, so the
@@ -109,21 +101,6 @@ begin
     insert_byte(byte(32))
   else if b >= byte(32) and b <= byte(126) then
     insert_byte(b);
-end;
-
-// One key event: special keys first (their text byte is 0), then the text byte
-// through the same editor. A KeyUp is ignored.
-procedure handle_key(key: const Event);
-begin
-  if key.kind = KeyDown then
-  begin
-    if stdlib.ui_key_is_enter(key.code) then
-      handle_byte(byte(13))
-    else if stdlib.ui_key_is_backspace(key.code) then
-      handle_byte(byte(127))
-    else
-      handle_byte(stdlib.ui_key_text(key.code));
-  end;
 end;
 
 // Reports the child's `ExitReason` sum value (spec 0003, "Sum types"). `case`
@@ -301,52 +278,17 @@ end;
 
 procedure main(args: const string[1024]);
 begin
-  // The REPL's terminal is an ordinary task-owned window (spec 0014). Open it
-  // and attach the console's terminal grid before the first banner byte; when
-  // graphics are disabled or the attach is refused the shell keeps the serial
-  // path and prints one line explaining it.
-  term := 0;
-  term_status := Status.Invalid;
-  st := syslib.window_open(24, 64, 560, 360, "Terminal", term);
-  if st = Ok then
-    term_status := core.terminal_attach(term);
-  if term_status <> Ok then
-  begin
-    if term <> 0 then
-      st := syslib.window_close(term);
-    out.say("shell: no terminal window\n");
-  end;
-
+  // M11: the shell is a session shell. The terminal emulator owns the window
+  // and the session; this task reads source 0 (its session input, or the
+  // global serial ring when unbound) and writes with `core.write` (spec 0021).
   banner := "igis-v2 shell\n";
   out.say(banner);
-  out.say("shell: spawning child\n");
-
-  // `core.spawn` returns `Status` and fills the caller's `Diagnostic` record on
-  // a synchronous failure (spec 0003 E1, spec 0005). `core.wait` blocks until
-  // the child exits and writes its `ExitReason`.
-  st := core.spawn("child", "hello", diag, id);
-  if st = Ok then
-  begin
-    out.say("shell: child task id assigned\n");
-    st := core.wait(id, reason);
-    if st = Ok then
-      report(reason)
-    else
-      out.say("child: wait failed\n");
-  end
-  else
-  begin
-    out.say("spawn failed: ");
-    out.say(diag.message);
-    out.say("\n");
-  end;
 
   // Command loop (spec 0005, ADR 0037). The console is a raw byte stream and
   // the kernel neither echoes nor assembles lines, so this loop does the line
-  // editing: it waits on console bytes (source 0) and input events (source 1)
-  // at once, applies one byte through `handle_byte`, and dispatches on Enter.
-  // `core.find` locates the first space and `core.substr_into` splits the line
-  // into the command and its tail.
+  // editing: it waits on source 0, applies one byte through `handle_byte`, and
+  // dispatches on Enter. `core.find` locates the first space and
+  // `core.substr_into` splits the line into the command and its tail.
   //
   // The builtins are `help`, `echo`, `cd`, `run`, `exit` and `terminal`; any
   // other word is an application under `base/` (then `system/`). The file
@@ -356,7 +298,6 @@ begin
   //
   // There is no `return` yet, so `main` ends by leaving the loop with `done`.
   sources[0] := uint(0);
-  sources[1] := uint(1);
   // The shell starts at the image root; the prompt shows it in display form
   // (`igis:/> `).
   cwd := "/";
@@ -373,31 +314,12 @@ begin
     while not submitted and not cancelled do
     begin
       ready := -1;
-      st := core.next_any(sources, 2, ready);
+      st := core.next_any(sources, 1, ready);
       if st = Ok then
       begin
-        if ready = 0 then
-        begin
-          got := core.read_input(one);
-          if got = 1 then
-            handle_byte(one[0]);
-        end
-        else
-        begin
-          st := syslib.next_event(ev);
-          if st = Ok then
-          begin
-            if ev.kind = Close and ev.window = term then
-            begin
-              // A close-box press is an owner request, not a kill (spec 0011,
-              // W23). Close our own terminal window and leave both loops.
-              done := true;
-              cancelled := true;
-            end
-            else
-              handle_key(ev);
-          end;
-        end;
+        got := core.read_input(one);
+        if got = 1 then
+          handle_byte(one[0]);
       end;
     end;
     if submitted then
@@ -482,59 +404,20 @@ begin
     end;
     if cmd = "terminal" then
     begin
-      // Terminal-window proof (spec 0014): report the attached id, check a
-      // refused unknown id, verify a foreground and a background pixel in the
-      // window's content rectangle, then spawn a probe that must be refused
-      // with Full while this shell holds the one terminal.
-      if term_status = Ok then
-      begin
-        out.say("terminal: window ");
-        split := core.format_int_into(rest, term, uint(10), uint(0));
-        out.say(rest);
-        out.say("\n");
-
-        st := core.terminal_attach(999999);
-        if st = NotFound then
-          out.say("terminal: unknown refused\n")
-        else
-          out.say("terminal: unknown BAD\n");
-
-        st := syslib.window_content_rect(term, term_rect);
-        if st = Ok then
-        begin
-          found_white := false;
-          found_ink := false;
-          py := 0;
-          while py < 16 do
-          begin
-            px := 0;
-            while px < 128 do
-            begin
-              if syslib.get_pixel(term_rect.x + px, term_rect.y + py) = uint(0) then
-                found_ink := true
-              else
-                found_white := true;
-              px := px + 1;
-            end;
-            py := py + 1;
-          end;
-          if found_ink and found_white then
-            out.say("terminal: pixels ok\n")
-          else
-            out.say("terminal: pixels BAD\n");
-        end
-        else
-          out.say("terminal: no rect\n");
-
-        st := core.run("system/terminal_probe", "", diag, reason);
-        if st = Ok then
-          report(reason)
-        else
-          out.say("terminal: probe failed\n");
-        out.say("terminal: ok\n");
-      end
+      // Console-session proof (spec 0021). The shell is a slave; it checks the
+      // stale-id rule, then runs the probe in this same session so the probe's
+      // own session must succeed without disturbing the shell.
+      st := core.session_close(999999);
+      if st = NotFound then
+        out.say("terminal: stale refused\n")
       else
-        out.say("terminal: not attached\n");
+        out.say("terminal: stale BAD\n");
+      st := core.run("system/terminal_probe", "", diag, reason);
+      if st = Ok then
+        report(reason)
+      else
+        out.say("terminal: probe failed\n");
+      out.say("terminal: ok\n");
       handled := true;
     end;
     if cmd = "exit" then
@@ -600,6 +483,4 @@ begin
   end;
 
   out.say("bye\n");
-  if term_status = Ok then
-    st := syslib.window_close(term);
 end;

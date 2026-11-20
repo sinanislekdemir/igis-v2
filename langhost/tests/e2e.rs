@@ -281,11 +281,6 @@ fn shell_spawns_and_waits_for_the_child_on_the_host() {
     assert_eq!(result.reason, ExitReason::Ok);
     let text = String::from_utf8(result.output).expect("UTF-8 output");
     for line in [
-        "shell: spawning child\n",
-        "shell: child task id assigned\n",
-        "child: args hello\n",
-        "child: bye\n",
-        "child: ok\n",
         "shell: help, echo <text>, cd [dir], run <app> [args], exit\n",
         "shell: base apps: ls dir pwd cat head tail mkdir rmdir rm\n",
         "child: args world\n",
@@ -295,9 +290,9 @@ fn shell_spawns_and_waits_for_the_child_on_the_host() {
     }
     // The host console scripts `help`, `run child world`, `echo hi there`,
     // `exit`, so the same command loop the kernel runs prints four prompts and
-    // exits without an unknown command. The shell, not the kernel, now echoes
-    // each typed byte, and the prompt carries the current directory (`/` at
-    // boot).
+    // exits without an unknown command. A session shell starts at a clean
+    // prompt (no startup demo child), and the prompt carries the current
+    // directory (`/` at boot).
     assert_eq!(
         text.matches("igis:/> ").count(),
         4,

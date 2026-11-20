@@ -1,30 +1,49 @@
 unit terminal_probe;
 
-// One-terminal refusal proof (spec 0014). The boot shell already holds the
-// machine-wide terminal; this task opens its own window and must be refused
-// with Full. It closes the window before reporting through `core.write`, which
-// lands in the shell's attached terminal.
+// Console-session surface proof (spec 0021). The shell runs this probe inside
+// its own session; the probe is a different task, so it may open its own
+// session. One live session per owner is `Full`, a stale id is `NotFound`, and
+// closing the owner's session is `Ok`.
 
-uses core, syslib;
+uses core;
 
 var
   id: int;
+  second: int;
   st: Status;
-  refused: bool;
+  ok: bool;
 
 procedure main(args: const string[1024]);
 begin
-  refused := false;
-  st := syslib.window_open(80, 300, 120, 80, "Terminal Probe", id);
-  if st = Ok then
+  ok := true;
+  id := 0;
+  second := 0;
+  st := core.session_open(id);
+  if st <> Ok or id = 0 then
   begin
-    st := core.terminal_attach(id);
-    if st = Full then
-      refused := true;
-    st := syslib.window_close(id);
+    core.write("terminal_probe: open failed\n");
+    return;
   end;
-  if refused then
-    core.write("terminal_probe: refused Full\n")
+  st := core.session_open(second);
+  if st <> Full then
+  begin
+    core.write("terminal_probe: second open BAD\n");
+    ok := false;
+  end;
+  st := core.session_close(999999);
+  if st <> NotFound then
+  begin
+    core.write("terminal_probe: stale BAD\n");
+    ok := false;
+  end;
+  st := core.session_close(id);
+  if st <> Ok then
+  begin
+    core.write("terminal_probe: close BAD\n");
+    ok := false;
+  end;
+  if ok then
+    core.write("terminal_probe: ok\n")
   else
     core.write("terminal_probe: BAD\n");
 end;
