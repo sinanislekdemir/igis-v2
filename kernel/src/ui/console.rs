@@ -96,6 +96,8 @@ struct Terminal {
     /// The window-service generation the cached geometry was read at, so a
     /// moved terminal is followed without a table query per byte.
     generation: u64,
+    /// The window is minimized; update the grid but do not paint (M11).
+    hidden: bool,
     /// Cells drawn since the last present. One bounded bounding box is enough:
     /// a write run is a line, and the whole box is presented once per flush
     /// (spec 0012, D3; spec 0016).
@@ -116,6 +118,7 @@ const EMPTY_TERMINAL: Terminal = Terminal {
     fg: 0,
     bg: 0,
     generation: 0,
+    hidden: false,
     dirty: None,
     grid: [[0; MAX_COLS]; MAX_ROWS],
 };
@@ -149,6 +152,7 @@ impl Terminal {
         self.fg = fg;
         self.bg = bg;
         self.generation = 0;
+        self.hidden = false;
         self.dirty = None;
         for line in self.grid.iter_mut() {
             line.fill(0);
@@ -244,7 +248,7 @@ impl Terminal {
         let Some(dirty) = self.dirty.take() else {
             return;
         };
-        if !self.attached || dirty.w <= 0 || dirty.h <= 0 {
+        if !self.attached || self.hidden || dirty.w <= 0 || dirty.h <= 0 {
             return;
         }
         let id = self.id;
@@ -283,7 +287,7 @@ impl Terminal {
     /// raised or moved on another core cannot change the visible parts between
     /// the geometry read and the pixels.
     fn paint_cell(&mut self, col: usize, row: usize) {
-        if !self.attached || col >= self.cols || row >= self.rows {
+        if !self.attached || self.hidden || col >= self.cols || row >= self.rows {
             return;
         }
         let x0 = self.x + col as i64 * CELL;
@@ -324,7 +328,7 @@ impl Terminal {
     /// rectangle, presenting each part once (spec 0012 D3). As in
     /// [`Terminal::paint_cell`], the window lock is held across the paint.
     fn repaint(&mut self) {
-        if !self.attached {
+        if !self.attached || self.hidden {
             return;
         }
         // The whole content is drawn and presented below, so any pending
@@ -499,6 +503,11 @@ pub fn _print(args: fmt::Arguments<'_>) {
     if !console.enabled {
         return;
     }
+    // A minimized log and an open app-drawn pull-down both suppress painting;
+    // the grid still records the bytes and `pump` repaints once the menu closes
+    // or the window is restored. Serial mirroring is unaffected.
+    console.log.hidden = console.log.attached
+        && (!window::is_visible(console.log.id) || window::grab_active());
     let _ = console.log.write_fmt(args);
     console.log.flush();
 }
@@ -532,18 +541,32 @@ pub fn write_bytes(session: u64, bytes: &[u8]) {
 /// [`poll_input`], so every service opportunity and idle-poll cycle repairs it.
 pub fn pump() {
     let mut console = CONSOLE.lock();
-    if !console.enabled {
+    if !console.enabled || !console.log.attached {
         return;
     }
+    // A minimized kernel window is not painted; a pending expose is cleared so
+    // the restore path can mark a fresh one.
+    if !window::is_visible(console.log.id) {
+        while window::take_expose(0).is_some() {}
+        return;
+    }
+    // While an app-drawn pull-down owns the modal grab, leave the expose
+    // pending: repainting the log here would draw over the menu. The next
+    // service opportunity after the menu closes repaints it.
+    if window::grab_active() {
+        return;
+    }
+    if console.log.hidden {
+        console.log.hidden = false;
+        console.log.repaint();
+    }
     while let Some(id) = window::take_expose(0) {
-        if console.log.attached && console.log.id == id {
+        if console.log.id == id {
+            console.log.hidden = false;
             console.log.repaint();
         }
     }
-    if console.log.attached
-        && window::generation() != console.log.generation
-        && console.log.sync()
-    {
+    if window::generation() != console.log.generation && console.log.sync() {
         console.log.repaint();
     }
 }

@@ -38,10 +38,12 @@ decisions in `adr/`, and work items in `PLAN.md`.
   `e2fsck -fn` clean). GUI applications live under `apps/<category>/`.
 - Networking: virtio-net and e1000/e1000e, IPv4/UDP/TCP, with DHCP/DNS/HTTP/`nc`/`purl`
   in `/lib` and `base/`.
-- UI: a kernel window server, proportional font, one kernel System Log window, a
-  terminal emulator (`apps/utilities/terminal`) over kernel console sessions, and source
-  apps (`editor`, `browser`, `calculator`, `minesweeper`, `clock_window`, `widgets`).
-  Every terminal instance has its own session, shell and cwd.
+- UI: a kernel window server with service-drawn close and minimize boxes, proportional
+  font, one kernel System Log window, a terminal emulator
+  (`apps/utilities/terminal`) over kernel console sessions, and source apps (`editor`,
+  `browser`, `calculator`, `minesweeper`, `clock_window`, `widgets`). Every terminal
+  instance has its own session, shell and cwd; `File` opens a clickable window list that
+  restores minimized windows.
 
 ## Ground rules
 

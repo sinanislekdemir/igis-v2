@@ -113,7 +113,9 @@ resize. Those are M2.4/M2.5.
   `F9` toggles Apps and `F10` toggles System.
 - **D11 (MUST):** A pointer-down with `window = 0` at a direct menu item runs it:
   - `File` enumerates the live windows and shows their id, title and frame in a
-    desktop-owned window (it no longer writes into a kernel terminal);
+    desktop-owned window (it no longer writes into a kernel terminal); a click on
+    a row raises that window and restores it if it was minimized (spec 0011,
+    W30);
   - `Apps` toggles the application pull-down (D20). It does not launch anything when it
     opens; a row activates, and an outside click dismisses the menu;
   - `Windows` raises the topmost window titled `Terminal` (the "bring the terminal

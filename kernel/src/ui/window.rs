@@ -114,6 +114,10 @@ struct Window {
     /// The close box was pressed and the owner has not taken the request yet
     /// (spec 0011, W23/W25).
     close_pending: bool,
+    /// The window is minimized: hidden from hit-testing and painting but still
+    /// enumerated at the bottom of the z-order so the window list can restore
+    /// it (M11 minimize).
+    minimized: bool,
     used: bool,
 }
 
@@ -129,6 +133,7 @@ impl Window {
         title: [0; TITLE_CAP],
         expose_pending: false,
         close_pending: false,
+        minimized: false,
         used: false,
     };
 
@@ -204,6 +209,9 @@ enum PressAction {
     /// The close box of a task-owned window was pressed: the window's
     /// `close_pending` flag is set and its owner is asked to close it.
     Close,
+    /// The minimize box was pressed: the window is hidden at the bottom of the
+    /// z-order and can be restored from the window list.
+    Minimize,
 }
 
 /// The close box is an 11 × 11 square at `(frame.x + 4, frame.y + 3)` (W22).
@@ -211,6 +219,15 @@ fn close_box_hit(frame: Rect, x: i64, y: i64) -> bool {
     x >= frame.x.saturating_add(4)
         && y >= frame.y.saturating_add(3)
         && x < frame.x.saturating_add(4 + 11)
+        && y < frame.y.saturating_add(3 + 11)
+}
+
+/// The minimize box is an 11 × 11 square at the right end of the title bar,
+/// `(frame.x + frame.w - 15, frame.y + 3)`.
+fn hide_box_hit(frame: Rect, x: i64, y: i64) -> bool {
+    x >= frame.x.saturating_add(frame.w).saturating_sub(15)
+        && y >= frame.y.saturating_add(3)
+        && x < frame.x.saturating_add(frame.w).saturating_sub(4)
         && y < frame.y.saturating_add(3 + 11)
 }
 
@@ -847,6 +864,7 @@ impl Table {
         };
         let slot = self.order[pos];
         let frame = self.windows[slot].frame();
+        self.windows[slot].minimized = false;
         let old_focus = self.focus;
         for index in pos..self.count - 1 {
             self.order[index] = self.order[index + 1];
@@ -960,6 +978,49 @@ impl Table {
 
     /// Handles a left-button press at `(x, y)` (W22/W23).
     ///
+    /// Hides a window at the bottom of the z-order. It stays in the table so
+    /// the desktop's window list can raise it again. Returns whether the
+    /// window was visible.
+    fn minimize(&mut self, id: u64) -> bool {
+        let Some(pos) = self.position(id) else {
+            return false;
+        };
+        let slot = self.order[pos];
+        if self.windows[slot].minimized {
+            return false;
+        }
+        let frame = self.windows[slot].frame();
+        self.windows[slot].minimized = true;
+        self.windows[slot].close_pending = false;
+        // `order` is bottom-first; a minimized window goes to the bottom so
+        // `info` lists it last and it covers nothing.
+        for index in (1..=pos).rev() {
+            self.order[index] = self.order[index - 1];
+        }
+        self.order[0] = slot;
+        if self.focus == id {
+            self.focus = self.top_visible().unwrap_or(0);
+        }
+        self.erases.add(frame, 0);
+        self.chrome.add(frame);
+        if let Some(pos) = self.position(self.focus) {
+            self.chrome.add(title_rect(&self.windows[self.order[pos]]));
+        }
+        self.bump();
+        true
+    }
+
+    /// The topmost non-minimized window id, or `None`.
+    fn top_visible(&self) -> Option<u64> {
+        for pos in (0..self.count).rev() {
+            let window = &self.windows[self.order[pos]];
+            if !window.minimized {
+                return Some(window.id);
+            }
+        }
+        None
+    }
+
     /// A press on the title bar (outside the close box) raises and focuses the
     /// window like `raise` and starts a drag; a press on a task-owned close box
     /// marks the window for a close request (the owner gets a `Close` event);
@@ -986,6 +1047,10 @@ impl Table {
             }
             self.windows[self.order[pos]].close_pending = true;
             return PressAction::Close;
+        }
+        if hide_box_hit(frame, x, y) {
+            let _ = self.minimize(id);
+            return PressAction::Minimize;
         }
         if !title_bar_hit(frame, x, y) {
             return PressAction::None;
@@ -1204,6 +1269,10 @@ impl Table {
         parts.push(rect);
         let mut pos = covers_from;
         while pos < self.count && parts.count > 0 {
+            if self.windows[self.order[pos]].minimized {
+                pos += 1;
+                continue;
+            }
             let cover = self.windows[self.order[pos]].frame();
             let mut next = Parts::new();
             for index in 0..parts.count {
@@ -1222,6 +1291,9 @@ impl Table {
     /// rectangle is never touched.
     fn draw_chrome(&self, slot: usize) {
         let window = &self.windows[slot];
+        if window.minimized {
+            return;
+        }
         let frame = window.frame();
         let focused = window.id == self.focus;
         let title_bg = if focused {
@@ -1249,12 +1321,18 @@ impl Table {
         let _ = gfx::fill_rect(box_x, box_y, 11, 11, title_bg);
         let _ = gfx::draw_rect(box_x, box_y, 11, 11, CHROME_INK);
 
-        // Title text: truncate to the band right of the close box, then centre
+        // Minimize box: the matching box at the right end, with a short dash.
+        let hide_x = frame.x + frame.w - 15;
+        let _ = gfx::fill_rect(hide_x, box_y, 11, 11, title_bg);
+        let _ = gfx::draw_rect(hide_x, box_y, 11, 11, CHROME_INK);
+        let _ = gfx::fill_rect(hide_x + 2, box_y + 4, 7, 2, CHROME_INK);
+
+        // Title text: truncate to the band between the two boxes, then centre
         // it. The band is repainted in the title colour so stripes never cross
         // a glyph. The service chrome uses the proportional font (spec 0015);
         // truncation is by measured width, so narrow letters fit more of the
         // title than the old fixed 8-pixel cells did.
-        let available = inner_w - 20;
+        let available = inner_w - 38;
         let mut chars = 0;
         let mut text_w = 0i64;
         if available >= 4 && window.title_len > 0 {
@@ -1298,6 +1376,9 @@ impl Table {
         let mut marked = false;
         for pos in 0..self.count {
             let slot = self.order[pos];
+            if self.windows[slot].minimized {
+                continue;
+            }
             if !self.windows[slot].expose_pending
                 && self.chrome.intersects(self.windows[slot].frame())
             {
@@ -1353,6 +1434,9 @@ impl Table {
     fn hit_test(&self, x: i64, y: i64) -> Option<u64> {
         for pos in (0..self.count).rev() {
             let window = &self.windows[self.order[pos]];
+            if window.minimized {
+                continue;
+            }
             let frame = window.frame();
             if x >= frame.x
                 && y >= frame.y
@@ -1651,6 +1735,10 @@ pub fn pointer_event(
                 consumed = true;
                 close_requested = true;
             }
+            PressAction::Minimize => {
+                consumed = true;
+                dirty = true;
+            }
             PressAction::None => {}
         }
     }
@@ -1731,6 +1819,16 @@ pub fn focus() -> u64 {
 /// console session (spec 0021, S10).
 pub fn owner_of(id: u64) -> u64 {
     TABLE.lock().owner_of(id).unwrap_or(0)
+}
+
+/// Whether window `id` is live and not minimized. Kernel-internal: the console
+/// leaves a minimized System Log unpainted until it is restored.
+pub fn is_visible(id: u64) -> bool {
+    let table = TABLE.lock();
+    let Some(pos) = table.position(id) else {
+        return false;
+    };
+    !table.windows[table.order[pos]].minimized
 }
 
 /// Closes every window owned by a terminating task and repairs the screen once.

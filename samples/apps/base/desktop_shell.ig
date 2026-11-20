@@ -145,6 +145,7 @@ var
   winlist_id: int;
   winlist_rect: Rect;
   win_lines: array[string[256], WindowListCapacity];
+  win_ids: array[int, WindowListCapacity];
   win_line_count: int;
   win_line: string[256];
 
@@ -409,6 +410,7 @@ begin
     if win_line_count < WindowListCapacity then
     begin
       win_lines[win_line_count] := win_line;
+      win_ids[win_line_count] := win_id;
       win_line_count := win_line_count + 1;
     end;
     if win_title = "Terminal" then
@@ -485,6 +487,31 @@ begin
   winlist_open := false;
   out.say("desktop_shell: window list closed\n");
   draw_shell_window();
+end;
+
+// A click on a Window List row raises that window; a minimized window is
+// restored by the same `window_raise` (M11 minimize).
+procedure raise_window_at(px: int; py: int);
+var
+  row: int;
+begin
+  if winlist_id <= 0 then
+    return;
+  status := syslib.window_content_rect(winlist_id, winlist_rect);
+  if status <> Ok then
+    return;
+  if px < winlist_rect.x or px >= winlist_rect.x + winlist_rect.w then
+    return;
+  row := (py - winlist_rect.y - 8) div 16;
+  if row < 0 or row >= win_line_count then
+    return;
+  status := syslib.window_raise(win_ids[row]);
+  if status = Ok then
+  begin
+    out.say("desktop_shell: raised window ");
+    out.say_int(win_ids[row]);
+    out.say("\n");
+  end;
 end;
 
 // Raises the terminal window: the "Windows" direct item's action. Enumeration
@@ -1617,6 +1644,8 @@ begin
           handle_apps_menu_click()
         else if ev.window = 0 then
           handle_menu(ev.x, ev.y)
+        else if ev.window = winlist_id then
+          raise_window_at(ev.x, ev.y)
         else if ev.window = own then
           draw_shell_window();
       end

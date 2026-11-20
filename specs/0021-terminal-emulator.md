@@ -145,7 +145,10 @@ There is no kernel terminal window.
 - **B1 (MUST):** `console::init` opens exactly one kernel text window, the
   System Log, owned by task `0`. There is no kernel Terminal window.
 - **B2 (MUST):** `println!`/`print!` continue to feed the System Log and COM1.
-  `core.write` never feeds the System Log.
+  `core.write` never feeds the System Log. While the log is minimized or an
+  app-drawn pull-down holds the modal grab, the log grid and serial mirror keep
+  updating but the kernel does not paint the log; it repaints after the menu
+  closes or the window is restored (spec 0011, W30).
 - **B3 (MUST):** The boot entry is still `system/entrypoint` (the desktop). The
   desktop launches `apps/utilities/terminal` from the Apps menu. A graphics-less
   boot still falls back to `base/shell` on serial.
