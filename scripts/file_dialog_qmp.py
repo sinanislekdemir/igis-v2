@@ -446,6 +446,9 @@ def run(args):
         time.sleep(0.4)
         tablet.click(*row_center(math_row))
         time.sleep(0.2)
+        # A QMP screendump can stall the guest; let it resume before the
+        # tablet press, or the release can overtake the press.
+        time.sleep(0.5)
         tablet.click(open_x + BUTTON_W // 2, button_y + BUTTON_H // 2)
         time.sleep(0.9)
         tablet.move(10, 10)
@@ -538,6 +541,9 @@ def run(args):
         if large_dialog < 10000 or not large_chrome_ok:
             print("[harness] FAIL: the dialog did not reopen for base/calculator")
             return 1
+        # A QMP screendump can stall the guest; let it resume before the
+        # tablet press, or the release can overtake the press.
+        time.sleep(0.5)
         tablet.click(open_x + BUTTON_W // 2, button_y + BUTTON_H // 2)
         time.sleep(2.0)
         tablet.move(10, 10)
