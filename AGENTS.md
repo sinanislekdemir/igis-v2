@@ -84,8 +84,12 @@ fresh.
 ├── langhost/          # host runner: compile, verify, run
 ├── ext2w/             # host-testable read/write ext2 over SectorDevice
 ├── net/               # host-testable Ethernet/ARP/IPv4/ICMP/UDP/TCP stack
-├── kernel/            # entry, console, frame allocator, clock, ext2/router, ATA,
-│                      #   PCI/USB/PS2 drivers, scheduler, streams, window server, REPL
+├── kernel/            # boot/service modules at the crate root (main, repl, stream,
+│   ├── mm/            #   event, clock, sync, net) plus the subject groups:
+│   ├── platform/x86_64/  # PC devices: ATA, PCI, UHCI/HID, PS/2, AP bring-up
+│   ├── sched/         #   interpreter loop and the task table
+│   ├── ui/            #   console, fonts, framebuffer shadow, window server
+│   └── vfs/           #   in-memory ext2 image reader and the path router
 ├── stdlib/            # standard library source, embedded into the compiler
 ├── samples/apps/      # shipped corpus staged into every image
 │   ├── lib/           #   importable modules (`*.ig`, names kept)
@@ -103,11 +107,14 @@ fresh.
 └── .cargo/config.toml
 ```
 
-Current modularity: `arch/x86_64` holds the ISA layer, but several `kernel` modules import
-`arch_x86_64` directly for ports, paging and the APIC, so the kernel is not yet an
-arch-agnostic core. The planned `platform/`, `drivers/`, `mm/`, `sched/` and `vfs/` split
-does not exist; those concerns live inside `kernel/src`. Treat the crate boundaries as the
-real seams and the future split as planned refactoring.
+Kernel layout (ADR 0052): `arch/x86_64` is the ISA/boot layer;
+`kernel/src/platform/x86_64` holds the PC device drivers (PCI, ATA, UHCI/HID, PS/2) and AP
+bring-up; `mm`, `sched`, `ui` and `vfs` group the remaining kernel services, and the
+boot/service modules stay at the crate root. Crate-root re-exports keep the historical
+`crate::gfx`-style paths. The crate is still one compilation unit; a future `platform`
+crate can take `platform/x86_64` wholesale. The two ext2 readers are deliberate:
+`vfs/ext2` reads the in-memory GRUB image, while `ext2w` owns the writable disk and its
+`RefCell` cache is not `Sync` (Q59).
 
 ## Toolchain
 

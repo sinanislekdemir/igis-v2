@@ -93,6 +93,12 @@ self-check proves the rule (`stack: layout ok`). Spec 0004 C6, spec 0002 H2.
 | Q57 | DHCP lease renewal, DNS caching, ICMP errors | M10.8 implements DISCOVER/OFFER/REQUEST/ACK and applies the lease; renewal, T1/T2 timers, a DNS cache and ICMP unreachable/time-exceeded reporting are follow-ups. A deterministic offline DNS responder is also open (slirp forwards DNS; guest UDP to the host alias is verified in M10.3) | M10.8 follow-up; spec 0020 open question 6 |
 | Q58 | Network trust model | No capability check (vision R14), so any task may reconfigure the single NIC and open sockets; sockets are owner-checked and there is no raw/promiscuous mode. A future multi-user or hostile-app model would need an authority rule | first multi-user or remote-service target |
 
+## H. Kernel structure
+
+| # | Question | Options / recommendation | Trigger |
+|---|----------|--------------------------|---------|
+| Q59 | One ext2 reader for the image and the home disk | `vfs/ext2` reads the in-memory GRUB image through a borrowed slice; `ext2w` owns the writable home disk and caches blocks in a `RefCell`. `RefCell` is not `Sync`, so an `ext2w::Fs` cannot be shared with the APs as-is. Unifying needs a `Sync` cache (or a `MemoryDisk` plus a lock-free cache) and a full boot/fsck proof; keeping both is deliberate (ADR 0052) | a third filesystem, a cache bug, or a measurable duplicate-maintenance cost |
+
 ## Decided in the 2026-11-16 guards session
 
 **Per-task and per-AP stack guards (spec 0002 H2, spec 0004 C6, ADR 0006).** The one-off

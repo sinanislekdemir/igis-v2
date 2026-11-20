@@ -1,30 +1,28 @@
 #![no_std]
 #![no_main]
 
-mod ata;
 mod clock;
-mod console;
 mod event;
-mod ext2;
-mod font;
-mod font8x8;
-mod frame;
-mod fs;
-mod gfx;
-mod guard;
 mod mb2;
 mod module;
-mod mouse;
 mod net;
-mod pci;
 mod repl;
-mod sched;
-mod smp;
 mod stream;
 mod sync;
-mod task;
-mod usb;
-mod window;
+
+mod mm;
+mod platform;
+mod sched;
+mod ui;
+mod vfs;
+
+// The crate keeps the flat `crate::name` paths its modules already use while
+// the files live in their subject directories (ADR 0052).
+pub(crate) use mm::{frame, guard};
+pub(crate) use platform::x86_64::{ata, mouse, pci, smp, usb};
+pub(crate) use sched::task;
+pub(crate) use ui::{console, font, font8x8, gfx, window};
+pub(crate) use vfs::{ext2, fs};
 
 use arch_x86_64::{apic, gdt, idt, ioapic, keyboard, serial};
 

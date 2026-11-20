@@ -41,6 +41,8 @@
 //! verifier scratch lock is dropped after parsing, and the console lock is
 //! taken and released inside the host's `console_write`.
 
+pub mod task;
+
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use abi::{ExitReason, FaultCode, Status};
@@ -53,7 +55,7 @@ use crate::println;
 use crate::repl;
 use crate::smp;
 use crate::sync::SpinLock;
-use crate::task::{self, Task, TaskClass, WaitFor};
+use crate::task::{Task, TaskClass, WaitFor};
 
 /// Bytecodes executed per claim (spec 0007 Q1, provisional).
 ///
