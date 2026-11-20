@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-"""Compose the README desktop screenshots.
+"""Compose the README screenshots on the boot desktop, top bar included.
 
-Boots `build/igis.iso` with the absolute tablet, starts the dark terminal and
-runs `ifconfig dhcp`, `nslookup example.com` and `net_probe dns`, then moves
-Calculator under the shell's own Desktop panel. The System Log stays visible as
-the light-grey desktop background; the result matches the other full-screen
-QEMU captures instead of a bare dither desktop.
+Every image is a full 1024x768 QEMU framebuffer capture with the desktop
+shell's menu bar visible; nothing is cropped.
 
-Writes:
-    docs/screenshots/desktop.png   terminal + Desktop panel + calculator
-    docs/screenshots/apps.png      the Apps pull-down over that composition
+    docs/screenshots/desktop.png   terminal + Desktop panel + Calculator
+    docs/screenshots/apps.png      Apps pull-down over that composition
+    docs/screenshots/network.png   the terminal network commands
+    docs/screenshots/widgets.png   the composed Widgets gallery
+    docs/screenshots/clock.png     Clock
+    docs/screenshots/browser.png   File Browser
+    docs/screenshots/editor.png    Editor
 
-The app gallery captures come from the existing scripts:
-    widgets_screenshot_qmp.py, editor_screenshot_qmp.py
-and the network terminal from network_screenshot_qmp.py.
+The terminal runs `ifconfig dhcp`, `nslookup example.com` and `net_probe dns`.
+Widgets needs its `shot` gallery, so it is started from the terminal and the
+terminal is arranged fully behind its 760x560 frame; the terminal is then
+minimized before the single-app captures.
 
 Usage:
     cargo xtask image
@@ -38,6 +40,9 @@ OUT_DIR = os.path.join(ROOT, "docs", "screenshots")
 
 APPS_LABEL = (64, 10)
 CALCULATOR_ROW = (140, 47)
+CLOCK_ROW = (140, 63)
+EDITOR_ROW = (140, 143)
+BROWSER_ROW = (140, 159)
 TERMINAL_ROW = (140, 191)
 OUTSIDE = (500, 700)
 PROMPT = r"(?:shell> |igis:/[^>]*> )"
@@ -119,6 +124,11 @@ def launch(qmp, serial, width, height, row, spawn, cursor):
     return cursor
 
 
+def shot(qmp, path):
+    capture(qmp, path)
+    print(f"[readme] {path}")
+
+
 def run(args):
     iso = os.path.abspath(args.iso)
     if not os.path.exists(iso):
@@ -174,10 +184,10 @@ def run(args):
         print(f"[readme] screen {width}x{height}, cores {args.cores}")
         time.sleep(0.6)
 
-        # Move the shell's Desktop panel to the right edge and the terminal
-        # to the left edge, so the panel's title and text are not covered.
+        # Move the shell's Desktop panel to the right edge.
         drag(qmp, (750, 80), (812, 80), width, height)
 
+        # Terminal at the left edge, running the network commands.
         cursor = launch(
             qmp, serial, width, height, TERMINAL_ROW,
             r"repl: apps/utilities/terminal: spawned as task", 0,
@@ -200,26 +210,75 @@ def run(args):
         _, cursor = serial.wait_for(PROMPT, timeout=30, start=cursor)
         time.sleep(0.5)
 
-        print("[readme] calculator under the Desktop panel")
+        # Calculator under the Desktop panel.
         cursor = launch(
             qmp, serial, width, height, CALCULATOR_ROW,
             r"repl: apps/accessories/calculator: spawned as task", cursor,
         )
         drag(qmp, (330, 108), (850, 288), width, height)
         time.sleep(0.8)
+        shot(qmp, os.path.join(OUT_DIR, "desktop.png"))
 
-        desktop = os.path.join(OUT_DIR, "desktop.png")
-        capture(qmp, desktop)
-        print(f"[readme] {desktop}")
-
+        # Apps pull-down over that composition.
         click(qmp, *APPS_LABEL, width, height)
         _, cursor = serial.wait_for(r"desktop_shell: apps menu open", timeout=30, start=cursor)
         time.sleep(0.3)
-        apps = os.path.join(OUT_DIR, "apps.png")
-        capture(qmp, apps)
-        print(f"[readme] {apps}")
+        shot(qmp, os.path.join(OUT_DIR, "apps.png"))
         click(qmp, *OUTSIDE, width, height)
-        serial.wait_for(r"desktop_shell: apps menu closed", timeout=30, start=cursor)
+        _, cursor = serial.wait_for(
+            r"desktop_shell: apps menu closed", timeout=30, start=cursor
+        )
+
+        # Close Calculator and the Desktop panel; keep the terminal and log.
+        click(qmp, 709, 288, width, height)
+        click(qmp, 671, 80, width, height)
+        _, cursor = serial.wait_for(
+            r"desktop_shell: desktop window closed", timeout=30, start=cursor
+        )
+        time.sleep(0.6)
+        shot(qmp, os.path.join(OUT_DIR, "network.png"))
+
+        # Widgets: arrange the terminal fully behind the 760x560 gallery.
+        drag(qmp, (150, 72), (230, 88), width, height)
+        type_text(process, "run apps/accessories/widgets shot\n")
+        _, cursor = serial.wait_for(r"widgets: ready", timeout=60, start=cursor)
+        time.sleep(0.3)
+        shot(qmp, os.path.join(OUT_DIR, "widgets.png"))
+        _, cursor = serial.wait_for(r"widgets: done", timeout=30, start=cursor)
+        _, cursor = serial.wait_for(PROMPT, timeout=30, start=cursor)
+
+        # Hide the terminal; its hide box is now on top and in the clear.
+        click(qmp, 712, 88, width, height)
+        time.sleep(0.5)
+
+        # Clock.
+        cursor = launch(
+            qmp, serial, width, height, CLOCK_ROW,
+            r"repl: apps/accessories/clock_window: spawned as task", cursor,
+        )
+        time.sleep(1.2)
+        shot(qmp, os.path.join(OUT_DIR, "clock.png"))
+        click(qmp, 350, 138, width, height)
+        time.sleep(0.5)
+
+        # File Browser.
+        cursor = launch(
+            qmp, serial, width, height, BROWSER_ROW,
+            r"repl: apps/productivity/browser: spawned as task", cursor,
+        )
+        time.sleep(1.8)
+        shot(qmp, os.path.join(OUT_DIR, "browser.png"))
+        click(qmp, 170, 99, width, height)
+        time.sleep(0.5)
+
+        # Editor.
+        cursor = launch(
+            qmp, serial, width, height, EDITOR_ROW,
+            r"repl: apps/productivity/editor: spawned as task", cursor,
+        )
+        time.sleep(1.8)
+        shot(qmp, os.path.join(OUT_DIR, "editor.png"))
+        click(qmp, 190, 99, width, height)
         print("[readme] done")
         return 0
     finally:
