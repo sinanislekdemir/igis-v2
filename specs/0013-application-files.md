@@ -200,7 +200,7 @@ test host keeps the `NotFound` defaults.
 
 ### The file browser (M2.5.4, navigation M3.4)
 
-`samples/apps/base/browser` records the application-level contract over the
+`samples/apps/base/browser.ig` records the application-level contract over the
 tree view:
 
 - the browser shows **one directory at a time**. Its state is the current
@@ -240,7 +240,7 @@ tree view:
 
 ### The text editor (M2.5.3; lexical highlighting M9.1; pointer/scroll M9.2; file dialog M9.3; 128 KiB buffer M9.4)
 
-`samples/apps/base/editor` records the application-level contract over the file
+`samples/apps/base/editor.ig` records the application-level contract over the file
 API. The document, editing and save rules are in spec 0003 ("Application
 buffers above 256 bytes") and spec 0019 (E1); M9.1 adds a view rule, M9.2 a
 drawing/drag rule, M9.3 the file-open dialog and M9.4 the document capacity:

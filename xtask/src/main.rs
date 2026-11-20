@@ -209,7 +209,7 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
         fs::remove_dir_all(&staging).map_err(|error| format!("{}: {error}", staging.display()))?;
     }
     fs::create_dir_all(&staging).map_err(|error| format!("{}: {error}", staging.display()))?;
-    stage_tree(&source, &staging, false)?;
+    stage_apps(&source, &staging, false)?;
 
     // X3: `home` is the read-only fallback and shares one seed with the
     // writable disk image (spec 0018, X1; spec 0019, H2).
@@ -243,7 +243,7 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
                 ));
             }
         }
-        stage_tree(&tests, &staging, true)?;
+        stage_apps(&tests, &staging, true)?;
     }
 
     // The four top-level directories exist even when empty.
@@ -332,6 +332,75 @@ fn home_image(reset: bool) -> Result<PathBuf, String> {
     }
     println!("home image: {}", image.display());
     Ok(image)
+}
+
+/// Stages an application tree (spec 0018, L3/X1): `lib` and `home` keep their
+/// names (`lib/<name>.ig`), while `base` and `system` sources are `<name>.ig`
+/// and are staged as `<name>` so the image command name has no extension.
+fn stage_apps(source: &Path, destination: &Path, overlay: bool) -> Result<(), String> {
+    fs::create_dir_all(destination)
+        .map_err(|error| format!("{}: {error}", destination.display()))?;
+    let entries = fs::read_dir(source).map_err(|error| format!("{}: {error}", source.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("{}: {error}", source.display()))?;
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if name.starts_with('.') {
+            continue;
+        }
+        if !path.is_dir() {
+            return Err(format!(
+                "{}: an image root entry must be a directory",
+                path.display()
+            ));
+        }
+        let target = destination.join(name);
+        if name == "lib" || name == "home" {
+            stage_tree(&path, &target, overlay)?;
+        } else {
+            stage_app_dir(&path, &target, overlay)?;
+        }
+    }
+    Ok(())
+}
+
+/// Stages one application directory, dropping the `.ig` suffix from file names
+/// (spec 0018, L3). A file without the suffix is copied unchanged.
+fn stage_app_dir(source: &Path, destination: &Path, overlay: bool) -> Result<(), String> {
+    fs::create_dir_all(destination)
+        .map_err(|error| format!("{}: {error}", destination.display()))?;
+    let entries = fs::read_dir(source).map_err(|error| format!("{}: {error}", source.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("{}: {error}", source.display()))?;
+        let path = entry.path();
+        let raw_name = match path.file_name().and_then(|name| name.to_str()) {
+            Some(name) => name,
+            None => return Err(format!("{}: no file name", path.display())),
+        };
+        if raw_name.starts_with('.') {
+            continue;
+        }
+        let staged_name = match raw_name.strip_suffix(".ig") {
+            Some(stem) if path.is_file() => stem,
+            _ => raw_name,
+        };
+        let target = destination.join(staged_name);
+        if path.is_dir() {
+            stage_app_dir(&path, &target, overlay)?;
+        } else if path.is_file() {
+            if overlay && target.exists() {
+                return Err(format!(
+                    "{}: test source collides with an image file",
+                    target.display()
+                ));
+            }
+            fs::copy(&path, &target).map_err(|error| format!("{}: {error}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Copies the tree under `source` into `destination`, creating real

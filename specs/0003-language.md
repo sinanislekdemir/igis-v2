@@ -1671,7 +1671,7 @@ kernel (`run text_edit`) and on `langhost` with the same transcript.
 
 The M2.4.1 mutators keep their fixed 256-byte working capacity: there are no generics, and
 the checked slice's destination capacity is a call-site immediate, so a library mutator
-serves exactly one size. The text editor (`samples/apps/base/editor`) is the first caller
+serves exactly one size. The text editor (`samples/apps/base/editor.ig`) is the first caller
 that needs a larger document: it holds one `string[131072]` and implements one **app-local**
 mutator with the same rules rather than widening the library:
 

@@ -51,7 +51,7 @@ DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-browser-drag.png")
 APPS_LABEL = (64, 10)
 BROWSER_ROW = (140, 78)
 
-# `samples/apps/base/browser` opens content 680x480 at (160, 90); the frame is
+# `samples/apps/base/browser.ig` opens content 680x480 at (160, 90); the frame is
 # content + (2, 17). The title bar grab is 300 pixels from the frame's left edge
 # and 8 rows down. The target frame origin is (310, 225), which fits the
 # 1024x768 screen (frame 682x497 ends at (992, 722)).

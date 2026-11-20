@@ -38,8 +38,10 @@ mount table. `stdlib` stays embedded and is not moved into the image.
   root entry is `mke2fs`'s `lost+found`.
 - **L2 (MUST):** `lib` holds importable module sources named `<name>.ig`; nesting is
   allowed (`lib/ui/menu.ig`).
-- **L3 (MUST):** `base` holds the applications a user launches. File names have no
-  extension (as today: `base/shell`, `base/editor`).
+- **L3 (MUST):** `base` holds the applications a user launches. A source file is
+  `samples/apps/base/<name>.ig` (or `samples/tests/apps/base/<name>.ig`) and the
+  stager drops the `.ig` suffix, so the image name has no extension (`base/shell`,
+  `base/editor`). `lib` sources keep `<name>.ig`.
 - **L4 (MUST):** `home` holds user files and is read-only in this slice.
 - **L5 (MUST):** `system` holds kernel and boot-owned applications
   (`system/entrypoint`, `system/system_probe`, `system/terminal_probe`).
@@ -54,10 +56,11 @@ mount table. `stdlib` stays embedded and is not moved into the image.
 - **L9 (MUST):** The reader validates every directory entry and inode it walks
   (name length, inode bounds, size, block pointers) as today; an invalid tree is a
   mount or lookup failure, never a fault.
-- **L10 (MUST):** Test-only sources live under `samples/tests/apps/{base,system}` in
-  the repository and are staged to the same image paths only for the test image
-  (`xtask image --shell`). The product image carries only `samples/apps`. A test file
-  name that collides with a shipped name is a staging error, not a silent shadow.
+- **L10 (MUST):** Test-only sources live under `samples/tests/apps/{base,system}` as
+  `<name>.ig` sources in the repository and are staged to the same image paths only
+  for the test image (`xtask image --shell`). The product image carries only
+  `samples/apps`. A test file name that collides with a shipped name is a staging
+  error, not a silent shadow.
 
 ### Modules and `uses`
 
@@ -131,7 +134,8 @@ mount table. `stdlib` stays embedded and is not moved into the image.
 ### Build and host
 
 - **X1 (MUST):** `xtask image` stages the shipped corpus `samples/apps` to the same
-  paths in the image and fills `home/` from `samples/home`, creating real
+  paths in the image, dropping the `.ig` suffix from `base`/`system` sources and
+  keeping `lib` names, and fills `home/` from `samples/home`, creating real
   directories. No file is staged at the image root.
 - **X2 (MUST):** `xtask image --shell` stages the test corpus `samples/tests/apps`
   over the shipped one (colliding names are an error) and omits `system/entrypoint`,
@@ -140,9 +144,9 @@ mount table. `stdlib` stays embedded and is not moved into the image.
 - **X3 (MUST):** `home` must exist in the image even when the seed is empty;
   `samples/home/readme.txt` is the single seed for both the app image's `home/` and
   the writable disk.
-- **X4 (MUST):** The desktop source stays an ordinary base application
-  (`base/desktop_shell`) and is staged once more as `system/entrypoint` for the
-  boot path; its unit name stays `desktop_shell`.
+- **X4 (MUST):** The desktop source `samples/apps/base/desktop_shell.ig` stays an
+  ordinary base application, staged as `base/desktop_shell` and once more as
+  `system/entrypoint` for the boot path; its unit name stays `desktop_shell`.
 - **X5 (MUST):** `langhost` resolves `lib.*` through the same reader interface over
   the `samples/apps` tree, and its tests use an in-memory reader or a fixture tree.
 
@@ -317,3 +321,4 @@ window and task that host it, and the caller's own window stays behind.
 | 2026-11-18 | Implemented: M3.1 (tree, ext2 paths, boot, short names), M3.2 (compiler `SourceReader`/units/caps), M3.3 (kernel `ImageReader`, `module_demo`) and M3.4 (browser navigation). The kernel keeps a 128 KiB application-source buffer and copies module sources into the 16 MiB arena; `abi::MAX_UNIT_ID` is 16. |
 | 2026-11-19 | M9.3 adds `lib/file_dialog.ig`: a module with one public function, `file_dialog.open_file(initial, chosen) -> Status`, that opens a task-owned, screen-centred `Open File` window, lists up to 96 image entries, navigates with keys/pointer/scrollbar and writes a regular-file path only on `Ok` (`Invalid` cancel, `CapacityExceeded` when the caller's 256-byte destination cannot hold it; both leave `chosen` untouched). It follows the M5 (`stdlib` import) and M6 (no `main`/state/stream) module rules and adds no opcode, builtin, file API or `stdlib` function. |
 | 2026-11-20 | L10/X1–X3 separate the shipped and test corpora: `samples/apps` holds only applications a user launches, `samples/tests/apps` holds proofs, helper children and negative fixtures, and `samples/home` is the single `home/` seed. `xtask image` builds the product image from the shipped corpus; `xtask image --shell` overlays the test corpus (collisions are errors) and remains the boot for the QMP regression suite. |
+| 2026-11-20 | L3 adds the source extension: `samples/apps/{base,system}` and `samples/tests/apps/{base,system}` sources are `<name>.ig`, and the stager drops `.ig` so image names stay extensionless (`base/shell`). `lib` keeps `<name>.ig`. `langhost` maps image paths to `.ig` sources, lists bare command names, and reports a path that descends through an application file (`base/child/x`) as `Invalid`. |

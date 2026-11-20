@@ -73,7 +73,7 @@ APPLE = (10, 10)
 # (y >= 90) so the click reaches the Desktop window while the Browser is live.
 DESKTOP_CLOSE = (609, 80)
 
-# `samples/apps/base/browser` opens content 680x480 at (160, 90); content
+# `samples/apps/base/browser.ig` opens content 680x480 at (160, 90); content
 # origin (161, 106). `ListLeft` 8, `ListTop` 30, `LineH` 16, `BodyH` 420.
 BROWSER_CONTENT = (161, 106)
 BROWSER_LIST_X = BROWSER_CONTENT[0] + 8
@@ -98,7 +98,7 @@ SCROLL_REGION = (BROWSER_CONTENT[0] + 352, BROWSER_CONTENT[1] + 30, 16, 420)
 PATH_REGION = (BROWSER_CONTENT[0], BROWSER_CONTENT[1], 360, 21)
 LIST_REGION = (BROWSER_LIST_X, BROWSER_LIST_Y, BROWSER_LIST_W, 90)
 
-# `samples/apps/base/calculator`: content 300x360 at frame origin (180, 100),
+# `samples/apps/base/calculator.ig`: content 300x360 at frame origin (180, 100),
 # so the content origin is (181, 116). The display is content + (8, 10),
 # 284x40; button `7` is content + (42, 138).
 CALCULATOR_CONTENT = (181, 116)

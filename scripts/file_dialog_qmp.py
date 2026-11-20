@@ -57,7 +57,7 @@ DIALOG_OUTPUT = os.path.join(SHOT_DIR, "igis-file-dialog.png")
 OPENED_OUTPUT = os.path.join(SHOT_DIR, "igis-file-dialog-open.png")
 LARGE_OUTPUT = os.path.join(SHOT_DIR, "igis-file-dialog-large.png")
 
-# `samples/apps/base/editor` opens content 640x480 at frame origin (180, 90), so
+# `samples/apps/base/editor.ig` opens content 640x480 at frame origin (180, 90), so
 # the content origin is (181, 106). Text/Dialog constants mirror the samples.
 EDITOR_FRAME = (180, 90)
 EDITOR_CONTENT = (181, 106)

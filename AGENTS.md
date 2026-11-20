@@ -88,11 +88,11 @@ fresh.
 │                      #   PCI/USB/PS2 drivers, scheduler, streams, window server, REPL
 ├── stdlib/            # standard library source, embedded into the compiler
 ├── samples/apps/      # shipped corpus staged into every image
-│   ├── lib/           #   importable modules (`*.ig`)
-│   ├── base/          #   applications (file name = command)
-│   └── system/        #   boot and probe applications
+│   ├── lib/           #   importable modules (`*.ig`, names kept)
+│   ├── base/          #   applications (`<name>.ig`, staged as `<name>`)
+│   └── system/        #   boot and probe applications (same rule)
 ├── samples/tests/     # test-only corpus, staged only by `image --shell`
-│   └── apps/base/     #   proofs, helper children and negative fixtures
+│   └── apps/base/     #   proofs, children, fixtures (`<name>.ig`)
 ├── samples/home/      # single seed tree for `home/` and the writable disk
 ├── samples/lang/      # language examples run by `langhost`
 ├── scripts/           # QEMU/QMP harnesses (screenshots, proofs, regressions)

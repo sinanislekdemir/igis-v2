@@ -91,7 +91,7 @@ resize. Those are M2.4/M2.5.
 
 ### Desktop shell
 
-- **D9 (MUST):** `samples/apps/base/desktop_shell` is an ordinary base application. It is
+- **D9 (MUST):** `samples/apps/base/desktop_shell.ig` is an ordinary base application. It is
   also the boot entry from M2.5.6: `xtask image` stages a second copy under the file name
   `system/entrypoint`, and the REPL tries `system/entrypoint` first and `base/shell`
   second (spec 0018, A3). The file name is the load path; the source keeps

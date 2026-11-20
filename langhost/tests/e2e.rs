@@ -16,7 +16,7 @@ fn app_path(name: &str) -> String {
     let root = format!("{}/..", env!("CARGO_MANIFEST_DIR"));
     for tree in ["samples/apps", "samples/tests/apps"] {
         for directory in ["base", "system"] {
-            let path = format!("{root}/{tree}/{directory}/{name}");
+            let path = format!("{root}/{tree}/{directory}/{name}.ig");
             if std::path::Path::new(&path).is_file() {
                 return path;
             }

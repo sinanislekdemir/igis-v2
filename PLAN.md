@@ -902,7 +902,7 @@ application's package. One ticket per session; the parent verifies each.
   `repl::load` uses `compile_with_imports` over the mounted `Ext2` (a reader
   that copies each module source into the compiler's arena, so the kernel
   application-source buffer stays 128 KiB); the arena is the M3.2 16 MiB; add
-  `samples/apps/base/module_demo` (imports `lib.math`, prints
+  `samples/apps/base/module_demo.ig` (imports `lib.math`, prints
   `module_demo: ok`); `run module_demo` proves the whole path on `-smp 4` and
   `-smp 1`; `langhost` prints the host path. Update image entry counts and the
   regression set.
@@ -916,7 +916,7 @@ application's package. One ticket per session; the parent verifies each.
   frames 57899).
 
 - [x] **M3.4 Browser subdirectory navigation (Q51 partial).**
-  `samples/apps/base/browser` descends into directories (`Enter` opens a
+  `samples/apps/base/browser.ig` descends into directories (`Enter` opens a
   directory, `Backspace`/`Ctrl+Up` truncates the current path to go up),
   previews and launches files at any depth by full path, and keeps the
   2048-byte preview cap. Spec 0013 amended; proof on both core counts.
@@ -947,7 +947,7 @@ session; the parent verifies each.
   of them — may appear in another unit's parameters and results; user-declared types
   stay rejected until M4.2. Add `samples/apps/lib/probe.ig` (a `Rect` area helper, an
   `ExitReason` classifier using `case`, a `Diagnostic` field read, an `Event` kind
-  helper) and extend `samples/apps/base/module_demo` to call all four with real
+  helper) and extend `samples/apps/base/module_demo.ig` to call all four with real
   values; compiler tests for the accepted and still-rejected cases. Prove on
   `langhost`, `-smp 4` and `-smp 1`. No ABI, verifier or runtime change.
   **Done (`a218832`, `6a37202`):** 441 host tests; the gate admits record ids
@@ -1005,7 +1005,7 @@ No new system surface: both are ordinary windowed applications over the existing
 `stdlib` UI helpers, `syslib` primitives, events and `/lib` modules. They prove the
 toolkit on real programs before the writable-filesystem milestone.
 
-- [x] **M5.1 The calculator.** `samples/apps/base/calculator`: one window
+- [x] **M5.1 The calculator.** `samples/apps/base/calculator.ig`: one window
   (content 300×360) with a right-aligned f64 display and a 4×5 button grid
   (`C`, `DEL`, `+/-`, `/`; `7 8 9 *`; `4 5 6 -`; `1 2 3 +`; `0 . =`), drawn with
   `ui_button`/`ui_button_hit`/`ui_button_pressed` and `ui_focus_ring`. Typed entry
@@ -1026,7 +1026,7 @@ toolkit on real programs before the writable-filesystem milestone.
   task (QMP `send-key`); the 28-command batch, visual golden, `boot_desktop_qmp.py`
   and the calculator screenshot pass on both.
 
-- [x] **M5.2 Minesweeper.** `samples/apps/base/minesweeper`: one window (content
+- [x] **M5.2 Minesweeper.** `samples/apps/base/minesweeper.ig`: one window (content
   300×400), a 9×9 field of 30-pixel cells, 10 mines, a header with a mine
   counter, a restart face button and `MM:SS` elapsed time, and a status line.
   Mines come from an app-local deterministic LCG (seeded by `core.clock()` in
@@ -1095,7 +1095,7 @@ parent verifies each.
   blocks/inodes (bitmap → group descriptor → superblock), plans capacity before
   mutating, writes data/inode/dirent in order; `core.fs_write` (builtin 53) is
   `fs_write_call` in codegen, `validate_writable` in `abi::fs`, a router
-  create-on-offset-0; `samples/tests/apps/base/home_write` prints nine step lines then
+  create-on-offset-0; `samples/tests/apps/base/home_write.ig` prints nine step lines then
   `home_write: ok` on `-smp 4`/`-smp 1` and on `langhost` (which now has a
   temporary home), and `home_write: no writable home` without the disk;
   `e2fsck -fn` exits 0 after the writes (12 → 13 files, 563 → 564 blocks) and
@@ -1147,7 +1147,7 @@ parent verifies each.
   capacity (full disk `CapacityExceeded`, no change); a directory is `Invalid`,
   a missing path `NotFound`, the current size an `Ok` no-op. Builtin 57
   (`core.fs_truncate(path, size) -> Status`, only `home/*`) with compiler,
-  interpreter, `Host`, router and `langhost` wiring. Add `samples/tests/apps/base/home_truncate`
+  interpreter, `Host`, router and `langhost` wiring. Add `samples/tests/apps/base/home_truncate.ig`
   (write 3000 bytes, shrink to 1000 and verify size/content, extend to 4000 and
   verify zeros, shrink to 0, idempotent, error paths) and `ext2w` host tests with
   `e2fsck -fn`. The editor keeps its temporary-file + rename save (ADR 0041).
@@ -1187,7 +1187,7 @@ parent verifies each.
   never held across `request_kill`. Boot self-check `window: drag ok` covers the
   pure rules (title-bar vs close-box vs content, grab offset, clamp, release,
   owner-0 exemption, drag cancellation).
-  Proof: `samples/tests/apps/base/windows_drag` (+ `windows_drag_victim`) injects real
+  Proof: `samples/tests/apps/base/windows_drag.ig` (+ `windows_drag_victim`) injects real
   pointer events, drags its own window by the title bar, checks the frame
   rectangle after each step, both screen clamps, release, the restored desktop
   and the repainted content after the `Expose`, verifies a title-bar press is
@@ -1595,7 +1595,7 @@ parent verifies each.
   User report: there is no way to go to the parent directory from the File
   Browser. `Backspace`/`Ctrl+Up` already truncate `dir`, but the pointer-only
   path had no visible control.
-  - **Fix (application-only):** `samples/apps/base/browser` computes a 44×18
+  - **Fix (application-only):** `samples/apps/base/browser.ig` computes a 44×18
     `stdlib.ui_button` at the right of the path line (left of the
     `home writable` label), draws it in `draw_path`, and a `PointerDown` on
     `ui_button_hit` calls `go_up()` exactly like the keys. The status hint names
@@ -1619,7 +1619,7 @@ parent verifies each.
 - [x] **M8.9 Drag the file browser's scrollbar thumb.**
   User request: can the scrollbar be grabbed and pulled down? The track already
   paged on click, but the thumb was not draggable.
-  - **Fix (application-only):** `samples/apps/base/browser` adds
+  - **Fix (application-only):** `samples/apps/base/browser.ig` adds
     `scroll_dragging`/`scroll_grab_dy` and a `scrollbar_thumb` helper matching
     `stdlib.ui_scrollbar` (track `BodyH-4`, 8-pixel floor, travel). A
     pointer-down in hit class 3 records the offset; `PointerMove` with the
@@ -1657,7 +1657,7 @@ parent verifies each.
     five rows (`Open`, `Save`, `-`, `Highlight`, `Quit`), its checked mask is
     `file_checked`, and row 3 toggles the view with `syntax on`/`syntax off` in
     the status line. Quit moved from row 3 to row 4; `Ctrl+Q` is unchanged.
-  - **Lexer (`samples/apps/base/editor`):** one visible line is scanned with
+  - **Lexer (`samples/apps/base/editor.ig`):** one visible line is scanned with
     `//` to the line end, `{ ... }` block comments to the first `}` (no
     nesting, strings and comments skip their interior), strings to the closing
     quote with `\"` skipped or to the line end, identifiers classified against
@@ -1808,7 +1808,7 @@ parent verifies each.
     too-long result is `CapacityExceeded`, and both leave `chosen` untouched.
     A disabled screen (`langhost`) returns `Invalid` before opening a window.
     No new opcode, builtin, `Host` method, file API or `stdlib` helper.
-  - **Editor:** `samples/apps/base/editor` says `uses ... lib.file_dialog;`,
+  - **Editor:** `samples/apps/base/editor.ig` says `uses ... lib.file_dialog;`,
     and File > Open and Ctrl+O call `browse_open`: `open_file(path,
     dialog_path)`, then `open_path(dialog_path)` on `Ok` and a status line on
     cancel. The editor raises its own window after the dialog, and a cancel
@@ -1929,7 +1929,7 @@ parent verifies each.
   no offloads); boot selection and `net::service()` in the service opportunity.
   `xtask` adds `-netdev user,id=n0` and
   `-device virtio-net-pci,netdev=n0,disable-modern=on`, plus `--no-net`.
-  `samples/apps/base/net_probe` gains `mac` and `raw` modes.
+  `samples/apps/base/net_probe.ig` gains `mac` and `raw` modes.
   - **Acceptance:** boot logs the device id, MAC, link state and the static DMA
     cost; `net_probe mac` prints the MAC and `net: tx ok` proves one frame left the
     TX ring; `--no-net` logs `net: no device` and returns a clean status; the
@@ -1996,7 +1996,7 @@ parent verifies each.
   `send`/`recv`/`accept` that returns `WouldBlock`, `net::service` wakes on
   data/space/EOF/close/timeout after dropping its lock, and the post-block recheck
   closes the lost-wake window. `core.socket_source` (`1 << 63 | handle`) feeds
-  `core.next_any`/`poll_any`; `samples/tests/apps/base/net_select` proves the selector,
+  `core.next_any`/`poll_any`; `samples/tests/apps/base/net_select.ig` proves the selector,
   a 300 ms recv timeout and a 300 ms select timeout. `kill_stress` is still
   300/300 and `mouse` 600/600.
 
@@ -2067,7 +2067,7 @@ parent verifies each.
   used-ring drain and the protocol work (ADR 0051 refines ADR 0023's "no lock in a
   handler" rule; the rings are not SPSC-safe against the service path, so a flag is
   the bounded handler). Add `core.net_stats` (73) and
-  `samples/tests/apps/base/net_perf` (ten timed HTTP GETs, min/avg/max from
+  `samples/tests/apps/base/net_perf.ig` (ten timed HTTP GETs, min/avg/max from
   `core.clock()`, counters before/after). Polling stays the default when the route
   is absent, when the device refuses to unmask, or when the boot asks for it:
   `xtask --net-irq intx|poll` writes `igis.net_irq=poll` into the multiboot2 command
@@ -2096,7 +2096,7 @@ parent verifies each.
 
 - [x] **M10.7 Accept a connection and echo it back.**
   Add `listen`/`accept` (`listen` is `socket_open` kind 3; `accept` is builtin 72;
-  a two-entry pending queue) and the `/lib/socket` functions. Write `samples/apps/base/net_echo`: listen on port 7,
+  a two-entry pending queue) and the `/lib/socket` functions. Write `samples/apps/base/net_echo.ig`: listen on port 7,
   echo lines from three sequential clients, close on FIN, print `net_echo: ok`.
   `xtask`/the harness forward a host port to guest 7, and
   `scripts/net_echo_qmp.py` connects, sends lines, checks the echoes and the exit.

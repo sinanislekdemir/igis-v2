@@ -248,17 +248,50 @@ impl ConsoleHost {
     }
 
     /// Resolves an image path under the sample tree (spec 0018, L6) or, for
-    /// `home`, under this run's home directory (spec 0019, A6). The shipped
-    /// corpus wins; the test-only corpus is the fallback (L10).
+    /// `home`, under this run's home directory (spec 0019, A6).
     fn resolve_path(&self, path: &str) -> Result<PathBuf, Status> {
-        match home_local(path) {
-            Some(local) => resolve_in(&self.home_dir, local),
-            None => match resolve_in(&self.source_dir, path) {
-                Ok(target) => Ok(target),
-                Err(Status::NotFound) => resolve_in(&self.test_dir, path),
-                Err(status) => Err(status),
-            },
+        if let Some(local) = home_local(path) {
+            return resolve_in(&self.home_dir, local);
         }
+        self.resolve_image(path)
+    }
+
+    /// Resolves a non-home image path against the shipped tree and then the
+    /// test-only tree. Application sources carry `.ig` (spec 0018, L3), so a
+    /// `base/foo` image path tries `base/foo` and then `base/foo.ig`.
+    fn resolve_image(&self, path: &str) -> Result<PathBuf, Status> {
+        let extended = if is_app_path(path) {
+            Some(format!("{path}.ig"))
+        } else {
+            None
+        };
+        for root in [&self.source_dir, &self.test_dir] {
+            match resolve_in(root, path) {
+                Ok(target) => return Ok(target),
+                Err(Status::NotFound) => {}
+                Err(status) => return Err(status),
+            }
+            if let Some(extended) = &extended {
+                match resolve_in(root, extended) {
+                    Ok(target) => return Ok(target),
+                    Err(Status::NotFound) => {}
+                    Err(status) => return Err(status),
+                }
+            }
+        }
+        // Descending through an application source file is invalid, not
+        // missing: `base/child/x` names a directory under `base/child.ig`.
+        if let Some(prefix) = app_file_prefix(path) {
+            let extended = format!("{prefix}.ig");
+            for root in [&self.source_dir, &self.test_dir] {
+                if let Ok(target) = resolve_in(root, &extended) {
+                    if target.is_file() {
+                        return Err(Status::Invalid);
+                    }
+                }
+            }
+        }
+        Err(Status::NotFound)
     }
 
     fn with_input(depth: u32, input: &[u8]) -> Self {
@@ -287,6 +320,32 @@ impl Drop for ConsoleHost {
             let _ = std::fs::remove_dir_all(&self.home_dir);
         }
     }
+}
+
+/// True for image paths whose sources are `<name>.ig` (spec 0018, L3).
+fn is_app_path(path: &str) -> bool {
+    path == "base"
+        || path == "system"
+        || path.starts_with("base/")
+        || path.starts_with("system/")
+}
+
+/// True for a directory whose entries are application command names.
+fn is_app_dir(path: &str) -> bool {
+    path == "base" || path == "system"
+}
+
+/// `base/name/rest` (or `system/...`) → `base/name`; `None` when the path is
+/// not an application path with a third component.
+fn app_file_prefix(path: &str) -> Option<String> {
+    let mut parts = path.splitn(3, '/');
+    let root = parts.next()?;
+    if root != "base" && root != "system" {
+        return None;
+    }
+    let name = parts.next()?;
+    parts.next()?;
+    Some(format!("{root}/{name}"))
 }
 
 /// Splits `home` / `home/...` into the path local to the home directory. Every
@@ -596,6 +655,11 @@ impl Host for ConsoleHost {
             None => {
                 let mut directories = Vec::new();
                 let mut resolved_file = false;
+                let extended = if is_app_path(path) {
+                    Some(format!("{path}.ig"))
+                } else {
+                    None
+                };
                 for root in [&self.source_dir, &self.test_dir] {
                     match resolve_in(root, path) {
                         Ok(directory) => {
@@ -607,6 +671,19 @@ impl Host for ConsoleHost {
                         }
                         Err(Status::NotFound) => {}
                         Err(status) => return Err(status),
+                    }
+                    if let Some(extended) = &extended {
+                        match resolve_in(root, extended) {
+                            Ok(source) => {
+                                if source.is_dir() {
+                                    directories.push(source);
+                                } else {
+                                    resolved_file = true;
+                                }
+                            }
+                            Err(Status::NotFound) => {}
+                            Err(status) => return Err(status),
+                        }
                     }
                 }
                 if directories.is_empty() {
@@ -621,7 +698,9 @@ impl Host for ConsoleHost {
         };
         // Merge the shipped and test-only directories; a name present in both
         // takes the test entry (an image collision is a staging error, so this
-        // only matters for a hand-made tree).
+        // only matters for a hand-made tree). `base` and `system` sources carry
+        // `.ig`, but the image exposes the bare command name (L3).
+        let strip = is_app_dir(path);
         let mut entries = std::collections::BTreeMap::new();
         for directory in directories {
             let read_dir = std::fs::read_dir(&directory).map_err(|error| {
@@ -653,7 +732,15 @@ impl Host for ConsoleHost {
                     abi::fs::KIND_OTHER
                 };
                 let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
-                entries.insert(entry_name, (kind, size));
+                let display_name = if strip {
+                    entry_name
+                        .strip_suffix(".ig")
+                        .unwrap_or(&entry_name)
+                        .to_string()
+                } else {
+                    entry_name
+                };
+                entries.insert(display_name, (kind, size));
             }
         }
         let entries: Vec<(String, u64, u64)> = entries
