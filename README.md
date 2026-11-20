@@ -9,9 +9,13 @@ at ring 0 in one address space.
 ![igis-v2 desktop: dark terminal, calculator and clock](docs/screenshots/desktop.png)
 
 *Real QEMU framebuffer. The terminal is running `ifconfig dhcp`, `nslookup example.com`
-and `net_probe dns`; Calculator and Clock are ordinary source applications.*
+and `net_probe dns`; Calculator is an ordinary source application, and the Desktop panel
+belongs to the interpreted desktop shell.*
 
 ## Screenshots
+
+These are unedited 1024×768 QEMU framebuffer captures, not mockups. The harnesses in
+[`scripts/`](scripts/) reproduce them on a headless boot.
 
 | Networking | Apps |
 |---|---|
@@ -20,6 +24,10 @@ and `net_probe dns`; Calculator and Clock are ordinary source applications.*
 | Widgets | Editor |
 |---|---|
 | ![Widgets control gallery](docs/screenshots/widgets.png) | ![Editor with highlighted source](docs/screenshots/editor.png) |
+
+| File Browser | Clock |
+|---|---|
+| ![File Browser over the image tree](docs/screenshots/browser.png) | ![Analog and digital clock window](docs/screenshots/clock.png) |
 
 ## Implementation
 
