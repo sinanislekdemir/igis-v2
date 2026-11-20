@@ -1,7 +1,7 @@
 # igis-v2
 
 A second-generation, from-scratch operating system written in Rust. The first version
-(2005) was a bare-metal front-end for a quantum-cryptography modem; the second is a
+(2005) was a bare-metal front-end for a modem; the second is a
 general personal system built on the same thesis: the kernel is a language runtime that
 owns the machine, applications are source text compiled in the kernel, and everything runs
 at ring 0 in one address space.

@@ -92,9 +92,10 @@ an `int`; `0` is never a valid id.
   `open`, `move`, `raise`, `close` and a focus change damage the affected frame
   rectangles, the overlapped windows and the desktop below them. One repair pass restores
   the desktop where a window was removed or moved, redraws the chrome of every damaged
-  window bottom-to-top in its visible parts, and presents the union once. Client content
-  is the client's: the service never keeps or repaints another window's content; it asks
-  the owner to repaint with a whole-content `Expose` (W12).
+  window bottom-to-top in its visible parts, and presents exactly the pixels it painted.
+  Client content is the client's: the service never keeps or repaints another window's
+  content; it asks the owner to repaint with a whole-content `Expose` (W12). A switch or
+  a completed move upgrades the pass to a full-stack repaint (W31).
 - **W12 (MUST):** `Expose` is delivered to the owning task as a machine event with
   `kind = Expose`, `window = id`, `x = 0`, `y = 0`, `code = 0`, and it always asks for the
   **whole content rectangle**; M2 has no partial-damage rectangles. `EventKind.Expose` has
@@ -137,6 +138,8 @@ an `int`; `0` is never a valid id.
   higher windows), and leaves the chrome and higher windows' pixels untouched. It is
   owner-only like `close`/`move`: `Ok`, `NotFound` for an unknown id, `Invalid` for
   another task's window or disabled graphics. It does not repair, raise or mark anything.
+  Only the owner presents content; a service repair presents desktop and chrome pixels
+  only (W31).
   `syslib.present` remains a legal generic primitive (spec 0009, G10), but
   `window_present` is the sanctioned path for a window client: it bounds what the client's
   presentation can cover. It reads the content rectangle at call time, so a client that
@@ -167,9 +170,12 @@ an `int`; `0` is never a valid id.
   request contained in one whose coverage limit is at least as high is redundant and is
   dropped. The coalesced set MUST cover the union of the original damage: a merge may
   grow the repainted area (the bounding box of diagonal neighbours), but no damaged pixel
-  may be lost. The presentation is the coalesced rectangles, not one bounding box of all
-  damage, and every presented rectangle is copied from the current shadow. Coalescing
-  happens after the per-window `Expose` flags are marked, so the exact original damage —
+  may be lost. The coalesced set drives the paint passes, but the presentation is **not**
+  the coalesced damage union: every presented rectangle is exactly a pixel region the
+  repair painted (a restored desktop piece or a chrome band/border piece, W31), copied
+  from the current shadow, so a merge can never copy a client's stale content over a
+  higher window. Coalescing happens after the per-window `Expose` flags are marked, so the
+  exact original damage —
   not a grown bounding box — decides which clients repaint.
 - **W22 (MUST):** A left-button press inside a window's 16-pixel title bar but not inside
   its close box raises and focuses that window (any task, like `raise`) and starts a
@@ -273,6 +279,10 @@ an `int`; `0` is never a valid id.
   input waiter after the table lock is dropped. There is no timeout: a claim reserves only
   the press inside its rectangle and leaves every other event routing normally. A claim is
   a UI focus mechanism, not an authority boundary.
+  A claim also reserves the **pixels** inside its rectangle: the desktop restore skips
+  the claimed rectangle (W31), so an app-drawn persistent region such as the menu bar
+  survives a window switch or move. Windows drawn over the claim still cover it; the
+  claimant is responsible for repainting its own rectangle.
 - **W28 (MUST):** A move of a **topmost** window copies its content rectangle from the old
   to the new origin **before** the repair, so the content follows the frame immediately
   (M8.5, ADR 0046). The copy is an exact shadow-to-shadow snapshot of the content
@@ -320,7 +330,11 @@ an `int`; `0` is never a valid id.
   square at `(frame.x + frame.w - 15, frame.y + 3)`, with a short dash. A press
   on it is consumed and hides the window (M11). A minimized window keeps its id,
   geometry, title and owner but is skipped by hit-testing, visible-part
-  subtraction, chrome painting and expose marking; it is moved to the bottom of
+  subtraction, chrome painting, expose marking, `window_present` (an `Ok`
+  no-op) and the desktop shell's menu-area
+  repair picker (a menu close must never raise a minimized window just
+  to repaint the menu; with no visible window under the menu the shell
+  repaints the service desktop pattern itself); it is moved to the bottom of
   the z-order so `window_info` lists it last. If it had focus, focus moves to the
   topmost non-minimized window. The frame is erased as desktop damage; no
   `Close` request is posted and the owner task is untouched. `window_raise`
@@ -332,6 +346,37 @@ an `int`; `0` is never a valid id.
   is builtin **78** (no opcode): true when the id is live and minimized, false
   for a missing window. The Windows pull-down and the File window list mark a
   minimized row with `min`/`*` respectively.
+
+- **W31 (MUST):** A **window switch** and a **completed move** request a
+  **full-stack repaint** (M11 follow-up, ADR 0055). A switch is a raise that
+  changes the z-order, the focus or a minimized state, plus `open`, `close`,
+  `minimize` and `close_task` when they change the live stack. A completed move
+  is a programmatic `window_move` whose origin changed, or the release that
+  ends a pointer drag that actually moved; individual drag steps do not request
+  it. A raise of the already-topmost, focused, non-minimized window does not
+  request it.
+  The repair then ignores the accumulated damage and, in one synchronous pass
+  under the table lock: restores the whole desktop (in the parts no live window
+  covers), redraws every live window's chrome bottom-to-top in its visible
+  parts, marks one whole-content `Expose` on **every** live non-minimized
+  window (owner-only and coalesced as in W12), and presents only the pixels it
+  painted. This is the service-side "redraw from the desktop up"; client
+  content is still the client's and arrives through the ordinary `Expose`
+  path, so the service never blocks on a client (W18 still applies).
+  The service presents **exactly the pixels it painted**: the restored desktop
+  pieces, the chrome band and border of a damaged window, and a topmost move's
+  content snapshot (W28). It never presents a window's content rectangle and
+  never a merged bounding box that could include client pixels, because a
+  lower window's shadow content may be stale. A client presents its own
+  content with `window_present` (W17), whose visible-parts clip keeps a
+  lower-window repaint safe.
+  The rectangle of a persistent pointer-region claim (W27) is excluded from the
+  desktop restore: the claimant owns those pixels. This keeps the
+  application-drawn desktop menu bar intact across switches and moves; a window
+  drawn over the bar still covers it normally. A windowed application that
+  previously refused to repaint while not topmost (the terminal emulator and
+  the desktop shell's own windows) MUST now repaint on its owner `Expose`
+  unconditionally; `window_present`'s visible-parts clip is the safety bound.
 
 ## Design
 
@@ -451,11 +496,18 @@ lock:
    frames of every higher window) intersected with the damage. Drawing in z-order and
    clipping to visible parts means a lower window can never corrupt a higher window's
    content or chrome.
-3. **Present.** The damage is coalesced (W21) and each coalesced rectangle is presented
-   with `gfx::present`, which composites the cursor as before (spec 0010, I7). This
-   replaces the single bounding-box present of M2.3.2: a scattered repair such as a
-   diagonal move now copies the two frames, not the rectangle that spans both.
-   Undamaged windows are not repainted.
+3. **Present.** The damage is coalesced (W21) to bound the paint work, but only the exact
+   pixels just painted are presented with `gfx::present`, which composites the cursor as
+   before (spec 0010, I7): each restored desktop piece and each chrome band/border piece.
+   Client content is never presented by the service (W17/W31), so a stale shadow pixel in
+   a lower window cannot be copied over a higher one. Undamaged windows are not painted.
+
+A **full-stack repaint** (W31) replaces the accumulated damage with the whole screen: the
+desktop is restored everywhere except live windows and the persistent claim rectangle,
+every live window's chrome is redrawn bottom-to-top in its visible parts, every live
+non-minimized window gets an `Expose`, and only those service-painted pixels are
+presented. Switches and completed moves use it so a window that was moved or lowered does
+not leave the pixels it uncovered stale until their owner happens to be raised.
 
 `move` to the same origin records nothing. A refused operation (`NotFound`, `Invalid`)
 records nothing. `close_task` accumulates every removed frame and repairs once, so a
@@ -469,9 +521,10 @@ geometry changes and before any painting; the copy is clipped like every other `
 operation and never touches the cursor. The repair then restores the old frame (the
 moved window's new frame is subtracted automatically, so an overlap is safe), paints the
 new chrome, asks every intersected window to repaint with its whole-content `Expose`, and
-presents the coalesced damage union, which includes the new frame. The content area is
-never painted by the service; if the snapshot is missing (a client drew outside its
-content, or a non-topmost move), the owner's refreshed repaint fills it.
+presents the copied destination content rectangle explicitly; it does not present the
+coalesced damage union (W31). The content area is never painted by the service; if the
+snapshot is missing (a client drew outside its content, or a non-topmost move), the
+owner's refreshed repaint fills it.
 
 The client half is a normal `Expose` handler: read `window_content_rect` again, recompute
 cached origins and draw at the new absolute coordinates. Calculator, Minesweeper, Editor,
@@ -497,19 +550,18 @@ coalescing passes reduce that work:
   redrawn per window in its visible parts, so a grown rectangle can only re-draw chrome
   from the window records (never content), and a higher window is never touched.
 
-The presentation accumulates every erase and chrome rectangle, coalesces that set the
-same way, and presents each result once. The added area of a merge is copied from the
-current shadow, so it is up to date by construction. `Expose` marking runs before
+Coalescing is a paint-work bound, not a presentation policy: the repair presents exactly
+the pieces it painted, never the coalesced union (W31). `Expose` marking runs before
 coalescing, so a window in the hole of a merged bounding box is not woken for damage that
 never existed.
 
-`damage_self_check` (boot line `window: damage ok (present ...)`) proves the merge rules,
-the erase coverage rule and the coverage invariant on scratch state, then measures a
-realistic diagonal move of a 200 × 120 window across a 1024 × 768 screen: four damage
-rectangles presented as one bounding box of 510 874 pixels become two coalesced rectangles
-of 55 348 pixels, an 89 % reduction in present area (2 rects instead of 4). It never
-touches the screen. The same pass is what makes a drag/scroll repair charge the client for
-its own frame, not for the span between the old and new origin.
+`damage_self_check` (boot line `window: damage ok (present ...)`, kept as the coalescing
+model) proves the merge rules, the erase coverage rule and the coverage invariant on
+scratch state, then measures a realistic diagonal move of a 200 × 120 window across a
+1024 × 768 screen: four damage rectangles as one bounding box of 510 874 pixels become two
+coalesced rectangles of 55 348 pixels, an 89 % reduction in paint area (2 rects instead of
+4). It never touches the screen. The same pass is what makes a drag/scroll repair charge
+the client for its own frame, not for the span between the old and new origin.
 
 #### Chrome
 
@@ -1172,3 +1224,5 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | 2026-11-18 | M8.5 implemented (W12/W17 clarified, W28 added; ADR 0046): a topmost move copies the window's content rectangle to the new origin in the shadow before the repair (internal `gfx::copy_rect`, overlap-safe, clipped, no `syslib` binding) and records no new-frame desktop erase, so the content follows the frame immediately; non-topmost moves keep both erases and rely on the client. Every windowed app re-reads `window_content_rect` on an owner `Expose` and recomputes cached geometry (Calculator, Minesweeper, Editor, Browser, Clock Window, Widgets; the desktop shell's own draw already did). `windows_drag` proves the copied mark before its pump and a changed repaint marker at the new origin after it; `scripts/drag_content_qmp.py` drags Calculator, checks the panel/display at the new origin and requires a `7` click to change the display. No opcode, builtin or `stdlib` change (ABI v1 stays 75). |
 | 2026-11-18 | M8.6 implemented (W29 added; ADR 0047): queued input is window-addressed. `Table::input_target` (hit, focus, region precedence, addressed, owner-0/no-target) is the one rule; `KernelHost::poll_event` peeks and a non-owner gets `WouldBlock` without consuming, while the target takes the ordinary routing path (a region press stays unchanged); the modal grab still takes precedence and skips the target gate. `task::input_queue_ready` uses the same target for readiness, the post-block re-check and `next_any` source 1. `window::target_self_check` prints `window: target ok`; `scripts/input_routing_qmp.py` proves Browser click/Enter navigation, About's close box and a Calculator button with the desktop alive, and `scripts/drag_content_qmp.py` drops the close-the-desktop workaround. `events`/`multiplex` own a small window because window-less keys/moves belong to the focus. No opcode, builtin, `Host`, `stdlib` or `Event` layout change. |
 | 2026-11-20 | M11 minimize (W30): the service draws an 11×11 hide box at the right end of every title bar. A press consumes the click, hides the window at the bottom of the z-order, moves focus to the topmost visible window and erases its frame; `window_raise` restores it. Minimized windows are skipped by hit-testing, visible parts, chrome and expose marking but remain in `window_info` so the Windows pull-down and the File Window List can restore them; `syslib.window_minimized` (builtin 78) marks the row. The System Log can be minimized; `console::_print`/`pump` suppress painting while it is hidden or while an app-drawn pull-down holds the modal grab, so kernel log refreshes never overdraw the Apps menu. Chrome, window pixels, the visual golden and the QMP harnesses are updated; `scripts/minimize_qmp.py` proves minimize, the no-overdraw sweep and window-list restore on `-smp 4`/`-smp 1`. |
+| 2026-11-20 | M11 follow-up (W11/W17/W21/W27 clarified, W31 added; ADR 0055): a window switch (raise/open/close/minimize/`close_task`) and a completed move (programmatic move or a drag release that moved) run a full-stack repaint. The repair replaces the accumulated damage with the whole screen, restores the desktop outside live windows and the persistent claim rectangle, redraws every window's chrome bottom-to-top and marks every live non-minimized window for a whole-content `Expose`. It presents exactly the pixels it painted — restored desktop pieces, chrome bands/borders and a topmost move snapshot — never a window's content or a merged bounding box, so stale lower-window shadow pixels cannot be copied to the screen. The claim rectangle is excluded from the desktop restore so the app-drawn menu bar survives a switch. The terminal emulator and the desktop shell windows stop refusing to repaint while not topmost; `window_present`'s visible-parts clip is the safety bound. `window: paint ok` now asserts the full-request flag for moves and drag releases and its absence for an already-topmost raise and a drag step; `windows_events` drains the full expose set. Verified with `scripts/drag_content_qmp.py`, `browser_drag_qmp.py`, `multi_terminal_qmp.py`, `desktop_shell check`, `minimize_qmp.py`, the visual golden, and `scripts/window_repaint_qmp.py` (a covered desktop-window marker is repainted after Calculator moves away, and a drag that stays over the shell keeps the calculator's display/border/panel intact) on `-smp 4` and `-smp 1`. |
+| 2026-11-20 | Minimized windows stay minimized across an app-drawn menu close (W30; user report "I minimize system log but running anything like calculator brings it back"). The desktop shell's `repair_menu_area` scanned the topmost-first `window_info` list and raised the first frame intersecting the menu, which was the minimized System Log; `window_raise` clears `minimized`, so opening Apps and launching Calculator restored the log. It now skips minimized windows and, when no visible window is under the menu, repaints the service desktop pattern (white + dither) in the menu rectangle and presents it. `window_present` on a minimized window is an `Ok` no-op, and the shell skips drawing/presenting its own minimized windows and does not raise a minimized Desktop window after a menu, so a stale timer or close-path repaint cannot resurrect hidden pixels either. `scripts/minimize_qmp.py` opens and closes Apps with the log minimized and asserts the log pixel stays gone and the menu area returns to the dither. |

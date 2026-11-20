@@ -1283,7 +1283,15 @@ fn try_shutdown() {
 /// boot core's timer can stop first when the caller is an AP), then the calling
 /// core halts too. Serial stops once the print below drains.
 pub fn halt_system() -> ! {
-    println!("system: halt requested");
+    // Write the request straight to serial rather than through `println!`: the
+    // System Log repaint would paint over the desktop's final halt screen.
+    // The summary below already avoids the console lock for the same reason
+    // (another core may halt holding it).
+    {
+        use core::fmt::Write as _;
+        let mut out = arch_x86_64::serial::Writer;
+        let _ = writeln!(out, "system: halt requested");
+    }
     arch_x86_64::enable_interrupts();
     // Count the calling core as stopped before the broadcast: when it is an AP,
     // the boot core (the clock source) halts in the same broadcast and the

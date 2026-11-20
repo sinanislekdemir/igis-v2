@@ -27,9 +27,6 @@ const
 var
   term: int;
   rect: Rect;
-  top_id: int;
-  top_rect: Rect;
-  top_title: string[64];
   st: Status;
   ev: Event;
   diag: Diagnostic;
@@ -40,6 +37,9 @@ var
   session_closed: bool;
   cols: int;
   rows: int;
+  // Logical row 0 is `lines[top]`; the grid is a ring of `rows` strings, so a
+  // scroll advances `top` and clears one row instead of copying all of them.
+  top: int;
   row: int;
   col: int;
   i: int;
@@ -68,47 +68,48 @@ var
   white: uint;
   black: uint;
 
+// Physical index of logical row `row` in the ring. `rows` is the visible row
+// count and also the ring length; a scroll only advances `top`.
+function phys(row: int): int;
+begin
+  return (top + row) mod rows;
+end;
+
 // Erases the whole content and paints every visible row, then the cursor
 // underline. The content rectangle is re-read on every call because a drag or
-// a move changes the origin (spec 0011, W28).
+// a move changes the origin (spec 0011, W28). It repaints whether or not it is
+// topmost: `window_present` clips the presentation to the visible parts, so a
+// window below another can rebuild the pixels a move uncovered (W31).
 procedure draw_screen();
 begin
   if term <= 0 then
     return;
-  st := syslib.window_info(uint(0), top_id, top_rect, top_title);
-  if st <> Ok or top_id <> term then
-  begin
-    st := syslib.window_present(term);
-    return;
-  end;
   st := syslib.window_content_rect(term, rect);
   if st <> Ok then
     return;
-  st := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, white);
+  // Dark screen: black paper, white ink and a white cursor underline.
+  st := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, black);
   i := 0;
   while i < rows do
   begin
-    st := syslib.draw_text(rect.x, rect.y + i * CellH, lines[i], black);
+    st := syslib.draw_text(rect.x, rect.y + i * CellH, lines[phys(i)], white);
     i := i + 1;
   end;
   if row >= 0 and row < rows and col >= 0 and col < cols then
   begin
     st := syslib.fill_rect(
-      rect.x + col * CellW, rect.y + row * CellH + CellH - 2, CellW - 2, 2, black);
+      rect.x + col * CellW, rect.y + row * CellH + CellH - 2, CellW - 2, 2, white);
   end;
   st := syslib.window_present(term);
 end;
 
+// Scrolls one row by advancing the ring: the old top row becomes the new
+// bottom row and is cleared. This is O(1); copying every row here burned the
+// task's CPU/step budget on a large `cat` (the reported freeze/crash).
 procedure scroll_one();
 begin
-  i := 0;
-  while i + 1 < rows do
-  begin
-    lines[i] := lines[i + 1];
-    i := i + 1;
-  end;
-  if rows > 0 then
-    lines[rows - 1] := "";
+  top := (top + 1) mod rows;
+  lines[phys(rows - 1)] := "";
   row := rows - 1;
   col := 0;
 end;
@@ -134,7 +135,7 @@ begin
   split := core.substr_into(ch, raw, 0, 1);
   if split = 1 then
   begin
-    st := stdlib.str_insert_into(lines[row], col, ch);
+    st := stdlib.str_insert_into(lines[phys(row)], col, ch);
     if st = Ok then
       col := col + 1;
   end;
@@ -143,7 +144,7 @@ end;
 procedure backspace();
 begin
   if col > 0 then
-    st := stdlib.str_backspace(lines[row], col);
+    st := stdlib.str_backspace(lines[phys(row)], col);
 end;
 
 procedure tab();
@@ -335,6 +336,7 @@ begin
     lines[i] := "";
     i := i + 1;
   end;
+  top := 0;
   row := 0;
   col := 0;
   draw_screen();

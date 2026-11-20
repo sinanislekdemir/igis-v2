@@ -8,7 +8,7 @@ Keep this file short and current. It points at documents; it does not duplicate 
 ## What this is
 
 `igis-v2` is a from-scratch second version of a personal operating system. The first
-version (2005) began as a Linux driver for a quantum-cryptography modem; the user/kernel
+version (2005) began as a Linux driver for a modem; the user/kernel
 ring boundary got in the way and it grew into a kernel. No code survives from it; the
 continuity is design intent and the constraints learned there.
 
@@ -30,7 +30,7 @@ decisions in `adr/`, and work items in `PLAN.md`.
 - Specs 0001–0021 are accepted; **M2–M11 are complete** (desktop, language,
   filesystems, networking, terminal emulator). Current milestone work is tracked in
   `PLAN.md`.
-- **610 host tests** (532 language + 56 `net` + 22 `ext2w`); ABI v1 has **75 opcodes**.
+- **612 host tests** (534 language + 56 `net` + 22 `ext2w`); ABI v1 has **75 opcodes**.
 - Boot: GRUB/multiboot2 → `system/entrypoint` (the desktop shell), falling back to
   `base/shell`; a graphics-less boot keeps a serial REPL.
 - Filesystems: a read-only ext2 application image (`lib`, `base`, `apps`, `home`,
@@ -43,7 +43,11 @@ decisions in `adr/`, and work items in `PLAN.md`.
   (`apps/utilities/terminal`) over kernel console sessions, and source apps (`editor`,
   `browser`, `calculator`, `minesweeper`, `clock_window`, `widgets`). Every terminal
   instance has its own session, shell and cwd; the `Windows` pull-down lists every
-  window (minimized rows marked `min`) and `File` opens a clickable window list.
+  window (minimized rows marked `min`) and `File` opens a clickable window list. A
+  window switch or a completed move runs a full-stack repaint (desktop, chrome
+  bottom-to-top, every window's whole-content `Expose`) and presents only the pixels the
+  service painted, so a moved window cannot leave stale content on the windows below
+  (ADR 0055).
 
 ## Ground rules
 

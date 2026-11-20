@@ -3,8 +3,10 @@
 
 Boots the product image, presses the System Log's minimize box, checks that the
 log pixels are gone (the desktop shows through), sweeps the pointer over the
-Apps menu (the log must not overdraw it), opens `Windows`, clicks the marked
-`System Log` row and checks that the log is painted again.
+Apps menu (the log must not overdraw it), then opens and closes Apps again and
+checks the minimized log does not come back and the menu area returns to the
+desktop pattern. It then opens `Windows`, clicks the marked `System Log` row and
+checks that the log is painted again.
 
 The same service box appears on every window title bar; this script uses the
 kernel log because it is always present at boot.
@@ -173,6 +175,30 @@ def run(args):
         print(f"[harness] log pixel after menu-bar move {moved_pixel}")
         if moved_pixel == (240, 240, 240):
             print("[harness] FAIL: the log repainted while minimized")
+            return 1
+
+        # Open and close Apps while the log is minimized. Closing the menu
+        # repairs its app-drawn pixels through the topmost visible window under
+        # it; a minimized window must not be raised (and restored) for that,
+        # and the menu area must return to the service desktop pattern.
+        click(qmp, *APPS_LABEL, width, height)
+        serial.wait_for(r"desktop_shell: apps menu open", timeout=args.timeout)
+        click(qmp, *OUTSIDE, width, height)
+        serial.wait_for(r"desktop_shell: apps menu closed", timeout=args.timeout)
+        time.sleep(0.5)
+        closed = capture(qmp, os.path.join(scratch, "closed.png"))
+        closed_pixel = pixel(closed, LOG_PIXEL)
+        menu_edge = pixel(closed, (271, 60))
+        menu_inner = pixel(closed, (270, 60))
+        print(
+            f"[harness] after minimized-menu close: log {closed_pixel}, "
+            f"menu edge {menu_edge}, menu inner {menu_inner}"
+        )
+        if closed_pixel == (240, 240, 240):
+            print("[harness] FAIL: closing the Apps menu restored the minimized log")
+            return 1
+        if menu_edge != (255, 255, 255) or menu_inner != (0, 0, 0):
+            print("[harness] FAIL: the app-drawn menu pixels were not repaired")
             return 1
 
         # Windows -> the marked `*System Log` row restores it.

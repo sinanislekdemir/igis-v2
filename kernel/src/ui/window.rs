@@ -14,7 +14,12 @@
 //! - every mutation records damage and runs one synchronous repair pass under
 //!   the table lock: the desktop is restored where a window was removed or
 //!   moved, the chrome of every damaged window is redrawn bottom-to-top (only
-//!   in its visible parts), and the damage union is presented once.
+//!   in its visible parts), and only the pixels the service painted are
+//!   presented;
+//! - a **switch** (raise, open, close, minimize) and a **completed move**
+//!   request a full-stack repaint: the whole desktop, every window's chrome
+//!   bottom-to-top and an `Expose` for every live window, so stale pixels left
+//!   under a moved or lowered window are rebuilt instead of lingering (W31).
 //!
 //! Client content is not kept by the service: a repair redraws chrome and the
 //! desktop, never another window's content. A **topmost** move copies a
@@ -167,6 +172,9 @@ struct Drag {
     id: u64,
     offset_x: i64,
     offset_y: i64,
+    /// Whether any step actually changed the origin. A release with no motion
+    /// ends the drag without requesting a full repaint.
+    moved: bool,
 }
 
 /// The one machine-wide modal popup input grab (spec 0011, W26; ADR 0044).
@@ -593,10 +601,10 @@ fn subtract_into(rect: Rect, cover: Rect, out: &mut Parts) {
     }
 }
 
-/// Accumulates the damage presented at the end of a repair pass (spec 0011,
-/// W11). The list is coalesced before presenting, so a repair presents a few
-/// tight rectangles instead of one screen-sized bounding box. Store room for
-/// both damage lists, so no damage is ever dropped here.
+/// Coalescing model kept for the boot self-check (spec 0011, W11): it measures
+/// how much present area the coalesced damage union would cover. The repair
+/// itself now presents each painted rectangle exactly (W31), because a merged
+/// bounding box could copy stale client pixels over a higher window.
 const MAX_PRESENT: usize = MAX_DAMAGE * 2;
 
 struct Presentation {
@@ -659,12 +667,6 @@ impl Presentation {
         }
         rect.w.saturating_mul(rect.h)
     }
-
-    fn present(&self) {
-        for rect in self.rects[..self.count].iter() {
-            let _ = gfx::present(rect.x, rect.y, rect.w, rect.h);
-        }
-    }
 }
 
 /// The machine-wide table: storage plus the bottom-to-top z-order (spec 0011,
@@ -689,6 +691,16 @@ struct Table {
     /// Pending desktop restore and chrome damage for the next repair pass.
     erases: EraseList,
     chrome: ChromeList,
+    /// A full-stack repaint is pending: the repair ignores the accumulated
+    /// damage, restores the whole desktop, redraws every live window's chrome
+    /// bottom-to-top and marks every live window for an `Expose` (W31). Set on
+    /// a focus/raise switch and when a move completes, so stale content under a
+    /// moved or lowered window is repainted instead of lingering.
+    full: bool,
+    /// The destination content rectangle of the last topmost move snapshot.
+    /// The service copied those pixels itself, so the repair may present them
+    /// (W28); it is never used to present another window's content.
+    snapshot: Option<Rect>,
     /// Geometry/focus generation (spec 0012 D3): bumped by every mutation that
     /// can change what is visible. The console's cell/part paints read it
     /// before computing visible parts and compare it after painting, so a
@@ -710,6 +722,8 @@ impl Table {
             region: None,
             erases: EraseList::new(),
             chrome: ChromeList::new(),
+            full: false,
+            snapshot: None,
             generation: 0,
         }
     }
@@ -722,6 +736,8 @@ impl Table {
     fn clear_damage(&mut self) {
         self.erases.clear();
         self.chrome.clear();
+        self.full = false;
+        self.snapshot = None;
     }
 
     /// Position of `id` in the z-order, or `None`.
@@ -820,6 +836,9 @@ impl Table {
         self.count += 1;
         self.focus = id;
         self.bump();
+        // A new topmost, focused window is a switch: rebuild the whole stack so
+        // no window keeps stale pixels from before it appeared (W31).
+        self.full = true;
 
         // The new window covers the desktop and any lower window: restore the
         // desktop across its whole frame (no window above it yet), then draw
@@ -845,6 +864,9 @@ impl Table {
         let was_focused = self.focus == id;
         self.remove_at(pos);
         self.bump();
+        // Closing changes the visible stack (and may move the focus): rebuild
+        // every window so the newly exposed pixels are not left stale (W31).
+        self.full = true;
 
         // The window is gone: the desktop returns where no live window covers
         // it, and the windows it uncovered redraw their chrome.
@@ -864,6 +886,8 @@ impl Table {
         };
         let slot = self.order[pos];
         let frame = self.windows[slot].frame();
+        let was_minimized = self.windows[slot].minimized;
+        let was_top = pos + 1 == self.count;
         self.windows[slot].minimized = false;
         let old_focus = self.focus;
         for index in pos..self.count - 1 {
@@ -872,6 +896,13 @@ impl Table {
         self.order[self.count - 1] = slot;
         self.focus = id;
         self.bump();
+        // A raise that changes the z-order, the focus or a minimized state is a
+        // window switch: rebuild the whole stack so every newly uncovered
+        // pixel is repainted by its owner (W31). A press on the already-topmost
+        // focused window only starts a drag and does not pay for this.
+        if !was_top || was_minimized || old_focus != id {
+            self.full = true;
+        }
 
         // Raising adds coverage and uncovers nothing that was above: redraw
         // the raised window's chrome (its newly visible parts), the title bars
@@ -908,7 +939,15 @@ impl Table {
         if self.windows[self.order[pos]].owner != owner {
             return Status::Invalid;
         }
-        self.relocate(screen_w, screen_h, pos, x, y, copy_content)
+        let before = self.windows[self.order[pos]];
+        let status = self.relocate(screen_w, screen_h, pos, x, y, copy_content);
+        // A completed programmatic move rebuilds the stack (W31); the pointer
+        // drag defers the same work to its release.
+        let moved = self.windows[self.order[pos]];
+        if status == Status::Ok && (moved.x != before.x || moved.y != before.y) {
+            self.full = true;
+        }
+        status
     }
 
     /// Moves the window at z-order position `pos`, clamping the origin on
@@ -944,20 +983,27 @@ impl Table {
         // the old content, and nothing has been painted over them yet. A
         // non-topmost window may be covered at the source, so it keeps the old
         // damage and relies on its refreshed repaint.
+        let mut copied = false;
         if copy_content && topmost {
-            let _ = gfx::copy_rect(
+            copied = gfx::copy_rect(
                 window.content().x,
                 window.content().y,
                 new_x.saturating_add(BORDER_WIDTH),
                 new_y.saturating_add(TITLE_BAR_HEIGHT),
                 window.w,
                 window.h,
-            );
+            ) == Status::Ok;
         }
         window.x = new_x;
         window.y = new_y;
         let moved = window.frame();
+        let snapshot = window.content();
         self.bump();
+        if copied {
+            // The service painted the destination content itself, so the
+            // repair may present exactly this rectangle after the chrome pass.
+            self.snapshot = Some(snapshot);
+        }
 
         // The old frame becomes desktop where no live window covers it. The
         // moved window's new frame is a live window, so the subtraction
@@ -1007,6 +1053,9 @@ impl Table {
             self.chrome.add(title_rect(&self.windows[self.order[pos]]));
         }
         self.bump();
+        // Hiding a window changes the visible stack; rebuild it so the pixels
+        // it uncovered are repainted, not left stale (W31).
+        self.full = true;
         true
     }
 
@@ -1062,6 +1111,7 @@ impl Table {
             id,
             offset_x: x.saturating_sub(frame.x),
             offset_y: y.saturating_sub(frame.y),
+            moved: false,
         });
         PressAction::Consumed
     }
@@ -1078,19 +1128,34 @@ impl Table {
             self.drag = None;
             return Status::NotFound;
         };
-        self.relocate(
+        let before = self.windows[self.order[pos]];
+        let status = self.relocate(
             screen_w,
             screen_h,
             pos,
             x.saturating_sub(drag.offset_x),
             y.saturating_sub(drag.offset_y),
             true,
-        )
+        );
+        let moved = self.windows[self.order[pos]];
+        if status == Status::Ok && (moved.x != before.x || moved.y != before.y) {
+            if let Some(drag) = self.drag.as_mut() {
+                drag.moved = true;
+            }
+        }
+        status
     }
 
-    /// Ends a drag; further motion does not move the window (W22).
-    fn end_drag(&mut self) {
+    /// Ends a drag; further motion does not move the window (W22). Returns
+    /// whether the drag actually moved the window; a real drag requests the
+    /// full-stack repaint at release (W31).
+    fn end_drag(&mut self) -> bool {
+        let moved = self.drag.is_some_and(|drag| drag.moved);
         self.drag = None;
+        if moved {
+            self.full = true;
+        }
+        moved
     }
 
     /// Takes or updates the one machine-wide modal popup grab for `owner`
@@ -1254,6 +1319,7 @@ impl Table {
         // window records no damage (and wakes nobody with a spurious expose).
         if removed {
             self.bump();
+            self.full = true;
             if let Some(pos) = self.position(self.focus) {
                 self.chrome.add(title_rect(&self.windows[self.order[pos]]));
             }
@@ -1511,6 +1577,12 @@ impl Table {
         if window.owner != owner {
             return Status::Invalid;
         }
+        // A minimized window is hidden: a late present from its owner (a timer,
+        // a stale expose handler) must not put its content back over the
+        // desktop (W30).
+        if window.minimized {
+            return Status::Ok;
+        }
         let content = window.content();
         let parts = self.visible_parts(content, pos + 1);
         for part in parts.rects[..parts.count].iter() {
@@ -1522,52 +1594,93 @@ impl Table {
         Status::Ok
     }
 
-    /// Runs one synchronous repair pass (spec 0011, W11).
+    /// Runs one synchronous repair pass (spec 0011, W11/W31).
     ///
     /// 1. The desktop is restored in the erased parts no live window covers.
     /// 2. Every window whose frame intersects the chrome damage redraws its
     ///    chrome, bottom-to-top, clipped to its visible parts inside the
     ///    damaged area. Higher windows are never overwritten.
-    /// 3. The union of all damage is presented once; `present` composites the
-    ///    cursor as usual.
+    /// 3. Only the pixels the service itself painted are presented: restored
+    ///    desktop parts, the chrome band and border, and a topmost move's
+    ///    content snapshot. Client content is presented by its owner through
+    ///    `window_present` (W17), so the service never copies a stale or
+    ///    another window's shadow content to the screen.
+    ///
+    /// A `full` request (W31: a switch, a close/minimize or a completed move)
+    /// replaces the accumulated damage with the whole screen, restores the
+    /// desktop, redraws every live window's chrome bottom-to-top and marks
+    /// every live window for an `Expose`, so the whole stack is rebuilt from
+    /// the desktop up.
     ///
     /// Runs under the table lock (window → graphics), so the z-order it walks
-    /// is the one the caller just produced. The repair is synchronous: no
+    /// is the one the caller just produced. The repair is synchronous: no table
     /// snapshot and no client call.
     fn repair(&mut self) -> bool {
-        if self.erases.count == 0 && self.chrome.count == 0 {
+        if !self.full && self.erases.count == 0 && self.chrome.count == 0 {
             return false;
         }
-        if gfx::size().0 == 0 {
+        let (screen_w, screen_h) = gfx::size();
+        if screen_w == 0 {
             self.clear_damage();
             return false;
         }
+        if self.full {
+            // A switch or completed move rebuilds the whole stack: incidental
+            // damage is subsumed by the full-screen pass.
+            self.erases.clear();
+            self.chrome.clear();
+            let screen = Rect {
+                x: 0,
+                y: 0,
+                w: i64::from(screen_w),
+                h: i64::from(screen_h),
+            };
+            self.erases.add(screen, 0);
+            self.chrome.add(screen);
+        }
         let marked = self.mark_exposes();
         // Coalesce after expose marking so the exact original damage decides
-        // which clients repaint; the paint/present pass then works on the
-        // smaller merged set (spec 0011, W11).
+        // which clients repaint; the paint pass then works on the smaller
+        // merged set (spec 0011, W11).
         self.erases.coalesce();
         self.chrome.coalesce();
         gfx::reset_clip();
-        let mut present = Presentation::new();
 
+        // A persistent pointer-region claim also reserves its pixels: the
+        // service never paints the desktop over the claimant's rectangle (the
+        // desktop shell's menu bar has no window). Windows drawn over it still
+        // cover it normally.
+        let claim = self.region.map(|region| region.rect);
         for index in 0..self.erases.count {
             let erase = self.erases.entries[index];
             let parts = self.visible_parts(erase.rect, erase.covers_from);
             for part in parts.rects[..parts.count].iter() {
-                if gfx::set_clip(part.x, part.y, part.w, part.h) {
-                    let _ = gfx::fill_rect(part.x, part.y, part.w, part.h, DESKTOP_BASE);
-                    let _ = gfx::fill_dither(part.x, part.y, part.w, part.h, DESKTOP_DITHER);
-                    gfx::reset_clip();
+                let mut pieces = Parts::new();
+                match claim {
+                    Some(rect) => subtract_into(*part, rect, &mut pieces),
+                    None => pieces.push(*part),
+                }
+                for piece in pieces.rects[..pieces.count].iter() {
+                    if gfx::set_clip(piece.x, piece.y, piece.w, piece.h) {
+                        let _ = gfx::fill_rect(piece.x, piece.y, piece.w, piece.h, DESKTOP_BASE);
+                        let _ =
+                            gfx::fill_dither(piece.x, piece.y, piece.w, piece.h, DESKTOP_DITHER);
+                        gfx::reset_clip();
+                        // The piece is exactly what the service just painted.
+                        let _ = gfx::present(piece.x, piece.y, piece.w, piece.h);
+                    }
                 }
             }
-            present.add(erase.rect);
         }
 
         if self.chrome.count > 0 {
             for pos in 0..self.count {
                 let slot = self.order[pos];
+                if self.windows[slot].minimized {
+                    continue;
+                }
                 let frame = self.windows[slot].frame();
+                let content = self.windows[slot].content();
                 if !self.chrome.intersects(frame) {
                     continue;
                 }
@@ -1590,18 +1703,32 @@ impl Table {
                         }
                         if gfx::set_clip(x0, y0, x1 - x0, y1 - y0) {
                             self.draw_chrome(slot);
+                            // Present the chrome band and border only; the
+                            // content rectangle belongs to the client.
+                            let clip = Rect {
+                                x: x0,
+                                y: y0,
+                                w: x1 - x0,
+                                h: y1 - y0,
+                            };
+                            let mut pieces = Parts::new();
+                            subtract_into(clip, content, &mut pieces);
+                            for piece in pieces.rects[..pieces.count].iter() {
+                                let _ = gfx::present(piece.x, piece.y, piece.w, piece.h);
+                            }
                             gfx::reset_clip();
                         }
                     }
                 }
             }
-            for index in 0..self.chrome.count {
-                present.add(self.chrome.rects[index]);
-            }
         }
 
-        present.coalesce();
-        present.present();
+        // The topmost move snapshot is service-painted content (W28), so it is
+        // presented before the owner's refreshed repaint arrives.
+        if let Some(rect) = self.snapshot.take() {
+            let _ = gfx::present(rect.x, rect.y, rect.w, rect.h);
+        }
+
         self.clear_damage();
         marked
     }
@@ -1743,7 +1870,11 @@ pub fn pointer_event(
         }
     }
     if released {
-        table.end_drag();
+        // A drag that moved gets the full-stack repaint on release; a plain
+        // title-bar click that never moved records no extra work.
+        if table.end_drag() {
+            dirty = true;
+        }
     } else if held && table.drag.is_some() && (x != old_x || y != old_y) {
         let _ = table.drag_move(screen_w as i64, screen_h as i64, x, y);
         dirty = true;
@@ -2388,6 +2519,43 @@ pub fn paint_self_check() -> Result<(), u32> {
     table.close_task(1);
     if table.count != 0 {
         return Err(30);
+    }
+
+    // 5. Full-stack requests (W31). A completed programmatic move and a drag
+    //    release that actually moved set the flag; a raise of the already
+    //    topmost, focused window and an in-progress drag step do not.
+    let mut table = Table::new();
+    let a = table
+        .open(SCREEN_W, SCREEN_H, 1, 100, 100, 200, 100, b"full")
+        .map_err(|_| 31u32)?;
+    table.clear_damage();
+    if table.full {
+        return Err(32);
+    }
+    if table.raise(a) != Status::Ok || table.full {
+        return Err(33);
+    }
+    if table.move_to(SCREEN_W, SCREEN_H, 1, a, 300, 300, false) != Status::Ok || !table.full {
+        return Err(34);
+    }
+    table.clear_damage();
+    let frame = table.frame_rect(a).map_err(|_| 35u32)?;
+    match table.press(frame.x + 50, frame.y + 8) {
+        PressAction::Consumed => {}
+        _ => return Err(36),
+    }
+    if table.full || table.drag.is_none() {
+        return Err(37);
+    }
+    if table.drag_move(SCREEN_W, SCREEN_H, 500, 400) != Status::Ok || table.full {
+        return Err(38);
+    }
+    if !table.end_drag() || !table.full {
+        return Err(39);
+    }
+    table.close_task(1);
+    if table.count != 0 {
+        return Err(40);
     }
 
     Ok(())

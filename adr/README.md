@@ -79,3 +79,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0052 | [Group the kernel by subject and put PC devices behind a platform seam](0052-kernel-module-layout-and-platform-seam.md) | Accepted | 2026-11-20 |
 | 0053 | [A terminal emulator over kernel console sessions](0053-terminal-emulator-console-sessions.md) | Accepted | 2026-11-20 |
 | 0054 | [Minimize is a service-owned window state restored through the window list](0054-service-owned-minimize.md) | Accepted | 2026-11-20 |
+| 0055 | [A switch or a completed move rebuilds the window stack in the service](0055-service-full-repaint-on-switch-and-move.md) | Accepted | 2026-11-20 |

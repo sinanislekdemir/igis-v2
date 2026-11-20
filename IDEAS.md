@@ -25,7 +25,7 @@ implies behavior deserves a spec; neither is needed for a thought we may never r
 - 2026-11-03 — Hold a "compatibility with the original igis" discussion before deciding
   what v2 keeps; no source exists, so the only continuity is design memory.
   → Resolved in [`specs/0001-vision.md`](specs/0001-vision.md) Context and OQ 2:
-  v1 was a 2005 bare-metal front-end for a quantum-cryptography modem; v2 inherits the
+  v1 was a 2005 bare-metal front-end for a modem; v2 inherits the
   constraints (determinism, no allocator, direct hardware, REPL), not the modem or its UI.
 - 2026-11-19 — Basic internet: a kernel IPv4/UDP/TCP wire stack behind a device seam,
   with a `socket` unit on the program/interpreter side and DNS/HTTP as ordinary

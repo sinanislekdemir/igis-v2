@@ -348,7 +348,7 @@ begin
     if cmd = "help" then
     begin
       out.say("shell: help, echo <text>, cd [dir], run <app> [args], exit\n");
-      out.say("shell: base apps: ls dir pwd cat head tail mkdir rmdir rm\n");
+      out.say("shell: base apps: ls dir pwd cat head tail mkdir rmdir rm ifconfig nslookup\n");
       handled := true;
     end;
     if cmd = "echo" then

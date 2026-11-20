@@ -8,7 +8,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0033
-- **Updated:** 2026-11-17
+- **Updated:** 2026-11-21
 
 ## Context
 
@@ -97,6 +97,16 @@ Non-goals:
   by the clock and a spin ceiling (the boot core's timer may stop first), writes
   `system: N of M APs stopped` to serial (another core may have halted holding the
   console lock), and halts. It never returns to the application.
+- **S9a (MUST):** In graphics mode the desktop shell paints a final full-screen
+  halt notice immediately before `core.halt`: the whole screen is black, the
+  proportional white text `You may now shut down your computer.` is centred,
+  and the shadow is presented once. It is a plain full-screen draw, not a
+  window, and the shell does not wait after presenting. A serial-only boot has
+  no screen. The kernel writes the `system: halt requested` line straight to
+  serial rather than through `println!`, because the System Log repaint would
+  otherwise paint over the notice before the halt. The `system_probe` path
+  (S17) calls the builtin directly and is not the desktop, so it draws no
+  notice.
 - **S10 (MUST):** `core.reboot` performs the same stop and then drives the platform
   reset channels: `0xCF9 <- 0x02`, `0xCF9 <- 0x06`, then a bounded wait for the 8042
   input buffer and `0x64 <- 0xFE`. QEMU resets and reboots. If the firmware ignores both
@@ -178,8 +188,9 @@ protocol and adds no service API.
 ```text
 core.halt  -> KernelHost::halt  -> sched::halt_system
 core.reboot-> KernelHost::reboot-> sched::reboot
-halt_system: println, note_stopped(self), smp::stop_all (set SHUTDOWN + broadcast),
-             bounded wait, println summary, arch_x86_64::halt
+halt_system: serial "halt requested", note_stopped(self),
+             smp::stop_all (set SHUTDOWN + broadcast), bounded wait,
+             serial summary, arch_x86_64::halt
 reboot:      println, smp::request_shutdown (set + broadcast), arch_x86_64::reboot
 wake_ipi:    if shutdown_requested { note_stopped(self); halt } else { on_ipi; eoi }
 ```
@@ -219,3 +230,4 @@ timer source) halts first.
 | Date | Change |
 |------|--------|
 | 2026-11-17 | Initial implemented version (M2.6.4): the `System` pull-down with About/Restart/Halt, the modal desktop-owned About window, `core.halt`/`core.reboot` (builtins 48/49), the focus-scoped Ctrl/F10 shortcuts, the `desktop_shell check` extension, the two QMP harnesses and the separate halt/reboot probe. ADR 0033 records the authority and shortcut policy. |
+| 2026-11-21 | S9a added (user request "when we halt the system in desktop mode, can we show a screen as 'you may now shutdown your computer'"). `desktop_shell` paints a full-screen black notice with centred white proportional text `You may now shut down your computer.` and presents it immediately before `core.halt`; `halt_system` writes `system: halt requested` directly to serial so the System Log repaint cannot cover the notice. `scripts/halt_screen_qmp.py` boots the desktop, clicks System > Halt, captures the paused framebuffer and checks the black background, the centred message ink and the AP summary. |

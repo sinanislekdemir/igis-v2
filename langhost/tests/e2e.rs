@@ -290,7 +290,7 @@ fn shell_spawns_and_waits_for_the_child_on_the_host() {
     let text = String::from_utf8(result.output).expect("UTF-8 output");
     for line in [
         "shell: help, echo <text>, cd [dir], run <app> [args], exit\n",
-        "shell: base apps: ls dir pwd cat head tail mkdir rmdir rm\n",
+        "shell: base apps: ls dir pwd cat head tail mkdir rmdir rm ifconfig nslookup\n",
         "child: args world\n",
         "hi there\n",
     ] {
@@ -309,7 +309,7 @@ fn shell_spawns_and_waits_for_the_child_on_the_host() {
     assert!(
         text.contains(
             "igis:/> help\nshell: help, echo <text>, cd [dir], run <app> [args], exit\n\
-             shell: base apps: ls dir pwd cat head tail mkdir rmdir rm\n"
+             shell: base apps: ls dir pwd cat head tail mkdir rmdir rm ifconfig nslookup\n"
         ),
         "{text:?}"
     );
@@ -343,7 +343,7 @@ fn shell_edits_the_line_with_backspace_on_the_host() {
     assert!(
         text.contains(
             "igis:/> helpzz\x08 \x08\x08 \x08\nshell: help, echo <text>, cd [dir], run <app> [args], exit\n\
-             shell: base apps: ls dir pwd cat head tail mkdir rmdir rm\n"
+             shell: base apps: ls dir pwd cat head tail mkdir rmdir rm ifconfig nslookup\n"
         ),
         "the shell echoes the deletion and runs the edited line: {text:?}"
     );
@@ -382,7 +382,7 @@ cd /base/cat\ncd /nope\ncd ~\npwd\ncd .\npwd\ncd /\nrun ls /home\nunknown\nhelp\
         "igis:/> run ls /home\nf readme.txt 238\nchild: ok\n",
         "unknown command: unknown\n",
         "shell: help, echo <text>, cd [dir], run <app> [args], exit\n",
-        "shell: base apps: ls dir pwd cat head tail mkdir rmdir rm\n",
+        "shell: base apps: ls dir pwd cat head tail mkdir rmdir rm ifconfig nslookup\n",
     ] {
         assert!(text.contains(line), "missing {line:?} in {text:?}");
     }
@@ -2970,6 +2970,32 @@ fn the_net_perf_sample_reports_the_host_path() {
         langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies and runs");
     assert_eq!(result.reason, ExitReason::Ok);
     assert_eq!(result.output, b"net_perf: no device\n".to_vec());
+}
+
+/// `ifconfig` on `langhost`'s disabled NIC reports the no-device contract
+/// without opening a socket or faulting (spec 0020).
+#[test]
+fn the_ifconfig_sample_reports_no_device_on_the_host() {
+    let path = app_path("ifconfig");
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "ifconfig").expect("the ifconfig sample compiles");
+    let result =
+        langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies and runs");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"eth0: no network device\n".to_vec());
+}
+
+/// `nslookup` with a name and no server reads `core.net_info`; the host has no
+/// device, so it reports that and never sends a query (spec 0020).
+#[test]
+fn the_nslookup_sample_reports_no_device_on_the_host() {
+    let path = app_path("nslookup");
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "nslookup").expect("the nslookup sample compiles");
+    let result = langhost::run(&package.code, b"example.com", langhost::DEFAULT_BUDGET)
+        .expect("verifies and runs");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"nslookup: no network device\n".to_vec());
 }
 
 /// `lib.path` is the shared command-path helper (spec 0018 modules): the

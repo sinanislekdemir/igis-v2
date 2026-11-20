@@ -102,12 +102,16 @@ There is no kernel terminal window.
   window's content rectangle and capped by a static maximum. It has no
   scrollback: a full row wraps, a newline at the last row scrolls the grid one
   line and the oldest line is discarded. Output beyond the screen is not
-  buffered.
+  buffered. The grid is a **ring**: a top index names logical row 0, and a
+  scroll advances it and clears the row that becomes the new bottom, so a
+  scroll is O(1) instead of copying every row. A large output burst must not
+  approach the normal-task CPU/step budget.
 - **T3 (MUST):** The emulator interprets at least CR, LF, BS, TAB and printable
   ASCII. It ignores other control bytes and leaves non-ASCII bytes blank.
   ANSI escape parsing is out of scope. It paints with `syslib` inside its own
   content rectangle, re-reads the content rectangle on every owner `Expose`,
-  and draws a cursor marker.
+  and draws a cursor marker. The screen is dark: black background, white text
+  and a white cursor underline.
 - **T4 (MUST):** A window close request closes the emulator: it closes its
   session, kills its shell task, closes its window and exits. The system stays
   alive. If the shell exits first, the emulator drains the remaining output,

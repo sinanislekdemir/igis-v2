@@ -245,7 +245,9 @@ begin
     verify("A border intact", syslib.get_pixel(80, 150) = black);
 
     // 6. A foreign task cannot take the owner's expose and cannot present its
-    // window. A fresh expose for A is pending before the child runs.
+    // window. A completed move now requests a full-stack repaint (W31), so
+    // every window of this task is exposed and A is somewhere in the pending
+    // set — not necessarily first. The child sees none of them.
     pump();
     flushed := syslib.event_flush();
     status := syslib.window_move(b, 40, 180);
@@ -255,19 +257,18 @@ begin
     status := core.wait(child, reason);
     classify_reason();
     verify("poll child exited Ok", status = Ok and exited_ok);
-    status := syslib.next_event(ev);
-    verify(
-      "foreign child did not steal the expose",
-      status = Ok and ev.kind = Expose and ev.window = a);
-    // B was exposed by the same move; present it before the child's report.
-    status := syslib.next_event(ev);
+    seen := false;
     polls := 0;
-    while status = Ok and ev.kind = Expose and polls < 4 do
+    status := syslib.next_event(ev);
+    while status = Ok and ev.kind = Expose and polls < 8 do
     begin
+      if ev.window = a then
+        seen := true;
       status := syslib.window_present(ev.window);
       status := syslib.next_event(ev);
       polls := polls + 1;
     end;
+    verify("foreign child did not steal the expose", seen);
     verify(
       "child reported WouldBlock and present Invalid",
       status = Ok and ev.kind = KeyDown and ev.code = uint(1));

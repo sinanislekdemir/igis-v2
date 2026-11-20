@@ -295,6 +295,14 @@ addresses are
 destination is local when `(dst & mask) == (ip & mask)`, otherwise the gateway is
 used; the gateway itself must be local.
 
+`base/ifconfig` is the command-line view of this surface: no argument prints the
+interface block (MAC, IPv4/prefix/netmask, gateway, DNS and the wire counters),
+`dhcp` acquires a lease with `lib/dhcp` and applies it with `core.net_config`, and
+`<ip> <netmask> <gateway> [dns]` applies a static configuration. `base/nslookup`
+resolves one A record through `lib/dns`, defaulting the server to the configured
+DNS and accepting an explicit second argument; a numeric name is answered
+locally. Neither command needs a new builtin.
+
 `lib/dns.ig` builds a standard query (type A, class IN, recursion desired), sends
 it to the configured server over a UDP socket, validates the transaction id and
 parses the first A record, with two retries and a 2 s deadline. It returns a

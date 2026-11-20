@@ -10,7 +10,7 @@
 ## Context
 
 `igis-v2` is a from-scratch successor to an operating system written in 2005. The first
-version was a front-end for a quantum-cryptography modem: it began as a Linux driver, but
+version was a front-end for a modem: it began as a Linux driver, but
 the user/kernel ring boundary made the hardware-facing work awkward, so it grew into a
 kernel with its own boot path. No source survives. The continuity is therefore not code
 but the constraints learned while writing that system: deterministic memory, no allocator
@@ -249,7 +249,7 @@ specified independently in `0005-host-interface.md`.
 | # | Question | Status / why it matters |
 |---|----------|-------------------------|
 | 1 | Multitasking model | **Resolved** — per-core interpreter loops, work-stealing tasks (ADR 0011). |
-| 2 | What did the original igis do, and which parts should v2 inherit? | **Resolved** — a 2005 bare-metal front-end for a quantum-cryptography modem; v2 inherits the constraints (determinism, no allocator, direct hardware, REPL), not the modem or its UI. |
+| 2 | What did the original igis do, and which parts should v2 inherit? | **Resolved** — a 2005 bare-metal front-end for a modem; v2 inherits the constraints (determinism, no allocator, direct hardware, REPL), not the modem or its UI. |
 | 3 | Is an intermediate bytecode representation acceptable? | **Resolved** — yes; JIT excluded (ADR 0005). |
 | 4 | How are applications delivered? | **Resolved** — read-only ext2 image as a GRUB module over an in-memory block device (ADR 0015). |
 | 5 | Is the system self-hosting for development (in-OS editor/REPL) or cross-developed? | **Resolved** — cross-developed; the in-system workflow is a REPL with no durable storage. A writable filesystem and an editor are future work. |

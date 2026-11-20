@@ -197,7 +197,6 @@ var
   now: uint;
   minutes: uint;
   hours: uint;
-  top_id: int;
   focus: int;
   pos: int;
   xx: int;
@@ -219,15 +218,6 @@ end;
 function tw(text: const string[0]): int;
 begin
   return int(syslib.text_width_prop(text));
-end;
-
-// True when `target` is the topmost window. A client has no per-task clip in
-// M2, so a full-content repaint is only safe while it cannot cover a higher
-// window (spec 0011, W18/W28).
-function is_topmost(target: int): bool;
-begin
-  status := syslib.window_info(uint(0), win_id, win_rect, win_title);
-  return status = Ok and win_id = target;
 end;
 
 // The menu bar is app-drawn and has no window either, but unlike a pull-down it
@@ -324,37 +314,32 @@ begin
   status := syslib.present(0, 0, screen_w, MenuHeight);
 end;
 
-// Draws the shell's own window content. It only repaints when the shell is the
-// topmost window: a covered client has no per-task clip in M2, so painting the
-// whole content would overwrite the window above it. When it is not topmost it
-// only presents, which leaves the visible part as the service last left it
-// (stale/dither), exactly the accepted M2 liveness rule (spec 0011, W18).
+// Draws the shell's own window content and presents it. The service clips the
+// presentation to the window's visible parts, so the shell repaints even when
+// another window covers part of it; a move that uncovered it then shows fresh
+// content instead of stale pixels (spec 0011, W17/W31).
 procedure draw_shell_window();
 begin
-  if own > 0 then
+  if own > 0 and not syslib.window_minimized(own) then
   begin
-    status := syslib.window_info(uint(0), top_id, win_rect, win_title);
-    if status = Ok and top_id = own then
+    status := syslib.window_content_rect(own, rect);
+    if status = Ok then
     begin
-      status := syslib.window_content_rect(own, rect);
-      if status = Ok then
-      begin
-        status := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, white);
-        status := syslib.draw_text(rect.x + 12, rect.y + 12, "igis-v2", black);
-        status := syslib.draw_text(rect.x + 12, rect.y + 28, "M2.3.4 desktop shell", black);
-        status := syslib.draw_text(rect.x + 12, rect.y + 52, "File: list windows", black);
-        status := syslib.draw_text(rect.x + 12, rect.y + 68, "Apps: application menu", black);
-        status := syslib.draw_text(rect.x + 12, rect.y + 84, "Windows: raise terminal", black);
-        status := syslib.draw_text(rect.x + 12, rect.y + 100, "Terminal: launch shell", black);
-        status := syslib.draw_text(rect.x + 12, rect.y + 116, "focus:", black);
-        focus := syslib.window_focus();
-        used := core.format_int_into(digits, focus, uint(10), uint(0));
-        status := syslib.draw_text(rect.x + 68, rect.y + 116, digits, black);
-        // A small black mark in the content, used by the check-mode pixel test
-        // and visible as the shell's own content marker.
-        status := syslib.fill_rect(
-          rect.x + rect.w - 8, rect.y + rect.h - 8, 8, 8, black);
-      end;
+      status := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, white);
+      status := syslib.draw_text(rect.x + 12, rect.y + 12, "igis-v2", black);
+      status := syslib.draw_text(rect.x + 12, rect.y + 28, "M2.3.4 desktop shell", black);
+      status := syslib.draw_text(rect.x + 12, rect.y + 52, "File: list windows", black);
+      status := syslib.draw_text(rect.x + 12, rect.y + 68, "Apps: application menu", black);
+      status := syslib.draw_text(rect.x + 12, rect.y + 84, "Windows: raise terminal", black);
+      status := syslib.draw_text(rect.x + 12, rect.y + 100, "Terminal: launch shell", black);
+      status := syslib.draw_text(rect.x + 12, rect.y + 116, "focus:", black);
+      focus := syslib.window_focus();
+      used := core.format_int_into(digits, focus, uint(10), uint(0));
+      status := syslib.draw_text(rect.x + 68, rect.y + 116, digits, black);
+      // A small black mark in the content, used by the check-mode pixel test
+      // and visible as the shell's own content marker.
+      status := syslib.fill_rect(
+        rect.x + rect.w - 8, rect.y + rect.h - 8, 8, 8, black);
     end;
     status := syslib.window_present(own);
   end;
@@ -450,13 +435,8 @@ end;
 // every call so a dragged list follows its frame (spec 0011, W28).
 procedure draw_window_list();
 begin
-  if winlist_id <= 0 then
+  if winlist_id <= 0 or syslib.window_minimized(winlist_id) then
     return;
-  if not is_topmost(winlist_id) then
-  begin
-    status := syslib.window_present(winlist_id);
-    return;
-  end;
   status := syslib.window_content_rect(winlist_id, winlist_rect);
   if status <> Ok then
     return;
@@ -862,10 +842,14 @@ begin
 end;
 
 // Erases the pull-down pixels. The shared shadow has no window for the menu, so
-// the topmost window whose frame intersects the menu area is raised: the
-// service repaints its chrome and marks its `Expose`, and the owner (the
-// console pump for the terminal, the app otherwise) restores its content. The
-// desktop window is raised again afterwards so focus returns to the shell.
+// the topmost *visible* window whose frame intersects the menu area is raised:
+// the service repaints its chrome and marks its `Expose`, and the owner (the
+// console pump for the terminal, the app otherwise) restores its content. A
+// minimized window must be skipped: raising it would restore it just to repaint
+// the menu, which is exactly how a minimized System Log came back. When no
+// visible window is under the menu, the shell repaints the service desktop
+// pattern itself. The desktop window is raised afterwards so focus returns to
+// the shell.
 procedure repair_menu_area(mx: int; my: int; mw: int; mh: int);
 begin
   under_id := 0;
@@ -873,17 +857,28 @@ begin
   status := syslib.window_info(uint(pos), win_id, win_rect, win_title);
   while status = Ok and pos < 32 and under_id = 0 do
   begin
-    if not (win_rect.x + win_rect.w <= mx) then
-      if not (win_rect.x >= mx + mw) then
-        if not (win_rect.y + win_rect.h <= my) then
-          if not (win_rect.y >= my + mh) then
-            under_id := win_id;
+    if not syslib.window_minimized(win_id) then
+      if not (win_rect.x + win_rect.w <= mx) then
+        if not (win_rect.x >= mx + mw) then
+          if not (win_rect.y + win_rect.h <= my) then
+            if not (win_rect.y >= my + mh) then
+              under_id := win_id;
     pos := pos + 1;
     status := syslib.window_info(uint(pos), win_id, win_rect, win_title);
   end;
   if under_id > 0 and under_id <> own then
-    status := syslib.window_raise(under_id);
-  if own > 0 then
+    status := syslib.window_raise(under_id)
+  else if under_id = 0 then
+  begin
+    // Only the desktop (or a minimized window) was under the menu: restore its
+    // white + dither pattern without touching any window state.
+    status := syslib.fill_rect(mx, my, mw, mh, white);
+    status := syslib.fill_dither(mx, my, mw, mh, black);
+    status := syslib.present(mx, my, mw, mh);
+  end;
+  // Do not restore a minimized Desktop window just to return focus after the
+  // menu; the minimized window stays hidden until the user raises it.
+  if own > 0 and not syslib.window_minimized(own) then
     status := syslib.window_raise(own);
 end;
 
@@ -1031,9 +1026,29 @@ begin
   out.say("desktop_shell: reboot returned\n");
 end;
 
+// The final screen for a desktop-requested halt (System > Halt / Ctrl+H). It is
+// a plain full-screen draw, not a window: `core.halt` follows immediately, so
+// no window, expose or repair can paint over it.
+procedure draw_halt_screen();
+var
+  message: string[64];
+  width: int;
+  x: int;
+  y: int;
+begin
+  message := "You may now shut down your computer.";
+  status := syslib.fill_rect(0, 0, screen_w, screen_h, black);
+  width := tw(message);
+  x := (screen_w - width) div 2;
+  y := screen_h div 2;
+  status := syslib.draw_text_prop(x, y, message, white);
+  status := syslib.present(0, 0, screen_w, screen_h);
+end;
+
 procedure request_halt();
 begin
   out.say("desktop_shell: halt\n");
+  draw_halt_screen();
   status := core.halt();
   out.say("desktop_shell: halt returned\n");
 end;
@@ -1175,13 +1190,8 @@ procedure draw_about();
 var
   row_top: int;
 begin
-  if about_id = 0 then
+  if about_id = 0 or syslib.window_minimized(about_id) then
     return;
-  if not is_topmost(about_id) then
-  begin
-    status := syslib.window_present(about_id);
-    return;
-  end;
   status := syslib.window_content_rect(about_id, about_rect);
   if status = Ok then
   begin
@@ -1192,7 +1202,7 @@ begin
     status := stdlib.ui_message(
       about_rect.x + 14, about_rect.y + 32, about_rect.w - 28,
       about_rect.h - 32 - 44,
-      "Interpreted desktop at ring 0.\nWindows, terminal, text and files.\nFonts, menus and a golden frame.\nM2, 2026.");
+      "Interpreted desktop at ring 0.\nWindows, terminal, text and files.\nFonts, menus and a golden frame.\nM2, 2026.\n\nSinan Islekdemir - sinan@islekdemir.com");
     row_top := about_rect.y + about_rect.h - 34;
     status := stdlib.ui_dialog_button(
       about_rect.x + (about_rect.w - 80) div 2, row_top, 80, 24,
@@ -1435,6 +1445,11 @@ begin
   if status = Ok then
   begin
     draw_shell_window();
+    // The window open requested a full-stack repaint (W31); the service owns
+    // the desktop base and the bar has no window, so the check redraws its own
+    // app-drawn bar before the pixel checks, exactly as the normal loop does
+    // after every event.
+    draw_menu_bar();
 
     // The menu bar and the service-drawn chrome/content are really in the
     // shadow. The shell window sits below the bar; no kernel window starts
