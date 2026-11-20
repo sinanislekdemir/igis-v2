@@ -1,6 +1,6 @@
 # 0021: The terminal emulator and console sessions
 
-- **Status:** Accepted
+- **Status:** Implemented
 - **Scope:** `abi`, `compiler`, `interpreter`, `kernel` (`console`, `session`,
   `sched`, `task`, `repl`), `langhost`, `samples/apps`; M11
 - **Supersedes:** 0014 (the machine-wide terminal window and `core.terminal_attach`)

@@ -3,7 +3,7 @@
 
 This is a verification harness, not part of the kernel. It boots the ISO with
 the absolute USB tablet, waits for the boot desktop's `desktop_shell: ready`
-line (no manual `run`), clicks the `Terminal` menu item through QMP absolute
+line (no manual `run`), opens Apps > Utilities > Terminal through QMP absolute
 pointer events, waits for the shell's window and prompt, types `terminal` over
 serial, checks `terminal: ok`, and writes the guest framebuffer to a PNG through
 QMP `screendump`.

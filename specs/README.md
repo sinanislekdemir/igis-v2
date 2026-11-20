@@ -27,7 +27,7 @@ revised as understanding improves, and their history lives in git.
 | 0018 | [The image filesystem and importable library modules](0018-filesystem-and-modules.md) | Implemented | abi, compiler, interpreter, kernel ext2/repl/sched, langhost, xtask, samples/apps | 2026-11-18 |
 | 0019 | [The writable home filesystem](0019-writable-home-filesystem.md) | Implemented | ext2w, kernel ata/fs/repl/sched, abi, compiler, interpreter, langhost, xtask, samples/apps | 2026-11-18 |
 | 0020 | [Networking — IPv4, UDP, TCP and the `socket` unit](0020-networking.md) | Implemented | net (new crate), kernel pci/net/sched/task, arch PCI/IOAPIC/IDT, abi, compiler, interpreter, langhost, xtask, samples/apps, scripts | 2026-11-19 |
-| 0021 | [The terminal emulator and console sessions](0021-terminal-emulator.md) | Accepted | abi, compiler, interpreter, kernel console/session/sched/task/repl, langhost, samples/apps | 2026-11-20 |
+| 0021 | [The terminal emulator and console sessions](0021-terminal-emulator.md) | Implemented | abi, compiler, interpreter, kernel console/session/sched/task/repl, langhost, samples/apps | 2026-11-20 |
 
 ## Lifecycle
 

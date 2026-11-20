@@ -14,9 +14,15 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Current state:** **505 host tests**; specs 0001–0019 (0018 and 0019
-  Implemented); ABI v1 at 75 opcodes; M5, M6, M7.1 and **M8.1–M8.9 complete**,
-  plus **M9.1–M9.4**. The
+- **Current state (M11):** **609 host tests**; specs 0001–0021 (0020 and 0021
+  Implemented); ABI v1 at 75 opcodes; **M2–M11 complete**. The terminal is an
+  application emulator over kernel console sessions (spec 0021, ADR 0053), the
+  image has top-level `apps/<category>/`, and the Apps pull-down is sectioned.
+  `/home` is a separate 8 MiB ext2 image on an ATA disk, read-write through
+  `ext2w`. `scripts/multi_terminal_qmp.py` proves two independent terminals.
+- **Historical context (M8–M10; counts below are from those slices):** **505 host
+  tests**; specs 0001–0019 (0018 and 0019 Implemented); ABI v1 at 75 opcodes; M5,
+  M6, M7.1 and **M8.1–M8.9 complete**, plus **M9.1–M9.4**. The
   application image is a read-only ext2 tree (`lib`, `base`, `home`, `system`);
   `/home` is a separate 8 MiB ext2 image on an ATA disk, read-write through
   `ext2w` and one router, persistent across reboots. Write builtins are 53–57.
@@ -2193,7 +2199,7 @@ apps live under `/apps/<category>`, and the Apps menu has sections.
 - [x] **M11.6 Apps menu.** `stdlib.ui_menu_is_header` / header rendering,
   section table, Terminal item, direct `Terminal` removal, File window list and
   the desktop check.
-- [ ] **M11.7 Regression and proof.** Host tests, `-smp 4`/`-smp 1` transcripts,
+- [x] **M11.7 Regression and proof.** Host tests, `-smp 4`/`-smp 1` transcripts,
   two-terminal QMP proof, updated app-menu/boot scripts, visual golden, and
   `AGENTS.md`/`HISTORY`/PLAN status.
 

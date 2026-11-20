@@ -22,7 +22,7 @@ The transcript proof is:
   clock_window: ok                 (empty args: the deterministic check)
   desktop_shell: launched File Browser task N
   repl: apps/productivity/browser: spawned as task N
-  desktop_shell: launched shell task N
+  desktop_shell: launched terminal task N  (Apps > Utilities > Terminal)
   terminal: ok
 
 and no `scheduler: idle summary`/`halt:` line. The script never opens the image

@@ -231,6 +231,11 @@ resize. Those are M2.4/M2.5.
 
 ## Design
 
+> **M11 amendment (spec 0021, ADR 0053):** the console state and boot-order text
+> below describes the M2 two-window console and is retained as history. The
+> System Log is the only kernel text window now; application output is a console
+> session owned by `apps/utilities/terminal`, and `core.terminal_attach` is gone.
+
 ### Console state and drawing
 
 ```text

@@ -27,17 +27,21 @@ decisions in `adr/`, and work items in `PLAN.md`.
 
 ## Current state
 
-- Specs 0001–0020 are accepted; **M2–M10 are complete** (desktop, language, filesystems,
-  networking). Current milestone work is tracked in `PLAN.md`.
-- **608 host tests** (530 language + 56 `net` + 22 `ext2w`); ABI v1 has **75 opcodes**.
+- Specs 0001–0021 are accepted; **M2–M11 are complete** (desktop, language,
+  filesystems, networking, terminal emulator). Current milestone work is tracked in
+  `PLAN.md`.
+- **609 host tests** (531 language + 56 `net` + 22 `ext2w`); ABI v1 has **75 opcodes**.
 - Boot: GRUB/multiboot2 → `system/entrypoint` (the desktop shell), falling back to
   `base/shell`; a graphics-less boot keeps a serial REPL.
-- Filesystems: a read-only ext2 application image (`lib`, `base`, `home`, `system`) and a
-  persistent 8 MiB ext2 `/home` on an ATA disk (`ext2w`, `e2fsck -fn` clean).
+- Filesystems: a read-only ext2 application image (`lib`, `base`, `apps`, `home`,
+  `system`) and a persistent 8 MiB ext2 `/home` on an ATA disk (`ext2w`,
+  `e2fsck -fn` clean). GUI applications live under `apps/<category>/`.
 - Networking: virtio-net and e1000/e1000e, IPv4/UDP/TCP, with DHCP/DNS/HTTP/`nc`/`purl`
   in `/lib` and `base/`.
-- UI: a kernel window server, proportional font, kernel text windows, and source apps
-  (`editor`, `browser`, `calculator`, `minesweeper`, `clock_window`, `widgets`).
+- UI: a kernel window server, proportional font, one kernel System Log window, a
+  terminal emulator (`apps/utilities/terminal`) over kernel console sessions, and source
+  apps (`editor`, `browser`, `calculator`, `minesweeper`, `clock_window`, `widgets`).
+  Every terminal instance has its own session, shell and cwd.
 
 ## Ground rules
 
@@ -88,12 +92,13 @@ fresh.
 │   ├── mm/            #   event, clock, sync, net) plus the subject groups:
 │   ├── platform/x86_64/  # PC devices: ATA, PCI, UHCI/HID, PS/2, AP bring-up
 │   ├── sched/         #   interpreter loop and the task table
-│   ├── ui/            #   console, fonts, framebuffer shadow, window server
+│   ├── ui/            #   console, sessions, fonts, framebuffer shadow, window server
 │   └── vfs/           #   in-memory ext2 image reader and the path router
 ├── stdlib/            # standard library source, embedded into the compiler
 ├── samples/apps/      # shipped corpus staged into every image
 │   ├── lib/           #   importable modules (`*.ig`, names kept)
-│   ├── base/          #   applications (`<name>.ig`, staged as `<name>`)
+│   ├── base/          #   command-line/session apps (`<name>.ig`, staged as `<name>`)
+│   ├── apps/          #   GUI apps under accessories/games/productivity/utilities
 │   └── system/        #   boot and probe applications (same rule)
 ├── samples/tests/     # test-only corpus, staged only by `image --shell`
 │   └── apps/base/     #   proofs, children, fixtures (`<name>.ig`)
