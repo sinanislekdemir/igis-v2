@@ -66,7 +66,7 @@ const
   ContentW = 680;
   ContentH = 480;
 
-  // Listing capacity: 96 entries in any directory (the root has five, `base`
+  // Listing capacity: 96 entries in any directory (the root has six, `base`
   // holds the most staged applications); 96 leaves room without a growth path
   // (there is no allocation).
   EntryCapacity = 96;
@@ -1334,16 +1334,17 @@ var
 begin
   dir := "";
   load_dir();
-  verify("root listed", entry_count >= 4);
+  verify("root listed", entry_count >= 5);
   verify("root complete", not truncated);
   verify("root base", has_kind("base", uint(1)));
+  verify("root apps", has_kind("apps", uint(1)));
   verify("root home", has_kind("home", uint(1)));
   verify("root lib", has_kind("lib", uint(1)));
   verify("root system", has_kind("system", uint(1)));
   if expect_lost_found then
   begin
     verify("root lost+found", has_kind("lost+found", uint(1)));
-    verify("root entry count", entry_count = 5);
+    verify("root entry count", entry_count = 6);
   end;
 
   err := enter_dir("base");
@@ -1353,8 +1354,6 @@ begin
   verify("listing capacity", entry_count <= EntryCapacity);
   verify("listing size", entry_count >= 50);
   verify("shell listed", has_kind("shell", uint(0)));
-  verify("editor listed", has_kind("editor", uint(0)));
-  verify("widgets listed", has_kind("widgets", uint(0)));
   verify("child listed", has_kind("child", uint(0)));
   verify("text listed", has_kind("text", uint(0)));
   verify("base is flat", find_first_dir() < 0);
@@ -1380,10 +1379,13 @@ begin
     value = Invalid and status_line = "not a regular file");
   verify("kind two keeps preview", int(core.len(preview)) = keep_length);
 
-  // `base/widgets` is 57,388 bytes: over the preview cap, refused without a read.
-  value := open_name("widgets");
+  // `apps/accessories/widgets` is 57,388 bytes: over the preview cap, refused
+  // without a read. Open it from the root by its full image path.
+  dir := "";
+  value := open_name("apps/accessories/widgets");
   verify("preview too large", value = CapacityExceeded);
   verify("too large keeps preview", int(core.len(preview)) = keep_length);
+  dir := "base";
 
   // Missing, malformed and file-as-directory paths are the error classes.
   value := open_name("no_such_file");
@@ -1819,7 +1821,7 @@ begin
     value = Invalid and status_line = "cannot launch this entry");
 
   // Back in `base`, `editor check` is a real terminating source app, so the
-  // blocking launcher leaves no child behind. The full path is `base/editor`.
+  // blocking launcher leaves no child behind. The full path is `apps/productivity/editor`.
   err := enter_dir("base");
   verify("launch in base", err = Ok and dir = "base");
   value := launch_name("editor", "check", uint(0));

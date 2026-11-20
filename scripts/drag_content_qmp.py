@@ -54,7 +54,7 @@ DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-drag.png")
 APPS_LABEL = (64, 10)
 CALCULATOR_ROW = (140, 30)
 
-# `samples/apps/base/calculator.ig`: WindowX/WindowY = (180, 100), content size
+# `samples/apps/apps/accessories/calculator.ig`: WindowX/WindowY = (180, 100), content size
 # 300x360, frame = content + (2, 17), so the title band starts at (180, 100).
 FRAME_START = (180, 100)
 FRAME_END = (430, 300)
@@ -234,7 +234,7 @@ def run(args):
             r"desktop_shell: launched Calculator", timeout=args.timeout, start=cursor
         )
         _, cursor = serial.wait_for(
-            r"repl: base/calculator: spawned as task",
+            r"repl: apps/accessories/calculator: spawned as task",
             timeout=args.timeout,
             start=cursor,
         )

@@ -179,7 +179,7 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
         return Err(format!("{} is not a directory", source.display()));
     }
     // Spec 0018, L1: the source root holds only image directories.
-    let top_level = ["lib", "base", "home", "system"];
+    let top_level = ["lib", "base", "apps", "home", "system"];
     let entries =
         fs::read_dir(&source).map_err(|error| format!("{}: {error}", source.display()))?;
     for entry in entries {
@@ -194,7 +194,7 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
         }
         if !path.is_dir() || !top_level.contains(&name) {
             return Err(format!(
-                "{}: the image root holds only lib, base, home and system",
+                "{}: the image root holds only lib, base, apps, home and system",
                 path.display()
             ));
         }

@@ -31,8 +31,16 @@ pub const MAX_SPAWN_DEPTH: u32 = 8;
 /// (spec 0018).
 const DEFAULT_APP_DIR: &str = "samples/apps";
 
-/// Prefix a bare launch name resolves against (spec 0018, A1).
-const LAUNCH_PREFIX: &str = "base/";
+/// Directories a bare launch name is searched in (spec 0018, A1). The first
+/// regular file wins; `base/` is the fallback when none exists.
+const LAUNCH_DIRS: [&str; 6] = [
+    "base/",
+    "apps/accessories/",
+    "apps/games/",
+    "apps/productivity/",
+    "apps/utilities/",
+    "system/",
+];
 
 /// A package with owned buffers, produced by [`compile`].
 ///
@@ -325,27 +333,41 @@ impl Drop for ConsoleHost {
 /// True for image paths whose sources are `<name>.ig` (spec 0018, L3).
 fn is_app_path(path: &str) -> bool {
     path == "base"
+        || path == "apps"
         || path == "system"
         || path.starts_with("base/")
+        || path.starts_with("apps/")
         || path.starts_with("system/")
 }
 
 /// True for a directory whose entries are application command names.
 fn is_app_dir(path: &str) -> bool {
-    path == "base" || path == "system"
+    path == "base"
+        || path == "system"
+        || path == "apps"
+        || path == "apps/accessories"
+        || path == "apps/games"
+        || path == "apps/productivity"
+        || path == "apps/utilities"
 }
 
-/// `base/name/rest` (or `system/...`) → `base/name`; `None` when the path is
-/// not an application path with a third component.
+/// `base/name/rest` (or `apps/category/name/rest`) → the application prefix;
+/// `None` when the path is not an application path with a trailing component.
 fn app_file_prefix(path: &str) -> Option<String> {
-    let mut parts = path.splitn(3, '/');
+    let mut parts = path.splitn(4, '/');
     let root = parts.next()?;
-    if root != "base" && root != "system" {
-        return None;
+    if root == "base" || root == "system" {
+        let name = parts.next()?;
+        parts.next()?;
+        return Some(format!("{root}/{name}"));
     }
-    let name = parts.next()?;
-    parts.next()?;
-    Some(format!("{root}/{name}"))
+    if root == "apps" {
+        let category = parts.next()?;
+        let name = parts.next()?;
+        parts.next()?;
+        return Some(format!("apps/{category}/{name}"));
+    }
+    None
 }
 
 /// Splits `home` / `home/...` into the path local to the home directory. Every
@@ -543,12 +565,20 @@ impl Host for ConsoleHost {
             return Err(Status::Invalid);
         }
 
-        // A bare name lives under `base/`; a path with `/` is used as written
-        // (spec 0018, A1).
+        // A bare name is searched in the fixed app directories; a path with
+        // `/` is used as written (spec 0018, A1).
         let resolved = if path.contains('/') {
             path.to_string()
         } else {
-            format!("{LAUNCH_PREFIX}{path}")
+            let mut chosen = None;
+            for prefix in LAUNCH_DIRS {
+                let candidate = format!("{prefix}{path}");
+                if self.resolve_path(&candidate).is_ok() {
+                    chosen = Some(candidate);
+                    break;
+                }
+            }
+            chosen.unwrap_or_else(|| format!("base/{path}"))
         };
         let status = abi::fs::validate_path(&resolved);
         if status != Status::Ok {

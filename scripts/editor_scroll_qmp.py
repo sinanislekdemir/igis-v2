@@ -58,7 +58,7 @@ os.makedirs(SHOT_DIR, exist_ok=True)
 
 DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-editor-scroll.png")
 
-# `samples/apps/base/editor.ig` opens content 640x480 at frame origin (180, 90), so
+# `samples/apps/apps/productivity/editor.ig` opens content 640x480 at frame origin (180, 90), so
 # the content origin is (181, 106). TextLeft 4 / TextTop 38 / ScrollLeft 620 /
 # ScrollTop 38 / ScrollW 16 / ScrollH 416 (client constants in the sample).
 EDITOR_CONTENT = (181, 106)
@@ -283,7 +283,7 @@ def run(args):
         process.stdin.write(b"run editor\n")
         process.stdin.flush()
         _, cursor = serial.wait_for(
-            r"repl: base/editor: spawned as task", timeout=args.timeout
+            r"repl: apps/productivity/editor: spawned as task", timeout=args.timeout
         )
         # Give the first frame time to reach the framebuffer.
         time.sleep(1.2)

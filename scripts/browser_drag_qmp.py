@@ -51,7 +51,7 @@ DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-browser-drag.png")
 APPS_LABEL = (64, 10)
 BROWSER_ROW = (140, 78)
 
-# `samples/apps/base/browser.ig` opens content 680x480 at (160, 90); the frame is
+# `samples/apps/apps/productivity/browser.ig` opens content 680x480 at (160, 90); the frame is
 # content + (2, 17). The title bar grab is 300 pixels from the frame's left edge
 # and 8 rows down. The target frame origin is (310, 225), which fits the
 # 1024x768 screen (frame 682x497 ends at (992, 722)).
@@ -215,7 +215,7 @@ def main():
         serial.wait_for(r"desktop_shell: apps menu open", timeout=args.timeout)
         click(qmp, *BROWSER_ROW, width, height)
         serial.wait_for(
-            r"repl: base/browser: spawned as task", timeout=args.timeout
+            r"repl: apps/productivity/browser: spawned as task", timeout=args.timeout
         )
         print("[harness] File Browser launched")
         time.sleep(2.0)

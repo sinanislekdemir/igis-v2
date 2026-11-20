@@ -9,20 +9,28 @@ fn sample(name: &str) -> Vec<u8> {
 }
 
 /// Path of a staged application sample (spec 0018): applications live under
-/// `samples/apps/base` (shipped) or `samples/tests/apps/base` (test-only), and
-/// kernel/boot-owned probes under `samples/apps/system`. The shipped corpus
-/// wins, matching the `--shell` overlay order.
+/// `samples/apps/base`, the `samples/apps/apps/<category>` tree, or
+/// `samples/tests/apps/base` (test-only), and kernel/boot-owned probes under
+/// `samples/apps/system`. The shipped corpus wins, matching the `--shell`
+/// overlay order.
 fn app_path(name: &str) -> String {
     let root = format!("{}/..", env!("CARGO_MANIFEST_DIR"));
     for tree in ["samples/apps", "samples/tests/apps"] {
-        for directory in ["base", "system"] {
+        for directory in [
+            "base",
+            "apps/accessories",
+            "apps/games",
+            "apps/productivity",
+            "apps/utilities",
+            "system",
+        ] {
             let path = format!("{root}/{tree}/{directory}/{name}.ig");
             if std::path::Path::new(&path).is_file() {
                 return path;
             }
         }
     }
-    panic!("sample `{name}` is not under samples/apps or samples/tests/apps")
+    panic!("sample `{name}` is not under the shipped or test app tree")
 }
 
 fn run_sample(name: &str, args: &[u8]) -> langhost::RunResult {

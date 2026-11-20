@@ -21,7 +21,7 @@ The transcript proof is:
   desktop_shell: launched Clock task N
   clock_window: ok                 (empty args: the deterministic check)
   desktop_shell: launched File Browser task N
-  repl: base/browser: spawned as task N
+  repl: apps/productivity/browser: spawned as task N
   desktop_shell: launched shell task N
   terminal: ok
 
@@ -252,7 +252,7 @@ def main():
         )
         click(qmp, *BROWSER_ROW, width, height)
         _, cursor = serial.wait_for(
-            r"repl: base/browser: spawned as task", timeout=args.timeout, start=cursor
+            r"repl: apps/productivity/browser: spawned as task", timeout=args.timeout, start=cursor
         )
         print("[harness] File Browser launched; it now competes for the queue")
         time.sleep(0.5)
@@ -296,7 +296,7 @@ def main():
         if "desktop_shell: launched File Browser" not in transcript:
             print("[harness] FAIL: no `desktop_shell: launched File Browser` line")
             return 1
-        if "repl: base/browser: spawned as task" not in transcript:
+        if "repl: apps/productivity/browser: spawned as task" not in transcript:
             print("[harness] FAIL: the browser was not spawned")
             return 1
         if "desktop_shell: launched shell" not in transcript:

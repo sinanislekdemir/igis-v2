@@ -12,10 +12,10 @@ the interactive editor (it opens `base/child`) and drives the M9.3 dialog:
    window is gone.
 3. Ctrl+O again (the dialog starts in `lib`), Backspace to the root, the `base`
    row, Enter, the `calculator` row and `Open`; the editor must load the
-   32,516-byte `base/calculator` source. This is the M9.4 proof: the dialog was
+   32,516-byte `apps/accessories/calculator` source. This is the M9.4 proof: the dialog was
    already returning the path, while the editor's old 8 KiB document buffer
    refused it. The text region must change substantially and the path line must
-   show the longer `base/calculator`.
+   show the longer `apps/accessories/calculator`.
 4. Ctrl+O again; Escape cancels. The calculator document must be unchanged and
    the dialog gone.
 5. Ctrl+Q exits the editor `Ok`, the shell prompt returns, and no budget fault
@@ -26,7 +26,7 @@ nothing here is kernel-specific. The final frames are written to
 `build/screenshots/igis-file-dialog.png` (dialog open),
 `build/screenshots/igis-file-dialog-open.png` (the editor after `lib/math.ig`
 loaded) and `build/screenshots/igis-file-dialog-large.png` (after
-`base/calculator` loaded). Pillow reads the captures for pixel diffs only;
+`apps/accessories/calculator` loaded). Pillow reads the captures for pixel diffs only;
 images are never displayed.
 
 Usage:
@@ -57,7 +57,7 @@ DIALOG_OUTPUT = os.path.join(SHOT_DIR, "igis-file-dialog.png")
 OPENED_OUTPUT = os.path.join(SHOT_DIR, "igis-file-dialog-open.png")
 LARGE_OUTPUT = os.path.join(SHOT_DIR, "igis-file-dialog-large.png")
 
-# `samples/apps/base/editor.ig` opens content 640x480 at frame origin (180, 90), so
+# `samples/apps/apps/productivity/editor.ig` opens content 640x480 at frame origin (180, 90), so
 # the content origin is (181, 106). Text/Dialog constants mirror the samples.
 EDITOR_FRAME = (180, 90)
 EDITOR_CONTENT = (181, 106)
@@ -397,7 +397,7 @@ def run(args):
         process.stdin.write(b"run editor\n")
         process.stdin.flush()
         _, cursor = serial.wait_for(
-            r"repl: base/editor: spawned as task", timeout=args.timeout
+            r"repl: apps/productivity/editor: spawned as task", timeout=args.timeout
         )
         time.sleep(1.0)
         tablet = Tablet(qmp, width, height)
@@ -539,7 +539,7 @@ def run(args):
             f"{'ok' if large_chrome_ok else 'FAILED'}"
         )
         if large_dialog < 10000 or not large_chrome_ok:
-            print("[harness] FAIL: the dialog did not reopen for base/calculator")
+            print("[harness] FAIL: the dialog did not reopen for apps/accessories/calculator")
             return 1
         # A QMP screendump can stall the guest; let it resume before the
         # tablet press, or the release can overtake the press.
@@ -575,7 +575,7 @@ def run(args):
             print("[harness] FAIL: the dialog did not close on calculator Open")
             return 1
         if large_text < 5000:
-            print("[harness] FAIL: base/calculator did not replace the document")
+            print("[harness] FAIL: apps/accessories/calculator did not replace the document")
             return 1
         # The calculator's first 26 lines are its header comment, so the page is
         # drawn mostly in the comment gray (not black): any non-white ink proves
@@ -586,13 +586,13 @@ def run(args):
         if large_path_changed < 30:
             print("[harness] FAIL: the editor path did not change to calculator")
             return 1
-        # `base/calculator` is fifteen 8-pixel cells (the old `lib/math.ig` path
+        # `apps/accessories/calculator` is fifteen 8-pixel cells (the old `lib/math.ig` path
         # is eleven), so a 110-pixel ink bbox proves the whole chosen path.
         if (
             large_path_text is None
             or large_path_text[2] - large_path_text[0] < 110
         ):
-            print("[harness] FAIL: the editor path is not base/calculator")
+            print("[harness] FAIL: the editor path is not apps/accessories/calculator")
             return 1
 
         # 4. Ctrl+O again; Escape cancels and the calculator is untouched.
@@ -675,7 +675,7 @@ def run(args):
 
         print(
             "[harness] PASS: dialog opened with chrome, lib/math.ig and "
-            "base/calculator loaded, Escape cancelled without changing the "
+            "apps/accessories/calculator loaded, Escape cancelled without changing the "
             "document, editor exited Ok"
         )
         return 0

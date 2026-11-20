@@ -164,7 +164,12 @@ mount table. `stdlib` stays embedded and is not moved into the image.
 ```
 /
 ├── lib/            importable modules   lib/math.ig, lib/ui/menu.ig
-├── base/           base applications    base/shell, base/editor, ...
+├── base/           base applications    base/shell, base/files, ...
+├── apps/           GUI applications     apps/productivity/editor, ...
+│   ├── accessories/
+│   ├── games/
+│   ├── productivity/
+│   └── utilities/  apps/utilities/terminal
 ├── home/           user files           home/readme.txt (read-only)
 ├── system/         kernel/boot apps     system/entrypoint, system/system_probe
 └── lost+found/     mke2fs (kind 1, unreadable, unchanged)
@@ -175,8 +180,9 @@ metadata) is unchanged; only the "root only" restriction goes away. The reader
 gains a path walk with an 8-component depth cap and a per-directory entry scan
 that already exists for the root.
 
-The source side splits into the shipped corpus (`samples/apps/{lib,base,system}`)
-and the test-only corpus (`samples/tests/apps/{base,system}`); `samples/home` is
+The source side splits into the shipped corpus
+(`samples/apps/{lib,base,apps,system}`) and the test-only corpus
+(`samples/tests/apps/{base,system}`); `samples/home` is
 the single seed for the image's `home` directory and the writable disk. Only the
 `--shell` test image overlays `samples/tests/apps`, so the product image contains
 just the shipped applications.

@@ -87,7 +87,7 @@ const
 
   // Document capacity: the spec 0008 per-unit source cap (128 KiB), so every
   // current sample opens. M9.4 raised this from 8 KiB; the file-open dialog was
-  // already correct and returned `base/calculator` (32,516 B), which the old
+  // already correct and returned `apps/accessories/calculator` (32,516 B), which the old
   // limit refused with a status line.
   BufferCapacity = 131072;
   // `abi::fs::PATH_MAX` (spec 0013 F2 / spec 0018 L6). The M9.3 file dialog
@@ -2263,12 +2263,12 @@ begin
     value = Invalid and int(core.len(text)) = keep_length);
 
   // M9.4: every current source sample now fits the 128 KiB buffer; the largest
-  // is this editor (81,509 B). `base/calculator` (32,516 B) is the file the
+  // is this editor (81,509 B). `apps/accessories/calculator` (32,516 B) is the file the
   // user opened through the dialog and the old 8 KiB limit refused.
-  value := open_path("base/calculator");
+  value := open_path("apps/accessories/calculator");
   verify("large source",
-    value = Ok and path = "base/calculator" and int(core.len(text)) > 8192);
-  value := core.fs_size("base/calculator", size);
+    value = Ok and path = "apps/accessories/calculator" and int(core.len(text)) > 8192);
+  value := core.fs_size("apps/accessories/calculator", size);
   verify("large source complete",
     value = Ok and int(core.len(text)) = int(size));
   verify("large source valid",

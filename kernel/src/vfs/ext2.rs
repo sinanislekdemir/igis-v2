@@ -389,10 +389,11 @@ impl<'a> Ext2<'a> {
     /// Boot self-check for the image tree (spec 0018, L1/L6).
     ///
     /// Proves that the path walk works before the REPL serves anything: the
-    /// four top-level directories exist and are directories, `base/shell`,
-    /// `home/readme.txt` and `system/system_probe` are readable files, `lib`
-    /// lists the staged `math.ig` module, a missing component is `NotFound`, and
-    /// `..`, an over-deep path and a file used as a directory are `Invalid`.
+    /// five top-level directories exist and are directories, `base/shell`,
+    /// `apps/utilities/terminal`, `home/readme.txt` and
+    /// `system/system_probe` are readable files, `lib` lists the staged
+    /// `math.ig` module, a missing component is `NotFound`, and `..`, an
+    /// over-deep path and a file used as a directory are `Invalid`.
     /// Returns the failed step number; the caller halts.
     pub fn tree_self_check(&self) -> Result<(), u32> {
         let mut name = [0u8; abi::fs::NAME_CAP];
@@ -410,7 +411,7 @@ impl<'a> Ext2<'a> {
             _ => return Err(2),
         }
 
-        // 3: the root lists the four directories (and mke2fs's lost+found).
+        // 3: the root lists the five directories (and mke2fs's lost+found).
         let mut seen = 0u8;
         let mut index = 0u32;
         loop {
@@ -419,7 +420,7 @@ impl<'a> Ext2<'a> {
                     if entry.kind != abi::fs::KIND_DIR {
                         return Err(3);
                     }
-                    for (bit, directory) in ["base", "home", "lib", "system"].iter().enumerate() {
+                    for (bit, directory) in ["base", "apps", "home", "lib", "system"].iter().enumerate() {
                         if &name[..entry.name_len] == directory.as_bytes() {
                             seen |= 1 << bit;
                         }
@@ -433,7 +434,7 @@ impl<'a> Ext2<'a> {
                 Err(_) => return Err(3),
             }
         }
-        if seen != 0b1111 {
+        if seen != 0b1_1111 {
             return Err(3);
         }
 
@@ -460,6 +461,9 @@ impl<'a> Ext2<'a> {
         }
 
         // 5: the other staged paths are readable files.
+        if !matches!(self.file_size("apps/utilities/terminal"), Ok(size) if size > 0) {
+            return Err(5);
+        }
         if !matches!(self.file_size("home/readme.txt"), Ok(size) if size > 0) {
             return Err(5);
         }

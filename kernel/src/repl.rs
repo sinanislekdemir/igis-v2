@@ -384,28 +384,48 @@ pub fn validate_path(path: &str) -> Status {
     abi::fs::validate_path(path)
 }
 
-/// Prefix a bare launch name resolves against (spec 0018, A1).
-const LAUNCH_PREFIX: &[u8] = b"base/";
+/// Directories a bare launch name is searched in (spec 0018, A1). The first
+/// regular file wins; `base/` is the fallback for the error message.
+const LAUNCH_DIRS: [&[u8]; 6] = [
+    b"base/",
+    b"apps/accessories/",
+    b"apps/games/",
+    b"apps/productivity/",
+    b"apps/utilities/",
+    b"system/",
+];
 
-/// Resolves a launch path (spec 0018, A1): a name with no `/` lives under
-/// `base/`, a path with `/` is used as written. The result is written into
-/// `out` and its length returned.
+/// Resolves a launch path (spec 0018, A1): a name with no `/` is searched in
+/// the fixed directory order, a path with `/` is used as written. The result is
+/// written into `out` and its length returned; when no bare candidate exists,
+/// the `base/<name>` path is returned so the caller reports the usual error.
 fn resolve_launch(path: &str, out: &mut [u8; PATH_BYTES]) -> Result<usize, Status> {
-    let total = if path.contains('/') {
-        path.len()
-    } else {
-        LAUNCH_PREFIX.len() + path.len()
-    };
-    if total > PATH_BYTES {
-        return Err(Status::CapacityExceeded);
-    }
     if path.contains('/') {
+        if path.len() > PATH_BYTES {
+            return Err(Status::CapacityExceeded);
+        }
         out[..path.len()].copy_from_slice(path.as_bytes());
-    } else {
-        out[..LAUNCH_PREFIX.len()].copy_from_slice(LAUNCH_PREFIX);
-        out[LAUNCH_PREFIX.len()..total].copy_from_slice(path.as_bytes());
+        return Ok(path.len());
     }
-    Ok(total)
+
+    let mut fallback = 0usize;
+    for prefix in LAUNCH_DIRS {
+        let total = prefix.len() + path.len();
+        if total > PATH_BYTES {
+            return Err(Status::CapacityExceeded);
+        }
+        out[..prefix.len()].copy_from_slice(prefix);
+        out[prefix.len()..total].copy_from_slice(path.as_bytes());
+        if fallback == 0 {
+            fallback = total;
+        }
+        if let Ok(candidate) = core::str::from_utf8(&out[..total]) {
+            if fs::file_size(candidate).is_ok() {
+                return Ok(total);
+            }
+        }
+    }
+    Ok(fallback)
 }
 
 /// The kernel side of `core.spawn`: resolve, validate, fill the diagnostic,

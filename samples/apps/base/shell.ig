@@ -21,6 +21,8 @@ var
   target: string[256];
   app_path: string[256];
   external_args: string[512];
+  app_dirs: array[string[32], 6];
+  app_dir: int;
   listed_name: string[64];
   listed_kind: uint;
   listed_size: uint;
@@ -298,6 +300,12 @@ begin
   //
   // There is no `return` yet, so `main` ends by leaving the loop with `done`.
   sources[0] := uint(0);
+  app_dirs[0] := "base/";
+  app_dirs[1] := "apps/accessories/";
+  app_dirs[2] := "apps/games/";
+  app_dirs[3] := "apps/productivity/";
+  app_dirs[4] := "apps/utilities/";
+  app_dirs[5] := "system/";
   // The shell starts at the image root; the prompt shows it in display form
   // (`igis:/> `).
   cwd := "/";
@@ -433,12 +441,15 @@ begin
       // prints the directory the prompt shows and `ls`/`cat` resolve their
       // target against it. Only a regular file is runnable; `fs_size` says
       // `Ok` for one and fails for a directory or a missing name.
-      app_path := "base/" + cmd;
-      st := core.fs_size(app_path, listed_size);
-      if st <> Ok then
+      // Search the app directories in the spec 0018 A1 order. The first
+      // regular file wins; `system/` is last.
+      app_dir := 0;
+      st := NotFound;
+      while app_dir < 6 and st <> Ok do
       begin
-        app_path := "system/" + cmd;
+        app_path := app_dirs[app_dir] + cmd;
         st := core.fs_size(app_path, listed_size);
+        app_dir := app_dir + 1;
       end;
 
       if st <> Ok then
