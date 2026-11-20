@@ -52,7 +52,7 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0025 | [Kernel text windows and an application-owned desktop shell](0025-kernel-text-windows-desktop-shell.md) | Accepted | 2026-11-16 |
 | 0026 | [The standard library may import `syslib` for the UI layout layer](0026-stdlib-may-use-syslib.md) | Accepted | 2026-11-17 |
 | 0027 | [File access for applications is stateless, root-only host builtins](0027-stateless-root-only-file-api.md) | Accepted | 2026-11-17 |
-| 0028 | [One machine-wide terminal attached to a task-owned window](0028-one-terminal-attached-window.md) | Accepted | 2026-11-17 |
+| 0028 | [One machine-wide terminal attached to a task-owned window](0028-one-terminal-attached-window.md) | Superseded by 0053 | 2026-11-17 |
 | 0029 | [Boot into the desktop; launch the shell from its Terminal item](0029-boot-to-desktop.md) | Accepted | 2026-11-17 |
 | 0030 | [A kernel-owned 12-pixel proportional bitmap font with a lazy glyph cache](0030-proportional-font.md) | Accepted | 2026-11-17 |
 | 0031 | [Coalesce damage before repair and batch console cells into one present](0031-damage-coalescing-present-batching.md) | Accepted | 2026-11-17 |
@@ -77,3 +77,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0050 | [Sockets are owned opaque handles with blocking waits and deadlines](0050-socket-handles-and-blocking.md) | Accepted | 2026-11-19 |
 | 0051 | [Acknowledge the NIC on its own INTx vector and keep the ring drain in the service opportunity](0051-nic-intx-acknowledge-and-poll-fallback.md) | Accepted | 2026-11-19 |
 | 0052 | [Group the kernel by subject and put PC devices behind a platform seam](0052-kernel-module-layout-and-platform-seam.md) | Accepted | 2026-11-20 |
+| 0053 | [A terminal emulator over kernel console sessions](0053-terminal-emulator-console-sessions.md) | Accepted | 2026-11-20 |

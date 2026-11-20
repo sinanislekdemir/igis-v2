@@ -35,12 +35,12 @@ resize. Those are M2.4/M2.5.
 ### Kernel text windows
 
 - **D1 (MUST):** After `gfx::init` and before the first kernel `println!`,
-  `console::init` opens exactly two kernel-owned text windows with owner id `0`: a
-  **terminal** for application output (`core.write`, including the shell's own input
-  echo), and a **system log** for kernel `println!`/`print!` diagnostics. When graphics
-  are disabled, no window is opened and every byte still reaches serial through the
-  existing mirror.
-- **D2 (MUST):** Each window has its own character grid, cursor and scroll state. The
+  `console::init` opens exactly one kernel-owned text window with owner id `0`: the
+  **system log** for kernel `println!`/`print!` diagnostics. Application output is not
+  a kernel text window: a terminal is an application emulator over a console session
+  (spec 0021). When graphics are disabled, no window is opened and every byte still
+  reaches serial through the existing mirror.
+- **D2 (MUST):** The system log has its own character grid, cursor and scroll state. The
   grid dimensions derive from the window's **content** rectangle and the 8×8 font at
   scale 1. A full column wraps and a newline at the last row scrolls that window's grid
   one row; it never scrolls the shadow or touches another window. Cells of a grid that
@@ -51,8 +51,8 @@ resize. Those are M2.4/M2.5.
   helpers (`gfx::draw_cell`/`gfx::present_within`) and never narrows the shadow's one
   global clip: a whole-grid repaint must not clip an application drawing on another
   core. A cell that is partly or wholly covered leaves the covering window untouched. A
-  painted cell joins the terminal's bounded dirty rectangle instead of being presented
-  immediately (M2.6.2, spec 0016): `console::write_bytes` and `_print` present once after
+  painted cell joins the log's bounded dirty rectangle instead of being presented
+  immediately (M2.6.2, spec 0016): `_print` presents once after
   their byte run, one flush at the end of `poll_input` presents anything still
   pending, and a whole-window repaint presents each visible part once. The flush
   reads the visible parts under the window lock and copies only the dirty rectangle from
@@ -64,28 +64,29 @@ resize. Those are M2.4/M2.5.
   calls the console. A window opened or moved afterwards runs its own repair, which
   paints above the console; the console follows a moved window through the
   visible-geometry generation on the next pump.
-- **D4 (MUST):** On a pending `Expose` for owner `0`, the console repaints that window's
+- **D4 (MUST):** On a pending `Expose` for owner `0`, the console repaints the system log's
   grid. The repaint is **pulled**, not called from the window service: `console::pump`
-  takes exposed owner-0 windows at the service opportunity (and the idle loop, through
+  takes an exposed owner-0 window at the service opportunity (and the idle loop, through
   the same `console::poll_input`). This keeps the lock order `CONSOLE → WINDOW →
   SCREEN`; no path takes `WINDOW` and then `CONSOLE`.
 - **D5 (MUST):** The routing is fixed: `print!`/`println!` (`console::_print`) feed the
-  system log; `core.write` feeds the terminal (the application echoes its own input);
-  every byte of both is still mirrored to COM1. Text is never echoed to both windows.
+  system log; `core.write` feeds the caller's terminal session when it has one and is
+  serial-only otherwise (spec 0021). Every byte of both is still mirrored to COM1. Text
+  is never echoed to both the log and a terminal.
 - **D6 (MUST):** Owner id `0` means "the kernel". Global task ids start at `1`, so no
   task can be confused with a kernel window. A kernel window is an ordinary window for
   the service: it has geometry, z-order, focus, `Expose`, hit-testing and
   `window_present`, and the kernel calls the same public `window::*` functions with
   owner `0`. A task can raise or focus it (a pointer click) but cannot close or move it.
 - **D7 (MUST):** Layout is derived from the reported screen; nothing assumes 1024×768.
-  The terminal frame is at `(8, 26)`, the log frame follows it with an 8-pixel gap, and
-  both use the full height minus an 8-pixel bottom margin. The top margin keeps the
-  frames clear of the 22-pixel menu bar of D8. If the derived content is below the 8×8
-  window minimum, no window is opened (serial only). Both titles are ordinary window
-  titles (at most 64 bytes).
-- **D8 (MUST):** A full-screen `syslib.clear` by an application erases the console
-  windows' pixels in the shared shadow, because the service has no per-window canvas.
-  Their records and grids survive; the next `Expose` or console output paints the cells
+  The system-log frame starts at `(8, 26)` and uses the full width minus the two
+  margins and the full height minus an 8-pixel bottom margin. The top margin keeps the
+  frame clear of the 22-pixel menu bar of D8. If the derived content is below the 8×8
+  window minimum, no window is opened (serial only). The title is an ordinary window
+  title (at most 64 bytes).
+- **D8 (MUST):** A full-screen `syslib.clear` by an application erases the log
+  window's pixels in the shared shadow, because the service has no per-window canvas.
+  Its record and grid survive; the next `Expose` or kernel log output paints the cells
   again. This is a documented consequence of the one-shadow model, not a service bug.
   The desktop shell itself does not clear the screen.
 
@@ -97,31 +98,26 @@ resize. Those are M2.4/M2.5.
   second (spec 0018, A3). The file name is the load path; the source keeps
   `unit desktop_shell;`, which is only diagnostic identity. An image without
   `system/entrypoint` (the `--shell` image) therefore boots the text `base/shell`
-  exactly as before M2.5.6. The desktop never attaches the console terminal; the
-  `shell` it launches does (spec 0014, the one-terminal rule).
+  exactly as before M2.5.6. The desktop does not own a terminal; an Apps activation
+  spawns `apps/utilities/terminal`, which opens its own emulator window and session
+  (spec 0021).
 - **D10 (MUST):** The shell draws a System 7.5-style menu bar at the top of the screen:
   a white bar 22 pixels high, a black 8×8 Apple square, the labels `File`, `Apps`,
-  `Windows` and `Terminal`, a black baseline on row 21, and the `core.clock()` `HH:MM`
+  `Windows` and `System`, a black baseline on row 21, and the `core.clock()` `HH:MM`
   right-aligned. The bar is application-drawn and is presented after it is drawn and
-  redrawn after every event. `File`, `Windows` and `Terminal` are direct items;
-  `Apps` (M8.3, D20) and `System` (M2.6.4) are pull-down menus. A pull-down's label is
+  redrawn after every event. `File` and `Windows` are direct items; `Apps` (M8.3, D20)
+  and `System` (M2.6.4) are pull-down menus. A pull-down's label is
   inverted while its menu is open. Both pull-downs are app-drawn and have no window, so
   opening one takes the machine-wide modal popup input grab (spec 0011, W26; ADR 0044)
   and closing it releases the grab; a bar click on the other pull-down switches menus.
   `F9` toggles Apps and `F10` toggles System.
 - **D11 (MUST):** A pointer-down with `window = 0` at a direct menu item runs it:
-  - `File` enumerates the live windows and writes their id, title and frame into the
-    terminal window;
+  - `File` enumerates the live windows and shows their id, title and frame in a
+    desktop-owned window (it no longer writes into a kernel terminal);
   - `Apps` toggles the application pull-down (D20). It does not launch anything when it
     opens; a row activates, and an outside click dismisses the menu;
-  - `Windows` raises the existing window titled `Terminal` (the "bring the terminal
-    forward" affordance without a dropdown; it sits left of the shell's window, so the
-    raise cannot uncover the shell);
-  - `Terminal` launches `shell` with `core.spawn` when no shell has been launched yet,
-    and records the task id. The desktop keeps pumping and never waits for it. After the
-    first launch, a Terminal click raises the live window titled `Terminal` instead of
-    spawning a second shell (which the one-terminal rule would refuse with `Full`); if
-    that window is gone because the shell exited, the click spawns a fresh shell.
+  - `Windows` raises the topmost window titled `Terminal` (the "bring the terminal
+    forward" affordance without a dropdown);
   - the Apple square raises the shell's own window.
 
   A launched application is never waited for: the shell uses `core.spawn`, not
@@ -143,14 +139,13 @@ resize. Those are M2.4/M2.5.
   check menu-bar/chrome/content pixels with `get_pixel`, call each menu item's handler
   directly (the boot desktop is itself an event consumer from M2.5.6, so an injected
   click from a second instance could be taken by it; the real pointer path is proved by
-  the boot harness and the routing proofs), verify the listing (Terminal and System Log
-  titles present), the Apps pull-down's item table, grab, highlight movement and one real
-  non-blocking launch (reaped with `core.wait`, so no child is left), the System menu and
-  its About panel, the focus change, verify that the `Terminal`
-  item raises the already-live terminal (check mode runs from a shell that holds it, so
-  it never spawns a second shell), verify enumeration ends in `NotFound` and
-  `window_present` succeeds, and print `desktop_shell: ok`. Normal mode draws the same
-  image, prints `desktop_shell: ready`, promotes itself to the realtime class with
+  the boot harness and the routing proofs), verify the listing (System Log title present
+  and the File window list), the Apps pull-down's item table and section headers, grab,
+  highlight movement and one real non-blocking launch (reaped with `core.wait`, so no
+  child is left), the System menu and its About panel, the focus change, verify that the
+  `Windows` item raises the topmost live terminal, verify enumeration ends in `NotFound`
+  and `window_present` succeeds, and print `desktop_shell: ok`. Normal mode draws the
+  same image, prints `desktop_shell: ready`, promotes itself to the realtime class with
   heartbeats (falling back to a normal loop when admission is full), and pumps
   `next_event` until it is killed.
 - **D14 (MUST):** There is no global work-area rule in M2.3.4. The shell places its own
@@ -178,14 +173,10 @@ resize. Those are M2.4/M2.5.
   `CONSOLE`, then `WINDOW` (to read visible parts **and hold through the paint**), then
   `SCREEN`; the window service's repair takes `WINDOW`, then `SCREEN`; no path takes
   `WINDOW` and then `CONSOLE`. Producers never take the window lock.
-- **D18 (MUST):** M2.5.5 extends D1/D4: the **terminal** half may be attached to an
-  ordinary task-owned window through `core.terminal_attach` (spec 0014, ADR 0028). The
-  first successful task attach releases the owner-`0` boot Terminal; the System Log
-  stays owner `0`. The console then pulls the terminal's `Expose` by id and the log's by
-  owner `0`, keeps D3's explicit-clip/generation rules and D17's lock order, and
-  detaches to serial-only when the terminal's window disappears. A terminal repaint
-  asserts the attached task's output, including children it spawns, as D5 already
-  requires; it does not add a second terminal or per-task routing.
+- **D18 (MUST):** M11 supersedes the M2.5.5 terminal attachment (spec 0021, ADR 0053):
+  the kernel keeps only the owner-`0` System Log. Application output goes to the
+  caller's console session, and a terminal is an application emulator. There is no
+  kernel terminal window and no `core.terminal_attach`.
 - **D19 (MUST):** Boot lands on the desktop. The REPL tries `entrypoint` first and
   `shell` second (spec 0002, spec 0005); the image stages `desktop_shell` under both
   names (`entrypoint` is an alias, not a second source). The boot desktop draws the bar
@@ -207,22 +198,28 @@ resize. Those are M2.4/M2.5.
   square reopens it, and `scripts/drag_content_qmp.py` keeps the desktop alive for its
   Calculator drag/click proof. A boot desktop cannot halt the system by losing its own
   window.
-- **D20 (MUST):** The `Apps` item is the application-selection pull-down (M8.3). It has
-  one 16-pixel row per item, in this order: `Calculator` → `calculator`, `Minesweeper` →
-  `minesweeper`, `Text Editor` → `editor`, `File Browser` → `browser`, `Clock` →
-  `clock_window`, `Widgets` → `widgets`. The frame is
-  `(menu_apps_x - 4, MenuHeight, 176, 6 * 16 + 2)`; it is drawn with the M2.4.3 menu
-  helpers and the labels are the app's own strings. Opening the menu takes the modal
-  popup input grab (spec 0011, W26) with the frame as the advisory rectangle and launches
-  nothing; closing it (an item, Escape, a bar switch, an outside click) releases the
-  grab. A row activation is a **non-blocking** `core.spawn(name, "", diag, id)` and logs
+- **D20 (MUST):** The `Apps` item is the application-selection pull-down (M8.3, updated
+  by M11). It has one 16-pixel row per item, in four sections led by non-selectable
+  header rows:
+  `Accessories` → `apps/accessories/calculator`, `apps/accessories/clock_window`,
+  `apps/accessories/widgets`; `Games` → `apps/games/minesweeper`;
+  `Productivity` → `apps/productivity/editor`, `apps/productivity/browser`;
+  `Utilities` → `apps/utilities/terminal`. The frame is
+  `(menu_apps_x - 4, MenuHeight, 220, row_count * 16 + 2)`; it is drawn with the M2.4.3
+  menu helpers, and a section header is a `#`-prefixed label that the helpers draw as
+  plain non-selectable text. Opening the menu takes the modal popup input grab
+  (spec 0011, W26) with the frame as the advisory rectangle and launches nothing;
+  closing it (an item, Escape, a bar switch, an outside click) releases the grab. A row
+  activation is a **non-blocking** `core.spawn(path, "", diag, id)` and logs
   `desktop_shell: launched <label> task <id>` (or the diagnostic on failure); the desktop
-  never waits in normal mode. `F9` toggles Apps, `F10` toggles System, Up/Down move the
-  highlight, Enter activates and Left/Right switch between the two pull-downs. The check
-  mode verifies the item table, both menus' grab/open/close, one real launch (the
-  `clock_window` deterministic check exits on its own and is reaped with `core.wait`),
-  the outside-click dismissal, the key switching and the pixels; `scripts/apps_menu_qmp.py`
-  proves a real `Clock` click at row 4 (over the kernel Terminal) on the boot desktop.
+  never waits in normal mode. Every Terminal activation spawns a new emulator; there is
+  no raise-first path. `F9` toggles Apps, `F10` toggles System, Up/Down move the
+  highlight across selectable rows, Enter activates and Left/Right switch between the
+  two pull-downs. The check mode verifies the item table, the section headers, both
+  menus' grab/open/close, one real launch (the `clock_window` deterministic check exits
+  on its own and is reaped with `core.wait`), the outside-click dismissal, the key
+  switching and the pixels; `scripts/apps_menu_qmp.py` proves a real `Clock` click on
+  the boot desktop and a second Terminal activation.
   The shell also claims the persistent pointer-region claim
   `(0, 0, screen_w, MenuHeight)` at startup, in normal and check mode, and releases it on
   exit (spec 0011, W27; ADR 0045). The modal grab only starts after a menu opens; without
@@ -230,9 +227,7 @@ resize. Those are M2.4/M2.5.
   press that opens the next menu (the M8.4 regression). A failed claim (`Full` when
   another desktop instance owns the bar, or disabled graphics) is reported and the shell
   keeps running; check mode accepts `Ok` or `Full` and releases only its own claim.
-  `scripts/apps_menu_qmp.py` launches `File Browser`, opens/dismisses Apps while it is
-  live, then clicks `Terminal` and requires `terminal: ok`; that sequence fails on M8.3 on
-  `-smp 4`. Submenus, filesystem app discovery and a task switcher are out of scope.
+  Submenus, filesystem app discovery and a task switcher are out of scope.
 
 ## Design
 
@@ -429,3 +424,4 @@ while that id is its own; otherwise it presents what the service last left.
 | 2026-11-18 | M8.5 (spec 0011 W28, ADR 0046): D12 records that the shell's own-window repaint re-reads `window_content_rect` on every `Expose` (its `draw_shell_window`/`draw_about` already did), so a dragged "Desktop" window redraws at the new origin after the service copies its content snapshot. No shell behaviour, opcode or `stdlib` helper changes. |
 | 2026-11-18 | D19 amended for M8.6 (spec 0010 I34, spec 0011 W29; ADR 0047): the desktop no longer receives an application's window-addressed clicks or keys even though it blocks in `next_event`. Only window-less events with no target (and the menu bar's region press) still compete with other tasks. The shell-image determinism note stays available, the close-the-desktop workaround is removed, and `scripts/input_routing_qmp.py` proves Browser navigation, About's close box and a Calculator click with the desktop alive. No D-level surface change. |
 | 2026-11-19 | The text shell tracks a current directory and runs the file commands as separate apps (spec 0013, `0b8ff2c`/`3597d6c`/`e02fc8f`): the prompt is `igis:/> `/`igis:/base> `, `cd [dir]` is the one stateful builtin (`~`/empty → `/home`, `/`, `.`, `..`), and a non-builtin command is resolved as `base/<cmd>` (fallback `system/<cmd>`). The file commands (`ls`, `dir`, `pwd`, `cat`, `head`, `tail`, `mkdir`, `rmdir`, `rm`) receive args `"<cwd> <rest>"`; every other app receives the raw tail, so `nc`, `purl`, `text` and `child` keep their `run` interfaces. The commands are separate `base/` apps over `lib/path`/`lib/cli`/`lib/list_dir`/`lib/file_view`; `run` keeps its explicit-path behavior and messages. The prompt change is app-only; every harness wait accepts `(?:shell> \|igis:/[^>]*> )`, and the langhost shell tests plus a new walk test pin the behavior. No D-level or kernel change. |
+| 2026-11-20 | M11 amends D1–D5, D7, D9–D13, D18 and D20 (spec 0021, ADR 0053): the kernel opens only the System Log; application output is a console session; terminals are `apps/utilities/terminal` emulators and every Apps activation starts a new one. The bar is `File / Apps / Windows / System`; the Apps menu has `Accessories`, `Games`, `Productivity` and `Utilities` section headers; `File` lists windows in a desktop-owned window. |

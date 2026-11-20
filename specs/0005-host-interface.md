@@ -72,7 +72,10 @@ The interface is split into two namespaces:
 | `fs_list` | `fn fs_list(path: &[u8], index: u64, name: &mut [u8]) -> Result<FsEntry, Status>` | no; root-only, directory order |
 | `fs_read` | `fn fs_read(path: &[u8], offset: u64, dst: &mut [u8]) -> Result<usize, Status>` | no; at most 256 bytes, 0 at EOF |
 | `fs_size` | `fn fs_size(path: &[u8]) -> Result<u64, Status>` | no; regular root files |
-| `terminal_attach` | `fn terminal_attach(window: u64) -> Status` | no; one machine-wide terminal, owner-checked by the kernel host |
+| `session_open` | `fn session_open() -> Result<u64, Status>` | no; fresh owner-checked session id (spec 0021, builtin 74) |
+| `session_close` | `fn session_close(id: u64) -> Status` | no; owner-checked (spec 0021, builtin 75) |
+| `session_send` | `fn session_send(id: u64, data: &[u8]) -> Result<usize, Status>` | no; non-blocking, `WouldBlock` when the input ring is full (spec 0021, builtin 76) |
+| `session_recv` | `fn session_recv(id: u64, dst: &mut [u8]) -> Result<usize, Status>` | no; non-blocking, `WouldBlock` when empty, `Closed` after finish (spec 0021, builtin 77) |
 | `halt` | `fn halt() -> Status` | no; stops the machine (never returns on the kernel), `Invalid` on a bare host |
 | `reboot` | `fn reboot() -> Status` | no; resets the machine, `Invalid` on a bare host |
 | `net_config` | `fn net_config(ip: u32, mask: u32, gateway: u32, dns: u32) -> Status` | no; machine-wide static IPv4 configuration (`core.net_config`, builtin 62) |
@@ -351,23 +354,29 @@ service compiles from.
   same root-only view over `samples/apps` (sorted names, the same 256-byte chunk).
   M2.5.1 is root-only by design: a separator is `Invalid`, not a traversal.
 
-#### Implemented ABI: terminal window (M2.5.5)
+#### Implemented ABI: terminal emulator sessions (M11)
+
+The terminal is an application emulator over a kernel console session (spec 0021,
+ADR 0053). `core.terminal_attach` (builtin 44) is retired; there is no kernel terminal
+grid.
 
 | Primitive | Implemented signature | Result |
 |-----------|-----------------------|--------|
-| `core.terminal_attach` | `(window_id: int) -> Status` | `Ok` binds the one console terminal grid to the caller's window; `NotFound` for an unknown id; `Invalid` for a foreign window, disabled graphics or a content rectangle below one cell; `Full` when another live task holds the terminal |
+| `core.session_open` | `(var id: int) -> Status` | `Ok` with a fresh positive session id; `Full` when the table or the caller's one live session is used; `Invalid` for a disabled host |
+| `core.session_close` | `(id: int) -> Status` | `Ok` for the owner (idempotent); `NotFound` stale; `Invalid` foreign |
+| `core.session_send` | `(id: int, data: const string[0] or const bytes[N], var sent: int) -> Status` | `Ok` with the copied count; `WouldBlock` when the input ring is full (nothing copied); `Closed` after finish/close; `NotFound`/`Invalid` per the handle rules |
+| `core.session_recv` | `(id: int, var dst: bytes[N], var read: int) -> Status` | `Ok` with the copied count; `WouldBlock` when empty; `Closed` when finished/closed and empty; `NotFound`/`Invalid` per the handle rules |
+| `core.session_source` | `(id: int) -> uint` | compiler-lowered `SOURCE_SESSION_BASE + id`, ready on output data or finish/close |
 
-- The kernel host supplies the caller's task id (`KernelHost::terminal_attach`), so the
-  language has no task id and no window-content primitive. The kernel checks ownership
-  and reads the content rectangle in one table lock (`CONSOLE → WINDOW`), releases the
-  owner-0 boot terminal on the first task attach, and repaints the new grid.
-- `Host::terminal_attach(window: u64) -> Status` defaults to `Invalid`: `langhost` and a
-  bare mock have no terminal window, so the shell falls back to serial there.
-- `console_write` keeps its signature and semantics; `core.read_input` reads the same
-  byte ring wherever output is painted. The attached terminal receives `core.write` only
-  (the application echoes its own input); `println!` stays in the System Log; serial
-  mirroring is unchanged. A terminal whose window disappears is detached and output
-  becomes serial-only until the next attach.
+- The interpreter stages the data or destination region and publishes the count only on
+  `Ok`; `session_recv` carries the destination capacity as a hidden operand, like
+  `socket_recv`. The compiler rejects a non-`bytes` receive destination and a positive
+  `session_send` data buffer that is neither `string` nor `bytes`.
+- `Host::session_open/close/send/recv/readable` default to `Invalid`/`false`, so
+  `langhost` and a bare mock keep the disabled-service contract.
+- A task's session binding is inherited at `core.spawn`/`core.run`; `core.write` and
+  `core.read_input`/source `0` route through it. Serial input is routed to the focused
+  window owner's session. `println!` stays in the System Log. The detail is spec 0021.
 
 #### Implemented ABI: system control (M2.6.4)
 
@@ -614,3 +623,4 @@ signal for origin and cost (`0003-language.md`).
 | 2026-11-19 | Blocking sockets (spec 0020 N13, M10.3/M10.4 follow-up): `WaitFor::Net(handle)`/`WaitFor::Deadline(ns)`; `Host::socket_timeout` (builtin 71), `Host::socket_timed_out` and `Host::socket_arm_wait` (kernel helpers), and compiler-lowered `core.socket_source` (`1 << 63 \| handle`) in `next_any`/`poll_any`. A host `WouldBlock` blocks the machine and retries the same instruction; the stack deadline defaults to 30 s (`0` = none), the TCP connect keeps 5 s, and `net::service` wakes after dropping the network lock. No opcode; ABI v1 stays 75. |
 | 2026-11-19 | `Host::socket_readable` is selector readiness: data, EOF, an error, a pending listener connection or an expired deadline; a bare completed TCP connect is excluded (the first blocking receive still waits for data). `Stack::readable` keeps the connect-completion meaning for other callers. No opcode; ABI v1 stays 75. |
 | 2026-11-17 | Q44 resolved (ADR 0037): the kernel line discipline is gone. COM1 drains into a 512-byte raw ring (newest byte dropped and counted when full, no echo); PS/2 key presses go only to the event queue. `Host::read_input(dst) -> usize` (non-blocking, `0` when empty) behind `core.read_input(var bytes[N]) -> int` replaces `Host::read_line`; it reuses the `READ_LINE` opcode slot as `READ_INPUT` (`0x42`), so ABI v1 stays at 75. Source `0` is now "a console byte is available" and the probe is `Host::console_byte_ready`. The shell echoes and edits its own `string[256]` with the `stdlib.str_*` helpers and blocks in `core.next_any`; `langhost` drains a scripted byte queue. |
+| 2026-11-20 | M11 console sessions (spec 0021, ADR 0053): `Host::session_open`/`session_close`/`session_send`/`session_recv` (builtins 74–77, `Invalid`/`false` defaults) and compiler-lowered `core.session_source` (`1 << 62 | id`). A child inherits the requester session; `core.write`/`read_input` route through it. Serial input follows the focused window owner. `Host::terminal_attach` is retired. No opcode; ABI v1 stays 75. |

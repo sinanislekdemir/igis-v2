@@ -1,6 +1,6 @@
 # 0014: The terminal window
 
-- **Status:** Accepted
+- **Status:** Superseded by 0021
 - **Scope:** `abi`, `compiler`, `interpreter`, `kernel` (`console`, `window`, `sched`),
   `langhost`, `samples/apps`; M2.5.5 of the desktop milestone
 - **Supersedes:** the owner-`0`-only terminal of spec 0012 D1 (extended, not removed)

@@ -20,13 +20,14 @@ revised as understanding improves, and their history lives in git.
 | 0011 | [Windows](0011-windows.md) | Accepted | abi, compiler, interpreter, kernel window/gfx/task/sched, syslib | 2026-11-17 |
 | 0012 | [The desktop shell and kernel text windows](0012-desktop-shell.md) | Accepted | kernel console/gfx/window/sched, compiler, interpreter, abi, samples/apps | 2026-11-17 |
 | 0013 | [The application file API](0013-application-files.md) | Accepted | abi, compiler, interpreter, kernel ext2/sched/repl, langhost, samples/apps | 2026-11-17 |
-| 0014 | [The terminal window](0014-terminal-window.md) | Accepted | abi, compiler, interpreter, kernel console/window/sched, langhost, samples/apps | 2026-11-17 |
+| 0014 | [The terminal window](0014-terminal-window.md) | Superseded by 0021 | abi, compiler, interpreter, kernel console/window/sched, langhost, samples/apps | 2026-11-17 |
 | 0015 | [The proportional font](0015-proportional-font.md) | Implemented | abi, compiler, interpreter, kernel font/gfx/window/console, langhost, samples/apps | 2026-11-17 |
 | 0016 | [Performance measurement](0016-performance.md) | Implemented | kernel window/console/gfx/clock, samples/apps/perf | 2026-11-17 |
 | 0017 | [The system menu and system control](0017-system-menu.md) | Implemented | kernel sched/smp/main, arch reboot, abi, compiler, interpreter, langhost, samples/apps | 2026-11-17 |
 | 0018 | [The image filesystem and importable library modules](0018-filesystem-and-modules.md) | Implemented | abi, compiler, interpreter, kernel ext2/repl/sched, langhost, xtask, samples/apps | 2026-11-18 |
 | 0019 | [The writable home filesystem](0019-writable-home-filesystem.md) | Implemented | ext2w, kernel ata/fs/repl/sched, abi, compiler, interpreter, langhost, xtask, samples/apps | 2026-11-18 |
 | 0020 | [Networking — IPv4, UDP, TCP and the `socket` unit](0020-networking.md) | Implemented | net (new crate), kernel pci/net/sched/task, arch PCI/IOAPIC/IDT, abi, compiler, interpreter, langhost, xtask, samples/apps, scripts | 2026-11-19 |
+| 0021 | [The terminal emulator and console sessions](0021-terminal-emulator.md) | Accepted | abi, compiler, interpreter, kernel console/session/sched/task/repl, langhost, samples/apps | 2026-11-20 |
 
 ## Lifecycle
 

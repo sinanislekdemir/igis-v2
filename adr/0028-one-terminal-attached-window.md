@@ -1,6 +1,6 @@
 # 0028: One machine-wide terminal attached to a task-owned window
 
-- **Status:** Accepted
+- **Status:** Superseded by 0053
 - **Date:** 2026-11-17
 - **Deciders:** project owner
 - **Spec:** 0014 (terminal window), 0005 (host interface), 0012 (console routing)

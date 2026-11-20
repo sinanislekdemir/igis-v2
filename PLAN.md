@@ -2170,6 +2170,33 @@ ticket is verified" plus `cargo test -p net`; `-smp 4` and `-smp 1` transcripts;
 `AGENTS.md` status/log row and this file updated. IPv6, TLS/HTTPS, Wi-Fi, multiple
 NICs and TCP congestion control remain out of scope (OPEN-QUESTIONS Q52–Q58).
 
+## M11: Terminal emulator, app tree and Apps sections
+
+Normative: spec 0021 and ADR 0053; specs 0012, 0018, 0005 and 0003 amended.
+Goal: the terminal is an application emulator over kernel console sessions, GUI
+apps live under `/apps/<category>`, and the Apps menu has sections.
+
+- [x] **M11.1 Specs and ADR.** Spec 0021, ADR 0053, the supersession of 0014/0028,
+  and the amendments to 0012/0018/0005/0003. No code.
+- [ ] **M11.2 Session ABI and interpreter.** `core.session_open/close/send/recv`
+  (builtins 74–77), compiler-lowered `core.session_source`, `Host` defaults, the
+  `abi::wait` source tag, and host tests. Retire `core.terminal_attach`.
+- [ ] **M11.3 Kernel sessions and routing.** A static session table sized from
+  `MAX_TASKS`, task session inheritance, `core.write`/`read_input` routing,
+  focused-session serial input, wake paths and `Task::reclaim` cleanup.
+- [ ] **M11.4 Terminal emulator and shell.** `apps/utilities/terminal.ig`, the
+  session shell (`base/shell`), `terminal_probe`, the retirement of the kernel
+  terminal window, and the one-window System Log.
+- [ ] **M11.5 `/apps` tree.** Move the six GUI app sources to
+  `apps/accessories|games|productivity`, add the top-level `apps` directory to
+  xtask/ext2/langhost, and implement the bare-name search order.
+- [ ] **M11.6 Apps menu.** `stdlib.ui_menu_is_header` / header rendering,
+  section table, Terminal item, direct `Terminal` removal, File window list and
+  the desktop check.
+- [ ] **M11.7 Regression and proof.** Host tests, `-smp 4`/`-smp 1` transcripts,
+  two-terminal QMP proof, updated app-menu/boot scripts, visual golden, and
+  `AGENTS.md`/`HISTORY`/PLAN status.
+
 ## Deferred (not UI; pick up when they matter)
 
 | Item | Where | Trigger |

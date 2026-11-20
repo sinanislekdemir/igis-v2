@@ -1130,22 +1130,25 @@ F14. Spec 0019 adds `core.fs_write`/`fs_remove`/`fs_mkdir`/`fs_rename`/`fs_trunc
 (builtins 53–57) for the writable `/home` mount; the read primitives above are
 unchanged and writes elsewhere are `Invalid`.
 
-### Terminal window (M2.5.5)
+### Terminal emulator and console sessions (M11)
 
 ```text
-core.terminal_attach(window_id: int) -> Status
+core.session_open(var id: int) -> Status
+core.session_close(id: int) -> Status
+core.session_send(id: int; data: const string[0] or const bytes[N];
+                  var sent: int) -> Status
+core.session_recv(id: int; var dst: bytes[N]; var read: int) -> Status
+core.session_source(id: int) -> uint
 ```
 
-Builtin 44, not an opcode. It binds the machine-wide console terminal grid (the
-`core.write` byte stream) to a window owned by the calling task, with the kernel
-supplying the task id. `Ok` on success; `NotFound` for an unknown window; `Invalid` for
-a foreign window, disabled graphics or a content rectangle too small for one 8×8 cell;
-`Full` when another live task holds the one terminal. A repeated attach by the current
-owner is `Ok`; the same owner may rebind to another of its windows.
-`println!`/`print!` stay in the kernel's System Log window, `core.read_input` reads the
-same byte ring, and a detach (the owner's window disappears) leaves output serial-only
-until the next attach. The language has no task id and no
-window-content drawing primitive. Spec 0014 and ADR 0028 own the contract.
+Builtins 74–77 plus a compiler-lowered source helper; no opcode is added (ABI v1 stays
+75). A session is an owner-checked pair of byte rings: the terminal emulator owns it,
+writes keystrokes with `session_send` and reads screen bytes with `session_recv`; a
+spawned child inherits it, so its `core.write` lands in the output ring and its
+`core.read_input`/source `0` reads the input ring. `session_source` is a `next_any`
+source ready on output data or finish/close. `core.terminal_attach` is retired.
+`println!`/`print!` stay in the System Log; `core.write` never feeds it. The exact
+status table and failure modes are spec 0021 and ADR 0053.
 
 ### System control (M2.6.4)
 
@@ -1826,6 +1829,7 @@ pull-down.
 |--------|-----------|
 | `stdlib.ui_menu_bar_height() -> int` | 22, the bar height. |
 | `stdlib.ui_menu_is_separator(label) -> bool` | True when the label is exactly `-`. |
+| `stdlib.ui_menu_is_header(label) -> bool` | True when the label starts with `#`; the helper draws the text after the marker as a non-selectable section header. |
 | `stdlib.ui_menu_bit(index) -> uint` | The single-bit value for `0..=63`; 0 outside. |
 | `stdlib.ui_menu_has(mask, index) -> bool` | True when the mask has the item's bit; false outside. |
 | `stdlib.ui_menu_set(mask, index, value) -> uint` | The mask with the bit set or cleared; out-of-range is a no-op. |
@@ -2220,3 +2224,4 @@ controls and input dialog for the QMP screenshot harness.
 | 2026-11-18 | M8.3 adds the modal popup input grab surface (spec 0011 W26, ADR 0044): `syslib.popup_grab(x: int, y: int, w: int, h: int) -> Status` and `syslib.popup_release() -> Status`. The grab is machine-wide and task-owned; while held, only the owner receives queued input events and the window service ignores pointer presses, so an app-drawn pull-down works over another window. `Ok`/`Full`/`Invalid` on take (a repeat by the owner updates the advisory rectangle), `Ok`/`NotFound`/`Invalid` on release. Host builtins 58/59, no opcode; the machine rejects a non-positive extent before the host call. |
 | 2026-11-18 | M8.4 adds the persistent pointer-region claim surface (spec 0011 W27, ADR 0045): `syslib.region_claim(x: int, y: int, w: int, h: int) -> Status` and `syslib.region_release() -> Status`. The claim is machine-wide and task-owned; while it is held and no modal grab is active, a queued `PointerDown` with `window = 0` inside the rectangle belongs only to the owner, and a new press there starts no service drag and posts no close request. `Ok`/`Full`/`Invalid` on take (a repeat by the owner updates the rectangle), `Ok`/`NotFound`/`Invalid` on release. Host builtins 60/61, no opcode; the machine rejects a non-positive extent before the host call. |
 | 2026-11-19 | M9.4 raises the editor's application buffer from 8192 to 131072 bytes (128 KiB, the spec 0008 per-unit source cap; `LineStateCapacity` follows at 131073). The M2.5.3 rules are unchanged — boundary-checked replacement, app-local `bytes[BufferCapacity]` staging, one strict-UTF-8 publish, `CapacityExceeded` without a partial write — and the size check now refuses only files over 131072 with `too large (131072 max)`. Every current source sample fits (the largest is `editor` at 81,509 B); the user-visible failure was the file-open dialog correctly returning `base/calculator` (32,516 B) while the editor's 8 KiB cap refused it silently. No language, ABI, opcode, builtin or file-API change. |
+| 2026-11-20 | M11 replaces the terminal-window surface with console sessions (spec 0021, ADR 0053): `core.session_open`/`close`/`send`/`recv` are builtins 74–77 and `core.session_source` is compiler-lowered; `core.terminal_attach` (44) is retired. The terminal is an application emulator. A `#`-prefixed menu label is a non-selectable section header (`stdlib.ui_menu_is_header`). No opcode is added; ABI v1 stays 75. |

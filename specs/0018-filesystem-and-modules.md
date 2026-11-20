@@ -34,14 +34,18 @@ mount table. `stdlib` stays embedded and is not moved into the image.
 ### Layout and path syntax
 
 - **L1 (MUST):** The application image is one read-only ext2 tree (spec 0015) with
-  the top-level directories `lib`, `base`, `home` and `system`. The only other
-  root entry is `mke2fs`'s `lost+found`.
+  the top-level directories `lib`, `base`, `apps`, `home` and `system`. The only
+  other root entry is `mke2fs`'s `lost+found`.
 - **L2 (MUST):** `lib` holds importable module sources named `<name>.ig`; nesting is
   allowed (`lib/ui/menu.ig`).
-- **L3 (MUST):** `base` holds the applications a user launches. A source file is
-  `samples/apps/base/<name>.ig` (or `samples/tests/apps/base/<name>.ig`) and the
-  stager drops the `.ig` suffix, so the image name has no extension (`base/shell`,
-  `base/editor`). `lib` sources keep `<name>.ig`.
+- **L3 (MUST):** `base` holds the command-line and session applications a user
+  launches, and `apps` holds launchable GUI applications under a category
+  directory (`apps/<category>/<name>`). A source file is
+  `samples/apps/base/<name>.ig` or `samples/apps/apps/<category>/<name>.ig` (or
+  the matching `samples/tests/apps/...` path) and the stager drops the `.ig`
+  suffix, so the image name has no extension (`base/shell`,
+  `apps/utilities/terminal`, `apps/productivity/editor`). `lib` sources keep
+  `<name>.ig`.
 - **L4 (MUST):** `home` holds user files and is read-only in this slice.
 - **L5 (MUST):** `system` holds kernel and boot-owned applications
   (`system/entrypoint`, `system/system_probe`, `system/terminal_probe`).
@@ -113,10 +117,13 @@ mount table. `stdlib` stays embedded and is not moved into the image.
 
 ### Applications and the file API
 
-- **A1 (MUST):** A launch path with no `/` resolves to `base/<name>`; a path with
-  `/` is used as written, relative to the image root. `run clock` and `run
-  base/clock` are the same application, and `run system/system_probe` launches a
-  system application.
+- **A1 (MUST):** A launch path with no `/` is searched in this order:
+  `base/<name>`, `apps/accessories/<name>`, `apps/games/<name>`,
+  `apps/productivity/<name>`, `apps/utilities/<name>`, `system/<name>`. The
+  first regular file wins. A path with `/` is used as written, relative to the
+  image root. `run terminal`, `run apps/utilities/terminal` and
+  `run base/shell` name their applications unambiguously; a duplicate bare name
+  across categories resolves by the fixed order above.
 - **A2 (MUST):** Any valid path may be launched. There is no capability model
   (vision R14), so restricting `home` or `system` would be cosmetic; a path that is
   not an application fails with the compiler's `missing main` diagnostic.
@@ -322,3 +329,4 @@ window and task that host it, and the caller's own window stays behind.
 | 2026-11-19 | M9.3 adds `lib/file_dialog.ig`: a module with one public function, `file_dialog.open_file(initial, chosen) -> Status`, that opens a task-owned, screen-centred `Open File` window, lists up to 96 image entries, navigates with keys/pointer/scrollbar and writes a regular-file path only on `Ok` (`Invalid` cancel, `CapacityExceeded` when the caller's 256-byte destination cannot hold it; both leave `chosen` untouched). It follows the M5 (`stdlib` import) and M6 (no `main`/state/stream) module rules and adds no opcode, builtin, file API or `stdlib` function. |
 | 2026-11-20 | L10/X1–X3 separate the shipped and test corpora: `samples/apps` holds only applications a user launches, `samples/tests/apps` holds proofs, helper children and negative fixtures, and `samples/home` is the single `home/` seed. `xtask image` builds the product image from the shipped corpus; `xtask image --shell` overlays the test corpus (collisions are errors) and remains the boot for the QMP regression suite. |
 | 2026-11-20 | L3 adds the source extension: `samples/apps/{base,system}` and `samples/tests/apps/{base,system}` sources are `<name>.ig`, and the stager drops `.ig` so image names stay extensionless (`base/shell`). `lib` keeps `<name>.ig`. `langhost` maps image paths to `.ig` sources, lists bare command names, and reports a path that descends through an application file (`base/child/x`) as `Invalid`. |
+| 2026-11-20 | M11 adds the top-level `apps` directory and its category tree (`apps/accessories`, `apps/games`, `apps/productivity`, `apps/utilities`). Bare launch names are searched in `base`, those four categories, then `system`; explicit paths are unchanged. The shipped GUI sources move under `samples/apps/apps/<category>/`. |
