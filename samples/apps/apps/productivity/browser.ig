@@ -525,34 +525,18 @@ end;
 
 // ---- launch ---------------------------------------------------------------
 
-// Blocking launcher: spawn the selected regular source app by its full image
-// path, then wait for it to exit. `Ok` means `ExitReason.Ok`; a killed or
-// faulted child is `IoError`. On a directory Ctrl+L descends instead; a kind-2
-// entry is refused before the spawn.
-function launch_name(entry_name: const string[0]; args: const string[0];
-                     entry_kind: uint): Status;
+// Blocking launcher for a full image path: spawn the source app, then wait for
+// it to exit. `Ok` means `ExitReason.Ok`; a killed or faulted child is
+// `IoError`. The check mode uses this for the editor, whose real path is
+// `apps/productivity/editor` rather than a name under the current directory.
+function launch_path(path: const string[0]; args: const string[0]): Status;
 var
   err: Status;
   child: int;
   why: ExitReason;
 begin
-  if entry_kind = uint(1) then
-    return enter_dir(entry_name);
-  if entry_kind <> uint(0) then
-  begin
-    status_line := "cannot launch this entry";
-    return Invalid;
-  end;
-
-  err := join_path(dir, entry_name, path_buf);
-  if err <> Ok then
-  begin
-    status_line := "path too long";
-    return err;
-  end;
-
   child := 0;
-  err := core.spawn(path_buf, args, diag, child);
+  err := core.spawn(path, args, diag, child);
   if err <> Ok then
   begin
     status_line := "launch failed";
@@ -581,6 +565,31 @@ begin
     end;
   end;
   return err;
+end;
+
+// Blocking launcher for a name in the current directory: `base/name` at the
+// root, or just `name` when the directory is empty. On a directory Ctrl+L
+// descends instead; a kind-2 entry is refused before the spawn.
+function launch_name(entry_name: const string[0]; args: const string[0];
+                     entry_kind: uint): Status;
+var
+  err: Status;
+begin
+  if entry_kind = uint(1) then
+    return enter_dir(entry_name);
+  if entry_kind <> uint(0) then
+  begin
+    status_line := "cannot launch this entry";
+    return Invalid;
+  end;
+
+  err := join_path(dir, entry_name, path_buf);
+  if err <> Ok then
+  begin
+    status_line := "path too long";
+    return err;
+  end;
+  return launch_path(path_buf, args);
 end;
 
 procedure launch_selected();
@@ -1828,7 +1837,7 @@ begin
   // blocking launcher leaves no child behind. The full path is `apps/productivity/editor`.
   err := enter_dir("base");
   verify("launch in base", err = Ok and dir = "base");
-  value := launch_name("editor", "check", uint(0));
+  value := launch_path("apps/productivity/editor", "check");
   verify("launch completed",
     value = Ok and last_task > 0 and int(core.len(diag.message)) = 0);
   verify("launch status", status_line = "launched: ok");
