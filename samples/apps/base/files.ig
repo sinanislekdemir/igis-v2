@@ -5,7 +5,7 @@ unit files;
 //
 //   run files
 //
-// Lists the image root (the five directories plus `mke2fs`'s `lost+found`),
+// Lists the image root (the six directories plus `mke2fs`'s `lost+found`),
 // lists `base` and `system`, then reads `base/child` in fixed 256-byte chunks
 // and checks the total against `core.fs_size`. It also proves the offset rules
 // (a middle byte, the last byte, an offset at the end and past it), atomic
@@ -32,6 +32,7 @@ var
   found_home: bool;
   found_lib: bool;
   found_system: bool;
+  found_image: bool;
   found_lost: bool;
   found_child: bool;
   found_text: bool;
@@ -80,6 +81,7 @@ begin
   found_home := false;
   found_lib := false;
   found_system := false;
+  found_image := false;
   found_lost := false;
   found_child := false;
   found_text := false;
@@ -109,17 +111,19 @@ begin
       found_lib := true;
     if name = "system" and kind = uint(1) then
       found_system := true;
+    if name = "image" and kind = uint(1) then
+      found_image := true;
     if name = "lost+found" and kind = uint(1) then
       found_lost := true;
     index := index + uint(1);
     st := core.fs_list("", index, name, kind, size);
   end;
-  // The kernel image has five directories and lost+found; the host tree has
-  // the five directories only.
+  // The kernel image has six directories and lost+found; the host tree has
+  // the six directories only.
   check("root listing",
     each_ok and st = NotFound and found_base and found_apps and found_home
-      and found_lib and found_system
-      and ((found_lost and count = uint(6)) or (not found_lost and count = uint(5))));
+      and found_lib and found_system and found_image
+      and ((found_lost and count = uint(7)) or (not found_lost and count = uint(6))));
   out.say("files: root entries=");
   out.say_int(int(count));
   out.say("\n");

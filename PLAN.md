@@ -2229,6 +2229,31 @@ Goal: the Settings app changes the **real** screen mode without a reboot.
   800×600) and `scripts/settings_desktop_qmp.py` (Apps > Settings > Apply on the
   boot desktop, exactly 800×600) on `-smp 4`; the same suite on `-smp 1`.
 
+## M13: PNG image viewer
+
+Normative: spec 0023 and ADR 0057.
+Goal: a full-resolution PNG corpus under `/image` and a streaming viewer that fits
+Adam7 pass 1 to the window; no kernel image codec and no full-image buffer.
+
+- [ ] **M13.1 Corpus and image tree.** Convert the four JPEGs at original size to
+  8-bit RGB Adam7-interlaced PNG, stage `samples/image` as `/image`, grow the apps
+  image to 64 MiB, teach the VFS self-check, `files` and `langhost` the sixth root
+  directory.
+- [ ] **M13.2 Bit and byte primitives.** `core.bit_and/or/xor/shl/shr` and
+  `core.copy_bytes/fill_bytes`, then `lib.bitio`, as format-independent layers.
+- [ ] **M13.3 `lib.inflate`.** Streaming zlib/DEFLATE over a 32 KiB window with the
+  stable status set, reusable outside PNG.
+- [ ] **M13.4 `lib.png`.** Row-streaming decoder: colour types 0/2/3/4/6 at 8-bit,
+  filters 0–4, palette expansion, alpha over white, CRC ignored, Adam7 pass 1 for
+  the preview and row-by-row otherwise.
+- [ ] **M13.5 `syslib.blit_rgb`.** Blit one opaque RGB row into a window's bounded
+  content buffer.
+- [ ] **M13.6 Viewer app.** `apps/accessories/image_viewer`: open from `image`, fit
+  the Adam7 pass-1 preview, stream rows for the full view, `check`/`shot` modes.
+- [ ] **M13.7 Menu row and proof.** Add the `Accessories` row (spec 0012), then host
+  tests, the `--shell` transcript, a QMP screenshot, `-smp 4`/`-smp 1` and an
+  unchanged visual golden.
+
 ## Deferred (not UI; pick up when they matter)
 
 | Item | Where | Trigger |

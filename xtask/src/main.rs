@@ -157,10 +157,12 @@ fn image(shell: bool, reset_home: bool, net_irq: &str) -> ExitCode {
 ///
 /// The shipped corpus is `samples/apps/`. The `home` fallback comes from
 /// `samples/home/`, the same seed the writable disk uses, so it has one source.
-/// The staging directory and the image live under `build/`; `mke2fs -d` copies
-/// the staged tree into a fresh 4 MiB ext2 filesystem with 1 KiB blocks. The
-/// image carries source files only (ADR 0019) and preserves the source tree
-/// (spec 0018, X1): `lib`, `base`, `home` and `system` become real directories,
+/// The PNG corpus comes from `samples/image/` and is served read-only at
+/// `image/` (spec 0023). The staging directory and the image live under
+/// `build/`; `mke2fs -d` copies the staged tree into a fresh 64 MiB ext2
+/// filesystem with 1 KiB blocks. The image carries application source (ADR
+/// 0019) and the image corpus, and preserves the source tree (spec 0018, X1):
+/// `lib`, `base`, `apps`, `home`, `system` and `image` become real directories,
 /// and no file sits at the image root.
 ///
 /// The boot entry is `system/entrypoint` (spec 0018, A3): `base/desktop_shell`
@@ -180,6 +182,8 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
     }
     // Spec 0018, L1: the source root holds only image directories.
     let top_level = ["lib", "base", "apps", "home", "system"];
+    // The staged image also carries the read-only PNG corpus (spec 0023).
+    let staged_dirs = ["lib", "base", "apps", "home", "system", "image"];
     let entries =
         fs::read_dir(&source).map_err(|error| format!("{}: {error}", source.display()))?;
     for entry in entries {
@@ -219,6 +223,13 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
     }
     stage_tree(&home_seed, &staging.join("home"), false)?;
 
+    // The PNG corpus is served read-only at `image/` (spec 0023).
+    let image_seed = root().join("samples").join("image");
+    if !image_seed.is_dir() {
+        return Err(format!("{} is not a directory", image_seed.display()));
+    }
+    stage_tree(&image_seed, &staging.join("image"), false)?;
+
     // X2: the test corpus is present only in the `--shell` image.
     if shell {
         let tests = root().join("samples").join("tests").join("apps");
@@ -246,8 +257,8 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
         stage_apps(&tests, &staging, true)?;
     }
 
-    // The four top-level directories exist even when empty.
-    for name in top_level {
+    // The six top-level directories exist even when empty.
+    for name in staged_dirs {
         fs::create_dir_all(staging.join(name))
             .map_err(|error| format!("{}: {error}", staging.join(name).display()))?;
     }
@@ -279,7 +290,7 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
         .arg(&staging)
         .arg("-F")
         .arg(&image)
-        .arg("4M")
+        .arg("64M")
         .status()
         .map_err(|error| format!("failed to run mke2fs: {error}"))?;
     if !status.success() {

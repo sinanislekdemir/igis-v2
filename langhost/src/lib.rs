@@ -27,8 +27,8 @@ pub const MAX_SPAWN_DEPTH: u32 = 8;
 
 /// Directory the file API and `core.spawn` resolve image paths against, unless
 /// `IGIS_APP_DIR` is set. It is the source tree `xtask image` stages, so the
-/// host and the kernel see the same `lib`/`base`/`home`/`system` layout
-/// (spec 0018).
+/// host and the kernel see the same `lib`/`base`/`apps`/`home`/`system` layout
+/// plus the sibling `image` tree (spec 0018, spec 0023).
 const DEFAULT_APP_DIR: &str = "samples/apps";
 
 /// Directories a bare launch name is searched in (spec 0018, A1). The first
@@ -224,6 +224,10 @@ struct ConsoleHost {
     /// A6). `home` and `home/...` resolve here; the top-level host owns it and
     /// removes it on drop, a child shares the parent's directory.
     home_dir: PathBuf,
+    /// The PNG corpus served read-only at `image` (spec 0023). It is the
+    /// `image` sibling of the source tree, so `IGIS_APP_DIR` moves it too.
+    /// Missing when the host runs outside the repository.
+    image_dir: PathBuf,
     /// True only for the host that created `home_dir`.
     home_owned: bool,
     children: HashMap<u64, ExitReason>,
@@ -246,6 +250,7 @@ impl ConsoleHost {
             source_dir: self.source_dir.clone(),
             test_dir: self.test_dir.clone(),
             home_dir: self.home_dir.clone(),
+            image_dir: self.image_dir.clone(),
             home_owned: false,
             children: HashMap::new(),
             next_id: 1,
@@ -260,6 +265,9 @@ impl ConsoleHost {
     fn resolve_path(&self, path: &str) -> Result<PathBuf, Status> {
         if let Some(local) = home_local(path) {
             return resolve_in(&self.home_dir, local);
+        }
+        if let Some(local) = image_local(path) {
+            return resolve_in(&self.image_dir, local);
         }
         self.resolve_image(path)
     }
@@ -306,12 +314,14 @@ impl ConsoleHost {
         let source_dir = app_dir();
         let test_dir = test_dir_for(&source_dir);
         let home_dir = make_home_dir(&source_dir);
+        let image_dir = image_dir_for(&source_dir);
         ConsoleHost {
             output: Vec::new(),
             depth,
             source_dir,
             test_dir,
             home_dir,
+            image_dir,
             home_owned: true,
             children: HashMap::new(),
             next_id: 1,
@@ -380,6 +390,16 @@ fn home_local(path: &str) -> Option<&str> {
     }
 }
 
+/// Splits `image` / `image/...` into the path local to the PNG corpus (spec
+/// 0023). Every other path is `None` and stays on the application tree.
+fn image_local(path: &str) -> Option<&str> {
+    if path == "image" {
+        Some("")
+    } else {
+        path.strip_prefix("image/")
+    }
+}
+
 /// The test-only corpus next to the shipped one: `<parent>/tests/apps`, which
 /// is `samples/tests/apps` for the default tree. A missing directory simply
 /// contributes no entries (spec 0018, L10).
@@ -387,6 +407,16 @@ fn test_dir_for(source_dir: &std::path::Path) -> PathBuf {
     source_dir
         .parent()
         .map(|parent| parent.join("tests").join("apps"))
+        .unwrap_or_default()
+}
+
+/// The PNG corpus next to the shipped application tree: `<parent>/image`,
+/// which is `samples/image` for the default tree (spec 0023). A missing
+/// directory simply makes `image` and `image/...` `NotFound`.
+fn image_dir_for(source_dir: &std::path::Path) -> PathBuf {
+    source_dir
+        .parent()
+        .map(|parent| parent.join("image"))
         .unwrap_or_default()
 }
 
@@ -669,10 +699,11 @@ impl Host for ConsoleHost {
 
     // Application files (spec 0013, spec 0018). `langhost` has a real
     // filesystem, so it implements the same tree view over the sample source
-    // directory the image is built from: listing is sorted by name (the ext2
-    // order is not sorted, so no program may depend on it), reads are chunked
-    // at the same 256 bytes, and symlinks and other non-file entries are
-    // refused exactly as the kernel subset does.
+    // directory the image is built from, plus the read-only PNG corpus
+    // (spec 0023): listing is sorted by name (the ext2 order is not sorted, so
+    // no program may depend on it), reads are chunked at the same 256 bytes,
+    // and symlinks and other non-file entries are refused exactly as the
+    // kernel subset does.
     fn fs_list(&mut self, path: &[u8], index: u64, name: &mut [u8]) -> Result<FsEntry, Status> {
         let path = std::str::from_utf8(path).map_err(|_| Status::Invalid)?;
         let status = abi::fs::validate_dir(path);
@@ -682,31 +713,21 @@ impl Host for ConsoleHost {
         let index = usize::try_from(index).map_err(|_| Status::NotFound)?;
         let directories: Vec<PathBuf> = match home_local(path) {
             Some(local) => vec![resolve_in(&self.home_dir, local)?],
-            None => {
-                let mut directories = Vec::new();
-                let mut resolved_file = false;
-                let extended = if is_app_path(path) {
-                    Some(format!("{path}.ig"))
-                } else {
-                    None
-                };
-                for root in [&self.source_dir, &self.test_dir] {
-                    match resolve_in(root, path) {
-                        Ok(directory) => {
-                            if directory.is_dir() {
-                                directories.push(directory);
-                            } else {
-                                resolved_file = true;
-                            }
-                        }
-                        Err(Status::NotFound) => {}
-                        Err(status) => return Err(status),
-                    }
-                    if let Some(extended) = &extended {
-                        match resolve_in(root, extended) {
-                            Ok(source) => {
-                                if source.is_dir() {
-                                    directories.push(source);
+            None => match image_local(path) {
+                Some(local) => vec![resolve_in(&self.image_dir, local)?],
+                None => {
+                    let mut directories = Vec::new();
+                    let mut resolved_file = false;
+                    let extended = if is_app_path(path) {
+                        Some(format!("{path}.ig"))
+                    } else {
+                        None
+                    };
+                    for root in [&self.source_dir, &self.test_dir] {
+                        match resolve_in(root, path) {
+                            Ok(directory) => {
+                                if directory.is_dir() {
+                                    directories.push(directory);
                                 } else {
                                     resolved_file = true;
                                 }
@@ -714,17 +735,30 @@ impl Host for ConsoleHost {
                             Err(Status::NotFound) => {}
                             Err(status) => return Err(status),
                         }
+                        if let Some(extended) = &extended {
+                            match resolve_in(root, extended) {
+                                Ok(source) => {
+                                    if source.is_dir() {
+                                        directories.push(source);
+                                    } else {
+                                        resolved_file = true;
+                                    }
+                                }
+                                Err(Status::NotFound) => {}
+                                Err(status) => return Err(status),
+                            }
+                        }
                     }
+                    if directories.is_empty() {
+                        return Err(if resolved_file {
+                            Status::Invalid
+                        } else {
+                            Status::NotFound
+                        });
+                    }
+                    directories
                 }
-                if directories.is_empty() {
-                    return Err(if resolved_file {
-                        Status::Invalid
-                    } else {
-                        Status::NotFound
-                    });
-                }
-                directories
-            }
+            },
         };
         // Merge the shipped and test-only directories; a name present in both
         // takes the test entry (an image collision is a staging error, so this
@@ -772,6 +806,17 @@ impl Host for ConsoleHost {
                 };
                 entries.insert(display_name, (kind, size));
             }
+        }
+        // `image` is a real directory in the kernel image but lives outside the
+        // shipped application tree on the host, so add it to the root view
+        // explicitly (spec 0023). Its size is the host directory size, like the
+        // other host directory entries.
+        if path.is_empty() && self.image_dir.is_dir() {
+            let size = std::fs::metadata(&self.image_dir)
+                .map(|meta| meta.len())
+                .unwrap_or(1)
+                .max(1);
+            entries.insert("image".to_string(), (abi::fs::KIND_DIR, size));
         }
         let entries: Vec<(String, u64, u64)> = entries
             .into_iter()

@@ -81,3 +81,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0054 | [Minimize is a service-owned window state restored through the window list](0054-service-owned-minimize.md) | Accepted | 2026-11-20 |
 | 0055 | [A switch or a completed move rebuilds the window stack in the service](0055-service-full-repaint-on-switch-and-move.md) | Accepted | 2026-11-20 |
 | 0056 | [Runtime display modes use the Bochs VBE dispi, not a real-mode BIOS trampoline](0056-runtime-display-mode-bochs-vbe.md) | Accepted | 2026-11-21 |
+| 0057 | [PNG row streaming with an Adam7 pass-1 preview](0057-png-row-streaming-preview.md) | Accepted | 2026-11-21 |
