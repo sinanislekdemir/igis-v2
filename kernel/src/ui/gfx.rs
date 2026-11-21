@@ -424,7 +424,7 @@ impl Screen {
             return;
         };
         for row in y0..y1 {
-            let dy = i128::from(row as i64 - x);
+            let dy = i128::from(row as i64 - y);
             let sy = (dy * i128::from(ph) / i128::from(h)) as usize;
             for col in x0..x1 {
                 let dx = i128::from(col as i64 - x);
