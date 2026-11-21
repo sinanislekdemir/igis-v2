@@ -78,3 +78,28 @@ Three decode strategies were considered:
   accepted for fit-to-window and recorded as a non-goal for this slice.
 - Adding a new format later is a `/lib` module and a viewer change, not a kernel
   change.
+
+## Amendment 2026-11-21: the bounded IDAT prefix
+
+`lib.inflate` is implemented as a bounded-input, bounded-output decoder rather than a
+stream endpoint. The PNG decoder stages the compressed payload in its own task state and
+then calls `inflate.read` with that same prefix on every call:
+
+- The stage is capped at **512 KiB**. The measured maximum `IDAT` bytes needed for the
+  Adam7 pass-1 prefix across the real corpus is **368,317 bytes**, leaving about 156 KiB
+  of headroom.
+- `read` takes `(input, input_len)` and appends at most 4 KiB to `out`. `in_pos` persists
+  across calls. A prefix too short for the next block header or symbol returns
+  `WouldBlock` and loses nothing, so the caller may pass a longer prefix later.
+- A compressed payload larger than the stage is `CapacityExceeded` in the PNG layer. A
+  full-resolution non-interlaced stream can exceed 512 KiB (a 4608×2963 RGB image has
+  about 41 MB of filtered rows before compression), so it is not decodable through this
+  bounded prefix without a larger stage; that is outside the pass-1 preview this ADR
+  covers.
+- The inflater itself keeps only a 32 KiB output ring plus canonical Huffman tables
+  (40,816 bytes in total), independent of the prefix and the image. The Adler-32 trailer
+  is not read.
+
+This refines the "streaming" wording above without changing the row-streaming decision:
+the preview still decodes Adam7 pass 1 into one row at a time, only the compressed side
+is a caller-owned prefix instead of an endpoint.

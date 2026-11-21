@@ -3101,3 +3101,34 @@ fn the_bitio_probe_proves_the_lsb_first_reader() {
     assert_eq!(result.reason, ExitReason::Ok);
     assert_eq!(result.output, b"bitio: ok\n".to_vec());
 }
+
+/// `inflate_probe` exercises the bounded `lib.inflate` module (spec 0023, G2)
+/// through the `/lib` import path against committed zlib vectors: a stored
+/// block, fixed and dynamic Huffman blocks, overlapping LZ matches and a mixed
+/// stream, each compared byte for byte with `done` required; a truncated stream
+/// and a bad-distance stream, which must report Invalid or WouldBlock without a
+/// fault; and `dynamic` again with half of the compressed prefix first (a
+/// symbol pause) and with a 4-byte prefix (a mid-header pause), so the resume
+/// cannot lose or duplicate output.
+#[test]
+fn the_inflate_probe_decodes_the_zlib_vectors() {
+    let path = app_path("inflate_probe");
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "inflate_probe").expect("the probe compiles");
+    let result =
+        langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies and runs");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(
+        result.output,
+        b"inflate: stored ok\n\
+          inflate: fixed ok\n\
+          inflate: dynamic ok\n\
+          inflate: lz ok\n\
+          inflate: mixed ok\n\
+          inflate: truncated ok\n\
+          inflate: corrupt ok\n\
+          inflate: bounded ok\n\
+          inflate: ok\n"
+            .to_vec()
+    );
+}

@@ -42,8 +42,10 @@ colour, gamma/colour-management or a kernel codec.
   3 (palette), 4 (grey+alpha) or 6 (RGBA) image. 16-bit and other bit depths are
   rejected with `Invalid` rather than truncated.
 - **P5 (MUST):** The decoder implements filters 0–4 for every row.
-- **P6 (MUST):** zlib/DEFLATE is decoded by a generic streaming `lib.inflate`
-  module, not by PNG-specific code.
+- **P6 (MUST):** zlib/DEFLATE is decoded by a generic `lib.inflate` module, not
+  by PNG-specific code. The PNG layer stages at most 512 KiB of `IDAT` payload in
+  its own state and hands that prefix to the inflater, which returns up to 4 KiB
+  of output per call; the decoder never holds the whole `IDAT` stream.
 - **P7 (MUST):** For an interlaced image the preview decodes Adam7 pass 1 only,
   producing `ceil(width/8) x ceil(height/8)` pixels. This is the fit-to-window
   preview.
@@ -51,9 +53,12 @@ colour, gamma/colour-management or a kernel codec.
 - **P9 (MUST):** The decoder exposes a row-streaming API (`png.open` then
   `png.next_row`, or an equivalent contract). It MUST NOT allocate or expose a
   full-image RGB buffer.
-- **P10 (MUST):** Decoder state is bounded: a previous row and a current row plus
-  a 32 KiB inflate window. A decoded row is at most `3 * width` bytes for colour
-  type 2 (and the corresponding size for the other accepted types).
+- **P10 (MUST):** Decoder state is bounded: a previous row and a current row, a
+  32 KiB inflate window plus its canonical Huffman tables (40,816 bytes, about
+  40 KiB, for the inflater in total) and the caller's staged compressed prefix
+  (at most 512 KiB). A decoded row is at most `3 * width` bytes for colour type 2
+  (and the corresponding size for the other accepted types). There is no
+  full-image buffer.
 - **P11 (MUST):** An alpha channel is composited over white, and a palette is
   expanded to RGB, so every decoded row is opaque RGB.
 - **P12 (MUST):** PNG chunk CRC fields and the zlib Adler-32 trailer are not
@@ -70,8 +75,11 @@ colour, gamma/colour-management or a kernel codec.
   are format-independent: `lib.bitio`, `lib.inflate`,
   `core.bit_and`/`bit_or`/`bit_xor`/`shl`/`shr`,
   `core.copy_bytes`/`core.fill_bytes`, and `syslib.blit_rgb`.
-- **G2 (MUST):** `lib.inflate` is a streaming zlib/DEFLATE decoder over a bounded
-  window and is reusable outside PNG.
+- **G2 (MUST):** `lib.inflate` is a bounded-input, bounded-output zlib/DEFLATE
+  (RFC 1950/1951) decoder and is reusable outside PNG. The caller supplies a
+  compressed prefix and receives at most 4 KiB of output per call; the decoder
+  keeps a 32 KiB window plus tables, never a full image, and does not verify the
+  zlib Adler-32 trailer.
 
 ### Viewer
 
@@ -99,25 +107,38 @@ image/<name>.png  →  syslib file reads  →  lib.png  →  lib.inflate  →  l
 ```
 
 `png.open` reads and validates the signature and the header, keeps the geometry,
-colour type and interlace flag, and initialises the inflater over the concatenated
-`IDAT` stream. `png.next_row` yields one row, undoing the filter with the previous
-row for filters 1–4. For interlaced input it runs only pass 1, whose seven
-sub-images collapse to one `ceil(w/8) x ceil(h/8)` preview; the pass-7 data after
-the first pass is ignored. For non-interlaced input it yields rows in order.
+colour type and interlace flag, and stages up to 512 KiB of concatenated `IDAT`
+payload in the decoder state. `png.next_row` yields one row, undoing the filter
+with the previous row for filters 1–4. For interlaced input it runs only pass 1,
+whose seven sub-images collapse to one `ceil(w/8) x ceil(h/8)` preview; the
+pass-7 data after the first pass is ignored. For non-interlaced input it yields
+rows in order.
+
+**Why a bounded compressed prefix.** The inflater takes the whole staged prefix
+and a length, not a stream endpoint: `lib.inflate.read` decodes from that prefix
+and returns at most 4 KiB of output. The PNG layer can therefore stage a fixed
+size (512 KiB; the measured corpus maximum for the Adam7 pass-1 prefix is
+368,317 bytes) and call the decoder repeatedly. A prefix that is too short for
+the next block or symbol is `WouldBlock` with no state lost, so passing a grown
+prefix later resumes exactly where it stopped; a prefix larger than the staging
+buffer is `CapacityExceeded` in the PNG layer. The alternative (a full
+`IDAT` buffer) would make the decoder state grow with the file, and the
+interlaced preview already stops after pass 1.
 
 The row buffer is the only image-shaped allocation. The inflater keeps a 32 KiB
-window, so memory is bounded by the window width, not by the file size. The
+window and its canonical Huffman tables (40,816 bytes in total), so memory is
+bounded by the window width and the staging prefix, not by the image area. The
 viewer maps decoded rows to the window content with `syslib.blit_rgb`.
 
 ## Interfaces
 
-Module functions (`lib.bitio` is implemented; the rest are planned; names may
-gain a trailing argument, but not change shape):
+Module functions (`lib.bitio` and `lib.inflate` are implemented; the rest are
+planned; names may gain a trailing argument, but not change shape):
 
 | Module | Contract |
 |---|---|
 | `lib.bitio` | bounded LSB-first bit reader over a caller buffer (below) |
-| `lib.inflate` | `open`, `read` into a caller buffer, `close`; 32 KiB window |
+| `lib.inflate` | `init`, `done`, `read` from a compressed prefix into a 4 KiB caller buffer; 32 KiB window + tables (below) |
 | `lib.png` | `open(path, info)`, `next_row(row, got)`, `close`; opaque RGB rows |
 | `syslib.blit_rgb` | blit one opaque RGB row into the window content |
 
@@ -180,13 +201,50 @@ function read_byte(r: var Reader; value: var uint): Status;        // one whole 
   `fill`'s `used` on `Full`, which is defined to be 0. No bad range faults; the
   errors are `WouldBlock`, `Invalid` and `Full`.
 
+### `lib.inflate` (implemented)
+
+`samples/apps/lib/inflate.ig` is an ordinary `/lib` module (M5/M6) over
+`lib.bitio`: no `main`, no top-level state, no stream endpoint, no new builtin or
+opcode. It decodes zlib (RFC 1950) and DEFLATE (RFC 1951) from a caller-supplied
+compressed prefix into bounded output chunks.
+
+```
+function init(d: var Inflater): Status;                    // zero the state
+function done(d: const Inflater): bool;                    // BFINAL end reached
+function read(d: var Inflater; input: const bytes[0]; input_len: uint;
+              out: var bytes[4096]; got: var int): Status;
+```
+
+- **Prefix.** `read` stages only `input[..input_len]` and advances `d.in_pos`;
+  the same buffer is passed on every call and `input_len` may grow. A larger
+  `input_len` than `core.len(input)` is `Invalid`.
+- **Output.** `read` appends 0..4096 bytes to `out` and stops when fewer than 258
+  bytes remain (a DEFLATE match is at most 258), the stream is done, or it needs
+  more input. Runs are resumable at symbol and byte boundaries with no lost or
+  duplicated output.
+- **Statuses.** `Ok` with `got >= 0` is progress or a done stream; `WouldBlock`
+  means more compressed input is needed than the prefix provides and nothing is
+  lost; `Invalid` is a bad zlib header (CM ≠ 8, CINFO > 7, FDICT set), a bad
+  block header or Huffman table, a bad stored-block complement, an invalid
+  symbol (286/287, distance 30/31), a bad length or distance, or a distance past
+  the produced output. Nothing faults.
+- **Blocks.** BTYPE 0 stored (align, LEN/NLEN, resumable byte copy), BTYPE 1 fixed
+  Huffman, BTYPE 2 dynamic Huffman (code-length code, repeat codes 16/17/18),
+  BTYPE 3 `Invalid`. Canonical mincode/maxcode/valptr tables decode short codes
+  from `min(max_bits, available)` bits, so the final padding is not over-read.
+- **Window.** A 32 KiB ring holds every produced byte; `wpos` wraps and
+  `total_out` bounds a match. A match copies byte by byte from the ring, so
+  overlapping matches (distance < length) are correct.
+- **No trailer.** The Adler-32 trailer is not read or checked (P12): a caller may
+  stop after a prefix, and structural bounds catch corruption.
+
 ## Failure modes
 
 | Condition | Result |
 |---|---|
 | File missing | `NotFound` |
 | Not a PNG signature, bad chunk layout, unsupported bit depth/colour type | `Invalid` |
-| Truncated or corrupt DEFLATE stream | `Invalid` |
+| Truncated or corrupt DEFLATE stream | `Invalid` at the PNG layer; `lib.inflate` reports `WouldBlock` for a short prefix and `Invalid` for bad structure |
 | Row wider than the caller's buffer or the decoder bound | `CapacityExceeded` |
 | File read error | `IoError` |
 | Interlaced image | pass 1 only for the preview; full passes not decoded |
@@ -218,3 +276,4 @@ function read_byte(r: var Reader; value: var uint): Status;        // one whole 
 |---|---|
 | 2026-11-21 | Accepted with the PNG corpus, the `/lib` row-streaming decoder contract, the generic primitive tickets and the fit-to-window viewer using Adam7 pass 1 (ADR 0057). |
 | 2026-11-21 | G1's `lib.bitio` is implemented (`samples/apps/lib/bitio.ig`): a 512-byte window with `init`/`fill`/`available`/`ensure`/`peek`/`drop`/`read_bits`/`align`/`read_byte`, LSB-first DEFLATE order, `WouldBlock`/`Invalid`/`Full` statuses, no new builtin or opcode. `read_byte` drains a whole byte already buffered in the accumulator after `align`, so switching from bits to stored-block bytes never loses data. Proved by the test-only `bitio_probe` on `langhost` and in the `--shell` image. |
+| 2026-11-21 | G2's `lib.inflate` is implemented (`samples/apps/lib/inflate.ig`): a bounded-input, bounded-output zlib/DEFLATE decoder with `init`/`done`/`read`, a 32 KiB output ring plus canonical Huffman tables (40,816 bytes), a caller-supplied compressed prefix (`in_pos` persists, `input_len` bounds it), stored/fixed/dynamic blocks, `Ok`/`WouldBlock`/`Invalid` statuses, no faults and no Adler-32 check. The PNG layer's staging prefix is capped at 512 KiB (measured pass-1 maximum 368,317 B). Proved by the test-only `inflate_probe` over committed stored, fixed, dynamic, LZ and mixed vectors, a truncated and a corrupt stream, and a half-prefix plus a mid-header pause/resume of the dynamic vector (ADR 0057). |
