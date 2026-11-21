@@ -88,16 +88,16 @@ colour, gamma/colour-management or a kernel codec.
   keeps a 32 KiB window plus tables, never a full image, and does not verify the
   zlib Adler-32 trailer.
 
-### Viewer
+### Viewer (implemented)
 
-- **V1 (MUST):** `apps/accessories/image_viewer` opens a PNG, decodes Adam7 pass 1
-  and fits that preview to the window for the corpus. It does not resample the
-  source file.
-- **V2 (MUST):** Drawing streams rows into a bounded window-content buffer; the
-  viewer does not keep the full image.
-- **V3 (MUST):** The viewer supports `check` and `shot` modes like the other GUI
-  applications, and its file dialog starts at `image`.
-- **V4 (MUST):** The viewer is listed under `Accessories` in the Apps menu.
+- **V1 (MUST, implemented):** `apps/accessories/image_viewer` opens a PNG, decodes
+  Adam7 pass 1 and fits that preview to the window for the corpus. It does not resample
+  the source file.
+- **V2 (MUST, implemented):** Drawing streams rows into a bounded window-content buffer;
+  the viewer does not keep the full image.
+- **V3 (MUST, implemented):** The viewer supports `check` and `shot` modes like the other
+  GUI applications, and its file dialog starts at `image`.
+- **V4 (MUST, implemented):** The viewer is listed under `Accessories` in the Apps menu.
 
 ## Design
 
@@ -226,9 +226,11 @@ function read(d: var Inflater; input: const bytes[0]; input_len: uint;
 
 - **Prefix.** `read` stages only `input[..input_len]` and advances `d.in_pos`;
   the same buffer is passed on every call and `input_len` may grow. A larger
-  `input_len` than `core.len(input)` is `Invalid`. `top_up` hands at most 512
-  bytes to `bitio.fill`, which compacts the unread window before appending, so a
-  full 512-byte window never blocks progress while the prefix has bytes.
+  `input_len` than `core.len(input)` is `Invalid`. `top_up` fills the reader while
+  fewer than 4096 bits (one full 512-byte window) are available, handing at most
+  512 bytes to `bitio.fill`, which compacts the unread window before appending.
+  Every DEFLATE block header therefore starts with a full window, and a full
+  512-byte window never blocks progress while the prefix has bytes.
 - **Output.** `read` appends 0..4096 bytes to `out` and stops when fewer than 258
   bytes remain (a DEFLATE match is at most 258), the stream is done, or it needs
   more input. Runs are resumable at symbol and byte boundaries with no lost or
@@ -326,6 +328,66 @@ function png.next_row(d: var Decoder; row: var bytes[16384];
   bad zlib header, block header, Huffman table or symbol is `Invalid`. Chunk
   CRCs and the zlib Adler-32 are not verified (P12).
 
+### `image_viewer` (implemented)
+
+`samples/apps/apps/accessories/image_viewer.ig` is an ordinary GUI application
+(`uses core, stdlib, syslib, lib.out, lib.file_dialog, lib.png`) and a
+non-blocking `core.spawn` from the Apps menu. Its state is one `png.Decoder`
+(611,360 bytes), one `bytes[16384]` caller row, a 12-byte 2x2 check preview,
+three 256-byte strings, a 64-byte failure label and scalars: 628,992 bytes
+compiled, under the 1 MiB cap.
+There is no full-image buffer and no resampling.
+
+```
+run image_viewer                  modal file_dialog.open_file("image", chosen)
+run image_viewer <path>           view that PNG
+run image_viewer <path> shot      view, print `image_viewer: ready SxS -> OxO`, pump
+run image_viewer check            deterministic check, `image_viewer: ok`
+```
+
+- **Modes.** The argument tail is trimmed and classified: `check` may be the
+  first token, `shot` is the last token, and everything else is the path. An
+  empty normal-mode path opens the file dialog; an empty `shot`/`check` path
+  uses the committed `system/png_grad_il.png` fixture. A shot with no
+  arguments prints `image_viewer: ready <src_w>x<src_h> -> <out_w>x<out_h>`
+  after the first complete frame and then blocks in `next_event` for the QMP
+  capture; Close or Escape leaves.
+- **Window flow.** `png.probe` runs before any window: a failure (or a frame
+  that does not fit the screen) opens a 400x120 white error panel with
+  `stdlib.ui_message("Cannot open image (status N)")` and waits for its close
+  box; nothing faults. Otherwise the content is exactly `out_w x out_h`
+  (at least 8x8), centred, titled with the path basename (safe-truncated to the
+  64-byte title cap) or `Image Viewer`.
+- **Draw.** The content is filled white and `Decoding...` is drawn and
+  `window_present`ed *before* `png.open`, because the 512 KiB IDAT stage is
+  visible work. Then each `png.next_row` result is blitted 1:1 as one
+  `syslib.blit_rgb(rect.x, rect.y + y, out_w, 1, row, out_w, 1)` row, followed
+  by one `window_present`. Pass 1 for the corpus is 472x354 … 576x371, so the
+  preview is the window.
+- **Budget and repaint.** The first frame stages the IDAT prefix with
+  `png.open` under the **normal** class (this part fits the normal 10 s /
+  200M-step budget). Only after a successful `open` does `render_image` call
+  `core.realtime_on()` for the row loop, heartbeat immediately and once per
+  decoded row, and leave the task realtime while it pumps events. An `Expose`
+  repaint calls `png.rewind` over the already-staged prefix (no `fs_read`) and
+  runs the same boosted row loop. `lib.inflate` heartbeats internally every 64
+  symbols/header items and every 1 KiB of output, so even the first row (the
+  zlib/DEFLATE header and dynamic-Huffman setup) cannot trip the 1 s watchdog.
+  Admission refusal (`Full`) is reported once and falls back to the normal
+  class; it never faults on admission.
+- **Expose.** The owner `Expose` re-reads `window_content_rect` (ADR 0046) and
+  re-runs the draw/present through `png.rewind` over the staged prefix (no
+  `fs_read`); an image buffer is forbidden. A decode failure on that path opens
+  the same error panel. Close/Escape on the image window exits.
+- **Check.** `png.probe("system/png_grad_il.png")` must report 16x16 with a
+  2x2 interlace-1 output; `png.open` plus two `next_row` calls must yield
+  (0,0) black, (1,0) (128,0,64), (0,1) (0,128,32) and (1,1) (128,128,96).
+  With graphics the 2x2 preview is blitted into an 8x8 window and `get_pixel`
+  reads the first two pixels back before the window closes; `langhost` skips
+  that and prints `image_viewer: host ok`. This check is deliberately
+  independent of the test-only `png_probe`; it proves the viewer's own
+  probe/decode/blit path.
+
 ## Failure modes
 
 | Condition | Result |
@@ -369,3 +431,4 @@ function png.next_row(d: var Decoder; row: var bytes[16384];
 | 2026-11-22 | `png.rewind` is added: it re-initialises the inflater and row cursor over the already-staged IDAT prefix (no `fs_read`), clearing the previous unfiltered row so the first row matches `open`. It returns `Ok` for an opened decoder and `Invalid` before `open` or after `open` fails; the prefix, palette/`tRNS` and geometry are kept. A viewer uses it to repaint an `Expose` without re-reading the 512 KiB prefix. Proved by `png_probe` replaying `grad_il` and every filter fixture after a complete decode, and replaying row 0 of `wide` after a partial decode. |
 | 2026-11-22 | `lib.inflate` signals progress to the scheduler (`core.heartbeat()`) every 64 decoded literal/length or distance symbols, every 64 dynamic-header length items and every 1024 produced output bytes. A realtime `png.next_row` that spends more than one second in the zlib header or a large block is no longer killed by the 1 s watchdog; a normal task's heartbeat is a no-op (spec 0007). Decoded bytes, statuses, resumability and the API are unchanged; the inflater state grows by one 8-byte `tick` to 40,824 bytes (the PNG decoder is 611,360 bytes). Proved by `inflate_probe` and `png_probe` on `langhost` and the `--shell` image. |
 | 2026-11-22 | The bit-reader window compacts: `bitio.fill` moves unread bytes to the front with the overlap-safe `core.copy_bytes` when `pos > 0`, and `inflate.top_up` no longer computes or gives up on free space, so a full 512-byte window accepts new input instead of reporting `Full`. This fixes the real-corpus `CapacityExceeded` at row 38: a 512 KiB IDAT stage must decode to the 368,317-byte Adam7 pass-1 prefix without a spurious `WouldBlock` at a window boundary. The new `long` probe vector (64 KiB, 12-symbol pseudorandom, 34,373 B compressed) reliably fails before the fix (`WouldBlock` at `in_pos=28160, pos=499, nbits=7`) and passes after; API, statuses, decoded bytes and state size are unchanged. |
+| 2026-11-21 | The viewer is implemented (`samples/apps/apps/accessories/image_viewer.ig`, V1–V4): normal/shot/check modes and the file dialog, probe-before-window with a 400x120 error panel (no faults), a content-sized centred window titled with the basename, `Decoding...` presented before the 512 KiB IDAT stage, one `syslib.blit_rgb` row per decoded pass-1 row, re-decode on `Expose`, and an independent fixture check that blits a 2x2 preview into an 8x8 window and reads two pixels back. State is one decoder plus a 16,384-byte row and a 12-byte preview; there is no image buffer and no resampling. The Apps menu gains `Accessories` → `Image Viewer` (13 rows); `scripts/image_viewer_qmp.py` captures the first frame from the `--shell` image on `-smp 4` and `-smp 1`. No kernel, ABI, builtin or `/lib` change. |

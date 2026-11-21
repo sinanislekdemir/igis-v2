@@ -186,7 +186,7 @@ var
   used: int;
   st: Status;
 begin
-  while bitio.available(d.reader) < uint(64) and d.in_pos < input_len do
+  while bitio.available(d.reader) < uint(4096) and d.in_pos < input_len do
   begin
     room := int(input_len - d.in_pos);
     count := room;

@@ -174,3 +174,13 @@ The `inflate_probe` `long` vector (64 KiB, 12-symbol pseudorandom, 34,373 B comp
 reliably fails before the fix with `WouldBlock` at `in_pos=28160, len=512, pos=499,
 nbits=7`, and decodes to `done` after it. The real corpus is proved by the viewer's QMP
 capture rather than a slow host test.
+
+## Amendment 2026-11-22: refill the reader before a block header
+
+`top_up` refilled only while fewer than 64 bits were buffered. A dynamic block header can
+start with more than 64 bits already buffered and still need more bits than the accumulator
+holds; when the caller had already supplied the whole prefix, `parse_dynamic` restored its
+checkpoint and retried with the same bytes forever, surfacing as `CapacityExceeded`. `top_up`
+now fills the 512-byte reader window while fewer than 4096 bits are available, so every block
+header starts with a full window. The four corpus images decode to completion; the API,
+statuses, state size and decoded bytes are unchanged.
