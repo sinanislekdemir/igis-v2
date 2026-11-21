@@ -51,13 +51,14 @@ colour, gamma/colour-management or a kernel codec.
 - **P9 (MUST):** The decoder exposes a row-streaming API (`png.open` then
   `png.next_row`, or an equivalent contract). It MUST NOT allocate or expose a
   full-image RGB buffer.
-- **P10 (MUST):** Decoder state is bounded: one row buffer plus a 32 KiB inflate
-  window. A decoded row is at most `3 * width` bytes for colour type 2 (and the
-  corresponding size for the other accepted types).
+- **P10 (MUST):** Decoder state is bounded: a previous row and a current row plus
+  a 32 KiB inflate window. A decoded row is at most `3 * width` bytes for colour
+  type 2 (and the corresponding size for the other accepted types).
 - **P11 (MUST):** An alpha channel is composited over white, and a palette is
   expanded to RGB, so every decoded row is opaque RGB.
-- **P12 (MUST):** PNG chunk CRC fields are not verified; a malformed stream is
-  detected by structure, bounds and the zlib checksum.
+- **P12 (MUST):** PNG chunk CRC fields and the zlib Adler-32 trailer are not
+  verified (an early stop for the pass-1 preview cannot see the trailer); a
+  malformed stream is detected by structure and bounds.
 - **P13 (MUST):** Decode failures use the stable statuses `NotFound` (no such
   file), `Invalid` (not a PNG, unsupported bit depth/colour type, malformed
   stream), `CapacityExceeded` (a row or the caller's buffer is too small) and
@@ -67,7 +68,7 @@ colour, gamma/colour-management or a kernel codec.
 
 - **G1 (MUST):** The generic layers are separate tickets from the PNG decoder and
   are format-independent: `lib.bitio`, `lib.inflate`,
-  `core.bit_and`/`bit_or`/`bit_xor`/`bit_shl`/`bit_shr`,
+  `core.bit_and`/`bit_or`/`bit_xor`/`shl`/`shr`,
   `core.copy_bytes`/`core.fill_bytes`, and `syslib.blit_rgb`.
 - **G2 (MUST):** `lib.inflate` is a streaming zlib/DEFLATE decoder over a bounded
   window and is reusable outside PNG.
