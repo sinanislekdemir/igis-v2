@@ -307,6 +307,24 @@ pub trait Host {
         Status::Invalid
     }
 
+    /// Scales a `pw × ph` RGB buffer into a destination rectangle with
+    /// nearest-neighbour sampling (`syslib.blit_rgb`, G22). The interpreter has
+    /// already rejected non-positive dimensions and a short buffer; the host
+    /// clips to the screen and the clip region. The default refuses because a
+    /// machine with no screen cannot rasterise.
+    fn blit_rgb(
+        &mut self,
+        _x: i64,
+        _y: i64,
+        _w: i64,
+        _h: i64,
+        _pixels: &[u8],
+        _pw: i64,
+        _ph: i64,
+    ) -> Status {
+        Status::Invalid
+    }
+
     /// Reads one shadow pixel as `0x00RRGGBB`; 0 outside the screen
     /// (`syslib.get_pixel`, G9).
     fn get_pixel(&mut self, _x: i64, _y: i64) -> u32 {
@@ -2068,6 +2086,40 @@ impl Machine {
                             let text =
                                 self.resolve_text(text_bits, state, stack, constants, args)?;
                             host.draw_text_prop(x as i64, y as i64, text, color as u32)
+                        };
+                        self.push(stack, status as u64)?;
+                    }
+                    builtin::BLIT_RGB => {
+                        // `x, y, w, h, pixels, pw, ph` (spec 0009, G22). The
+                        // destination and source extents are validated before
+                        // the buffer is resolved, so a bad geometry is
+                        // `Invalid` and never reaches the host. A buffer
+                        // shorter than `pw * ph * 3` is `Invalid` too; the
+                        // nearest-neighbour raster and the clipping belong to
+                        // the host.
+                        let ph = self.pop(stack)?;
+                        let pw = self.pop(stack)?;
+                        let pixels_bits = self.pop(stack)?;
+                        let h = self.pop(stack)?;
+                        let w = self.pop(stack)?;
+                        let y = self.pop(stack)?;
+                        let x = self.pop(stack)?;
+                        let (x, y, w, h) = (x as i64, y as i64, w as i64, h as i64);
+                        let (pw, ph) = (pw as i64, ph as i64);
+                        let status = if w <= 0 || h <= 0 || pw <= 0 || ph <= 0 {
+                            Status::Invalid
+                        } else {
+                            let pixels =
+                                self.resolve_text(pixels_bits, state, stack, constants, args)?;
+                            let needed = (pw as u64)
+                                .checked_mul(ph as u64)
+                                .and_then(|count| count.checked_mul(3));
+                            match needed {
+                                Some(needed) if pixels.len() as u64 >= needed => {
+                                    host.blit_rgb(x, y, w, h, pixels, pw, ph)
+                                }
+                                _ => Status::Invalid,
+                            }
                         };
                         self.push(stack, status as u64)?;
                     }

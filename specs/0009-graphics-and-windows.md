@@ -71,7 +71,7 @@ grows down. Colours are `0x00RRGGBB`.
   set. `get_pixel` has no error path and returns `0` outside the screen.
 - **G10 (MUST):** The `syslib` graphics surface is exactly the small orthogonal set in
   "Interfaces": `screen_width`, `screen_height`, `fill_rect`, `fill_dither`,
-  `draw_rect`, `draw_text`, `get_pixel`, `present`, `clear`, plus the three
+  `draw_rect`, `draw_text`, `blit_rgb`, `get_pixel`, `present`, `clear`, plus the three
   proportional-text primitives of G20 (`text_width_prop`, `text_height_prop`,
   `draw_text_prop`). Runtime mode selection is the separate surface of spec 0022; it
   adds no drawing primitive.
@@ -126,6 +126,15 @@ grows down. Colours are `0x00RRGGBB`.
   `visual: ready` without changing a pixel. The same golden MUST match on `-smp 4` and
   `-smp 1`. A normal harness run MUST NOT rewrite the golden; only an explicit,
   reviewed `--update` may. No kernel debug builtin or serial dump is added (ADR 0032).
+- **G22 (MUST):** `blit_rgb(x, y, w, h, pixels, pw, ph)` draws a `pw × ph` image of
+  three bytes per pixel (`0xRRGGBB`, no alpha, no colour conversion) scaled into the
+  destination rectangle with nearest-neighbour sampling: destination pixel `(dx, dy)`
+  samples source `((dx * pw) / w, (dy * ph) / h)` with integer arithmetic. `w`, `h`,
+  `pw` and `ph` must be positive and `pixels` at least `pw * ph * 3` bytes; otherwise
+  the result is `Status.Invalid` and nothing is drawn. The destination is clipped to
+  the screen and the current clip region exactly like `fill_rect` (G8/G9); a fully
+  clipped rectangle is `Ok` with no writes. Disabled graphics return `Status.Invalid`
+  (G15/G16). No opcode is added.
 
 ## Design
 
@@ -245,6 +254,8 @@ syslib.draw_text(x: int, y: int, text: const string[0], color: uint) -> Status
 syslib.text_width_prop(text: const string[0]) -> uint  // 0 when disabled
 syslib.text_height_prop() -> uint                      // 12, or 0 when disabled
 syslib.draw_text_prop(x: int, y: int, text: const string[0], color: uint) -> Status
+syslib.blit_rgb(x: int, y: int, w: int, h: int,
+                pixels: const bytes[0], pw: int, ph: int) -> Status
 syslib.get_pixel(x: int, y: int) -> uint // 0x00RRGGBB, or 0 outside
 syslib.present(x: int, y: int, w: int, h: int) -> Status
 syslib.clear(color: uint) -> Status
@@ -270,6 +281,7 @@ fn draw_text(&mut self, x: i64, y: i64, text: &[u8], color: u32) -> Status { Sta
 fn text_width_prop(&mut self, text: &[u8]) -> u64 { 0 }
 fn text_height_prop(&mut self) -> u64 { 0 }
 fn draw_text_prop(&mut self, x: i64, y: i64, text: &[u8], color: u32) -> Status { Status::Invalid }
+fn blit_rgb(&mut self, x: i64, y: i64, w: i64, h: i64, pixels: &[u8], pw: i64, ph: i64) -> Status { Status::Invalid }
 fn get_pixel(&mut self, x: i64, y: i64) -> u32 { 0 }
 fn present(&mut self, x: i64, y: i64, w: i64, h: i64) -> Status { Status::Invalid }
 fn clear(&mut self, color: u32) -> Status { Status::Invalid }
@@ -316,6 +328,7 @@ an `Info` (width, height, pitch, bpp, shadow address/size/frames, free-frame del
 | `pitch < width * 4` or `width`/`height` zero | Geometry rejected as unsupported; graphics disabled |
 | Shadow allocation fails | Graphics disabled with a boot line naming the byte count; console on the text path |
 | `w <= 0` or `h <= 0` | `Status.Invalid`, nothing drawn |
+| `blit_rgb` with `w`, `h`, `pw` or `ph` non-positive, or a buffer shorter than `pw * ph * 3` | `Status.Invalid`, nothing drawn |
 | Colour above `0x00FFFFFF` | `Status.Invalid`, nothing drawn |
 | Coordinates wholly outside the screen | `Ok`, nothing drawn |
 | Partly outside the screen or the clip | Clipped; `Ok` |
@@ -324,6 +337,8 @@ an `Info` (width, height, pitch, bpp, shadow address/size/frames, free-frame del
 | `draw_text_prop` with a printable byte | Proportional glyph, variable advance; `Ok` |
 | `draw_text_prop` with a non-ASCII byte | Blank 8×8 cell, advance 8; `Ok` |
 | `text_width_prop`/`text_height_prop` with graphics disabled | `0` |
+| `blit_rgb` with a fully clipped destination | `Ok`, nothing drawn |
+| `blit_rgb` with graphics disabled | `Status.Invalid`, nothing drawn |
 | Graphics disabled and a primitive is called | `Status.Invalid`; the application may ignore it |
 | Two cores draw at once | The graphics lock serialises each primitive; output interleaves at primitive boundaries |
 | Screen mode is larger than 1024×768 | Works: shadow and clip derive from the actual geometry |
@@ -367,3 +382,4 @@ an `Info` (width, height, pitch, bpp, shadow address/size/frames, free-frame del
 | 2026-11-17 | M2.6.1 (spec 0015, ADR 0030): G20 adds the three proportional-text builtins (`text_width_prop`, `text_height_prop`, `draw_text_prop`, ids 45–47) and the window-service title bar uses the proportional face; `draw_text`, the console and the `stdlib.ui_*` helpers stay 8×8. No opcode; ABI v1 stays at 75. |
 | 2026-11-17 | M2.6.3 (ADR 0032): G21 resolves M2.1.2 with a host-side QMP `screendump` of a deterministic full-screen specimen (`samples/apps/visual`) compared exactly against `tests/golden/visual.png` + a SHA-256/tile manifest (`scripts/visual_regression.py`). No kernel serial dump or debug builtin is added. The specimen covers the kernel text windows, has no clock/input, checks its own pixels and holds after `visual: ready`; the same golden matches on `-smp 4` and `-smp 1`, `--tamper` proves the comparator rejects a changed pixel, and only `--update` rewrites the golden. 376 host tests. |
 | 2026-11-21 | Runtime display modes (spec 0022, ADR 0056): G2 now separates the boot mode from a later change; the Bochs VBE dispi changes the real mode, the shadow is reallocated and swapped under the graphics lock, and builtins 80–83 expose the mode list and `set_resolution`. No drawing primitive, opcode or boot-mode assumption is added. |
+| 2026-11-21 | Graphics: G22 adds `blit_rgb` (builtin 91, effect `(7,1)`), a nearest-neighbour scaled blit of a `pw × ph` RGB buffer into a destination rectangle. The interpreter rejects non-positive `w`/`h`/`pw`/`ph` and a buffer shorter than `pw * ph * 3` with `Invalid` before the host call; the kernel clips to the screen and the clip region and writes the shadow through the same path as `fill_rect`, so a fully clipped rectangle is `Ok`. No alpha, no colour conversion and no opcode; ABI v1 stays at 75. |

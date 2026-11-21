@@ -1359,6 +1359,8 @@ syslib.draw_text(x: int, y: int, text: const string[0], color: uint) -> Status
 syslib.text_width_prop(text: const string[0]) -> uint  // 0 when graphics are disabled
 syslib.text_height_prop() -> uint                      // 12, or 0 when disabled
 syslib.draw_text_prop(x: int, y: int, text: const string[0], color: uint) -> Status
+syslib.blit_rgb(x: int, y: int, w: int, h: int,
+                pixels: const bytes[0], pw: int, ph: int) -> Status
 syslib.get_pixel(x: int, y: int) -> uint
 syslib.present(x: int, y: int, w: int, h: int) -> Status
 syslib.clear(color: uint) -> Status
@@ -1375,6 +1377,15 @@ a blank cell for a byte outside `0x00..=0x7F`; `get_pixel` returns `0` outside t
 whole screen and presents it. Drawing primitives other than `clear` do not present. When
 graphics are disabled the size is `0x0`, every primitive is `Invalid` and `get_pixel` is
 `0` (spec 0009, G15).
+
+**Scaled RGB blit (spec 0009, G22).** `blit_rgb` draws a `pw × ph` image of three bytes
+per pixel (`0xRRGGBB`, no alpha, no colour conversion) scaled with nearest-neighbour
+sampling into the destination rectangle `(x, y, w, h)`: destination pixel `(dx, dy)`
+samples source `((dx * pw) / w, (dy * ph) / h)` with integer arithmetic. `w`, `h`, `pw`
+and `ph` must be `int` and positive, and the `pixels` argument is a `const bytes`
+reference of at least `pw * ph * 3` bytes; otherwise the result is `Status.Invalid` and
+nothing is drawn. The destination is clipped to the screen and the clip region like
+`fill_rect`, and disabled graphics are `Invalid`. Builtin 91; no opcode.
 
 **Proportional font (spec 0015, M2.6.1).** Three additional primitives expose a
 12-pixel-tall proportional bitmap font for printable ASCII (`0x20..=0x7E`).
@@ -2275,3 +2286,4 @@ controls and input dialog for the QMP screenshot harness.
 | 2026-11-20 | M11 minimize query: `syslib.window_minimized(id: int) -> bool` (builtin 78) reports whether a live window is minimized. The Windows pull-down marks such rows with `min`; the File window list marks them with `*`. No opcode; ABI v1 stays 75. |
 | 2026-11-21 | `core.sleep(ms: uint) -> Status` (builtin 79): block until at least `ms` milliseconds of wall time, then `Ok`. Blocked time does not count against the budget; `ms = 0` and hosts without a scheduler return `Ok` immediately. No opcode; ABI v1 stays 75. |
 | 2026-11-21 | Generic machine primitives: `core.bit_and`/`bit_or`/`bit_xor`/`shl`/`shr` (builtins 84–88; `uint` only, a shift count at or above 64 faults `IllegalOperation`, `shr` is logical) and the bulk buffer operations `core.copy_bytes` (89) and `core.fill_bytes` (90). The buffer operations are all-or-nothing, push `Status` (`Ok`, `CapacityExceeded`, `Invalid`), carry the destination capacity as a hidden operand, copy with `memmove` overlap safety, and publish the destination length as `max(old_len, off + len)` with a zero-filled gap, exactly like indexed writes. No `Host` method; no new opcode; ABI v1 stays 75. |
+| 2026-11-21 | `syslib.blit_rgb(x, y, w, h, pixels, pw, ph) -> Status` (builtin 91, spec 0009 G22): scales a `const bytes` RGB buffer of `pw × ph` pixels into the destination rectangle with nearest-neighbour sampling. `int` dimensions, no alpha or colour conversion; non-positive dimensions or a buffer shorter than `pw * ph * 3` are `Invalid` and draw nothing, and clipping is `fill_rect`'s. Host builtin with a disabled-screen `Invalid` default; no opcode, ABI v1 stays 75. |

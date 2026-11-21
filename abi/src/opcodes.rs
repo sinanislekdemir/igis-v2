@@ -1066,6 +1066,15 @@ pub mod builtin {
     /// destination untouched.
     pub const FILL_BYTES: u32 = 90;
 
+    /// `syslib.blit_rgb(x, y, w, h, pixels, pw, ph) -> Status`: scale a
+    /// `pw × ph` RGB (three bytes per pixel, `0xRRGGBB`) buffer into the
+    /// destination rectangle with nearest-neighbour sampling (spec 0009,
+    /// G22). The machine rejects non-positive `w`, `h`, `pw` or `ph` and a
+    /// buffer shorter than `pw * ph * 3` with `Invalid` before calling the
+    /// host; the host clips and owns the raster. Operands:
+    /// `[x][y][w][h][pixels reference][pw][ph]`.
+    pub const BLIT_RGB: u32 = 91;
+
     /// `core.sleep(ms)`: block the caller until at least `ms` milliseconds of
     /// wall time have passed, then push `Ok`. The wait is the scheduler's
     /// generic deadline (`WaitFor::Deadline`), so blocked time does not count
@@ -1164,6 +1173,7 @@ pub mod builtin {
             SHR => Some((2, 1)),
             COPY_BYTES => Some((6, 1)),
             FILL_BYTES => Some((5, 1)),
+            BLIT_RGB => Some((7, 1)),
             _ => None,
         }
     }

@@ -7019,6 +7019,54 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::enumeration(STATUS_ENUM)))
             }
+            "syslib.blit_rgb" => {
+                if args.len() != 7 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`syslib.blit_rgb` expects 7 arguments, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                for (index, name) in ["x", "y", "w", "h"].iter().enumerate() {
+                    let value = self.expr_scalar(args[index])?;
+                    if value.kind != Kind::Int {
+                        return Err(self.err_at(
+                            args[index],
+                            format_args!(
+                                "`syslib.blit_rgb` expects an `int` {name}, found `{value}`"
+                            ),
+                        ));
+                    }
+                }
+                let pixels = self.emit_ref(args[4], Some(Kind::Bytes))?;
+                if pixels.kind != Kind::Bytes {
+                    let found = self.type_name(pixels);
+                    return Err(self.err_at(
+                        args[4],
+                        format_args!(
+                            "`syslib.blit_rgb` expects a `const bytes` pixels, found `{found}`"
+                        ),
+                    ));
+                }
+                for (index, name) in [(5, "pw"), (6, "ph")] {
+                    let value = self.expr_scalar(args[index])?;
+                    if value.kind != Kind::Int {
+                        return Err(self.err_at(
+                            args[index],
+                            format_args!(
+                                "`syslib.blit_rgb` expects an `int` {name}, found `{value}`"
+                            ),
+                        ));
+                    }
+                }
+                self.one(opcodes::BUILTIN, builtin::BLIT_RGB)?;
+                self.pop(7)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
             "syslib.get_pixel" => {
                 if args.len() != 2 {
                     return Err(self.err(

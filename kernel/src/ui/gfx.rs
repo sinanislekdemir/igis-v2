@@ -414,6 +414,32 @@ impl Screen {
         }
     }
 
+    /// Scales a `pw × ph` RGB buffer into a destination rectangle with
+    /// nearest-neighbour sampling (spec 0009, G22). The destination rectangle
+    /// is clipped exactly like [`Screen::fill`]; the source sample for
+    /// destination pixel `(dx, dy)` is `((dx * pw) / w, (dy * ph) / h)`. The
+    /// caller has checked the dimensions and the buffer length.
+    fn blit(&mut self, x: i64, y: i64, w: i64, h: i64, pixels: &[u8], pw: i64, ph: i64) {
+        let Some((x0, y0, x1, y1)) = self.clipped(x, y, w, h) else {
+            return;
+        };
+        for row in y0..y1 {
+            let dy = i128::from(row as i64 - x);
+            let sy = (dy * i128::from(ph) / i128::from(h)) as usize;
+            for col in x0..x1 {
+                let dx = i128::from(col as i64 - x);
+                let sx = (dx * i128::from(pw) / i128::from(w)) as usize;
+                let index = (sy * pw as usize + sx) * 3;
+                let Some(rgb) = pixels.get(index..index + 3) else {
+                    continue;
+                };
+                let color =
+                    (u32::from(rgb[0]) << 16) | (u32::from(rgb[1]) << 8) | u32::from(rgb[2]);
+                self.store(col, row, color);
+            }
+        }
+    }
+
     fn outline(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) {
         // Four one-pixel strips inside the same extent. They are drawn through
         // `fill` so the clip applies once per strip; overlapping corners are
@@ -1083,6 +1109,32 @@ pub fn fill_rect(x: i64, y: i64, w: i64, h: i64, color: u32) -> Status {
     match SCREEN.lock().as_mut() {
         Some(screen) => {
             screen.fill(x, y, w, h, color);
+            Status::Ok
+        }
+        None => Status::Invalid,
+    }
+}
+
+/// Draws a `pw × ph` RGB (three bytes per pixel, `0xRRGGBB`) buffer scaled into
+/// the destination rectangle with nearest-neighbour sampling (spec 0009, G22).
+/// The destination is clipped to the screen and the clip region like
+/// [`fill_rect`]; a fully clipped rectangle is `Ok` with no writes. A
+/// non-positive dimension, a buffer shorter than `pw * ph * 3` or disabled
+/// graphics is `Invalid` and draws nothing.
+pub fn blit_rgb(x: i64, y: i64, w: i64, h: i64, pixels: &[u8], pw: i64, ph: i64) -> Status {
+    if w <= 0 || h <= 0 || pw <= 0 || ph <= 0 {
+        return Status::Invalid;
+    }
+    let needed = (pw as u64)
+        .checked_mul(ph as u64)
+        .and_then(|count| count.checked_mul(3));
+    match needed {
+        Some(needed) if pixels.len() as u64 >= needed => {}
+        _ => return Status::Invalid,
+    }
+    match SCREEN.lock().as_mut() {
+        Some(screen) => {
+            screen.blit(x, y, w, h, pixels, pw, ph);
             Status::Ok
         }
         None => Status::Invalid,

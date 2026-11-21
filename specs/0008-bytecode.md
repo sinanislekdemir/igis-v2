@@ -438,11 +438,13 @@ on the same table; the machine, not the compiler, owns the runtime checks.
 | 88 | `shr` | 2 → 1 | logical right shift; same count rule |
 | 89 | `copy_bytes` | 6 → 1 | `[capacity][dst ref][dst_off][src ref][src_off][len]`; `memmove`, `Status` |
 | 90 | `fill_bytes` | 5 → 1 | `[capacity][dst ref][off][value][len]`; `Status` |
+| 91 | `blit_rgb` | 7 → 1 | `[x][y][w][h][pixels ref][pw][ph]`; scaled RGB blit; `Status` |
 
 The networking (62–73), session (74–77), `window_minimized` (78), `sleep` (79) and
 display-mode (80–83) builtins are documented with their constants in `abi::opcodes`;
 the table above resumes at the machine-level primitives 84–90, which are pure
-interpreter code with no `Host` method.
+interpreter code with no `Host` method, and ends with the graphics `blit_rgb` (91),
+which routes through `Host` like the other drawing primitives.
 
 Graphics builtins add no opcode, so ABI v1 stays at **75** opcodes (spec 0009). The input
 builtins (spec 0010), the window builtins (spec 0011), the application file builtins
@@ -641,3 +643,4 @@ pub fn run(task: &mut Task);
 | 2026-11-18 | M8.3 adds builtins 58 `popup_grab` (4 → 1) and 59 `popup_release` (0 → 1) (spec 0011 W26, ADR 0044). The machine rejects a non-positive extent before the host call and otherwise calls `Host::popup_grab`/`Host::popup_release`, pushing the `Status`; the kernel host owns the one machine-wide grab, the owner rule and the release wake, and the defaults are `Invalid`. The table also backfills rows 51–57 that the earlier file-writing entries added without updating this table. No opcode; ABI v1 stays at **75**. |
 | 2026-11-18 | M8.4 adds builtins 60 `region_claim` (4 → 1) and 61 `region_release` (0 → 1) (spec 0011 W27, ADR 0045): the persistent pointer-region claim counterpart of the popup grab. The machine rejects a non-positive extent before the host call and otherwise calls `Host::region_claim`/`Host::region_release`, pushing the `Status`; the kernel host owns the one machine-wide claim, the owner rule, the poll-time head gate and the release wake, and the defaults are `Invalid`. No opcode; ABI v1 stays at **75**. |
 | 2026-11-21 | Builtins 84–90 are the machine-level primitives (spec 0003): `bit_and`/`bit_or`/`bit_xor` (2 → 1), `shl`/`shr` (2 → 1, a count at or above 64 faults `IllegalOperation`), `copy_bytes` (6 → 1) and `fill_bytes` (5 → 1). The buffer operands are `[capacity][dst ref][dst_off][src ref][src_off][len]` and `[capacity][dst ref][off][value][len]`; the interpreter validates every range before the first write, moves with `memmove` semantics and publishes the destination length as `max(old_len, off + len)` with a zero-filled gap. No `Host` method and no opcode; ABI v1 stays at **75**. |
+| 2026-11-21 | Builtin **91** `blit_rgb` (7 → 1, spec 0009 G22): `[x][y][w][h][pixels ref][pw][ph]`. The interpreter rejects non-positive destination/source dimensions and a buffer shorter than `pw * ph * 3` with `Invalid` before the host call; the host clips exactly like `fill_rect` and samples nearest-neighbour. No new opcode; ABI v1 stays at **75**. |

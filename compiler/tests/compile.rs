@@ -6087,6 +6087,119 @@ end;
     }
 }
 
+#[test]
+fn syslib_blit_rgb_emits_its_builtin_and_checks_its_signature() {
+    use abi::opcodes::builtin;
+
+    let source = br#"
+unit t;
+
+uses core, syslib;
+
+var
+  status: Status;
+  pixels: bytes[12];
+
+procedure main(args: const string[1024]);
+begin
+  status := syslib.blit_rgb(1, 2, 3, 4, pixels, 2, 2);
+end;
+"#;
+    let package = compile(source, "t.ig").expect("the blit primitive compiles");
+    assert_eq!(builtin_count(&package, builtin::BLIT_RGB), 1);
+    assert_eq!(builtin::BLIT_RGB, 91);
+    assert_eq!(builtin::effect(builtin::BLIT_RGB), Some((7, 1)));
+
+    let cases = [
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+var pixels: bytes[12];
+procedure main(args: const string[1024]);
+begin
+  status := syslib.blit_rgb(1, 2, 3, 4, pixels, 2);
+end;
+"#,
+            "`syslib.blit_rgb` expects 7 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+var pixels: bytes[12];
+procedure main(args: const string[1024]);
+begin
+  status := syslib.blit_rgb(uint(1), 2, 3, 4, pixels, 2, 2);
+end;
+"#,
+            "`syslib.blit_rgb` expects an `int` x",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+var pixels: bytes[12];
+procedure main(args: const string[1024]);
+begin
+  status := syslib.blit_rgb(1, 2, uint(3), 4, pixels, 2, 2);
+end;
+"#,
+            "`syslib.blit_rgb` expects an `int` w",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+var text: string[12];
+procedure main(args: const string[1024]);
+begin
+  status := syslib.blit_rgb(1, 2, 3, 4, text, 2, 2);
+end;
+"#,
+            "expected `bytes`, found `string[12]`",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+var pixels: bytes[12];
+procedure main(args: const string[1024]);
+begin
+  status := syslib.blit_rgb(1, 2, 3, 4, pixels, uint(2), 2);
+end;
+"#,
+            "`syslib.blit_rgb` expects an `int` pw",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+var pixels: bytes[12];
+procedure main(args: const string[1024]);
+begin
+  status := syslib.blit_rgb(1, 2, 3, 4, pixels, 2, uint(2));
+end;
+"#,
+            "`syslib.blit_rgb` expects an `int` ph",
+        ),
+    ];
+    for (source, expected) in cases {
+        let error = compile(source.as_bytes(), "t.ig").expect_err("must be a compile error");
+        assert!(
+            error.message.contains(expected),
+            "expected `{expected}`, got `{}`",
+            error.message
+        );
+    }
+}
+
 // ---- syslib proportional font (spec 0015) ---------------------------------
 
 #[test]

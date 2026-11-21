@@ -290,6 +290,19 @@ impl Host for KernelHost {
         crate::gfx::draw_text_prop(x, y, text, color)
     }
 
+    fn blit_rgb(
+        &mut self,
+        x: i64,
+        y: i64,
+        w: i64,
+        h: i64,
+        pixels: &[u8],
+        pw: i64,
+        ph: i64,
+    ) -> Status {
+        crate::gfx::blit_rgb(x, y, w, h, pixels, pw, ph)
+    }
+
     fn get_pixel(&mut self, x: i64, y: i64) -> u32 {
         crate::gfx::get_pixel(x, y)
     }

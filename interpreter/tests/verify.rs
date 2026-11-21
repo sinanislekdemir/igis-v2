@@ -372,6 +372,7 @@ struct MockHost {
     dithers: Vec<(i64, i64, i64, i64, u32)>,
     outlines: Vec<(i64, i64, i64, i64, u32)>,
     texts: Vec<(i64, i64, Vec<u8>, u32)>,
+    blits: Vec<(i64, i64, i64, i64, Vec<u8>, i64, i64)>,
     prop_widths: Vec<Vec<u8>>,
     prop_texts: Vec<(i64, i64, Vec<u8>, u32)>,
     prop_width_value: u64,
@@ -520,6 +521,25 @@ impl Host for MockHost {
 
     fn draw_text_prop(&mut self, x: i64, y: i64, text: &[u8], color: u32) -> Status {
         self.prop_texts.push((x, y, text.to_vec(), color));
+        if self.gfx_ok {
+            Status::Ok
+        } else {
+            Status::Invalid
+        }
+    }
+
+    fn blit_rgb(
+        &mut self,
+        x: i64,
+        y: i64,
+        w: i64,
+        h: i64,
+        pixels: &[u8],
+        pw: i64,
+        ph: i64,
+    ) -> Status {
+        self.blits
+            .push((x, y, w, h, pixels.to_vec(), pw, ph));
         if self.gfx_ok {
             Status::Ok
         } else {
@@ -3720,6 +3740,190 @@ fn graphics_defaults_describe_a_disabled_screen() {
     assert_eq!(word(8), 0);
     assert_eq!(word(16), Status::Invalid as u64);
     assert_eq!(word(24), 0);
+}
+
+#[test]
+fn blit_rgb_routes_its_arguments_and_buffer_to_the_host() {
+    let mut instructions = Vec::new();
+    op_const(&mut instructions, 10); // x
+    op_const(&mut instructions, 20); // y
+    op_const(&mut instructions, 40); // w
+    op_const(&mut instructions, 30); // h
+    op_imm(&mut instructions, opcodes::REF_CONST, 8); // pixels
+    op_const(&mut instructions, 2); // pw
+    op_const(&mut instructions, 2); // ph
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::BLIT_RGB,
+    );
+    store_at(&mut instructions, 0);
+    op(&mut instructions, opcodes::RET);
+
+    let pixels: Vec<u8> = (1..=12).collect();
+    let constants = constant(&pixels);
+    let spec = FnSpec {
+        frame_size: 128,
+        operand_off: 40,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &constants, 8, 128, 0);
+    let mut host = MockHost {
+        screen_width_value: 1024,
+        screen_height_value: 768,
+        gfx_ok: true,
+        ..Default::default()
+    };
+    let mut state = vec![0u8; 8];
+    let mut stack = vec![0u8; 128];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+
+    assert_eq!(host.blits, vec![(10, 20, 40, 30, pixels, 2, 2)]);
+    assert_eq!(
+        u64::from_le_bytes(state[..8].try_into().unwrap()),
+        Status::Ok as u64
+    );
+}
+
+#[test]
+fn blit_rgb_rejects_bad_dimensions_and_short_buffers_without_calling_the_host() {
+    let mut instructions = Vec::new();
+    // w = 0.
+    for value in [1, 2, 0, 4] {
+        op_const(&mut instructions, value);
+    }
+    op_imm(&mut instructions, opcodes::REF_CONST, 8);
+    for value in [2, 2] {
+        op_const(&mut instructions, value);
+    }
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::BLIT_RGB,
+    );
+    store_at(&mut instructions, 0);
+    // h = -1.
+    for value in [1, 2, 3, -1] {
+        op_const(&mut instructions, value);
+    }
+    op_imm(&mut instructions, opcodes::REF_CONST, 8);
+    for value in [2, 2] {
+        op_const(&mut instructions, value);
+    }
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::BLIT_RGB,
+    );
+    store_at(&mut instructions, 8);
+    // pw = 0.
+    for value in [1, 2, 3, 4] {
+        op_const(&mut instructions, value);
+    }
+    op_imm(&mut instructions, opcodes::REF_CONST, 8);
+    for value in [0, 2] {
+        op_const(&mut instructions, value);
+    }
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::BLIT_RGB,
+    );
+    store_at(&mut instructions, 16);
+    // ph = 0.
+    for value in [1, 2, 3, 4] {
+        op_const(&mut instructions, value);
+    }
+    op_imm(&mut instructions, opcodes::REF_CONST, 8);
+    for value in [2, 0] {
+        op_const(&mut instructions, value);
+    }
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::BLIT_RGB,
+    );
+    store_at(&mut instructions, 24);
+    // A 6-byte buffer for a 2×2 source needs 12 bytes.
+    for value in [1, 2, 3, 4] {
+        op_const(&mut instructions, value);
+    }
+    op_imm(&mut instructions, opcodes::REF_CONST, 8);
+    for value in [2, 2] {
+        op_const(&mut instructions, value);
+    }
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::BLIT_RGB,
+    );
+    store_at(&mut instructions, 32);
+    op(&mut instructions, opcodes::RET);
+
+    let constants = constant(&[1, 2, 3, 4, 5, 6]);
+    let spec = FnSpec {
+        frame_size: 128,
+        operand_off: 40,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &constants, 40, 128, 0);
+    let mut host = MockHost {
+        gfx_ok: true,
+        ..Default::default()
+    };
+    let mut state = vec![0u8; 40];
+    let mut stack = vec![0u8; 128];
+    let (outcome, _) = run_with_host(&code, &mut state, &mut stack, &mut host, 100);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+
+    for offset in [0, 8, 16, 24, 32] {
+        let status = u64::from_le_bytes(state[offset..offset + 8].try_into().unwrap());
+        assert_eq!(status, Status::Invalid as u64, "status at {offset}");
+    }
+    assert!(host.blits.is_empty());
+}
+
+#[test]
+fn blit_rgb_defaults_to_invalid_on_a_host_without_graphics() {
+    // `Recorder` overrides only the console and the clock, so `blit_rgb` is the
+    // trait default: a machine with no screen refuses (spec 0009, G15/G16).
+    let mut instructions = Vec::new();
+    for value in [1, 2, 3, 4] {
+        op_const(&mut instructions, value);
+    }
+    op_imm(&mut instructions, opcodes::REF_CONST, 8);
+    for value in [2, 2] {
+        op_const(&mut instructions, value);
+    }
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::BLIT_RGB,
+    );
+    store_at(&mut instructions, 0);
+    op(&mut instructions, opcodes::RET);
+
+    let constants = constant(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    let spec = FnSpec {
+        frame_size: 128,
+        operand_off: 40,
+        ..MAIN
+    };
+    let code = build(&[spec], &instructions, &constants, 8, 128, 0);
+    let mut scratch = scratch_for(&code);
+    let program = Program::parse(&code, &mut scratch).expect("package must verify");
+    let mut state = vec![0u8; 8];
+    let mut stack = vec![0u8; 128];
+    let args = vec![0u8; 8 + 1024];
+    let mut machine = Machine::new();
+    let mut host = Recorder { output: Vec::new() };
+    let outcome = machine.run(&program, &mut host, &mut state, &mut stack, &args, 10_000);
+    assert_eq!(outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(
+        u64::from_le_bytes(state[..8].try_into().unwrap()),
+        Status::Invalid as u64
+    );
 }
 
 #[test]
