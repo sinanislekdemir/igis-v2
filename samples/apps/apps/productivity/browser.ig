@@ -66,7 +66,8 @@ const
   ContentW = 680;
   ContentH = 480;
 
-  // Listing capacity: 96 entries in any directory (the root has six, `base`
+  // Listing capacity: 96 entries in any directory (the root has six on the
+  // host and seven in the kernel image, where mke2fs adds `lost+found`; `base`
   // holds the most staged applications); 96 leaves room without a growth path
   // (there is no allocation).
   EntryCapacity = 96;
@@ -1334,18 +1335,21 @@ var
 begin
   dir := "";
   load_dir();
-  verify("root listed", entry_count >= 5);
+  verify("root listed", entry_count >= 6);
   verify("root complete", not truncated);
   verify("root base", has_kind("base", uint(1)));
   verify("root apps", has_kind("apps", uint(1)));
   verify("root home", has_kind("home", uint(1)));
   verify("root lib", has_kind("lib", uint(1)));
   verify("root system", has_kind("system", uint(1)));
+  verify("root image", has_kind("image", uint(1)));
   if expect_lost_found then
   begin
     verify("root lost+found", has_kind("lost+found", uint(1)));
+    verify("root entry count", entry_count = 7);
+  end
+  else
     verify("root entry count", entry_count = 6);
-  end;
 
   err := enter_dir("base");
   verify("enter base", err = Ok and dir = "base");
