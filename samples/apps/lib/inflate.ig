@@ -174,30 +174,24 @@ end;
 
 // Stages more caller bytes into the bit reader while fewer than 64 bits are
 // buffered. `bitio.fill` copies by the source's runtime length, so the prefix
-// bound `input_len` is applied here: at most the reader's free window space is
-// copied into a small staging buffer first, and `fill` appends exactly that.
-// The loop always terminates because it stages at least one byte or reports a
-// full window (which already has plenty of bits).
+// bound `input_len` is applied here: at most 512 bytes are copied into a small
+// staging buffer and `fill` copies what fits, compacting the unread window
+// bytes first. A short copy leaves the rest at `in_pos` for the next loop.
+// The loop always terminates because it stages at least one byte or reaches
+// the end of the caller's prefix.
 function top_up(d: var Inflater; input: const bytes[0]; input_len: uint): Status;
 var
   stage: bytes[ReaderWindow];
-  free, room, count: int;
+  room, count: int;
   used: int;
   st: Status;
 begin
   while bitio.available(d.reader) < uint(64) and d.in_pos < input_len do
   begin
-    // Mirrors `fill`'s rewind: an exhausted window is rewound before copying.
-    if d.reader.pos = d.reader.len then
-      free := ReaderWindow
-    else
-      free := ReaderWindow - d.reader.len;
-    if free <= 0 then
-      return Ok;
     room := int(input_len - d.in_pos);
     count := room;
-    if count > free then
-      count := free;
+    if count > ReaderWindow then
+      count := ReaderWindow;
     if count <= 0 then
       return Ok;
     stage := "";

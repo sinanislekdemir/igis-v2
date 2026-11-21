@@ -22,6 +22,11 @@ unit bitio;
 // DEFLATE order: a stored-block length or a header field is read directly, and
 // a Huffman code is decoded from the bits in the order they arrive.
 //
+// The window is compacted by `fill`: unread bytes move to the front before new
+// bytes are appended, so a partially consumed 512-byte window (not only an
+// empty one) can accept input. That keeps a long stream flowing across window
+// boundaries instead of blocking on a full window with `pos > 0`.
+//
 //   var r: bitio.Reader;
 //   bitio.init(r);                       // zero the state
 //   bitio.fill(r, chunk, offset, used);  // stage bytes; `used` were copied
@@ -35,7 +40,8 @@ unit bitio;
 //   * `Invalid` means the request is not well formed: `ensure`/`peek`/
 //     `read_bits` with `count > 32` (the accumulator is bounded) or `drop` with
 //     more bits than are buffered.
-//   * `Full` means `fill` had no free window space; `used` is 0.
+//   * `Full` means `fill` had no free window space after compaction (512
+//     unread bytes); `used` is 0.
 // "All failures leave out-parameters untouched" holds except for `fill`'s
 // `used` on `Full`, which is defined to be 0.
 //
@@ -65,8 +71,10 @@ begin
 end;
 
 // Stages bytes from `data[offset..]` into the window, up to the free space.
-// A window whose bytes were all consumed is rewound first. `used` receives the
-// number copied; a full window pushes `Full` with `used = 0`. `data` is copied
+// Unread bytes are compacted to the front first (the copy is overlap-safe), so
+// a full window with `pos > 0` still accepts input; a window whose bytes were
+// all consumed is reset. `used` receives the number copied; a window that is
+// still full after compaction pushes `Full` with `used = 0`. `data` is copied
 // by its runtime length, so any `bytes` buffer of any capacity works and only
 // the bytes that actually exist are read.
 function fill(r: var Reader; data: const bytes[0]; offset: uint;
@@ -82,6 +90,15 @@ begin
   begin
     r.pos := 0;
     r.len := 0;
+  end
+  else if r.pos > 0 then
+  begin
+    st := core.copy_bytes(r.buf, uint(0), r.buf, uint(r.pos),
+                          uint(r.len - r.pos));
+    if st <> Ok then
+      return st;
+    r.len := r.len - r.pos;
+    r.pos := 0;
   end;
   free := uint(512 - r.len);
   if free = uint(0) then

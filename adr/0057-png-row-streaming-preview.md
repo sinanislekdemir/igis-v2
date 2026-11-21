@@ -152,3 +152,25 @@ For a realtime task this resets the one-second deadline; for a normal task it is
 The only cost is one scalar `tick` (8 bytes), so the inflater is 40,824 bytes and the PNG
 decoder 611,360 bytes. The bounded-prefix decision and the `CapacityExceeded`/`Invalid`
 mapping are likewise unchanged.
+
+## Amendment 2026-11-22: bit-reader window compaction
+
+`bitio.fill` rewound only when `pos == len`. A 512-byte window that was full with unread
+bytes (`pos < len`, free space zero) refused new input with `Full`, so `inflate.top_up`
+returned `Ok` without staging; a later `ensure` that needed more bytes than the window held
+returned `WouldBlock`, and the PNG layer mapped that to `CapacityExceeded`. On the real
+corpus this appeared at row 38 of the Adam7 pass 1, although the 512 KiB stage is enough
+for the 368,317-byte prefix.
+
+`fill` now compacts the unread bytes to the front (overlap-safe `core.copy_bytes`) before
+computing free space, so any window with unread capacity accepts more input; only 512 truly
+unread bytes report `Full`. `inflate.top_up` no longer computes free space or returns early
+— it stages at most 512 caller bytes, lets `fill` copy what fits, and advances `in_pos` by
+`used`; a partial copy leaves the rest for the next iteration. This is a generic bit-reader
+fix, not a PNG special case. API, statuses, decoded bytes and the 40,824-byte inflater state
+are unchanged.
+
+The `inflate_probe` `long` vector (64 KiB, 12-symbol pseudorandom, 34,373 B compressed)
+reliably fails before the fix with `WouldBlock` at `in_pos=28160, len=512, pos=499,
+nbits=7`, and decodes to `done` after it. The real corpus is proved by the viewer's QMP
+capture rather than a slow host test.

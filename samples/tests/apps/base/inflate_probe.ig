@@ -13,7 +13,11 @@ unit inflate_probe;
 // `--shell` image; both directories are staged by `xtask image --shell`.
 // Each stream is decoded
 // through the bounded-prefix API, every output chunk is compared, and the exact
-// total length plus `done` are required. `dynamic` is decoded twice: once with
+// total length plus `done` are required. The `long` vector is a 64 KiB
+// 12-symbol pseudorandom payload (Python `random.Random(7)`, `randrange(12)`)
+// compressed to 34,373 bytes; it fills the 512-byte bit-reader window 67 times
+// and proves `fill` compacts unread bytes. Its success prints nothing, so the
+// committed e2e output is unchanged. `dynamic` is decoded twice: once with
 // half of the compressed prefix, which must end in `WouldBlock` after some
 // output, and then with the full prefix from the same state, so no byte can be
 // lost or repeated at the pause. `truncated` and `corrupt` must produce a
@@ -23,6 +27,7 @@ uses core, lib.out, lib.inflate;
 
 const
   ChunkSize = 256;
+  LongCap = 65536;      // 64 KiB: the long vector and its compressed form
 
 var
   failures: int;
@@ -209,6 +214,105 @@ begin
   return drain_full(name, d, z, zlen, expected, elen, offset);
 end;
 
+// Loads at most 64 KiB of the long vector, chunked at 256 bytes.
+function load_long(name: const string[0]; dst: var bytes[LongCap];
+                   size: var int): bool;
+var
+  total: uint;
+  offset: uint;
+  got: int;
+  st: Status;
+  chunk: bytes[ChunkSize];
+begin
+  dst := "";
+  size := 0;
+  st := core.fs_size(name, total);
+  if st <> Ok then
+    return false;
+  if total > uint(LongCap) then
+    return false;
+  offset := uint(0);
+  while offset < total do
+  begin
+    got := -1;
+    st := core.fs_read(name, offset, chunk, got);
+    if st <> Ok then
+      return false;
+    if got <= 0 then
+      return false;
+    if uint(got) > total - offset then
+      return false;
+    st := core.copy_bytes(dst, offset, chunk, uint(0), uint(got));
+    if st <> Ok then
+      return false;
+    offset := offset + uint(got);
+  end;
+  if core.len(dst) <> total then
+    return false;
+  size := int(total);
+  return true;
+end;
+
+// A 64 KiB 12-symbol pseudorandom payload compressed to 34,373 bytes: the
+// compressed stream spans 67 full 512-byte bit-reader windows, so decoding
+// crosses the boundary where `fill` must compact unread bytes. Success prints
+// nothing, so the committed e2e output is unchanged; a failure names `long`.
+procedure decode_long();
+var
+  z: bytes[LongCap];
+  expected: bytes[LongCap];
+  outbuf: bytes[4096];
+  d: inflate.Inflater;
+  zlen, elen, got, offset: int;
+  st: Status;
+begin
+  if not load_long("system/inflate_long.zlib", z, zlen) then
+  begin
+    fail("long", "zlib read");
+    return;
+  end;
+  if not load_long("system/inflate_long.bin", expected, elen) then
+  begin
+    fail("long", "bin read");
+    return;
+  end;
+  st := inflate.init(d);
+  if st <> Ok then
+  begin
+    fail("long", "init");
+    return;
+  end;
+  offset := 0;
+  while not inflate.done(d) do
+  begin
+    got := 0;
+    st := inflate.read(d, z, uint(zlen), outbuf, got);
+    if st = WouldBlock then
+    begin
+      fail("long", "unexpected WouldBlock");
+      return;
+    end;
+    if st <> Ok then
+    begin
+      fail("long", "status");
+      return;
+    end;
+    if not same_bytes(outbuf, expected, offset, got) then
+    begin
+      fail("long", "byte mismatch");
+      return;
+    end;
+    offset := offset + got;
+    if got = 0 and not inflate.done(d) then
+    begin
+      fail("long", "stalled");
+      return;
+    end;
+  end;
+  if offset <> elen then
+    fail("long", "total length");
+end;
+
 // A truncated or corrupt stream must report Invalid or WouldBlock, never run to
 // completion and never fault.
 function decode_bad(name: const string[0]): bool;
@@ -379,6 +483,7 @@ begin
   vector("dynamic");
   vector("lz");
   vector("mixed");
+  decode_long();
   if decode_bad("truncated") then
     out.say("inflate: truncated ok\n");
   if decode_bad("corrupt") then

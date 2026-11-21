@@ -183,12 +183,14 @@ procedure align(r: var Reader);                                    // skip to by
 function read_byte(r: var Reader; value: var uint): Status;        // one whole byte
 ```
 
-- **Window.** `fill` copies up to `512 - len` bytes from the caller's
-  `data[offset..]` into `buf` by its runtime length; a reader whose bytes were
-  all consumed (`pos = len`) is rewound first, so a stream is staged in chunks.
-  `used` receives the count. A full window with unread bytes is `Full` with
-  `used = 0`. No allocation and no whole-file staging: the caller's buffer is
-  the only input.
+- **Window.** `fill` compacts unread bytes to the front of `buf` when `pos > 0`
+  (the overlap-safe `copy_bytes`), then copies up to the freed space from the
+  caller's `data[offset..]` by its runtime length; an exhausted reader
+  (`pos = len`) is reset first. A partially consumed full window therefore
+  accepts new input instead of reporting `Full`, so a stream is staged across
+  window boundaries. `used` receives the count; `Full` with `used = 0` only when
+  512 bytes are still unread after compaction. No allocation and no whole-file
+  staging: the caller's buffer is the only input.
 - **Bits.** `ensure(count)` pulls whole bytes from the window and places each
   above the buffered bits (`acc = acc + byte * shl(1, nbits)`), so `nbits` after
   a successful call is at most 39. An empty window is `WouldBlock` and changes
@@ -224,7 +226,9 @@ function read(d: var Inflater; input: const bytes[0]; input_len: uint;
 
 - **Prefix.** `read` stages only `input[..input_len]` and advances `d.in_pos`;
   the same buffer is passed on every call and `input_len` may grow. A larger
-  `input_len` than `core.len(input)` is `Invalid`.
+  `input_len` than `core.len(input)` is `Invalid`. `top_up` hands at most 512
+  bytes to `bitio.fill`, which compacts the unread window before appending, so a
+  full 512-byte window never blocks progress while the prefix has bytes.
 - **Output.** `read` appends 0..4096 bytes to `out` and stops when fewer than 258
   bytes remain (a DEFLATE match is at most 258), the stream is done, or it needs
   more input. Runs are resumable at symbol and byte boundaries with no lost or
@@ -364,3 +368,4 @@ function png.next_row(d: var Decoder; row: var bytes[16384];
 | 2026-11-21 | The row-streaming decoder is implemented (`samples/apps/lib/png.ig`): `probe`/`open`/`info`/`next_row`, 8-bit colour types 0/2/3/4/6, filters 0–4, Adam7 pass 1 only, palette expansion with `tRNS` alpha, alpha composited over white, a 512 KiB IDAT prefix and `WouldBlock` mapped to `CapacityExceeded` when the prefix is full and `Invalid` when the IDAT ended. State is 611,352 bytes; the caller row is 16,384 bytes. Proved by the test-only `png_probe` over committed fixtures (every filter, colour type, interlace pass 1, a 1000-pixel row, unsupported depth/width, truncated, corrupt and non-PNG input) on `langhost` and the `--shell` image. |
 | 2026-11-22 | `png.rewind` is added: it re-initialises the inflater and row cursor over the already-staged IDAT prefix (no `fs_read`), clearing the previous unfiltered row so the first row matches `open`. It returns `Ok` for an opened decoder and `Invalid` before `open` or after `open` fails; the prefix, palette/`tRNS` and geometry are kept. A viewer uses it to repaint an `Expose` without re-reading the 512 KiB prefix. Proved by `png_probe` replaying `grad_il` and every filter fixture after a complete decode, and replaying row 0 of `wide` after a partial decode. |
 | 2026-11-22 | `lib.inflate` signals progress to the scheduler (`core.heartbeat()`) every 64 decoded literal/length or distance symbols, every 64 dynamic-header length items and every 1024 produced output bytes. A realtime `png.next_row` that spends more than one second in the zlib header or a large block is no longer killed by the 1 s watchdog; a normal task's heartbeat is a no-op (spec 0007). Decoded bytes, statuses, resumability and the API are unchanged; the inflater state grows by one 8-byte `tick` to 40,824 bytes (the PNG decoder is 611,360 bytes). Proved by `inflate_probe` and `png_probe` on `langhost` and the `--shell` image. |
+| 2026-11-22 | The bit-reader window compacts: `bitio.fill` moves unread bytes to the front with the overlap-safe `core.copy_bytes` when `pos > 0`, and `inflate.top_up` no longer computes or gives up on free space, so a full 512-byte window accepts new input instead of reporting `Full`. This fixes the real-corpus `CapacityExceeded` at row 38: a 512 KiB IDAT stage must decode to the 368,317-byte Adam7 pass-1 prefix without a spurious `WouldBlock` at a window boundary. The new `long` probe vector (64 KiB, 12-symbol pseudorandom, 34,373 B compressed) reliably fails before the fix (`WouldBlock` at `in_pos=28160, pos=499, nbits=7`) and passes after; API, statuses, decoded bytes and state size are unchanged. |
