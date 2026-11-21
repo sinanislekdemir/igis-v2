@@ -3177,3 +3177,31 @@ fn the_png_probe_decodes_the_png_fixtures() {
         .join()
         .expect("test thread panicked");
 }
+
+/// `image_viewer check` exercises the viewer's own probe/decode/blit path
+/// (spec 0023, V1-V4) on the host: it probes the 16x16 Adam7 fixture, decodes
+/// its 2x2 pass-1 preview and asserts all four RGB pixels. The window blit is
+/// kernel-only, so `langhost` stops after the decode assertions and prints
+/// `image_viewer: host ok`.
+#[test]
+fn the_image_viewer_check_mode_probes_and_decodes_on_the_host() {
+    // The unoptimised compiler frame is much larger than the default 2 MiB
+    // test-thread stack. This is test scaffolding only; the kernel stack bound
+    // is unrelated.
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let path = app_path("image_viewer");
+            let source = std::fs::read(&path)
+                .unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+            let package =
+                langhost::compile(&source, "image_viewer").expect("the viewer compiles");
+            let result = langhost::run(&package.code, b"check", langhost::DEFAULT_BUDGET)
+                .expect("verifies and runs");
+            assert_eq!(result.reason, ExitReason::Ok);
+            assert_eq!(result.output, b"image_viewer: host ok\n".to_vec());
+        })
+        .expect("spawn test thread")
+        .join()
+        .expect("test thread panicked");
+}

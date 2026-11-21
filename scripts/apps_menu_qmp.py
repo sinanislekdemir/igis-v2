@@ -55,16 +55,17 @@ DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-apps-menu.png")
 
 # `desktop_shell` layout_menu: File starts at x = 24, Apps at x = 56,
 # Windows at x = 94 and System at x = 153 (measured prop widths). The Apps
-# frame is (52, 22, 220, 178). `Clock` is row 2
-# (y = 22 + 1 + 2*16 + 8 = 63) and `File Browser` row 8 (y = 159); both lie
-# over live windows, which is the regression the grab fixes.
+# frame is (52, 22, 220, 210) with 13 rows. `Clock` is row 2
+# (y = 22 + 1 + 2*16 + 8 = 63), `File Browser` row 9 (y = 175) and `Terminal`
+# row 11 (y = 207); the first two lie over live windows, which is the
+# regression the grab fixes.
 APPS_LABEL = (64, 10)
 CLOCK_ROW = (140, 63)
-BROWSER_ROW = (140, 159)
+BROWSER_ROW = (140, 175)
 SYSTEM_LABEL = (170, 10)
 OUTSIDE = (700, 400)
-# `Terminal` is the last Apps row: y = 22 + 1 + 10*16 + 8 = 191.
-TERMINAL_ROW = (140, 191)
+# `Terminal` is the last selectable Utilities row: y = 22 + 1 + 11*16 + 8 = 207.
+TERMINAL_ROW = (140, 207)
 
 
 def hid_axis(pixel, extent):
