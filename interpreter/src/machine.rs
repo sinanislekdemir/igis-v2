@@ -3338,6 +3338,51 @@ impl Machine {
                             Err(status) => self.push(stack, status as u64)?,
                         }
                     }
+                    // Machine-level integer primitives (spec 0003): the
+                    // operands are `uint`s and the result is one `uint`. No
+                    // host call, so the kernel and `langhost` share them.
+                    builtin::BIT_AND => {
+                        let rhs = self.pop(stack)?;
+                        let lhs = self.pop(stack)?;
+                        self.push(stack, lhs & rhs)?;
+                    }
+                    builtin::BIT_OR => {
+                        let rhs = self.pop(stack)?;
+                        let lhs = self.pop(stack)?;
+                        self.push(stack, lhs | rhs)?;
+                    }
+                    builtin::BIT_XOR => {
+                        let rhs = self.pop(stack)?;
+                        let lhs = self.pop(stack)?;
+                        self.push(stack, lhs ^ rhs)?;
+                    }
+                    builtin::SHL | builtin::SHR => {
+                        let count = self.pop(stack)?;
+                        let value = self.pop(stack)?;
+                        // A count at or above 64 is `fault(IllegalOperation)`
+                        // (spec 0003), never a masked shift.
+                        if count >= 64 {
+                            return Err(FaultCode::IllegalOperation);
+                        }
+                        let result = if id == builtin::SHL {
+                            value << count
+                        } else {
+                            value >> count
+                        };
+                        self.push(stack, result)?;
+                    }
+                    // Bulk buffer primitives (spec 0003, "Bulk buffer
+                    // operations"). The destination capacity is the hidden
+                    // bottom operand; the helpers validate everything before
+                    // the first write and publish the length last.
+                    builtin::COPY_BYTES => {
+                        let status = self.copy_bytes_builtin(state, stack, constants, args)?;
+                        self.push(stack, status as u64)?;
+                    }
+                    builtin::FILL_BYTES => {
+                        let status = self.fill_bytes_builtin(state, stack, constants, args)?;
+                        self.push(stack, status as u64)?;
+                    }
                     _ => return Err(FaultCode::IllegalOperation),
                 }
             }
@@ -3813,6 +3858,210 @@ impl Machine {
             }
         }
         Ok(())
+    }
+
+    /// `core.copy_bytes(...)` (spec 0003, "Bulk buffer operations").
+    ///
+    /// Operands, top last: `[capacity][dst][dst_off][src][src_off][len]`. The
+    /// capacity is the destination's declared `N`. Every range is checked
+    /// before the first write; the copy itself is `copy_refs`' overlap-safe
+    /// move. On success the destination length becomes
+    /// `max(old_len, dst_off + len)` and the gap `[old_len, dst_off)` is
+    /// zero-filled, exactly like an indexed buffer write.
+    fn copy_bytes_builtin(
+        &mut self,
+        state: &mut [u8],
+        stack: &mut [u8],
+        code: &[u8],
+        args: &[u8],
+    ) -> Result<Status, FaultCode> {
+        let length = self.pop(stack)?;
+        let source_offset = self.pop(stack)?;
+        let source_bits = self.pop(stack)?;
+        let destination_offset = self.pop(stack)?;
+        let destination_bits = self.pop(stack)?;
+        let capacity = self.pop(stack)?;
+
+        let capacity = usize::try_from(capacity).map_err(|_| FaultCode::IllegalOperation)?;
+        let length = usize::try_from(length).map_err(|_| FaultCode::IllegalOperation)?;
+        let source_offset =
+            usize::try_from(source_offset).map_err(|_| FaultCode::IllegalOperation)?;
+        let destination_offset =
+            usize::try_from(destination_offset).map_err(|_| FaultCode::IllegalOperation)?;
+
+        let (destination_region, destination) =
+            self.resolve(destination_bits, state, stack, code, args)?;
+        if destination_region != refs::REGION_STATE && destination_region != refs::REGION_STACK {
+            return Err(FaultCode::IllegalOperation);
+        }
+        if destination < 8 {
+            return Err(FaultCode::OutOfBounds);
+        }
+        let relative_end = destination_offset
+            .checked_add(length)
+            .ok_or(FaultCode::OutOfBounds)?;
+        // The declared capacity bounds the write first; a failure leaves the
+        // destination byte-identical.
+        if relative_end > capacity {
+            return Ok(Status::CapacityExceeded);
+        }
+
+        let (source_region, source) = self.resolve(source_bits, state, stack, code, args)?;
+        let source_len = self.buffer_len(source_region, source, state, stack, code, args)?;
+        let source_relative_end = source_offset
+            .checked_add(length)
+            .ok_or(FaultCode::OutOfBounds)?;
+        if source_relative_end > source_len {
+            return Ok(Status::Invalid);
+        }
+        let source_end = source
+            .checked_add(source_relative_end)
+            .ok_or(FaultCode::OutOfBounds)?;
+        if source_end
+            > region_len(source_region, state, stack, code, args).ok_or(FaultCode::OutOfBounds)?
+        {
+            return Err(FaultCode::OutOfBounds);
+        }
+
+        let destination_region_len = region_len(destination_region, state, stack, code, args)
+            .ok_or(FaultCode::OutOfBounds)?;
+        let destination_end = destination
+            .checked_add(relative_end)
+            .ok_or(FaultCode::OutOfBounds)?;
+        if destination_end > destination_region_len {
+            return Err(FaultCode::OutOfBounds);
+        }
+        let old_len = self.buffer_len(destination_region, destination, state, stack, code, args)?;
+        let data_len = destination_region_len - destination;
+        if old_len > data_len {
+            return Err(FaultCode::OutOfBounds);
+        }
+
+        let new_len = old_len.max(relative_end);
+        if destination_offset > old_len {
+            // The write-extends rule: the gap between the old length and the
+            // write origin is zero-filled.
+            match destination_region {
+                refs::REGION_STATE => {
+                    state[destination + old_len..destination + destination_offset].fill(0)
+                }
+                refs::REGION_STACK => {
+                    stack[destination + old_len..destination + destination_offset].fill(0)
+                }
+                _ => return Err(FaultCode::IllegalOperation),
+            }
+        }
+        if length > 0 {
+            let destination_ref = refs::encode(
+                destination_region,
+                (destination + destination_offset) as u64,
+            );
+            let source_ref = refs::encode(source_region, (source + source_offset) as u64);
+            self.copy_refs(
+                destination_ref,
+                source_ref,
+                length as u64,
+                state,
+                stack,
+                code,
+                args,
+            )?;
+        }
+        if new_len != old_len {
+            self.write_ref(
+                refs::encode(destination_region, (destination - 8) as u64),
+                new_len as u64,
+                state,
+                stack,
+                code,
+                args,
+            )?;
+        }
+        Ok(Status::Ok)
+    }
+
+    /// `core.fill_bytes(...)` (spec 0003, "Bulk buffer operations").
+    ///
+    /// Operands, top last: `[capacity][dst][off][value][len]`. The range is
+    /// checked before the first write; the length and gap rules match
+    /// [`Self::copy_bytes_builtin`].
+    fn fill_bytes_builtin(
+        &mut self,
+        state: &mut [u8],
+        stack: &mut [u8],
+        code: &[u8],
+        args: &[u8],
+    ) -> Result<Status, FaultCode> {
+        let length = self.pop(stack)?;
+        let value = self.pop(stack)?;
+        let offset = self.pop(stack)?;
+        let destination_bits = self.pop(stack)?;
+        let capacity = self.pop(stack)?;
+
+        if value > u8::MAX as u64 {
+            return Err(FaultCode::Overflow);
+        }
+        let capacity = usize::try_from(capacity).map_err(|_| FaultCode::IllegalOperation)?;
+        let length = usize::try_from(length).map_err(|_| FaultCode::IllegalOperation)?;
+        let offset = usize::try_from(offset).map_err(|_| FaultCode::IllegalOperation)?;
+
+        let (destination_region, destination) =
+            self.resolve(destination_bits, state, stack, code, args)?;
+        if destination_region != refs::REGION_STATE && destination_region != refs::REGION_STACK {
+            return Err(FaultCode::IllegalOperation);
+        }
+        if destination < 8 {
+            return Err(FaultCode::OutOfBounds);
+        }
+        let relative_end = offset.checked_add(length).ok_or(FaultCode::OutOfBounds)?;
+        if relative_end > capacity {
+            return Ok(Status::CapacityExceeded);
+        }
+
+        let destination_region_len = region_len(destination_region, state, stack, code, args)
+            .ok_or(FaultCode::OutOfBounds)?;
+        let destination_end = destination
+            .checked_add(relative_end)
+            .ok_or(FaultCode::OutOfBounds)?;
+        if destination_end > destination_region_len {
+            return Err(FaultCode::OutOfBounds);
+        }
+        let old_len = self.buffer_len(destination_region, destination, state, stack, code, args)?;
+        let data_len = destination_region_len - destination;
+        if old_len > data_len {
+            return Err(FaultCode::OutOfBounds);
+        }
+
+        let new_len = old_len.max(relative_end);
+        if offset > old_len {
+            match destination_region {
+                refs::REGION_STATE => state[destination + old_len..destination + offset].fill(0),
+                refs::REGION_STACK => stack[destination + old_len..destination + offset].fill(0),
+                _ => return Err(FaultCode::IllegalOperation),
+            }
+        }
+        if length > 0 {
+            match destination_region {
+                refs::REGION_STATE => {
+                    state[destination + offset..destination + relative_end].fill(value as u8)
+                }
+                refs::REGION_STACK => {
+                    stack[destination + offset..destination + relative_end].fill(value as u8)
+                }
+                _ => return Err(FaultCode::IllegalOperation),
+            }
+        }
+        if new_len != old_len {
+            self.write_ref(
+                refs::encode(destination_region, (destination - 8) as u64),
+                new_len as u64,
+                state,
+                stack,
+                code,
+                args,
+            )?;
+        }
+        Ok(Status::Ok)
     }
 
     /// Executes one `map_*` operation (spec 0003, "Maps"; spec 0008).

@@ -4200,3 +4200,288 @@ fn line_table_unit_ids_accept_the_whole_package_range() {
         error.message
     );
 }
+
+// ---- machine-level bit and bulk buffer primitives -------------------------
+
+/// Runs a package against a caller-owned `state`, so the test can inspect the
+/// length word and the bytes a builtin published.
+fn run_state(code: &[u8], state: &mut [u8], stack_size: usize) -> Outcome {
+    let mut stack = vec![0u8; stack_size];
+    let mut host = MockHost::default();
+    let (outcome, _) = run_with_host(code, state, &mut stack, &mut host, 1_000);
+    outcome
+}
+
+fn bit_package(id: u32, a: u64, b: u64) -> Vec<u8> {
+    let mut instructions = Vec::new();
+    op_const(&mut instructions, a as i64);
+    op_const(&mut instructions, b as i64);
+    op_imm(&mut instructions, opcodes::BUILTIN, id);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op(&mut instructions, opcodes::RET);
+    let spec = FnSpec {
+        frame_size: 64,
+        ..MAIN
+    };
+    build(&[spec], &instructions, &[], 8, 128, 0)
+}
+
+fn run_bit(id: u32, a: u64, b: u64) -> u64 {
+    let code = bit_package(id, a, b);
+    let mut state = vec![0u8; 8];
+    assert_eq!(
+        run_state(&code, &mut state, 128),
+        Outcome::Exited(ExitReason::Ok)
+    );
+    state_u64(&state, 0)
+}
+
+#[test]
+fn bitwise_builtins_compute_on_uint_operands() {
+    use opcodes::builtin;
+    assert_eq!(run_bit(builtin::BIT_AND, 0xF0F0, 0x0FF0), 0x00F0);
+    assert_eq!(run_bit(builtin::BIT_OR, 0xF0F0, 0x0FF0), 0xFFF0);
+    assert_eq!(run_bit(builtin::BIT_XOR, 0xF0F0, 0x0FF0), 0xFF00);
+    assert_eq!(run_bit(builtin::SHL, 1, 63), 1u64 << 63);
+    assert_eq!(run_bit(builtin::SHR, 0x8000_0000_0000_0000, 63), 1);
+    // A logical right shift fills with zeros, never the sign bit.
+    assert_eq!(run_bit(builtin::SHR, u64::MAX, 1), u64::MAX >> 1);
+}
+
+#[test]
+fn a_shift_count_at_or_above_64_faults_illegal_operation() {
+    use opcodes::builtin;
+    for (id, count) in [
+        (builtin::SHL, 64),
+        (builtin::SHL, u64::MAX),
+        (builtin::SHR, 64),
+        (builtin::SHR, u64::MAX),
+    ] {
+        let code = bit_package(id, 1, count);
+        let (reason, _) = execute(&code, 8, 128);
+        assert_eq!(
+            reason,
+            ExitReason::Faulted(FaultCode::IllegalOperation),
+            "a count of {count} must fault"
+        );
+    }
+}
+
+/// A `core.copy_bytes` package with both data references chosen by the caller:
+/// `destination` and `source` are the state byte offsets of their data areas,
+/// so the same state can hold one buffer (same reference) or two.
+fn copy_package(
+    capacity: u32,
+    destination: u32,
+    dst_off: u64,
+    source: u32,
+    src_off: u64,
+    len: u64,
+) -> Vec<u8> {
+    let mut instructions = Vec::new();
+    op_const(&mut instructions, i64::from(capacity));
+    op_imm(&mut instructions, opcodes::REF_STATE, destination);
+    op_const(&mut instructions, dst_off as i64);
+    op_imm(&mut instructions, opcodes::REF_STATE, source);
+    op_const(&mut instructions, src_off as i64);
+    op_const(&mut instructions, len as i64);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::COPY_BYTES,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 32);
+    op(&mut instructions, opcodes::RET);
+    let spec = FnSpec {
+        frame_size: 96,
+        ..MAIN
+    };
+    build(&[spec], &instructions, &[], 40, 160, 0)
+}
+
+struct BufferResult {
+    outcome: Outcome,
+    data: Vec<u8>,
+    length: u64,
+    status: u64,
+}
+
+fn run_copy(
+    capacity: u32,
+    destination: u32,
+    dst_off: u64,
+    source: u32,
+    src_off: u64,
+    len: u64,
+    dst_len: u64,
+    dst: &[u8],
+    src_len: u64,
+    src: &[u8],
+) -> BufferResult {
+    let code = copy_package(capacity, destination, dst_off, source, src_off, len);
+    let mut state = vec![0u8; 40];
+    state[0..8].copy_from_slice(&dst_len.to_le_bytes());
+    state[8..8 + dst.len()].copy_from_slice(dst);
+    state[16..24].copy_from_slice(&src_len.to_le_bytes());
+    state[24..24 + src.len()].copy_from_slice(src);
+    let outcome = run_state(&code, &mut state, 160);
+    BufferResult {
+        outcome,
+        data: state[8..16].to_vec(),
+        length: state_u64(&state, 0),
+        status: state_u64(&state, 32),
+    }
+}
+
+#[test]
+fn copy_bytes_handles_overlap_in_one_buffer_both_directions() {
+    let forward = run_copy(8, 8, 1, 8, 0, 4, 8, b"abcdefgh", 8, b"abcdefgh");
+    assert_eq!(forward.outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(forward.status, Status::Ok as u64);
+    assert_eq!(forward.data, b"aabcdfgh");
+    assert_eq!(forward.length, 8, "the length is max(old, off + len)");
+
+    let backward = run_copy(8, 8, 0, 8, 1, 4, 8, b"abcdefgh", 8, b"abcdefgh");
+    assert_eq!(backward.outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(backward.data, b"bcdeefgh");
+}
+
+#[test]
+fn copy_bytes_copies_across_buffers_and_publishes_the_length() {
+    let result = run_copy(8, 8, 0, 24, 1, 2, 0, b"\0\0\0\0\0\0\0\0", 4, b"abcd");
+    assert_eq!(result.outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(result.status, Status::Ok as u64);
+    assert_eq!(result.data, b"bc\0\0\0\0\0\0");
+    assert_eq!(result.length, 2);
+}
+
+#[test]
+fn copy_bytes_zero_length_updates_only_the_length_edge() {
+    // `off <= old_len`: nothing changes.
+    let inside = run_copy(8, 8, 2, 24, 0, 0, 4, b"abcd\0\0\0\0", 4, b"wxyz");
+    assert_eq!(inside.outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(inside.data, b"abcd\0\0\0\0");
+    assert_eq!(inside.length, 4);
+
+    // `off > old_len`: the gap is zero-filled and the length becomes `off`.
+    let gap = run_copy(
+        8,
+        8,
+        3,
+        24,
+        0,
+        0,
+        1,
+        b"a\xaa\xaa\xaa\xaa\xaa\xaa\xaa",
+        4,
+        b"wxyz",
+    );
+    assert_eq!(gap.outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(gap.data, b"a\0\0\xaa\xaa\xaa\xaa\xaa");
+    assert_eq!(gap.length, 3);
+}
+
+#[test]
+fn copy_bytes_zero_fills_a_gap_before_the_write_origin() {
+    let result = run_copy(8, 8, 3, 24, 0, 2, 1, b"x\0\0\0\0\0\0\0", 4, b"wxyz");
+    assert_eq!(result.outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(result.data, b"x\0\0wx\0\0\0");
+    assert_eq!(result.length, 5);
+}
+
+#[test]
+fn copy_bytes_failures_leave_the_destination_untouched() {
+    // `dst_off + len > capacity`: CapacityExceeded, no write.
+    let capacity = run_copy(2, 8, 1, 24, 0, 2, 4, b"abcd\0\0\0\0", 4, b"wxyz");
+    assert_eq!(capacity.outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(capacity.status, Status::CapacityExceeded as u64);
+    assert_eq!(capacity.data, b"abcd\0\0\0\0");
+    assert_eq!(capacity.length, 4);
+
+    // `src_off + len > len(src)`: Invalid, no write.
+    let source = run_copy(8, 8, 0, 24, 1, 4, 4, b"abcd\0\0\0\0", 2, b"wx");
+    assert_eq!(source.outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(source.status, Status::Invalid as u64);
+    assert_eq!(source.data, b"abcd\0\0\0\0");
+    assert_eq!(source.length, 4);
+}
+
+fn fill_package(capacity: u32, destination: u32, off: u64, value: u8, len: u64) -> Vec<u8> {
+    let mut instructions = Vec::new();
+    op_const(&mut instructions, i64::from(capacity));
+    op_imm(&mut instructions, opcodes::REF_STATE, destination);
+    op_const(&mut instructions, off as i64);
+    op_const(&mut instructions, i64::from(value));
+    op_const(&mut instructions, len as i64);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::FILL_BYTES,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 32);
+    op(&mut instructions, opcodes::RET);
+    let spec = FnSpec {
+        frame_size: 96,
+        ..MAIN
+    };
+    build(&[spec], &instructions, &[], 40, 160, 0)
+}
+
+fn run_fill(
+    capacity: u32,
+    off: u64,
+    value: u8,
+    len: u64,
+    dst_len: u64,
+    dst: &[u8],
+) -> BufferResult {
+    let code = fill_package(capacity, 8, off, value, len);
+    let mut state = vec![0u8; 40];
+    state[0..8].copy_from_slice(&dst_len.to_le_bytes());
+    state[8..8 + dst.len()].copy_from_slice(dst);
+    let outcome = run_state(&code, &mut state, 160);
+    BufferResult {
+        outcome,
+        data: state[8..16].to_vec(),
+        length: state_u64(&state, 0),
+        status: state_u64(&state, 32),
+    }
+}
+
+#[test]
+fn fill_bytes_writes_in_range_and_at_the_capacity_boundary() {
+    let inside = run_fill(8, 0, 0xAB, 4, 0, b"\0\0\0\0\0\0\0\0");
+    assert_eq!(inside.outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(inside.status, Status::Ok as u64);
+    assert_eq!(inside.data, b"\xAB\xAB\xAB\xAB\0\0\0\0");
+    assert_eq!(inside.length, 4);
+
+    // `off + len == N` is allowed: the boundary is inclusive.
+    let boundary = run_fill(8, 4, 0x5A, 4, 4, b"abcd\0\0\0\0");
+    assert_eq!(boundary.outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(boundary.data, b"abcdZZZZ");
+    assert_eq!(boundary.length, 8);
+}
+
+#[test]
+fn fill_bytes_zero_fills_the_gap_and_publishes_the_length() {
+    let result = run_fill(8, 3, 0x11, 2, 1, b"x\0\0\0\0\0\0\0");
+    assert_eq!(result.outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(result.data, b"x\0\0\x11\x11\0\0\0");
+    assert_eq!(result.length, 5);
+
+    // `len = 0`, `off > old_len`: zero-fill to `off`, length becomes `off`.
+    let empty = run_fill(8, 3, 0x11, 0, 1, b"x\xaa\xaa\xaa\xaa\xaa\xaa\xaa");
+    assert_eq!(empty.outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(empty.data, b"x\0\0\xaa\xaa\xaa\xaa\xaa");
+    assert_eq!(empty.length, 3);
+}
+
+#[test]
+fn fill_bytes_capacity_failure_leaves_the_destination_untouched() {
+    let result = run_fill(4, 2, 0xAB, 3, 4, b"abcd\0\0\0\0");
+    assert_eq!(result.outcome, Outcome::Exited(ExitReason::Ok));
+    assert_eq!(result.status, Status::CapacityExceeded as u64);
+    assert_eq!(result.data, b"abcd\0\0\0\0");
+    assert_eq!(result.length, 4);
+}

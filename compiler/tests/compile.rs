@@ -9752,3 +9752,167 @@ end;
         error.message
     );
 }
+
+#[test]
+fn machine_primitives_are_builtins_84_to_90_and_check_their_signatures() {
+    use abi::opcodes::{self, builtin};
+
+    let source = r#"
+unit t;
+uses core;
+var
+  status: Status;
+  a: uint;
+  b: uint;
+  dst: bytes[100];
+  src: bytes[64];
+procedure main(args: const string[1024]);
+begin
+  a := core.bit_and(a, b);
+  a := core.bit_or(a, b);
+  a := core.bit_xor(a, b);
+  a := core.shl(a, b);
+  a := core.shr(a, b);
+  status := core.copy_bytes(dst, uint(0), src, uint(0), uint(4));
+  status := core.fill_bytes(dst, uint(0), byte(7), uint(4));
+end;
+"#;
+    let package = compile(source.as_bytes(), "t.ig").expect("the machine primitives compile");
+    for id in [
+        builtin::BIT_AND,
+        builtin::BIT_OR,
+        builtin::BIT_XOR,
+        builtin::SHL,
+        builtin::SHR,
+        builtin::COPY_BYTES,
+        builtin::FILL_BYTES,
+    ] {
+        assert_eq!(
+            builtin_count(&package, id),
+            1,
+            "builtin {id} is emitted once"
+        );
+    }
+    assert_eq!(
+        (
+            builtin::BIT_AND,
+            builtin::BIT_OR,
+            builtin::BIT_XOR,
+            builtin::SHL,
+            builtin::SHR,
+            builtin::COPY_BYTES,
+            builtin::FILL_BYTES,
+        ),
+        (84, 85, 86, 87, 88, 89, 90)
+    );
+    assert_eq!(builtin::effect(builtin::BIT_AND), Some((2, 1)));
+    assert_eq!(builtin::effect(builtin::BIT_OR), Some((2, 1)));
+    assert_eq!(builtin::effect(builtin::BIT_XOR), Some((2, 1)));
+    assert_eq!(builtin::effect(builtin::SHL), Some((2, 1)));
+    assert_eq!(builtin::effect(builtin::SHR), Some((2, 1)));
+    assert_eq!(
+        builtin::effect(builtin::COPY_BYTES),
+        Some((6, 1)),
+        "the destination capacity is a hidden sixth operand"
+    );
+    assert_eq!(
+        builtin::effect(builtin::FILL_BYTES),
+        Some((5, 1)),
+        "the destination capacity is a hidden fifth operand"
+    );
+
+    // Both buffer primitives stage `bytes[100]`'s declared capacity as a
+    // `const` immediately before the destination data reference.
+    let words = instruction_words(&package);
+    let staged = words.windows(2).filter(|pair| {
+        pair[0].0 == opcodes::CONST && pair[0].1 == [100, 0] && pair[1].0 == opcodes::REF_STATE
+    });
+    assert_eq!(
+        staged.count(),
+        2,
+        "copy_bytes and fill_bytes each stage the capacity first"
+    );
+
+    let cases: &[(&str, &str)] = &[
+        (
+            r#"
+unit t;
+uses core;
+var a: uint; b: uint;
+procedure main(args: const string[1024]);
+begin
+  a := core.bit_and(1, b);
+end;
+"#,
+            "`core.bit_and` expects a `uint` argument",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var a: uint; b: uint;
+procedure main(args: const string[1024]);
+begin
+  a := core.shl(a, 1);
+end;
+"#,
+            "`core.shl` expects a `uint` argument",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; dst: bytes[8]; src: bytes[8];
+procedure main(args: const string[1024]);
+begin
+  status := core.copy_bytes(dst, uint(0), src, uint(0));
+end;
+"#,
+            "`core.copy_bytes` expects 5 arguments, got 4",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; dst: string[8]; src: bytes[8];
+procedure main(args: const string[1024]);
+begin
+  status := core.copy_bytes(dst, uint(0), src, uint(0), uint(1));
+end;
+"#,
+            "`core.copy_bytes` needs a writable `var bytes` destination",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; dst: bytes[8]; src: string[8];
+procedure main(args: const string[1024]);
+begin
+  status := core.copy_bytes(dst, uint(0), src, uint(0), uint(1));
+end;
+"#,
+            "expected `bytes`",
+        ),
+        (
+            r#"
+unit t;
+uses core;
+var status: Status; dst: bytes[8];
+procedure main(args: const string[1024]);
+begin
+  status := core.fill_bytes(dst, uint(0), uint(7), uint(1));
+end;
+"#,
+            "`core.fill_bytes` expects a `byte` value",
+        ),
+    ];
+    for (case, expected) in cases {
+        let error = compile(case.as_bytes(), "t.ig").expect_err("the case is rejected");
+        assert!(
+            error.message.contains(expected),
+            "expected `{expected}`, got `{}`",
+            error.message
+        );
+    }
+}

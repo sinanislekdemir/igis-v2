@@ -67,15 +67,19 @@ Two constraints dominate the design:
 - Statements end with `;`. Blocks are `begin ... end`.
 - Assignment `:=`; equality `=`; inequality `<>`; comparisons `<`, `<=`, `>`, `>=`.
 - Boolean operators are `and`, `or`, `not`; they take `bool` operands and short-circuit.
-  Integer bitwise operations are named functions, not operators: `core.bit_and`,
-  `core.bit_or`, `core.bit_xor`, `core.shl`, `core.shr`.
+  Integer bitwise operations are named functions, not operators: `core.bit_and(a, b)`,
+  `core.bit_or(a, b)`, `core.bit_xor(a, b)`, `core.shl(value, count)` and
+  `core.shr(value, count)`. All five take `uint` operands and return a `uint`; an `int`
+  or any other operand is a compile error (there is no implicit conversion). `shr` is a
+  logical (zero-filling) right shift.
 - Integer operators are `+`, `-`, `*`, `div`, `mod`. Integer overflow is a fault, never
   wraparound. Float operands use `+`, `-`, `*` and `/`, following IEEE-754.
 - Precedence, highest first: unary `not` and `-`; `*`, `/`, `div`, `mod`; `+`, `-`;
   relational `<`, `<=`, `>`, `>=`; equality `=` and `<>`; `and`; `or`. Parentheses
   override. `and` and `or` bind looser than comparisons, so `a > 0 and b > 0` means what
   it reads like.
-- A shift count outside `0..63` is `fault(IllegalOperation)`.
+- A shift count outside `0..63` is `fault(IllegalOperation)`; `0..=63` shifts by that
+  many bits and never masks the count.
 - String literals use double quotes with escapes (`\n`, `\t`, `\\`, `\"`, `\xNN`). A
   literal is typed by its destination: a `string` destination validates UTF-8 at compile
   time; a `bytes` destination accepts raw bytes.
@@ -210,6 +214,34 @@ Rules:
   defined for buffers.
 - **Length.** `core.len(buf) -> uint` returns the runtime length for either kind. One
   builtin serves both because the length word is part of the shared representation.
+
+### Bulk buffer operations (implemented)
+
+`core` carries two machine-level bulk primitives over `bytes`; they perform no host call
+and are shared by the kernel and `langhost`.
+
+- **`core.copy_bytes(dst: var bytes[N], dst_off: uint, src: const bytes[M],
+  src_off: uint, len: uint) -> Status`** copies `len` bytes from `src` at `src_off` into
+  `dst` at `dst_off`. The copy has `memmove` semantics: an overlap inside one region (or
+  two regions) moves correctly in either direction.
+- **`core.fill_bytes(dst: var bytes[N], off: uint, value: byte, len: uint) -> Status`**
+  fills `len` bytes with `value`. `value` is a `byte`; an `int` or `uint` needs an
+  explicit `byte(x)`.
+- **All-or-nothing.** Every check happens before the first write, and the destination is
+  byte-identical on failure. `dst_off + len > N` (or `off + len > N`) pushes
+  `CapacityExceeded` (`6`); `src_off + len > core.len(src)` pushes `Invalid` (`4`).
+  Success pushes `Ok` (`0`).
+- **The length is published like an indexed write.** On success the destination's runtime
+  length becomes `max(old_len, dst_off + len)` (or `max(old_len, off + len)` for the
+  fill), and the gap `[old_len, off)`/`[old_len, dst_off)` is zero-filled, exactly as an
+  indexed `bytes[i] := value` does. `len = 0` is `Ok`: the length is unchanged when
+  `off <= old_len`, and when `off > old_len` the gap is still zero-filled and the length
+  becomes `off`.
+- The destination is always a writable `var bytes`; a `string` destination (for either
+  source kind) is a compile error, because a bulk byte write could split a code point.
+  The destination capacity is a call-site immediate (a hidden operand), like
+  `core.substr_into`'s, so the interpreter can bound the write without a runtime
+  capacity field.
 
 ### Slicing and search (implemented)
 
@@ -2242,3 +2274,4 @@ controls and input dialog for the QMP screenshot harness.
 | 2026-11-20 | M11 replaces the terminal-window surface with console sessions (spec 0021, ADR 0053): `core.session_open`/`close`/`send`/`recv` are builtins 74–77 and `core.session_source` is compiler-lowered; `core.terminal_attach` (44) is retired. The terminal is an application emulator. A `#`-prefixed menu label is a non-selectable section header (`stdlib.ui_menu_is_header`). No opcode is added; ABI v1 stays 75. |
 | 2026-11-20 | M11 minimize query: `syslib.window_minimized(id: int) -> bool` (builtin 78) reports whether a live window is minimized. The Windows pull-down marks such rows with `min`; the File window list marks them with `*`. No opcode; ABI v1 stays 75. |
 | 2026-11-21 | `core.sleep(ms: uint) -> Status` (builtin 79): block until at least `ms` milliseconds of wall time, then `Ok`. Blocked time does not count against the budget; `ms = 0` and hosts without a scheduler return `Ok` immediately. No opcode; ABI v1 stays 75. |
+| 2026-11-21 | Generic machine primitives: `core.bit_and`/`bit_or`/`bit_xor`/`shl`/`shr` (builtins 84–88; `uint` only, a shift count at or above 64 faults `IllegalOperation`, `shr` is logical) and the bulk buffer operations `core.copy_bytes` (89) and `core.fill_bytes` (90). The buffer operations are all-or-nothing, push `Status` (`Ok`, `CapacityExceeded`, `Invalid`), carry the destination capacity as a hidden operand, copy with `memmove` overlap safety, and publish the destination length as `max(old_len, off + len)` with a zero-filled gap, exactly like indexed writes. No `Host` method; no new opcode; ABI v1 stays 75. |

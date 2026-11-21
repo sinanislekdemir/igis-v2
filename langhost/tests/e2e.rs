@@ -3069,3 +3069,17 @@ fn the_net_select_sample_reports_the_host_path() {
     assert_eq!(result.reason, ExitReason::Ok);
     assert_eq!(result.output, b"net_select: no device\n".to_vec());
 }
+
+/// `buffer_ops` exercises the machine-level bit primitives and the two bulk
+/// buffer primitives (spec 0003): overlap-safe copies, the published length
+/// with a zero-filled gap, and the all-or-nothing failures.
+#[test]
+fn the_buffer_ops_sample_proves_the_machine_primitives() {
+    let path = app_path("buffer_ops");
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "buffer_ops").expect("the sample compiles");
+    let result =
+        langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies and runs");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"buffer_ops: ok\n".to_vec());
+}

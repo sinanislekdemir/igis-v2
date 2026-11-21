@@ -6435,6 +6435,28 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::scalar(Kind::Int)))
             }
+            // Machine-level integer primitives (spec 0003): `uint` operands
+            // only, no host call, and a shift count at or above 64 faults
+            // `IllegalOperation`. The names are the language surface; there is
+            // no opcode and no ABI change.
+            "core.bit_and" => {
+                self.bit_binop_call(args, line, column, "core.bit_and", builtin::BIT_AND)
+            }
+            "core.bit_or" => {
+                self.bit_binop_call(args, line, column, "core.bit_or", builtin::BIT_OR)
+            }
+            "core.bit_xor" => {
+                self.bit_binop_call(args, line, column, "core.bit_xor", builtin::BIT_XOR)
+            }
+            "core.shl" => self.bit_binop_call(args, line, column, "core.shl", builtin::SHL),
+            "core.shr" => self.bit_binop_call(args, line, column, "core.shr", builtin::SHR),
+            // Bulk buffer primitives (spec 0003, "Bulk buffer operations").
+            // The destination's declared capacity rides in a hidden scalar
+            // operand, the same convention `socket_recv`/`fs_read` use; the
+            // interpreter owns the overlap-safe copy, the zero-filled gap and
+            // the `Status` result. Separate helpers keep `call`'s frame small.
+            "core.copy_bytes" => self.copy_bytes_call(args, line, column),
+            "core.fill_bytes" => self.fill_bytes_call(args, line, column),
             // `core.substr_into(dst, src, start: int, len: int) -> int`. It stays
             // in `core`: the destination capacity must be a call-site
             // immediate. All four kind
@@ -8990,6 +9012,162 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         }
         self.one(opcodes::BUILTIN, builtin::SOCKET_RECV)?;
         self.pop(4)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// `core.bit_and(a, b)`, `core.bit_or`, `core.bit_xor`, `core.shl` and
+    /// `core.shr` (spec 0003): two `uint` operands, one `uint` result, with no
+    /// host call. The shift range (`0..63`) is the interpreter's check.
+    fn bit_binop_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+        name: &str,
+        id: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 2 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`{name}` expects 2 arguments, got {}", args.len()),
+            ));
+        }
+        for arg in args {
+            let value = self.expr_scalar(arg)?;
+            if value.kind != Kind::Uint {
+                return Err(self.err_at(
+                    arg,
+                    format_args!("`{name}` expects a `uint` argument, found `{value}`"),
+                ));
+            }
+        }
+        self.one(opcodes::BUILTIN, id)?;
+        self.pop(2)?;
+        self.push();
+        Ok(Some(Type::scalar(Kind::Uint)))
+    }
+
+    /// `core.copy_bytes(var dst, dst_off: uint, src: const bytes,
+    /// src_off: uint, len: uint) -> Status` (spec 0003, "Bulk buffer
+    /// operations"). The destination capacity is a hidden scalar operand, so
+    /// it is emitted first; the rest follow in declaration order.
+    fn copy_bytes_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 5 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`core.copy_bytes` expects 5 arguments, got {}", args.len()),
+            ));
+        }
+        let destination = self.var_buffer_place(args[0])?;
+        if destination.ty.kind != Kind::Bytes {
+            let found = self.type_name(destination.ty);
+            return Err(self.err_at(
+                args[0],
+                format_args!(
+                    "`core.copy_bytes` needs a writable `var bytes` destination, found `{found}`"
+                ),
+            ));
+        }
+        self.const_i64(i64::from(destination.ty.cap))?;
+        self.push_buffer_data_ref(&destination)?;
+        let destination_offset = self.expr_scalar(args[1])?;
+        if destination_offset.kind != Kind::Uint {
+            return Err(self.err_at(
+                args[1],
+                format_args!(
+                    "`core.copy_bytes` expects a `uint` dst_off, found `{destination_offset}`"
+                ),
+            ));
+        }
+        let source = self.emit_ref(args[2], Some(Kind::Bytes))?;
+        if source.kind != Kind::Bytes {
+            let found = self.type_name(source);
+            return Err(self.err_at(
+                args[2],
+                format_args!("`core.copy_bytes` expects a `bytes` source, found `{found}`"),
+            ));
+        }
+        let source_offset = self.expr_scalar(args[3])?;
+        if source_offset.kind != Kind::Uint {
+            return Err(self.err_at(
+                args[3],
+                format_args!("`core.copy_bytes` expects a `uint` src_off, found `{source_offset}`"),
+            ));
+        }
+        let length = self.expr_scalar(args[4])?;
+        if length.kind != Kind::Uint {
+            return Err(self.err_at(
+                args[4],
+                format_args!("`core.copy_bytes` expects a `uint` len, found `{length}`"),
+            ));
+        }
+        self.one(opcodes::BUILTIN, builtin::COPY_BYTES)?;
+        self.pop(6)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// `core.fill_bytes(var dst, off: uint, value: byte, len: uint) -> Status`
+    /// (spec 0003, "Bulk buffer operations"). The capacity is the same hidden
+    /// first operand `copy_bytes` uses.
+    fn fill_bytes_call(
+        &mut self,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 4 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`core.fill_bytes` expects 4 arguments, got {}", args.len()),
+            ));
+        }
+        let destination = self.var_buffer_place(args[0])?;
+        if destination.ty.kind != Kind::Bytes {
+            let found = self.type_name(destination.ty);
+            return Err(self.err_at(
+                args[0],
+                format_args!(
+                    "`core.fill_bytes` needs a writable `var bytes` destination, found `{found}`"
+                ),
+            ));
+        }
+        self.const_i64(i64::from(destination.ty.cap))?;
+        self.push_buffer_data_ref(&destination)?;
+        let offset = self.expr_scalar(args[1])?;
+        if offset.kind != Kind::Uint {
+            return Err(self.err_at(
+                args[1],
+                format_args!("`core.fill_bytes` expects a `uint` off, found `{offset}`"),
+            ));
+        }
+        let value = self.expr_scalar(args[2])?;
+        if value.kind != Kind::Byte {
+            return Err(self.err_at(
+                args[2],
+                format_args!(
+                    "`core.fill_bytes` expects a `byte` value, found `{value}`; convert with `byte(x)`"
+                ),
+            ));
+        }
+        let length = self.expr_scalar(args[3])?;
+        if length.kind != Kind::Uint {
+            return Err(self.err_at(
+                args[3],
+                format_args!("`core.fill_bytes` expects a `uint` len, found `{length}`"),
+            ));
+        }
+        self.one(opcodes::BUILTIN, builtin::FILL_BYTES)?;
+        self.pop(5)?;
         self.push();
         Ok(Some(Type::enumeration(STATUS_ENUM)))
     }

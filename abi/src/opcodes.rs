@@ -1013,6 +1013,59 @@ pub mod builtin {
     /// the mode. A failure leaves the current mode untouched (spec 0022, D6).
     pub const SET_RESOLUTION: u32 = 83;
 
+    // ---- machine-level integer and buffer primitives --------------------
+    //
+    // These are pure interpreter operations: no `Host` method is involved,
+    // so a bare host (`langhost`) and the kernel share one implementation.
+    // The bit operations take `uint` only; the shift count is checked against
+    // `0..63` and a larger count faults `IllegalOperation` (spec 0003). The
+    // buffer primitives carry the destination's declared capacity as a hidden
+    // scalar operand, the same convention `SOCKET_RECV` and `FS_READ` use.
+
+    /// `core.bit_and(a, b) -> uint`: the 64-bit bitwise AND. Operands:
+    /// `[a][b]`.
+    pub const BIT_AND: u32 = 84;
+
+    /// `core.bit_or(a, b) -> uint`: the 64-bit bitwise OR. Operands: `[a][b]`.
+    pub const BIT_OR: u32 = 85;
+
+    /// `core.bit_xor(a, b) -> uint`: the 64-bit bitwise XOR. Operands: `[a][b]`.
+    pub const BIT_XOR: u32 = 86;
+
+    /// `core.shl(value, count) -> uint`: logical left shift. A `count` at or
+    /// above 64 faults `IllegalOperation` (spec 0003). Operands: `[value][count]`.
+    pub const SHL: u32 = 87;
+
+    /// `core.shr(value, count) -> uint`: logical (zero-filling) right shift. A
+    /// `count` at or above 64 faults `IllegalOperation`. Operands:
+    /// `[value][count]`.
+    pub const SHR: u32 = 88;
+
+    /// `core.copy_bytes(var dst, dst_off, src, src_off, len) -> Status`: copy
+    /// `len` bytes from a read-only buffer into a writable `bytes` destination
+    /// with `memmove` semantics (an overlap inside one region is moved). The
+    /// destination's declared capacity rides in a hidden scalar operand:
+    /// `[capacity][dst reference][dst_off][src reference][src_off][len]`.
+    ///
+    /// On success the destination's runtime length becomes
+    /// `max(old_len, dst_off + len)` and the gap `[old_len, dst_off)` is
+    /// zero-filled, exactly like indexed buffer writes; a zero `len` still
+    /// updates the length to `dst_off` when `dst_off > old_len`. A failure
+    /// leaves the destination untouched: `dst_off + len` past the declared
+    /// capacity pushes `CapacityExceeded`, and `src_off + len` past the
+    /// source's runtime length pushes `Invalid`.
+    pub const COPY_BYTES: u32 = 89;
+
+    /// `core.fill_bytes(var dst, off, value, len) -> Status`: fill `len` bytes
+    /// of a writable `bytes` destination with `value` (a `byte`). The capacity
+    /// is a hidden scalar operand: `[capacity][dst reference][off][value][len]`.
+    ///
+    /// The length and gap rules are [`COPY_BYTES`]'s: on success the runtime
+    /// length is `max(old_len, off + len)` and `[old_len, off)` is zero-filled.
+    /// `off + len` past the capacity pushes `CapacityExceeded` and leaves the
+    /// destination untouched.
+    pub const FILL_BYTES: u32 = 90;
+
     /// `core.sleep(ms)`: block the caller until at least `ms` milliseconds of
     /// wall time have passed, then push `Ok`. The wait is the scheduler's
     /// generic deadline (`WaitFor::Deadline`), so blocked time does not count
@@ -1104,6 +1157,13 @@ pub mod builtin {
             DISPLAY_MODE_WIDTH => Some((1, 1)),
             DISPLAY_MODE_HEIGHT => Some((1, 1)),
             SET_RESOLUTION => Some((2, 1)),
+            BIT_AND => Some((2, 1)),
+            BIT_OR => Some((2, 1)),
+            BIT_XOR => Some((2, 1)),
+            SHL => Some((2, 1)),
+            SHR => Some((2, 1)),
+            COPY_BYTES => Some((6, 1)),
+            FILL_BYTES => Some((5, 1)),
             _ => None,
         }
     }

@@ -431,6 +431,18 @@ on the same table; the machine, not the compiler, owns the runtime checks.
 | 59 | `popup_release` | 0 → 1 | releases the caller's grab and wakes input waiters |
 | 60 | `region_claim` | 4 → 1 | x, y, w, h; one machine-wide persistent pointer-region claim for the caller |
 | 61 | `region_release` | 0 → 1 | releases the caller's region claim and wakes input waiters |
+| 84 | `bit_and` | 2 → 1 | `uint` only; machine-level bitwise AND |
+| 85 | `bit_or` | 2 → 1 | `uint` only; bitwise OR |
+| 86 | `bit_xor` | 2 → 1 | `uint` only; bitwise XOR |
+| 87 | `shl` | 2 → 1 | `[value][count]`; `count >= 64` faults `IllegalOperation` |
+| 88 | `shr` | 2 → 1 | logical right shift; same count rule |
+| 89 | `copy_bytes` | 6 → 1 | `[capacity][dst ref][dst_off][src ref][src_off][len]`; `memmove`, `Status` |
+| 90 | `fill_bytes` | 5 → 1 | `[capacity][dst ref][off][value][len]`; `Status` |
+
+The networking (62–73), session (74–77), `window_minimized` (78), `sleep` (79) and
+display-mode (80–83) builtins are documented with their constants in `abi::opcodes`;
+the table above resumes at the machine-level primitives 84–90, which are pure
+interpreter code with no `Host` method.
 
 Graphics builtins add no opcode, so ABI v1 stays at **75** opcodes (spec 0009). The input
 builtins (spec 0010), the window builtins (spec 0011), the application file builtins
@@ -628,3 +640,4 @@ pub fn run(task: &mut Task);
 | 2026-11-17 | Q44 resolved (ADR 0037): the `read_line` opcode (`0x42`) becomes `read_input` in the same slot — capacity immediate, a `var bytes` destination reference on the stack, a raw non-blocking console read that pushes the copied count (`0` when empty) and always publishes the destination length. The kind field stays zero (the compiler requires `bytes`). This is a semantic change inside ABI v1, not a new opcode: the table stays at **75**. |
 | 2026-11-18 | M8.3 adds builtins 58 `popup_grab` (4 → 1) and 59 `popup_release` (0 → 1) (spec 0011 W26, ADR 0044). The machine rejects a non-positive extent before the host call and otherwise calls `Host::popup_grab`/`Host::popup_release`, pushing the `Status`; the kernel host owns the one machine-wide grab, the owner rule and the release wake, and the defaults are `Invalid`. The table also backfills rows 51–57 that the earlier file-writing entries added without updating this table. No opcode; ABI v1 stays at **75**. |
 | 2026-11-18 | M8.4 adds builtins 60 `region_claim` (4 → 1) and 61 `region_release` (0 → 1) (spec 0011 W27, ADR 0045): the persistent pointer-region claim counterpart of the popup grab. The machine rejects a non-positive extent before the host call and otherwise calls `Host::region_claim`/`Host::region_release`, pushing the `Status`; the kernel host owns the one machine-wide claim, the owner rule, the poll-time head gate and the release wake, and the defaults are `Invalid`. No opcode; ABI v1 stays at **75**. |
+| 2026-11-21 | Builtins 84–90 are the machine-level primitives (spec 0003): `bit_and`/`bit_or`/`bit_xor` (2 → 1), `shl`/`shr` (2 → 1, a count at or above 64 faults `IllegalOperation`), `copy_bytes` (6 → 1) and `fill_bytes` (5 → 1). The buffer operands are `[capacity][dst ref][dst_off][src ref][src_off][len]` and `[capacity][dst ref][off][value][len]`; the interpreter validates every range before the first write, moves with `memmove` semantics and publishes the destination length as `max(old_len, off + len)` with a zero-filled gap. No `Host` method and no opcode; ABI v1 stays at **75**. |
