@@ -56,7 +56,7 @@ colour, gamma/colour-management or a kernel codec.
   expose a full-image RGB buffer.
 - **P10 (MUST):** Decoder state is bounded: two source rows of 20,480 bytes
   (previous/current, for filters), a 32 KiB inflate window plus its canonical
-  Huffman tables (40,816 bytes, about 40 KiB, for the inflater in total), a
+  Huffman tables (40,824 bytes, about 40 KiB, for the inflater in total), a
   4,096-byte inflater-output staging buffer, a 768-byte palette, a 256-byte
   `tRNS` table, the staged compressed prefix (at most 512 KiB), and scalars. The
   caller's RGB row is 16,384 bytes (at most 5,461 pixels). A decoded row is at
@@ -133,7 +133,7 @@ buffer is `CapacityExceeded` in the PNG layer. The alternative (a full
 interlaced preview already stops after pass 1.
 
 The row buffer is the only image-shaped allocation. The inflater keeps a 32 KiB
-window and its canonical Huffman tables (40,816 bytes in total), so memory is
+window and its canonical Huffman tables (40,824 bytes in total), so memory is
 bounded by the window width and the staging prefix, not by the image area. The
 viewer maps decoded rows to the window content with `syslib.blit_rgb`.
 
@@ -242,6 +242,13 @@ function read(d: var Inflater; input: const bytes[0]; input_len: uint;
 - **Window.** A 32 KiB ring holds every produced byte; `wpos` wraps and
   `total_out` bounds a match. A match copies byte by byte from the ring, so
   overlapping matches (distance < length) are correct.
+- **Heartbeats.** Long work signals `core.heartbeat()`: every 64 decoded
+  literal/length or distance symbols, every 64 dynamic-header length items and
+  every 1024 produced output bytes (stored blocks and matches included). A
+  realtime caller's one-second watchdog is reset while one `read` decodes a big
+  row or block; a normal task's heartbeat is a no-op (spec 0007). Decoded bytes,
+  statuses and the API are unchanged, and the cadence adds one 8-byte `tick`
+  field (the inflater is 40,824 bytes).
 - **No trailer.** The Adler-32 trailer is not read or checked (P12): a caller may
   stop after a prefix, and structural bounds catch corruption.
 
@@ -300,10 +307,10 @@ function png.next_row(d: var Decoder; row: var bytes[16384];
   `(c*a + 255*(255-a)) div 255`. A palette `tRNS` alpha is applied; for colour
   types 0 and 2 `tRNS` is ignored. Every output row is exactly `out_w * 3`
   opaque RGB bytes.
-- **State.** `type Decoder` holds `inflate.Inflater` (40,816 B), the
+- **State.** `type Decoder` holds `inflate.Inflater` (40,824 B), the
   `idat: bytes[524288]` stage (512 KiB), `out_buf: bytes[4096]`, `prev` and
   `cur` source rows (`bytes[20480]` each), `palette: bytes[768]`,
-  `trns: bytes[256]`, and scalars: 611,352 bytes compiled. It is well under the
+  `trns: bytes[256]`, and scalars: 611,360 bytes compiled. It is well under the
   1 MiB state cap. The caller's `row` is `bytes[16384]`. `rewind` keeps the
   staged prefix and geometry in that state and resets only the inflater and row
   cursor, so an `Expose` repaint reads no file bytes and allocates nothing.
@@ -356,3 +363,4 @@ function png.next_row(d: var Decoder; row: var bytes[16384];
 | 2026-11-21 | G2's `lib.inflate` is implemented (`samples/apps/lib/inflate.ig`): a bounded-input, bounded-output zlib/DEFLATE decoder with `init`/`done`/`read`, a 32 KiB output ring plus canonical Huffman tables (40,816 bytes), a caller-supplied compressed prefix (`in_pos` persists, `input_len` bounds it), stored/fixed/dynamic blocks, `Ok`/`WouldBlock`/`Invalid` statuses, no faults and no Adler-32 check. The PNG layer's staging prefix is capped at 512 KiB (measured pass-1 maximum 368,317 B). Proved by the test-only `inflate_probe` over committed stored, fixed, dynamic, LZ and mixed vectors, a truncated and a corrupt stream, and a half-prefix plus a mid-header pause/resume of the dynamic vector (ADR 0057). |
 | 2026-11-21 | The row-streaming decoder is implemented (`samples/apps/lib/png.ig`): `probe`/`open`/`info`/`next_row`, 8-bit colour types 0/2/3/4/6, filters 0–4, Adam7 pass 1 only, palette expansion with `tRNS` alpha, alpha composited over white, a 512 KiB IDAT prefix and `WouldBlock` mapped to `CapacityExceeded` when the prefix is full and `Invalid` when the IDAT ended. State is 611,352 bytes; the caller row is 16,384 bytes. Proved by the test-only `png_probe` over committed fixtures (every filter, colour type, interlace pass 1, a 1000-pixel row, unsupported depth/width, truncated, corrupt and non-PNG input) on `langhost` and the `--shell` image. |
 | 2026-11-22 | `png.rewind` is added: it re-initialises the inflater and row cursor over the already-staged IDAT prefix (no `fs_read`), clearing the previous unfiltered row so the first row matches `open`. It returns `Ok` for an opened decoder and `Invalid` before `open` or after `open` fails; the prefix, palette/`tRNS` and geometry are kept. A viewer uses it to repaint an `Expose` without re-reading the 512 KiB prefix. Proved by `png_probe` replaying `grad_il` and every filter fixture after a complete decode, and replaying row 0 of `wide` after a partial decode. |
+| 2026-11-22 | `lib.inflate` signals progress to the scheduler (`core.heartbeat()`) every 64 decoded literal/length or distance symbols, every 64 dynamic-header length items and every 1024 produced output bytes. A realtime `png.next_row` that spends more than one second in the zlib header or a large block is no longer killed by the 1 s watchdog; a normal task's heartbeat is a no-op (spec 0007). Decoded bytes, statuses, resumability and the API are unchanged; the inflater state grows by one 8-byte `tick` to 40,824 bytes (the PNG decoder is 611,360 bytes). Proved by `inflate_probe` and `png_probe` on `langhost` and the `--shell` image. |

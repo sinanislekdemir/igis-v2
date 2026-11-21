@@ -18,6 +18,13 @@ unit inflate;
 // preview) cannot see it, and structural bounds are what catch a corrupt
 // stream.
 //
+// Long work signals progress: `read` calls `core.heartbeat()` every 64 decoded
+// symbols, every 64 dynamic-header length items and every 1024 produced bytes
+// (stored blocks and matches included), so a realtime caller's one-second
+// watchdog stays reset across a large row or block. A normal task's heartbeat
+// is a no-op (spec 0007). The cadence costs one 8-byte `tick` field; decoded
+// bytes, statuses and the API are unchanged.
+//
 //   var d: inflate.Inflater;
 //   inflate.init(d);
 //   ...
@@ -53,6 +60,8 @@ const
   WindowSize = 32768;
   OutSize = 4096;
   ReaderWindow = 512;   // `bitio.Reader`'s byte window
+  SignalEvery = 64;     // progress ticks between `core.heartbeat()` calls
+  BytesPerTick = 16;    // produced bytes per progress tick (1024 per heartbeat)
   SymbolTotal = 352;    // 288 literal/length + 32 distance + 19 code-length
   MaxLengths = 318;     // most HLIT + HDIST code lengths in one header
   TableSlots = 48;      // three canonical tables of 16 lengths
@@ -79,6 +88,8 @@ type Inflater = record
   bfinal: bool;
   stored_left: int;
   match_len: int;       // a decoded length waiting for its distance (mode 4)
+  // Progress cadence for `core.heartbeat()`; persists across `read` calls.
+  tick: int;
   // Checkpoint before a block header, so a WouldBlock in the (possibly long)
   // dynamic header restarts it without losing or duplicating output.
   save_reader: bitio.Reader;
@@ -113,6 +124,7 @@ begin
   d.bfinal := false;
   d.stored_left := 0;
   d.match_len := 0;
+  d.tick := 0;
   i := 0;
   while i < SymbolTotal do
   begin
@@ -143,6 +155,21 @@ end;
 function done(d: const Inflater): bool;
 begin
   return d.done;
+end;
+
+// Signals scheduler progress every `SignalEvery` ticks. For a realtime task
+// this resets the one-second watchdog (spec 0007, ADR 0016); for a normal task
+// it is a no-op. One tick is one decoded symbol, one dynamic-header length
+// item, or `BytesPerTick` produced bytes, so `read` calls this often enough
+// that no long block header or match can run a second without a heartbeat.
+procedure progress(d: var Inflater);
+begin
+  d.tick := d.tick + 1;
+  if d.tick >= SignalEvery then
+  begin
+    d.tick := 0;
+    core.heartbeat();
+  end;
 end;
 
 // Stages more caller bytes into the bit reader while fewer than 64 bits are
@@ -441,6 +468,7 @@ begin
   i := 0;
   while i < total do
   begin
+    progress(d);
     st := hdecode(d, 2, sym, used);
     if st <> Ok then
       return st;
@@ -708,6 +736,8 @@ begin
       if st <> Ok then
         return st;
       emit(d, byte(v), out, got);
+      if (d.total_out mod uint(BytesPerTick)) = uint(0) then
+        progress(d);
       d.stored_left := d.stored_left - 1;
       if d.stored_left = 0 then
       begin
@@ -731,6 +761,7 @@ begin
       end;
       if st <> Ok then
         return st;
+      progress(d);
       if sym < 256 then
       begin
         st := take_bits(d, used, 0, v);
@@ -783,6 +814,7 @@ begin
       end;
       if st <> Ok then
         return st;
+      progress(d);
       if sym > 29 then
         return Invalid;
       distance := distance_base(sym, extra);
@@ -807,6 +839,8 @@ begin
         if src < 0 then
           src := src + WindowSize;
         emit(d, d.window[src], out, got);
+        if (d.total_out mod uint(BytesPerTick)) = uint(0) then
+          progress(d);
         i := i + 1;
       end;
       d.mode := 3;

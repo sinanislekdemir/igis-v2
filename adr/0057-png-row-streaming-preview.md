@@ -134,3 +134,21 @@ start of the retained prefix, so decoding restarts from the first byte with no `
 and no new allocation. It returns `Ok` for an opened decoder and `Invalid` before `open`.
 This does not change the bounded-prefix decision: the same 512 KiB stage is reused, and
 the `CapacityExceeded`/`Invalid` mapping is unchanged.
+
+## Amendment 2026-11-22: inflate progress heartbeats
+
+A realtime caller decodes rows from `png.next_row`, which calls `inflate.read`. Under TCG
+the first row's zlib header and DEFLATE dynamic-Huffman setup can take longer than the
+one-second realtime watchdog, even though the decoder itself is resumable; the viewer was
+killed at `WatchdogTimeout` inside row 0. `lib.inflate.read` now signals progress with
+`core.heartbeat()`:
+
+- every 64 decoded literal/length or distance symbols,
+- every 64 dynamic-header code-length items, and
+- every 1024 produced output bytes, including stored-block bytes and match bytes.
+
+For a realtime task this resets the one-second deadline; for a normal task it is a no-op
+(spec 0007, ADR 0016). Decoded bytes, statuses, resumability and the API are unchanged.
+The only cost is one scalar `tick` (8 bytes), so the inflater is 40,824 bytes and the PNG
+decoder 611,360 bytes. The bounded-prefix decision and the `CapacityExceeded`/`Invalid`
+mapping are likewise unchanged.
