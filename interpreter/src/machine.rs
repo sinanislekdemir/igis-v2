@@ -242,6 +242,28 @@ pub trait Host {
         0
     }
 
+    /// Number of selectable runtime display modes (`syslib.display_mode_count`);
+    /// 0 when the host has no runtime VBE interface.
+    fn display_mode_count(&mut self) -> u64 {
+        0
+    }
+
+    /// Width of selectable mode `index`, or 0 when out of range.
+    fn display_mode_width(&mut self, _index: u64) -> u64 {
+        0
+    }
+
+    /// Height of selectable mode `index`, or 0 when out of range.
+    fn display_mode_height(&mut self, _index: u64) -> u64 {
+        0
+    }
+
+    /// Changes the runtime display mode (`syslib.set_resolution`). The default
+    /// host has no display device and reports `Invalid`.
+    fn set_resolution(&mut self, _width: u64, _height: u64) -> Status {
+        Status::Invalid
+    }
+
     /// Fills an extent of the shadow (`syslib.fill_rect`). The interpreter has
     /// already rejected `w <= 0`, `h <= 0` and an over-wide colour; the host
     /// clips to the screen and the clip region (G8, G9).
@@ -1944,6 +1966,26 @@ impl Machine {
                     builtin::SCREEN_HEIGHT => {
                         let height = host.screen_height();
                         self.push(stack, height)?;
+                    }
+                    builtin::DISPLAY_MODE_COUNT => {
+                        let count = host.display_mode_count();
+                        self.push(stack, count)?;
+                    }
+                    builtin::DISPLAY_MODE_WIDTH => {
+                        let index = self.pop(stack)?;
+                        let width = host.display_mode_width(index);
+                        self.push(stack, width)?;
+                    }
+                    builtin::DISPLAY_MODE_HEIGHT => {
+                        let index = self.pop(stack)?;
+                        let height = host.display_mode_height(index);
+                        self.push(stack, height)?;
+                    }
+                    builtin::SET_RESOLUTION => {
+                        let height = self.pop(stack)?;
+                        let width = self.pop(stack)?;
+                        let status = host.set_resolution(width, height);
+                        self.push(stack, status as u64)?;
                     }
                     builtin::FILL_RECT => {
                         let color = self.pop(stack)?;

@@ -3,7 +3,7 @@
 Operational guide for humans and coding agents working in this repository.
 Keep this file short and current. It points at documents; it does not duplicate them.
 
-**Last updated:** 2026-11-20
+**Last updated:** 2026-11-21
 
 ## What this is
 
@@ -27,10 +27,11 @@ decisions in `adr/`, and work items in `PLAN.md`.
 
 ## Current state
 
-- Specs 0001–0021 are accepted; **M2–M11 are complete** (desktop, language,
-  filesystems, networking, terminal emulator). Current milestone work is tracked in
-  `PLAN.md`.
-- **613 host tests** (535 language + 56 `net` + 22 `ext2w`); ABI v1 has **75 opcodes**.
+- Specs 0001–0022 are accepted; **M2–M12 are complete** (desktop, language,
+  filesystems, networking, terminal emulator, runtime display modes). Current milestone
+  work is tracked in `PLAN.md`.
+- **613 host tests** (535 language + 56 `net` + 22 `ext2w`); ABI v1 has **75 opcodes**
+  (runtime display modes add builtins 80–83, no opcode).
 - Boot: GRUB/multiboot2 → `system/entrypoint` (the desktop shell), falling back to
   `base/shell`; a graphics-less boot keeps a serial REPL.
 - Filesystems: a read-only ext2 application image (`lib`, `base`, `apps`, `home`,
@@ -40,8 +41,10 @@ decisions in `adr/`, and work items in `PLAN.md`.
   in `/lib` and `base/`.
 - UI: a kernel window server with service-drawn close and minimize boxes, proportional
   font, one kernel System Log window, a terminal emulator
-  (`apps/utilities/terminal`) over kernel console sessions, and source apps (`editor`,
-  `browser`, `calculator`, `minesweeper`, `clock_window`, `widgets`). Every terminal
+  (`apps/utilities/terminal`) over kernel console sessions, a Settings app
+  (`apps/utilities/settings`) that changes the real mode through the Bochs VBE dispi
+  (spec 0022, ADR 0056), and source apps (`editor`, `browser`, `calculator`,
+  `minesweeper`, `clock_window`, `widgets`). Every terminal
   instance has its own session, shell and cwd; the `Windows` pull-down lists every
   window (minimized rows marked `min`) and `File` opens a clickable window list. A
   window switch or a completed move runs a full-stack repaint (desktop, chrome

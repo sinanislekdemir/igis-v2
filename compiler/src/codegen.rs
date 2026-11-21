@@ -6800,6 +6800,67 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::scalar(Kind::Uint)))
             }
+            "syslib.display_mode_count" => {
+                if !args.is_empty() {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`{target}` expects 0 arguments, got {}", args.len()),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::DISPLAY_MODE_COUNT)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Uint)))
+            }
+            "syslib.display_mode_width" | "syslib.display_mode_height" => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`{target}` expects 1 argument, got {}", args.len()),
+                    ));
+                }
+                let index = self.expr_scalar(args[0])?;
+                if index.kind != Kind::Uint {
+                    let found = self.type_name(index);
+                    return Err(self.err_at(
+                        args[0],
+                        format_args!("`{target}` expects a `uint` index, found `{found}`"),
+                    ));
+                }
+                let id = if target == "syslib.display_mode_width" {
+                    builtin::DISPLAY_MODE_WIDTH
+                } else {
+                    builtin::DISPLAY_MODE_HEIGHT
+                };
+                self.one(opcodes::BUILTIN, id)?;
+                self.pop(1)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Uint)))
+            }
+            "syslib.set_resolution" => {
+                if args.len() != 2 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`{target}` expects 2 arguments, got {}", args.len()),
+                    ));
+                }
+                for (index, name) in ["width", "height"].iter().enumerate() {
+                    let value = self.expr_scalar(args[index])?;
+                    if value.kind != Kind::Uint {
+                        let found = self.type_name(value);
+                        return Err(self.err_at(
+                            args[index],
+                            format_args!("`{target}` expects a `uint` {name}, found `{found}`"),
+                        ));
+                    }
+                }
+                self.one(opcodes::BUILTIN, builtin::SET_RESOLUTION)?;
+                self.pop(2)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
             "syslib.fill_rect" | "syslib.fill_dither" | "syslib.draw_rect" => {
                 self.gfx_rect_operands(target, line, column, args)?;
                 let id = match target {

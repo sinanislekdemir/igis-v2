@@ -21,7 +21,7 @@ mod vfs;
 pub(crate) use mm::{frame, guard};
 pub(crate) use platform::x86_64::{ata, mouse, pci, smp, usb};
 pub(crate) use sched::task;
-pub(crate) use ui::{console, font, font8x8, gfx, session, window};
+pub(crate) use ui::{console, display, font, font8x8, gfx, session, window};
 pub(crate) use vfs::{ext2, fs};
 
 use arch_x86_64::{apic, gdt, idt, ioapic, keyboard, serial};
@@ -41,6 +41,24 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
     // so it runs before the console: the shadow screen is allocated from it at
     // boot, and the console attaches once the shadow exists (spec 0009).
     frame::init(mb2_info as usize, fb);
+    // The Bochs dispi LFB stays at the boot framebuffer's PCI BAR while the
+    // mode changes, so reserve the largest supported aperture up front: a
+    // larger mode must never overlap a frame the allocator could hand to a
+    // shadow or a task region (spec 0022).
+    let lfb_reserved = if arch_x86_64::bochs::available() {
+        fb.map(|info| {
+            let end = info
+                .addr
+                .saturating_add(16 * 1024 * 1024)
+                .min(0x1_0000_0000);
+            if end > info.addr {
+                frame::reserve_range(info.addr, end);
+            }
+            end.saturating_sub(info.addr)
+        })
+    } else {
+        None
+    };
     let graphics = gfx::init(fb);
     // The window service narrows this clip when it repaints a window (spec
     // 0011, W10). Check the save/narrow/restore arithmetic before the console
@@ -61,6 +79,18 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
             println!("console: route FAIL at step {step}");
             arch_x86_64::halt();
         }
+    }
+
+    // Runtime display modes (spec 0022). The Bochs VBE dispi is the QEMU std
+    // VGA register interface; its presence is logged before any mode change.
+    if arch_x86_64::bochs::available() {
+        println!(
+            "display: bochs vbe revision {:#06x}, LFB {} KiB reserved",
+            arch_x86_64::bochs::revision(),
+            lfb_reserved.unwrap_or(0) / 1024
+        );
+    } else {
+        println!("display: no Bochs VBE dispi (runtime mode changes disabled)");
     }
 
     // Console input is a raw byte ring (spec 0005, ADR 0037). FIFO order, a

@@ -41,10 +41,11 @@ grows down. Colours are `0x00RRGGBB`.
 
 - **G1 (MUST):** The kernel keeps the multiboot2 framebuffer information (address,
   pitch, width, height, bpp, type) in one graphics module, not in the console.
-- **G2 (MUST):** The screen mode is whatever the bootloader returns. Nothing in the
-  kernel or the language may assume 1024×768: the shadow is sized from the actual
-  `pitch * height`, and `syslib.screen_width()`/`screen_height()` report the actual
-  geometry.
+- **G2 (MUST):** The screen mode at boot is whatever the bootloader returns. Nothing in
+  the kernel or the language may assume 1024×768: the shadow is sized from the actual
+  `pitch * height`, and `syslib.screen_width()`/`screen_height()` report the current
+  geometry. A runtime change is defined separately by spec 0022 and keeps the same
+  no-assumption rule.
 - **G3 (MUST):** Only 32 bpp RGB (`bpp == 32`, framebuffer type 1) is supported. Any
   other mode disables graphics; the console keeps working through its text path, which
   in this slice is serial only (the kernel never draws text into an unsupported mode).
@@ -72,7 +73,8 @@ grows down. Colours are `0x00RRGGBB`.
   "Interfaces": `screen_width`, `screen_height`, `fill_rect`, `fill_dither`,
   `draw_rect`, `draw_text`, `get_pixel`, `present`, `clear`, plus the three
   proportional-text primitives of G20 (`text_width_prop`, `text_height_prop`,
-  `draw_text_prop`).
+  `draw_text_prop`). Runtime mode selection is the separate surface of spec 0022; it
+  adds no drawing primitive.
 - **G11 (MUST):** `fill_dither` writes `color` to every other pixel of its extent — the
   pixel `(X, Y)` when `(X + Y)` is even — and leaves the other pixels untouched. This
   is the System 7 desktop background when a white `fill_rect` precedes it.
@@ -364,3 +366,4 @@ an `Info` (width, height, pitch, bpp, shadow address/size/frames, free-frame del
 | 2026-11-16 | M2.3.4 (spec 0012, ADR 0025): the console paints two kernel-owned text windows (owner `0`, terminal and system log) instead of the whole screen, with per-window grids and scrolling; expose repair is pulled by `console::pump` at the service opportunity. The whole-screen console helpers and the shadow scroll are removed from `gfx`; the nine drawing primitives, `present`, `clear` and the clip are unchanged. A full-screen `clear` erases the console windows' pixels; their grids survive and repaint on the next expose/output. |
 | 2026-11-17 | M2.6.1 (spec 0015, ADR 0030): G20 adds the three proportional-text builtins (`text_width_prop`, `text_height_prop`, `draw_text_prop`, ids 45–47) and the window-service title bar uses the proportional face; `draw_text`, the console and the `stdlib.ui_*` helpers stay 8×8. No opcode; ABI v1 stays at 75. |
 | 2026-11-17 | M2.6.3 (ADR 0032): G21 resolves M2.1.2 with a host-side QMP `screendump` of a deterministic full-screen specimen (`samples/apps/visual`) compared exactly against `tests/golden/visual.png` + a SHA-256/tile manifest (`scripts/visual_regression.py`). No kernel serial dump or debug builtin is added. The specimen covers the kernel text windows, has no clock/input, checks its own pixels and holds after `visual: ready`; the same golden matches on `-smp 4` and `-smp 1`, `--tamper` proves the comparator rejects a changed pixel, and only `--update` rewrites the golden. 376 host tests. |
+| 2026-11-21 | Runtime display modes (spec 0022, ADR 0056): G2 now separates the boot mode from a later change; the Bochs VBE dispi changes the real mode, the shadow is reallocated and swapped under the graphics lock, and builtins 80–83 expose the mode list and `set_resolution`. No drawing primitive, opcode or boot-mode assumption is added. |

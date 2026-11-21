@@ -780,6 +780,7 @@ impl Table {
         w: i64,
         h: i64,
         title: &[u8],
+        bottom: bool,
     ) -> Result<u64, Status> {
         if screen_w <= 0 || screen_h <= 0 {
             return Err(Status::Invalid);
@@ -832,6 +833,24 @@ impl Table {
         let frame = window.frame();
         let old_focus = self.focus;
         self.windows[slot] = window;
+        if bottom {
+            // Insert at the bottom of the z-order: the kernel System Log is a
+            // screen-sized background window and must not cover an application
+            // after a mode change reopened it.
+            let mut index = self.count;
+            while index > 0 {
+                self.order[index] = self.order[index - 1];
+                index -= 1;
+            }
+            self.order[0] = slot;
+            self.count += 1;
+            if self.focus == 0 {
+                self.focus = id;
+            }
+            self.bump();
+            self.full = true;
+            return Ok(id);
+        }
         self.order[self.count] = slot;
         self.count += 1;
         self.focus = id;
@@ -1745,7 +1764,43 @@ static TABLE: SpinLock<Table> = SpinLock::new(Table::new());
 pub fn open(owner: u64, x: i64, y: i64, w: i64, h: i64, title: &[u8]) -> Result<u64, Status> {
     let (screen_w, screen_h) = gfx::size();
     let mut table = TABLE.lock();
-    let result = table.open(screen_w as i64, screen_h as i64, owner, x, y, w, h, title);
+    let result = table.open(screen_w as i64, screen_h as i64, owner, x, y, w, h, title, false);
+    let wake = if result.is_ok() {
+        table.repair()
+    } else {
+        false
+    };
+    drop(table);
+    if wake {
+        crate::task::wake_input();
+    }
+    result
+}
+
+/// Opens a window at the **bottom** of the z-order. Kernel-internal: the
+/// System Log is a screen-sized diagnostic window and must stay behind
+/// application windows, including when a mode change reopens it.
+pub(crate) fn open_bottom(
+    owner: u64,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+    title: &[u8],
+) -> Result<u64, Status> {
+    let (screen_w, screen_h) = gfx::size();
+    let mut table = TABLE.lock();
+    let result = table.open(
+        screen_w as i64,
+        screen_h as i64,
+        owner,
+        x,
+        y,
+        w,
+        h,
+        title,
+        true,
+    );
     let wake = if result.is_ok() {
         table.repair()
     } else {
@@ -1772,6 +1827,69 @@ pub fn close(owner: u64, id: u64) -> Status {
         crate::task::wake_input();
     }
     status
+}
+
+/// Rebuilds the window stack after a display mode change (spec 0022).
+///
+/// Window content sizes are kept: only the frame origins are scaled with the
+/// screen and clamped so each frame starts on-screen. The service then runs
+/// the full-stack repair (W31), which restores the desktop, redraws every
+/// chrome and marks every live window for an `Expose`, so each owner repaints
+/// at its refreshed content rectangle. A stale modal grab or drag is dropped;
+/// the desktop shell re-claims its menu-bar region when it next draws.
+pub fn screen_changed(old_width: u32, old_height: u32) {
+    let (new_width, new_height) = gfx::size();
+    if new_width == 0 {
+        return;
+    }
+    let new_w = i64::from(new_width);
+    let new_h = i64::from(new_height);
+    let old_w = i64::from(old_width.max(1));
+    let old_h = i64::from(old_height.max(1));
+
+    let mut table = TABLE.lock();
+    for slot in 0..MAX_WINDOWS {
+        let window = &mut table.windows[slot];
+        if !window.used {
+            continue;
+        }
+        let frame_w = window.w.saturating_add(BORDER_WIDTH * 2);
+        let frame_h = window
+            .h
+            .saturating_add(TITLE_BAR_HEIGHT + BORDER_WIDTH);
+        let x = if old_width == 0 {
+            window.x
+        } else {
+            window.x.saturating_mul(new_w) / old_w
+        };
+        let y = if old_height == 0 {
+            window.y
+        } else {
+            window.y.saturating_mul(new_h) / old_h
+        };
+        window.x = x.clamp(0, (new_w - frame_w).max(0));
+        window.y = y.clamp(0, (new_h - frame_h).max(0));
+    }
+    table.drag = None;
+    table.grab = None;
+    if let Some(mut region) = table.region {
+        if region.rect.x >= new_w {
+            region.rect.x = 0;
+        }
+        if region.rect.y >= new_h {
+            region.rect.y = 0;
+        }
+        region.rect.w = region.rect.w.min(new_w);
+        region.rect.h = region.rect.h.min(new_h);
+        table.region = Some(region);
+    }
+    table.full = true;
+    table.bump();
+    let wake = table.repair();
+    drop(table);
+    if wake {
+        crate::task::wake_input();
+    }
 }
 
 /// Raises and focuses a window; any task may (W7).
@@ -2128,7 +2246,7 @@ pub fn self_check() -> Result<(), u32> {
     let mut table = Table::new();
 
     // 1. First open: id 1, focused, geometry derives from the content size.
-    let one = table.open(SCREEN_W, SCREEN_H, 7, 10, 20, 100, 50, b"one");
+    let one = table.open(SCREEN_W, SCREEN_H, 7, 10, 20, 100, 50, b"one", false);
     if one != Ok(1) || table.focus != 1 {
         return Err(1);
     }
@@ -2153,7 +2271,7 @@ pub fn self_check() -> Result<(), u32> {
     }
 
     // 2. Second open is on top and focused; the first window is unchanged.
-    let two = table.open(SCREEN_W, SCREEN_H, 8, 300, 200, 160, 90, b"two");
+    let two = table.open(SCREEN_W, SCREEN_H, 8, 300, 200, 160, 90, b"two", false);
     if two != Ok(2) || table.focus != 2 {
         return Err(5);
     }
@@ -2222,7 +2340,7 @@ pub fn self_check() -> Result<(), u32> {
     }
 
     // 7. Origins are clamped; a negative origin lands at (0, 0).
-    let clamped = table.open(SCREEN_W, SCREEN_H, 7, -50, -50, 100, 50, b"c");
+    let clamped = table.open(SCREEN_W, SCREEN_H, 7, -50, -50, 100, 50, b"c", false);
     if clamped != Ok(3) {
         return Err(14);
     }
@@ -2241,8 +2359,8 @@ pub fn self_check() -> Result<(), u32> {
     }
 
     // 8. Minimum content and an oversized frame are refused.
-    if table.open(SCREEN_W, SCREEN_H, 7, 0, 0, 7, 50, b"") != Err(Status::Invalid)
-        || table.open(SCREEN_W, SCREEN_H, 7, 0, 0, 100, 752, b"") != Err(Status::Invalid)
+    if table.open(SCREEN_W, SCREEN_H, 7, 0, 0, 7, 50, b"", false) != Err(Status::Invalid)
+        || table.open(SCREEN_W, SCREEN_H, 7, 0, 0, 100, 752, b"", false) != Err(Status::Invalid)
     {
         return Err(17);
     }
@@ -2251,14 +2369,14 @@ pub fn self_check() -> Result<(), u32> {
     if table.close(7, 0) != Status::NotFound
         || table.raise(99) != Status::NotFound
         || table.frame_rect(99) != Err(Status::NotFound)
-        || table.open(0, 0, 7, 0, 0, 100, 50, b"") != Err(Status::Invalid)
+        || table.open(0, 0, 7, 0, 0, 100, 50, b"", false) != Err(Status::Invalid)
     {
         return Err(18);
     }
 
     // 10. Task termination closes every window the task owns.
-    if table.open(SCREEN_W, SCREEN_H, 9, 0, 0, 100, 50, b"a") != Ok(4)
-        || table.open(SCREEN_W, SCREEN_H, 9, 200, 100, 100, 50, b"b") != Ok(5)
+    if table.open(SCREEN_W, SCREEN_H, 9, 0, 0, 100, 50, b"a", false) != Ok(4)
+        || table.open(SCREEN_W, SCREEN_H, 9, 200, 100, 100, 50, b"b", false) != Ok(5)
         || table.focus != 5
     {
         return Err(19);
@@ -2270,7 +2388,7 @@ pub fn self_check() -> Result<(), u32> {
 
     // 11. A long title is truncated at 64 bytes (all ASCII).
     let long = [b'x'; 100];
-    let truncated = table.open(SCREEN_W, SCREEN_H, 7, 0, 0, 100, 50, &long);
+    let truncated = table.open(SCREEN_W, SCREEN_H, 7, 0, 0, 100, 50, &long, false);
     if truncated != Ok(6) {
         return Err(21);
     }
@@ -2283,12 +2401,12 @@ pub fn self_check() -> Result<(), u32> {
     // 12. The table is full at 16 and frees on close.
     let mut index = 0;
     while index < MAX_WINDOWS {
-        if table.open(SCREEN_W, SCREEN_H, 12, 0, 0, 100, 50, b"f") != Ok(7 + index as u64) {
+        if table.open(SCREEN_W, SCREEN_H, 12, 0, 0, 100, 50, b"f", false) != Ok(7 + index as u64) {
             return Err(24);
         }
         index += 1;
     }
-    if table.open(SCREEN_W, SCREEN_H, 12, 0, 0, 100, 50, b"full") != Err(Status::Full) {
+    if table.open(SCREEN_W, SCREEN_H, 12, 0, 0, 100, 50, b"full", false) != Err(Status::Full) {
         return Err(25);
     }
     table.close_task(12);
@@ -2299,7 +2417,7 @@ pub fn self_check() -> Result<(), u32> {
     // 13. Owner 0 is the kernel (spec 0012, D6): it opens, focuses and is
     //     enumerated topmost-first like any other window, and its own close
     //     works. The previous steps leave `next_id` at 23.
-    let kernel = table.open(SCREEN_W, SCREEN_H, 0, 10, 10, 100, 50, b"kernel");
+    let kernel = table.open(SCREEN_W, SCREEN_H, 0, 10, 10, 100, 50, b"kernel", false);
     if kernel != Ok(23) || table.focus != 23 {
         return Err(27);
     }
@@ -2412,7 +2530,7 @@ pub fn paint_self_check() -> Result<(), u32> {
     //    bands that do not touch the frame and preserve the exact area.
     let mut table = Table::new();
     let id = table
-        .open(SCREEN_W, SCREEN_H, 5, 100, 100, 80, 60, b"vis")
+        .open(SCREEN_W, SCREEN_H, 5, 100, 100, 80, 60, b"vis", false)
         .map_err(|_| 5u32)?;
     let frame = table.frame_rect(id).map_err(|_| 6u32)?;
     let outer = Rect {
@@ -2445,7 +2563,7 @@ pub fn paint_self_check() -> Result<(), u32> {
     //    focus title bar.
     let mut table = Table::new();
     let a = table
-        .open(SCREEN_W, SCREEN_H, 1, 100, 100, 200, 120, b"Alpha")
+        .open(SCREEN_W, SCREEN_H, 1, 100, 100, 200, 120, b"Alpha", false)
         .map_err(|_| 11u32)?;
     let fa = table.frame_rect(a).map_err(|_| 12u32)?;
     if !table.chrome.covers(fa) || !table.erases.covers(fa, table.count) {
@@ -2454,7 +2572,7 @@ pub fn paint_self_check() -> Result<(), u32> {
 
     table.clear_damage();
     let b = table
-        .open(SCREEN_W, SCREEN_H, 1, 200, 160, 200, 120, b"Beta")
+        .open(SCREEN_W, SCREEN_H, 1, 200, 160, 200, 120, b"Beta", false)
         .map_err(|_| 14u32)?;
     let fb = table.frame_rect(b).map_err(|_| 15u32)?;
     let ta = title_of(&table, a).ok_or(16u32)?;
@@ -2526,7 +2644,7 @@ pub fn paint_self_check() -> Result<(), u32> {
     //    topmost, focused window and an in-progress drag step do not.
     let mut table = Table::new();
     let a = table
-        .open(SCREEN_W, SCREEN_H, 1, 100, 100, 200, 100, b"full")
+        .open(SCREEN_W, SCREEN_H, 1, 100, 100, 200, 100, b"full", false)
         .map_err(|_| 31u32)?;
     table.clear_damage();
     if table.full {
@@ -2740,10 +2858,10 @@ pub fn damage_self_check() -> Result<DamageStats, u32> {
     //    new positions; the coalesced present covers only the two frames.
     let mut table = Table::new();
     let alpha = table
-        .open(SCREEN_W, SCREEN_H, 1, 100, 100, 200, 120, b"Alpha")
+        .open(SCREEN_W, SCREEN_H, 1, 100, 100, 200, 120, b"Alpha", false)
         .map_err(|_| 6u32)?;
     let _beta = table
-        .open(SCREEN_W, SCREEN_H, 2, 600, 400, 200, 120, b"Beta")
+        .open(SCREEN_W, SCREEN_H, 2, 600, 400, 200, 120, b"Beta", false)
         .map_err(|_| 7u32)?;
     table.clear_damage();
     if table.move_to(SCREEN_W, SCREEN_H, 1, alpha, 700, 600, false) != Status::Ok {
@@ -2824,10 +2942,10 @@ pub fn route_self_check() -> Result<(), u32> {
     // Two windows of different owners, not overlapping.
     let mut table = Table::new();
     let a = table
-        .open(SCREEN_W, SCREEN_H, 1, 10, 10, 100, 50, b"A")
+        .open(SCREEN_W, SCREEN_H, 1, 10, 10, 100, 50, b"A", false)
         .map_err(|_| 1u32)?;
     let b = table
-        .open(SCREEN_W, SCREEN_H, 2, 400, 400, 100, 50, b"B")
+        .open(SCREEN_W, SCREEN_H, 2, 400, 400, 100, 50, b"B", false)
         .map_err(|_| 2u32)?;
     if a != 1 || b != 2 {
         return Err(3);
@@ -2904,7 +3022,7 @@ pub fn route_self_check() -> Result<(), u32> {
 
     // A closed window loses its pending expose.
     let c = table
-        .open(SCREEN_W, SCREEN_H, 3, 600, 100, 100, 50, b"C")
+        .open(SCREEN_W, SCREEN_H, 3, 600, 100, 100, 50, b"C", false)
         .map_err(|_| 21u32)?;
     table.clear_damage();
     if table.raise(c) != Status::Ok {
@@ -2939,7 +3057,7 @@ pub fn drag_self_check() -> Result<(), u32> {
 
     let mut table = Table::new();
     let id = table
-        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"drag")
+        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"drag", false)
         .map_err(|_| 1u32)?;
     let frame = table.frame_rect(id).map_err(|_| 2u32)?;
 
@@ -2965,7 +3083,7 @@ pub fn drag_self_check() -> Result<(), u32> {
     //    cannot reach a client): the drag is unchanged and no new grab replaces
     //    it.
     let other = table
-        .open(SCREEN_W, SCREEN_H, 8, 600, 500, 100, 50, b"other")
+        .open(SCREEN_W, SCREEN_H, 8, 600, 500, 100, 50, b"other", false)
         .map_err(|_| 7u32)?;
     let other_frame = table.frame_rect(other).map_err(|_| 8u32)?;
     match table.press(other_frame.x + 40, other_frame.y + 8) {
@@ -3047,7 +3165,7 @@ pub fn drag_self_check() -> Result<(), u32> {
     // 7. The close box posts an owner request: owner 0 is consumed but inert,
     //    a task window yields `Close` and a pending flag the owner can take.
     let kernel = table
-        .open(SCREEN_W, SCREEN_H, 0, 300, 100, 100, 50, b"kernel")
+        .open(SCREEN_W, SCREEN_H, 0, 300, 100, 100, 50, b"kernel", false)
         .map_err(|_| 22u32)?;
     let kernel_frame = table.frame_rect(kernel).map_err(|_| 23u32)?;
     match table.press(kernel_frame.x + 5, kernel_frame.y + 5) {
@@ -3058,7 +3176,7 @@ pub fn drag_self_check() -> Result<(), u32> {
         return Err(25);
     }
     let victim = table
-        .open(SCREEN_W, SCREEN_H, 9, 500, 100, 100, 50, b"victim")
+        .open(SCREEN_W, SCREEN_H, 9, 500, 100, 100, 50, b"victim", false)
         .map_err(|_| 26u32)?;
     let victim_frame = table.frame_rect(victim).map_err(|_| 27u32)?;
     match table.press(victim_frame.x + 5, victim_frame.y + 5) {
@@ -3071,7 +3189,7 @@ pub fn drag_self_check() -> Result<(), u32> {
 
     // 8. Closing the dragged window cancels the drag.
     let doomed = table
-        .open(SCREEN_W, SCREEN_H, 7, 600, 300, 100, 50, b"doomed")
+        .open(SCREEN_W, SCREEN_H, 7, 600, 300, 100, 50, b"doomed", false)
         .map_err(|_| 30u32)?;
     let doomed_frame = table.frame_rect(doomed).map_err(|_| 31u32)?;
     match table.press(doomed_frame.x + 40, doomed_frame.y + 8) {
@@ -3103,13 +3221,13 @@ pub fn close_self_check() -> Result<(), u32> {
 
     let mut table = Table::new();
     let a = table
-        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"A")
+        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"A", false)
         .map_err(|_| 1u32)?;
     let b = table
-        .open(SCREEN_W, SCREEN_H, 7, 400, 100, 200, 100, b"B")
+        .open(SCREEN_W, SCREEN_H, 7, 400, 100, 200, 100, b"B", false)
         .map_err(|_| 2u32)?;
     let other = table
-        .open(SCREEN_W, SCREEN_H, 8, 700, 100, 100, 50, b"other")
+        .open(SCREEN_W, SCREEN_H, 8, 700, 100, 100, 50, b"other", false)
         .map_err(|_| 3u32)?;
 
     // 1. A close-box press on A posts a request for its owner and is consumed;
@@ -3173,7 +3291,7 @@ pub fn close_self_check() -> Result<(), u32> {
 
     // 5. An owner-0 close box is consumed but posts nothing.
     let kernel = table
-        .open(SCREEN_W, SCREEN_H, 0, 300, 400, 100, 50, b"kernel")
+        .open(SCREEN_W, SCREEN_H, 0, 300, 400, 100, 50, b"kernel", false)
         .map_err(|_| 20u32)?;
     let kernel_frame = table.frame_rect(kernel).map_err(|_| 21u32)?;
     match table.press(kernel_frame.x + 5, kernel_frame.y + 5) {
@@ -3208,7 +3326,7 @@ pub fn grab_self_check() -> Result<(), u32> {
     const SCREEN_H: i64 = 768;
     let mut table = Table::new();
     let id = table
-        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"menu")
+        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"menu", false)
         .map_err(|_| 1u32)?;
     if table.frame_rect(id).is_err() {
         return Err(2);
@@ -3309,7 +3427,7 @@ pub fn region_self_check() -> Result<(), u32> {
     const SCREEN_H: i64 = 768;
     let mut table = Table::new();
     let id = table
-        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"window")
+        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"window", false)
         .map_err(|_| 1u32)?;
     if table.frame_rect(id).is_err() {
         return Err(2);
@@ -3416,10 +3534,10 @@ pub fn target_self_check() -> Result<(), u32> {
     const SCREEN_H: i64 = 768;
     let mut table = Table::new();
     let one = table
-        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"one")
+        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"one", false)
         .map_err(|_| 1u32)?;
     let two = table
-        .open(SCREEN_W, SCREEN_H, 8, 150, 150, 100, 50, b"two")
+        .open(SCREEN_W, SCREEN_H, 8, 150, 150, 100, 50, b"two", false)
         .map_err(|_| 2u32)?;
 
     // A helper event with the fields the target rule reads.
@@ -3484,7 +3602,7 @@ pub fn target_self_check() -> Result<(), u32> {
     //    while it is focused, are free-for-all. An addressed event to it is
     //    likewise untargeted, because no task owns the window.
     let kernel = table
-        .open(SCREEN_W, SCREEN_H, 0, 400, 400, 100, 50, b"kernel")
+        .open(SCREEN_W, SCREEN_H, 0, 400, 400, 100, 50, b"kernel", false)
         .map_err(|_| 7u32)?;
     if table.owner_of(kernel) != Some(0)
         || table.focus_owner().is_some()

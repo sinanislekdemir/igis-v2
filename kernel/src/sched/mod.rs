@@ -242,6 +242,22 @@ impl Host for KernelHost {
         u64::from(crate::gfx::size().1)
     }
 
+    fn display_mode_count(&mut self) -> u64 {
+        crate::display::mode_count()
+    }
+
+    fn display_mode_width(&mut self, index: u64) -> u64 {
+        crate::display::mode_width(index)
+    }
+
+    fn display_mode_height(&mut self, index: u64) -> u64 {
+        crate::display::mode_height(index)
+    }
+
+    fn set_resolution(&mut self, width: u64, height: u64) -> Status {
+        crate::display::set_resolution(width, height)
+    }
+
     fn fill_rect(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) -> Status {
         crate::gfx::fill_rect(x, y, w, h, color)
     }

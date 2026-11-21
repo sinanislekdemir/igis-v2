@@ -19,7 +19,7 @@ The transcript proof is:
 
   desktop_shell: apps menu open
   desktop_shell: launched Clock task N
-  clock_window: ok                 (empty args: the deterministic check)
+  clock_window: ready HH:MM:SS     (empty args: the live clock)
   desktop_shell: launched File Browser task N
   repl: apps/productivity/browser: spawned as task N
   desktop_shell: launched terminal task N  (Apps > Utilities > Terminal)
@@ -233,8 +233,13 @@ def main():
         # own output is the deterministic gate; the launch line is asserted
         # against the joined transcript at the end.
         click(qmp, *CLOCK_ROW, width, height)
-        _, cursor = serial.wait_for(r"clock_window: ok", timeout=args.timeout, start=cursor)
+        _, cursor = serial.wait_for(r"clock_window: ready", timeout=args.timeout, start=cursor)
         print("[harness] Clock launched from a row over the Terminal")
+        # The clock stays live until its close box; close it so the next menu
+        # click does not race a realtime window. The Clock frame is
+        # (340, 130) and the close box is frame + (9, 8).
+        click(qmp, 349, 138, width, height)
+        time.sleep(0.5)
         if halted(serial):
             print("[harness] FAIL: the system halted after the Apps launch")
             return 1

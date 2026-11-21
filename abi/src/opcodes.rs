@@ -993,6 +993,26 @@ pub mod builtin {
     /// is minimized (M11 minimize). A missing window is false. Operands: `[id]`.
     pub const WINDOW_MINIMIZED: u32 = 78;
 
+    /// `syslib.display_mode_count() -> uint`: number of selectable runtime
+    /// display modes; `0` when the platform has no runtime VBE interface
+    /// (spec 0022, D4).
+    pub const DISPLAY_MODE_COUNT: u32 = 80;
+
+    /// `syslib.display_mode_width(index) -> uint`: width of a selectable mode,
+    /// or `0` when the index is out of range (spec 0022, D5).
+    pub const DISPLAY_MODE_WIDTH: u32 = 81;
+
+    /// `syslib.display_mode_height(index) -> uint`: height of a selectable
+    /// mode, or `0` when the index is out of range.
+    pub const DISPLAY_MODE_HEIGHT: u32 = 82;
+
+    /// `syslib.set_resolution(width, height) -> Status`: change the real
+    /// display mode. `Ok` on success, `NotFound` for a geometry outside the
+    /// selectable list, `Invalid` when graphics are disabled, `Full` when the
+    /// new shadow cannot be allocated and `IoError` when the device rejects
+    /// the mode. A failure leaves the current mode untouched (spec 0022, D6).
+    pub const SET_RESOLUTION: u32 = 83;
+
     /// `core.sleep(ms)`: block the caller until at least `ms` milliseconds of
     /// wall time have passed, then push `Ok`. The wait is the scheduler's
     /// generic deadline (`WaitFor::Deadline`), so blocked time does not count
@@ -1080,6 +1100,10 @@ pub mod builtin {
             SESSION_RECV => Some((4, 1)),
             WINDOW_MINIMIZED => Some((1, 1)),
             SLEEP => Some((1, 1)),
+            DISPLAY_MODE_COUNT => Some((0, 1)),
+            DISPLAY_MODE_WIDTH => Some((1, 1)),
+            DISPLAY_MODE_HEIGHT => Some((1, 1)),
+            SET_RESOLUTION => Some((2, 1)),
             _ => None,
         }
     }

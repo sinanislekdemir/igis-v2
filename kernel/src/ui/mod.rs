@@ -2,6 +2,7 @@
 //! proportional fonts, the text console, and the window server.
 
 pub mod console;
+pub mod display;
 pub mod font;
 pub mod font8x8;
 pub mod gfx;

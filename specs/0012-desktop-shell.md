@@ -207,7 +207,7 @@ resize. Those are M2.4/M2.5.
   `Accessories` → `apps/accessories/calculator`, `apps/accessories/clock_window`,
   `apps/accessories/widgets`; `Games` → `apps/games/minesweeper`;
   `Productivity` → `apps/productivity/editor`, `apps/productivity/browser`;
-  `Utilities` → `apps/utilities/terminal`. The frame is
+  `Utilities` → `apps/utilities/terminal`, `apps/utilities/settings`. The frame is
   `(menu_apps_x - 4, MenuHeight, 220, row_count * 16 + 2)`; it is drawn with the M2.4.3
   menu helpers, and a section header is a `#`-prefixed label that the helpers draw as
   plain non-selectable text. Opening the menu takes the modal popup input grab
@@ -221,8 +221,9 @@ resize. Those are M2.4/M2.5.
   two pull-downs. The check mode verifies the item table, the section headers, both
   menus' grab/open/close, one real launch (the `clock_window` deterministic check exits
   on its own and is reaped with `core.wait`), the outside-click dismissal, the key
-  switching and the pixels; `scripts/apps_menu_qmp.py` proves a real `Clock` click on
-  the boot desktop and a second Terminal activation.
+  switching and the pixels; the Settings row is part of the item table and is
+  selectable. `scripts/apps_menu_qmp.py` proves a real `Clock` click on the boot
+  desktop and a second Terminal activation.
   The shell also claims the persistent pointer-region claim
   `(0, 0, screen_w, MenuHeight)` at startup, in normal and check mode, and releases it on
   exit (spec 0011, W27; ADR 0045). The modal grab only starts after a menu opens; without
@@ -433,3 +434,4 @@ while that id is its own; otherwise it presents what the service last left.
 | 2026-11-18 | D19 amended for M8.6 (spec 0010 I34, spec 0011 W29; ADR 0047): the desktop no longer receives an application's window-addressed clicks or keys even though it blocks in `next_event`. Only window-less events with no target (and the menu bar's region press) still compete with other tasks. The shell-image determinism note stays available, the close-the-desktop workaround is removed, and `scripts/input_routing_qmp.py` proves Browser navigation, About's close box and a Calculator click with the desktop alive. No D-level surface change. |
 | 2026-11-19 | The text shell tracks a current directory and runs the file commands as separate apps (spec 0013, `0b8ff2c`/`3597d6c`/`e02fc8f`): the prompt is `igis:/> `/`igis:/base> `, `cd [dir]` is the one stateful builtin (`~`/empty → `/home`, `/`, `.`, `..`), and a non-builtin command is resolved as `base/<cmd>` (fallback `system/<cmd>`). The file commands (`ls`, `dir`, `pwd`, `cat`, `head`, `tail`, `mkdir`, `rmdir`, `rm`) receive args `"<cwd> <rest>"`; every other app receives the raw tail, so `nc`, `purl`, `text` and `child` keep their `run` interfaces. The commands are separate `base/` apps over `lib/path`/`lib/cli`/`lib/list_dir`/`lib/file_view`; `run` keeps its explicit-path behavior and messages. The prompt change is app-only; every harness wait accepts `(?:shell> \|igis:/[^>]*> )`, and the langhost shell tests plus a new walk test pin the behavior. No D-level or kernel change. |
 | 2026-11-20 | M11 amends D1–D5, D7, D9–D13, D18 and D20 (spec 0021, ADR 0053): the kernel opens only the System Log; application output is a console session; terminals are `apps/utilities/terminal` emulators and every Apps activation starts a new one. The bar is `File / Apps / Windows / System`; the Apps menu has `Accessories`, `Games`, `Productivity` and `Utilities` section headers; `File` lists windows in a desktop-owned window. |
+| 2026-11-21 | Runtime display modes (spec 0022): `Utilities` gains `Settings`, the Apps frame grows to 12 rows, and the shell re-reads the screen size and re-claims the menu-bar region before a draw after a mode change. The item-table check includes the new row. |

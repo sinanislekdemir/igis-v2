@@ -145,6 +145,26 @@ pub fn free_frame(addr: u64) {
     }
 }
 
+/// Marks `[start, end)` as device memory. Used for a linear framebuffer whose
+/// full aperture is larger than the mode the bootloader happened to set.
+pub fn reserve_range(start: u64, end: u64) {
+    let start = start.min(MAX_PHYS);
+    let end = end.min(MAX_PHYS);
+    if end <= start {
+        return;
+    }
+    let mut guard = BITMAP.lock();
+    let words: &mut [u64] = &mut guard[..];
+    let first = (start / FRAME_SIZE) as usize;
+    let last = ((end + FRAME_SIZE - 1) / FRAME_SIZE).min(FRAME_COUNT as u64) as usize;
+    for frame in first..last {
+        if !is_used(words, frame) {
+            set_used(words, frame);
+            FREE_FRAMES.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Allocates `count` physically contiguous frames and returns the address of
 /// the first. Task regions are contiguous so that a region is one slice.
 ///

@@ -468,10 +468,34 @@ impl Console {
         }
         let cols = cols as usize;
         let rows = rows as usize;
-        if let Ok(id) = window::open(0, MARGIN, TOP, content_w, content_h, b"System Log") {
+        if let Ok(id) = window::open_bottom(0, MARGIN, TOP, content_w, content_h, b"System Log") {
             self.log.attach(0, id, MARGIN + 1, TOP + 16, cols, rows);
         }
     }
+}
+
+/// Reopens the kernel System Log after a runtime display mode change
+/// (spec 0022, D9). The log's content rectangle is derived from the screen at
+/// init; without this it would keep its old (nearly full-screen) size and hide
+/// the desktop on a smaller mode. The log is closed and reopened at the new
+/// geometry, which clears its previous diagnostics; kernel output continues in
+/// the new grid.
+pub fn screen_changed() {
+    let (width, height) = gfx::size();
+    if width == 0 || height == 0 {
+        return;
+    }
+    let mut console = CONSOLE.lock();
+    if !console.enabled {
+        return;
+    }
+    if console.log.id != 0 {
+        let _ = window::close(0, console.log.id);
+    }
+    console.log.reset(LOG_FG, LOG_BG);
+    console.open_windows(width as i64, height as i64);
+    console.log.repaint();
+    while window::take_expose(0).is_some() {}
 }
 
 /// Initialises the console: paints the desktop, opens the System Log and paints

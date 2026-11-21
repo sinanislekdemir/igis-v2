@@ -57,7 +57,7 @@ const
   SysMenuWidth = 224;
   SysMenuCount = 4;
   AppMenuWidth = 220;
-  AppMenuCount = 11;
+  AppMenuCount = 12;
   WindowMenuWidth = 220;
   WindowListCapacity = 16;
   AboutContentW = 420;
@@ -400,8 +400,28 @@ end;
 // in the top 22 rows; app windows are expected to open below it. The labels and
 // the clock use the proportional font (spec 0015): positions come from the
 // measured widths, not from 8-pixel cells.
+// A runtime mode change (spec 0022) marks every window for an `Expose`; the
+// shell also has to pick up the new screen geometry, because the menu bar and
+// its pointer-region claim are drawn outside any window.
+procedure refresh_screen();
+var
+  width: int;
+  height: int;
+begin
+  width := int(syslib.screen_width());
+  height := int(syslib.screen_height());
+  if width <> screen_w or height <> screen_h then
+  begin
+    screen_w := width;
+    screen_h := height;
+    if screen_w > 0 and screen_h > 0 then
+      claim_menu_bar();
+  end;
+end;
+
 procedure draw_menu_bar();
 begin
+  refresh_screen();
   status := syslib.fill_rect(0, 0, screen_w, MenuHeight, white);
   // The Apple square is aligned with the proportional cap rows (line top 7 +
   // the glyph box's two-row top bearing), not with the old 8×8 cell.
@@ -891,9 +911,10 @@ end;
 //   8  File Browser     apps/productivity/browser
 //   9  #Utilities
 //  10  Terminal         apps/utilities/terminal (always a new instance)
+//  11  Settings         apps/utilities/settings
 //
 // Every item is a non-blocking `core.spawn`; the shell never waits. The menu
-// frame is `(menu_apps_x - 4, MenuHeight, AppMenuWidth, 11 * 16 + 2)`.
+// frame is `(menu_apps_x - 4, MenuHeight, AppMenuWidth, 12 * 16 + 2)`.
 
 procedure init_apps_menu();
 begin
@@ -908,6 +929,7 @@ begin
   app_items[8] := "File Browser";
   app_items[9] := "#Utilities";
   app_items[10] := "Terminal";
+  app_items[11] := "Settings";
   pos := 0;
   while pos < AppMenuCount do
   begin
@@ -1103,7 +1125,9 @@ begin
   begin
     terminal_runs := terminal_runs + 1;
     launch_shell();
-  end;
+  end
+  else if action = 11 then
+    launch_app("apps/utilities/settings", "Settings");
 end;
 
 procedure handle_apps_key(code: uint);
@@ -1628,7 +1652,7 @@ begin
       app_items[1] = "Calculator" and app_items[2] = "Clock"
         and app_items[3] = "Widgets" and app_items[5] = "Minesweeper"
         and app_items[7] = "Text Editor" and app_items[8] = "File Browser"
-        and app_items[10] = "Terminal");
+        and app_items[10] = "Terminal" and app_items[11] = "Settings");
     verify(
       "apps headers not selectable",
       not stdlib.ui_menu_selectable(app_items[0], uint(0), 0)
@@ -1637,7 +1661,8 @@ begin
     verify(
       "apps items are selectable",
       stdlib.ui_menu_selectable(app_items[1], uint(0), 1)
-        and stdlib.ui_menu_selectable(app_items[10], uint(0), 10));
+        and stdlib.ui_menu_selectable(app_items[10], uint(0), 10)
+        and stdlib.ui_menu_selectable(app_items[11], uint(0), 11));
     // Opening the menu takes the modal grab and launches nothing.
     handle_menu(menu_apps_x + 4, 10);
     verify("apps menu open", handled and app_open and not system_open);
@@ -1697,7 +1722,7 @@ begin
     // emulator so no long-lived child is left behind.
     handle_menu(menu_apps_x + 4, 10);
     pos := 0;
-    while pos < 9 do
+    while app_selected <> 10 and pos < AppMenuCount do
     begin
       handle_apps_key(uint(0x1130000));
       pos := pos + 1;

@@ -467,6 +467,9 @@ host mock and `langhost` need no framebuffer:
 | Primitive | Host method | Default |
 |-----------|-------------|---------|
 | `syslib.screen_width` / `screen_height` | `screen_width(&mut self) -> u64`, `screen_height(&mut self) -> u64` | `0`, `0` |
+| `syslib.display_mode_count` | `display_mode_count(&mut self) -> u64` | `0` |
+| `syslib.display_mode_width` / `display_mode_height` | `display_mode_width(index: u64) -> u64`, `display_mode_height(index: u64) -> u64` | `0`, `0` |
+| `syslib.set_resolution` | `set_resolution(width: u64, height: u64) -> Status` | `Invalid` |
 | `syslib.fill_rect` | `fill_rect(x, y, w, h: i64, color: u32) -> Status` | `Invalid` |
 | `syslib.fill_dither` | `fill_dither(...) -> Status` | `Invalid` |
 | `syslib.draw_rect` | `draw_rect(...) -> Status` | `Invalid` |
@@ -478,7 +481,9 @@ host mock and `langhost` need no framebuffer:
 The interpreter owns the error rules (`w <= 0`, `h <= 0`, a colour above `0x00FFFFFF` is
 `Status.Invalid` before the host is called); the host clips to the screen and its clip
 region. The kernel implements these over `kernel/src/gfx.rs`; the defaults are exactly the
-kernel's disabled state, so both paths agree (spec 0009, G15/G16). `draw_text` receives the
+kernel's disabled state, so both paths agree (spec 0009, G15/G16). The runtime mode
+builtins are specified by 0022 and implemented over `kernel/src/ui/display.rs`; a host
+without the device reports zero modes and `Invalid` for a change. `draw_text` receives the
 resolved `string` bytes, so the host never sees a language reference.
 
 #### Staged syslib: input (spec 0010)

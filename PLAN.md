@@ -14,15 +14,16 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Current state (M11):** **613 host tests**; specs 0001–0021 (0020 and 0021
-  Implemented); ABI v1 at 75 opcodes; **M2–M11 complete**. The terminal is an
-  application emulator over kernel console sessions (spec 0021, ADR 0053), the
+- **Current state (M12):** **613 host tests**; specs 0001–0022 (0021 and 0022
+  Implemented); ABI v1 at 75 opcodes, with runtime-display builtins 80–83;
+  **M2–M12 complete**. The Settings app (`apps/utilities/settings`) changes the
+  real display mode through the Bochs VBE dispi (spec 0022, ADR 0056): presets,
+  allocation-first shadow swap, window reflow and the Apps menu row. A window
+  switch or a completed move runs a full-stack repaint (spec 0011 W31, ADR 0055).
+  The terminal is an application emulator over kernel console sessions (spec 0021, ADR 0053), the
   image has top-level `apps/<category>/`, and the Apps pull-down is sectioned.
   `/home` is a separate 8 MiB ext2 image on an ATA disk, read-write through
   `ext2w`. `scripts/multi_terminal_qmp.py` proves two independent terminals.
-  A window switch or a completed move now runs a full-stack repaint in the
-  service and presents only service-painted pixels (spec 0011 W31, ADR 0055),
-  so a moved window no longer leaves stale content on the windows below.
 - **Historical context (M8–M10; counts below are from those slices):** **505 host
   tests**; specs 0001–0019 (0018 and 0019 Implemented); ABI v1 at 75 opcodes; M5,
   M6, M7.1 and **M8.1–M8.9 complete**, plus **M9.1–M9.4**. The
@@ -2205,6 +2206,28 @@ apps live under `/apps/<category>`, and the Apps menu has sections.
 - [x] **M11.7 Regression and proof.** Host tests, `-smp 4`/`-smp 1` transcripts,
   two-terminal QMP proof, updated app-menu/boot scripts, visual golden, and
   `AGENTS.md`/`HISTORY`/PLAN status.
+
+## M12: Runtime display modes
+
+Normative: spec 0022 and ADR 0056; spec 0011 W32, specs 0009/0012/0005 amended.
+Goal: the Settings app changes the **real** screen mode without a reboot.
+
+- [x] **M12.1 Spec, ADR and language surface.** Spec 0022, ADR 0056, builtins
+  80–83 (`display_mode_count/width/height`, `set_resolution`), compiler
+  diagnostics, interpreter dispatch and `Host` defaults.
+- [x] **M12.2 Device and shadow swap.** `arch/x86_64::bochs` (QEMU std VGA
+  dispi), the 16 MiB LFB aperture reservation, `frame::reserve_range`,
+  `gfx::change_mode` under the graphics lock, and allocation-before-programming.
+- [x] **M12.3 Window rebuild.** `window::screen_changed`: scaled/clamped origins,
+  dropped drag/grab, clamped region claim, full repaint and an `Expose` for every
+  window; the desktop shell re-reads the screen and re-claims the menu bar.
+- [x] **M12.4 Settings app.** `apps/utilities/settings` with the mode list,
+  Apply, `check` and `shot`; the Apps menu's `Utilities` section gains the row.
+- [x] **M12.5 Proof.** `samples/tests/apps/base/display_probe.ig`,
+  `run settings check` (8 modes, 800×600, restore 1024×768), `desktop_shell
+  check`, `scripts/settings_resolution_qmp.py` (shell app, screendump exactly
+  800×600) and `scripts/settings_desktop_qmp.py` (Apps > Settings > Apply on the
+  boot desktop, exactly 800×600) on `-smp 4`; the same suite on `-smp 1`.
 
 ## Deferred (not UI; pick up when they matter)
 

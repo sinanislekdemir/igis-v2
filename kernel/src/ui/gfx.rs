@@ -187,8 +187,12 @@ struct Screen {
     pitch: usize,
     /// Physical (identity-mapped) framebuffer base.
     fb: u64,
-    /// `pitch * height` bytes owned by the screen for the system's lifetime.
+    /// `pitch * height` bytes owned by the screen until the next mode change.
     shadow: &'static mut [u8],
+    /// Physical base of `shadow`, for `free_contiguous` on a mode change.
+    shadow_base: u64,
+    /// Contiguous frames owned by `shadow`.
+    shadow_frames: usize,
     /// Rectangular clip, intersected with the screen (spec 0009, G7).
     clip: Rect,
     /// The one pointer, and whether the cursor is composited (spec 0010).
@@ -577,6 +581,8 @@ pub fn init(framebuffer: Option<Framebuffer>) -> Init {
         pitch,
         fb: info.addr,
         shadow,
+        shadow_base: base,
+        shadow_frames: frames,
         clip: Rect {
             x: 0,
             y: 0,
@@ -602,6 +608,74 @@ pub fn init(framebuffer: Option<Framebuffer>) -> Init {
         free_before,
         free_after,
     })
+}
+
+/// Replaces the screen image after a display mode change.
+///
+/// The caller has already allocated `frames` contiguous frames at `base` and
+/// passes a closure that programs the display device. The closure runs while
+/// the screen lock is held, so no other core can draw into the old image or
+/// present it to the new framebuffer between the device change and the swap.
+/// Returns the old shadow's `(base, frames)` on success, for the caller to
+/// free once this function has released the lock; `None` leaves the old screen
+/// untouched and the caller frees the unused new shadow.
+pub(crate) fn change_mode(
+    info: Framebuffer,
+    base: u64,
+    frames: usize,
+    apply: impl FnOnce() -> bool,
+) -> Option<(u64, usize)> {
+    let width = info.width as usize;
+    let height = info.height as usize;
+    let pitch = info.pitch as usize;
+    if info.bpp != 32
+        || info.kind != 1
+        || width == 0
+        || height == 0
+        || pitch < width.saturating_mul(4)
+    {
+        return None;
+    }
+    let bytes = pitch.checked_mul(height)?;
+    if frames != bytes.div_ceil(frame::FRAME_SIZE as usize) {
+        return None;
+    }
+
+    let mut guard = SCREEN.lock();
+    let screen = guard.as_mut()?;
+    if !apply() {
+        return None;
+    }
+
+    // SAFETY: the caller reserved exactly these frames, they are
+    // identity-mapped below 4 GiB, and the old slice is not used again.
+    let shadow = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, bytes) };
+    let old = (screen.shadow_base, screen.shadow_frames);
+    screen.width = width;
+    screen.height = height;
+    screen.pitch = pitch;
+    screen.fb = info.addr;
+    screen.shadow = shadow;
+    screen.shadow_base = base;
+    screen.shadow_frames = frames;
+    screen.clip = Rect {
+        x: 0,
+        y: 0,
+        w: width as i32,
+        h: height as i32,
+    };
+    screen.pointer.x = screen.pointer.x.clamp(0, width as i32 - 1);
+    screen.pointer.y = screen.pointer.y.clamp(0, height as i32 - 1);
+    Some(old)
+}
+
+/// Physical linear-framebuffer base of the current mode, or 0 when graphics
+/// are disabled. Used by the display module as the Bochs dispi LFB address.
+pub fn framebuffer_addr() -> u64 {
+    match &*SCREEN.lock() {
+        Some(screen) => screen.fb,
+        None => 0,
+    }
 }
 
 /// Screen size in pixels, `(0, 0)` when graphics are disabled.

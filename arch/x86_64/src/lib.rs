@@ -11,6 +11,7 @@ core::arch::global_asm!(include_str!("interrupts.s"));
 core::arch::global_asm!(include_str!("ap.s"));
 
 pub mod apic;
+pub mod bochs;
 pub mod gdt;
 pub mod idt;
 pub mod ioapic;

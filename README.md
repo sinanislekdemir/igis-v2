@@ -40,10 +40,11 @@ is pinned ([ADR 0011](adr/0011-work-stealing-interpreters.md)). The shell is its
 application: a kernel REPL service compiles it at boot and starts it, and applications
 start others through a `run`/`spawn` request queue ([ADR 0017](adr/0017-repl-spawn-service.md)).
 
-**Status: implementation.** Specs 0001–0021 are accepted; milestones M2–M11 are complete
-(desktop, language, filesystems, networking, terminal emulator), 613 host tests pass, and
-ABI v1 has 75 opcodes. See [`AGENTS.md`](AGENTS.md) for the current state and
-[`PLAN.md`](PLAN.md) for what is next.
+**Status: implementation.** Specs 0001–0022 are accepted; milestones M2–M12 are complete
+(desktop, language, filesystems, networking, terminal emulator, runtime display modes),
+613 host tests pass, and ABI v1 has 75 opcodes. A Settings application changes the real
+display mode through the QEMU `std` VGA Bochs VBE dispi (spec 0022, ADR 0056). See
+[`AGENTS.md`](AGENTS.md) for the current state and [`PLAN.md`](PLAN.md) for what is next.
 
 | Document | Purpose |
 |----------|---------|
