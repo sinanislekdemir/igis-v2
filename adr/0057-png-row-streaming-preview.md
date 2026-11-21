@@ -103,3 +103,24 @@ then calls `inflate.read` with that same prefix on every call:
 This refines the "streaming" wording above without changing the row-streaming decision:
 the preview still decodes Adam7 pass 1 into one row at a time, only the compressed side
 is a caller-owned prefix instead of an endpoint.
+
+## Amendment 2026-11-21: the decoder implementation and prefix statuses
+
+`lib.png` is implemented as `samples/apps/lib/png.ig` with `probe`, `open`, `info` and
+`next_row`. `probe` reads only the signature and IHDR; `open` re-reads them, parses
+`PLTE`/`tRNS`, walks the chunks and stages the IDAT prefix. The decoder record holds the
+40,816-byte inflater, a 524,288-byte IDAT prefix, two 20,480-byte source rows (previous
+and current), a 4,096-byte inflater-output chunk, a 768-byte palette, a 256-byte `tRNS`
+table and scalars: 611,352 bytes in total. The caller's RGB row is 16,384 bytes.
+
+A row call drains `inflate.read` over the staged prefix and resumes from `d.out_pos` and
+the inflater's `in_pos`. The two failure modes are deliberately distinct:
+
+- `WouldBlock` with a prefix that filled the 512 KiB stage is `CapacityExceeded`: the
+  file has more compressed payload than the bounded stage can hold.
+- `WouldBlock` with a prefix that contains the file's final IDAT byte is `Invalid`: the
+  compressed stream ended before the requested row.
+
+Chunk CRCs and the Adler-32 trailer are still not verified, so a file whose only damage
+is in the trailer decodes its in-range rows successfully; structural damage (a bad zlib
+or DEFLATE header, table or symbol) is `Invalid`.

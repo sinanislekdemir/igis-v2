@@ -3132,3 +3132,48 @@ fn the_inflate_probe_decodes_the_zlib_vectors() {
             .to_vec()
     );
 }
+
+/// `png_probe` exercises the row-streaming `lib.png` module (spec 0023,
+/// P4-P13) through the `/lib` import path against committed PNG fixtures:
+/// `probe` geometry for every accepted colour type, an Adam7 pass-1 preview,
+/// all five row filters, grey, palette, RGBA and grey+alpha compositing over
+/// white, and a 1000-pixel row; `open`/`next_row` decode exact pixels. A
+/// truncated stream, a corrupt DEFLATE block and a non-PNG file must report
+/// Invalid or CapacityExceeded without a fault.
+#[test]
+fn the_png_probe_decodes_the_png_fixtures() {
+    // The unoptimised compiler frame is much larger than the default 2 MiB
+    // test-thread stack. This is test scaffolding only; the kernel stack bound
+    // is unrelated.
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let path = app_path("png_probe");
+            let source = std::fs::read(&path)
+                .unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+            let package = langhost::compile(&source, "png_probe").expect("the probe compiles");
+            let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET)
+                .expect("verifies and runs");
+            assert_eq!(result.reason, ExitReason::Ok);
+            assert_eq!(
+                result.output,
+                b"png: grad_il ok\n\
+                  png: filter0 ok\n\
+                  png: filter1 ok\n\
+                  png: filter2 ok\n\
+                  png: filter3 ok\n\
+                  png: filter4 ok\n\
+                  png: gray ok\n\
+                  png: palette ok\n\
+                  png: rgba ok\n\
+                  png: graya ok\n\
+                  png: wide ok\n\
+                  png: rejects ok\n\
+                  png: ok\n"
+                    .to_vec()
+            );
+        })
+        .expect("spawn test thread")
+        .join()
+        .expect("test thread panicked");
+}
