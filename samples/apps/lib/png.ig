@@ -17,6 +17,7 @@ unit png;
 //   st := png.open(path, d);
 //   while st = Ok do ...
 //     st := png.next_row(d, row, got_w, y);
+//   png.rewind(d);                       // repaint from the staged prefix
 //
 // Non-interlaced images yield every row. Interlaced images yield Adam7 pass 1
 // only: a `ceil(width/8) x ceil(height/8)` rectangular sub-image, which is the
@@ -438,6 +439,30 @@ begin
   out_h := d.out_h;
   color_type := d.color_type;
   interlace := d.interlace;
+  return Ok;
+end;
+
+// Restarts row decoding from the staged IDAT prefix without touching the
+// filesystem. The compressed prefix, palette/tRNS and geometry stay put; only
+// the inflater, the staged output chunk and the row cursor are reset, and the
+// previous unfiltered row is cleared so the first row sees zeros. This is the
+// repaint path for a window Expose: the viewer does not re-read 512 KiB.
+function rewind(d: var Decoder): Status;
+var
+  st: Status;
+begin
+  if not d.started or d.idat_len = uint(0) then
+    return Invalid;
+  st := inflate.init(d.inf);
+  if st <> Ok then
+    return st;
+  d.out_buf := "";
+  d.out_len := 0;
+  d.out_pos := 0;
+  d.cur := "";
+  d.prev := "";
+  d.y := uint(0);
+  d.have_prev := false;
   return Ok;
 end;
 

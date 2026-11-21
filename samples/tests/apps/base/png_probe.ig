@@ -98,6 +98,16 @@ begin
     and int(pixels[uint(3) * x + uint(2)]) = b;
 end;
 
+function rewind_ok(name: const string[0]): bool;
+begin
+  if png.rewind(d) <> Ok then
+  begin
+    fail(name, "rewind");
+    return false;
+  end;
+  return true;
+end;
+
 function get_row(name: const string[0]; y: uint; want: uint): bool;
 var
   got_w, yy: uint;
@@ -248,6 +258,20 @@ begin
     ok := pixel_is(uint(0), 0, 128, 32);
   if ok then
     ok := pixel_is(uint(1), 128, 128, 96);
+  if ok then
+    ok := rewind_ok("grad_il");
+  if ok then
+    ok := get_row("grad_il", uint(0), uint(2));
+  if ok then
+    ok := pixel_is(uint(0), 0, 0, 0);
+  if ok then
+    ok := pixel_is(uint(1), 128, 0, 64);
+  if ok then
+    ok := get_row("grad_il", uint(1), uint(2));
+  if ok then
+    ok := pixel_is(uint(0), 0, 128, 32);
+  if ok then
+    ok := pixel_is(uint(1), 128, 128, 96);
   if not ok then
     fail("grad_il", "pixel");
   return ok;
@@ -261,19 +285,13 @@ begin
                   (x * 11 + y * 7) mod 256);
 end;
 
-function test_filter(name: const string[0]): bool;
+// Decodes all eight rows of a filter fixture, checking row 0 and row 7.
+function filter_pass(name: const string[0]): bool;
 var
-  path: string[64];
   ok: bool;
   y: uint;
 begin
-  path := "system/png_" + name + ".png";
-  ok := expect_probe(name, path, uint(8), uint(8), uint(8), uint(8),
-                     uint(2), uint(0));
-  if ok then
-    ok := expect_open(name, path, uint(8), uint(8));
-  if ok then
-    ok := get_row(name, uint(0), uint(8));
+  ok := get_row(name, uint(0), uint(8));
   if ok then
     ok := filter_pixel(0, 0);
   if ok then
@@ -288,6 +306,25 @@ begin
     ok := filter_pixel(0, 7);
   if ok then
     ok := filter_pixel(7, 7);
+  return ok;
+end;
+
+function test_filter(name: const string[0]): bool;
+var
+  path: string[64];
+  ok: bool;
+begin
+  path := "system/png_" + name + ".png";
+  ok := expect_probe(name, path, uint(8), uint(8), uint(8), uint(8),
+                     uint(2), uint(0));
+  if ok then
+    ok := expect_open(name, path, uint(8), uint(8));
+  if ok then
+    ok := filter_pass(name);
+  if ok then
+    ok := rewind_ok(name);
+  if ok then
+    ok := filter_pass(name);
   if not ok then
     fail(name, "pixel");
   return ok;
@@ -388,6 +425,14 @@ begin
     ok := pixel_is(uint(0), 10, 20, 30);
   if ok then
     ok := pixel_is(uint(999), 10, 20, 30);
+  if ok then
+    ok := rewind_ok("wide");
+  if ok then
+    ok := get_row("wide", uint(0), uint(1000));
+  if ok then
+    ok := pixel_is(uint(0), 10, 20, 30);
+  if ok then
+    ok := pixel_is(uint(999), 10, 20, 30);
   if not ok then
     fail("wide", "pixel");
   return ok;
@@ -432,6 +477,8 @@ end;
 procedure main(args: const string[1024]);
 begin
   failures := 0;
+  if png.rewind(d) <> Invalid then
+    fail("rewind", "before open");
   if test_grad_il() then
     ok_line("grad_il");
   if test_filter("filter0") then

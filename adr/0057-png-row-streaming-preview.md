@@ -124,3 +124,13 @@ the inflater's `in_pos`. The two failure modes are deliberately distinct:
 Chunk CRCs and the Adler-32 trailer are still not verified, so a file whose only damage
 is in the trailer decodes its in-range rows successfully; structural damage (a bad zlib
 or DEFLATE header, table or symbol) is `Invalid`.
+
+## Amendment 2026-11-22: `rewind` reuses the staged prefix for repaint
+
+An `Expose` must be repainted without reading the file again. `png.rewind(d)` keeps the
+staged `idat`/`idat_len`, the palette/`tRNS` and the geometry, and re-initialises only the
+inflater and row cursor (previous row cleared, as after `open`). The zlib header is at the
+start of the retained prefix, so decoding restarts from the first byte with no `fs_read`
+and no new allocation. It returns `Ok` for an opened decoder and `Invalid` before `open`.
+This does not change the bounded-prefix decision: the same 512 KiB stage is reused, and
+the `CapacityExceeded`/`Invalid` mapping is unchanged.

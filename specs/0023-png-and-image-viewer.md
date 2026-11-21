@@ -146,7 +146,7 @@ planned; names may gain a trailing argument, but not change shape):
 |---|---|
 | `lib.bitio` | bounded LSB-first bit reader over a caller buffer (below) |
 | `lib.inflate` | `init`, `done`, `read` from a compressed prefix into a 4 KiB caller buffer; 32 KiB window + tables (below) |
-| `lib.png` | `probe`, `open`, `info`, `next_row`; opaque RGB rows (below) |
+| `lib.png` | `probe`, `open`, `info`, `rewind`, `next_row`; opaque RGB rows (below) |
 | `syslib.blit_rgb` | blit one opaque RGB row into the window content |
 
 ### `lib.bitio` (implemented)
@@ -261,6 +261,7 @@ function png.open(path: const string[0]; d: var Decoder): Status;
 function png.info(d: const Decoder; width: var uint; height: var uint;
                   out_w: var uint; out_h: var uint;
                   color_type: var uint; interlace: var uint): Status;
+function png.rewind(d: var Decoder): Status;
 function png.next_row(d: var Decoder; row: var bytes[16384];
                       got_w: var uint; y: var uint): Status;
 ```
@@ -272,6 +273,14 @@ function png.next_row(d: var Decoder; row: var bytes[16384];
   `info` copies the geometry of an opened decoder. `next_row` yields rows top
   to bottom with `got_w = out_w` and `y` = the row index; after `out_h` rows the
   caller stops (a further call is `Invalid`, not a fault).
+- **`rewind`.** Restarts row decoding from the already-staged IDAT prefix: it
+  re-initialises the inflater (so its `in_pos`, window and zlib header reset),
+  clears `out_len`/`out_pos` and the row cursor, and clears the previous
+  unfiltered row so the first row sees zeros exactly as after `open`. The
+  prefix, `idat_len`, palette/`tRNS` and geometry are kept. It returns `Ok` for
+  an opened decoder and `Invalid` when no prefix/header is present; it performs
+  no `fs_read`. A viewer uses it to repaint an `Expose` without re-reading the
+  512 KiB prefix.
 - **Accepted subset.** 8-bit colour type 0 (grey), 2 (RGB), 3 (palette), 4
   (grey+alpha) and 6 (RGBA). Bit depths other than 8, unknown colour types,
   non-zero compression/filter methods, interlace flags other than 0/1, and
@@ -295,7 +304,9 @@ function png.next_row(d: var Decoder; row: var bytes[16384];
   `idat: bytes[524288]` stage (512 KiB), `out_buf: bytes[4096]`, `prev` and
   `cur` source rows (`bytes[20480]` each), `palette: bytes[768]`,
   `trns: bytes[256]`, and scalars: 611,352 bytes compiled. It is well under the
-  1 MiB state cap. The caller's `row` is `bytes[16384]`.
+  1 MiB state cap. The caller's `row` is `bytes[16384]`. `rewind` keeps the
+  staged prefix and geometry in that state and resets only the inflater and row
+  cursor, so an `Expose` repaint reads no file bytes and allocates nothing.
 - **Prefix and statuses.** `inflate.read` is called with the staged
   `(idat, idat_len)` on every row; `in_pos` persists inside the inflater, so a
   row is resumable across calls. `WouldBlock` maps to `CapacityExceeded` when
@@ -344,3 +355,4 @@ function png.next_row(d: var Decoder; row: var bytes[16384];
 | 2026-11-21 | G1's `lib.bitio` is implemented (`samples/apps/lib/bitio.ig`): a 512-byte window with `init`/`fill`/`available`/`ensure`/`peek`/`drop`/`read_bits`/`align`/`read_byte`, LSB-first DEFLATE order, `WouldBlock`/`Invalid`/`Full` statuses, no new builtin or opcode. `read_byte` drains a whole byte already buffered in the accumulator after `align`, so switching from bits to stored-block bytes never loses data. Proved by the test-only `bitio_probe` on `langhost` and in the `--shell` image. |
 | 2026-11-21 | G2's `lib.inflate` is implemented (`samples/apps/lib/inflate.ig`): a bounded-input, bounded-output zlib/DEFLATE decoder with `init`/`done`/`read`, a 32 KiB output ring plus canonical Huffman tables (40,816 bytes), a caller-supplied compressed prefix (`in_pos` persists, `input_len` bounds it), stored/fixed/dynamic blocks, `Ok`/`WouldBlock`/`Invalid` statuses, no faults and no Adler-32 check. The PNG layer's staging prefix is capped at 512 KiB (measured pass-1 maximum 368,317 B). Proved by the test-only `inflate_probe` over committed stored, fixed, dynamic, LZ and mixed vectors, a truncated and a corrupt stream, and a half-prefix plus a mid-header pause/resume of the dynamic vector (ADR 0057). |
 | 2026-11-21 | The row-streaming decoder is implemented (`samples/apps/lib/png.ig`): `probe`/`open`/`info`/`next_row`, 8-bit colour types 0/2/3/4/6, filters 0–4, Adam7 pass 1 only, palette expansion with `tRNS` alpha, alpha composited over white, a 512 KiB IDAT prefix and `WouldBlock` mapped to `CapacityExceeded` when the prefix is full and `Invalid` when the IDAT ended. State is 611,352 bytes; the caller row is 16,384 bytes. Proved by the test-only `png_probe` over committed fixtures (every filter, colour type, interlace pass 1, a 1000-pixel row, unsupported depth/width, truncated, corrupt and non-PNG input) on `langhost` and the `--shell` image. |
+| 2026-11-22 | `png.rewind` is added: it re-initialises the inflater and row cursor over the already-staged IDAT prefix (no `fs_read`), clearing the previous unfiltered row so the first row matches `open`. It returns `Ok` for an opened decoder and `Invalid` before `open` or after `open` fails; the prefix, palette/`tRNS` and geometry are kept. A viewer uses it to repaint an `Expose` without re-reading the 512 KiB prefix. Proved by `png_probe` replaying `grad_il` and every filter fixture after a complete decode, and replaying row 0 of `wide` after a partial decode. |
