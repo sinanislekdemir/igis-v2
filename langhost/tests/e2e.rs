@@ -3083,3 +3083,21 @@ fn the_buffer_ops_sample_proves_the_machine_primitives() {
     assert_eq!(result.reason, ExitReason::Ok);
     assert_eq!(result.output, b"buffer_ops: ok\n".to_vec());
 }
+
+/// `bitio_probe` exercises the `lib.bitio` module (spec 0023, G1) through the
+/// `/lib` import path: LSB-first order across a byte boundary, `ensure`/
+/// `peek`/`drop` without consumption, `align` to the byte boundary,
+/// `read_byte` for stored blocks (including a whole byte already buffered in
+/// the accumulator), the `fill` window (nonzero source offset, `Full` at
+/// capacity, rewind after the bytes are read) and `WouldBlock` on an empty
+/// window.
+#[test]
+fn the_bitio_probe_proves_the_lsb_first_reader() {
+    let path = app_path("bitio_probe");
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "bitio_probe").expect("the probe compiles");
+    let result =
+        langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies and runs");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"bitio: ok\n".to_vec());
+}

@@ -111,15 +111,74 @@ viewer maps decoded rows to the window content with `syslib.blit_rgb`.
 
 ## Interfaces
 
-Planned module functions (names may gain a trailing argument, but not change
-shape):
+Module functions (`lib.bitio` is implemented; the rest are planned; names may
+gain a trailing argument, but not change shape):
 
 | Module | Contract |
 |---|---|
-| `lib.bitio` | bounded LSB-first bit reader over a caller buffer |
+| `lib.bitio` | bounded LSB-first bit reader over a caller buffer (below) |
 | `lib.inflate` | `open`, `read` into a caller buffer, `close`; 32 KiB window |
 | `lib.png` | `open(path, info)`, `next_row(row, got)`, `close`; opaque RGB rows |
 | `syslib.blit_rgb` | blit one opaque RGB row into the window content |
+
+### `lib.bitio` (implemented)
+
+`samples/apps/lib/bitio.ig` is an ordinary `/lib` module (M5/M6): no `main`, no
+top-level state, no stream endpoint, no new builtin or opcode. It uses
+`core.shl`/`core.shr` for the shifts and `core.copy_bytes` for the window copy,
+because the language has no bitwise operators.
+
+Bit order is **LSB-first**: the first bit read is bit 0 of the next byte, and
+`read_bits(n)` returns those n bits with the first bit in bit 0. This is the
+DEFLATE order: a stored-block length or a header field is read directly, and a
+Huffman code is decoded from the bits in the order they arrive. `0xB5, 0x03`
+read as 3/5/4 bits gives 5, 22, 3.
+
+```
+type Reader = record
+  buf: bytes[512];   // byte window
+  len: int;          // bytes valid in buf
+  pos: int;          // next unread byte
+  acc: uint;         // next bits in the low positions
+  nbits: int;        // valid bits in acc
+end;
+
+function init(r: var Reader): Status;                              // zero the state
+function fill(r: var Reader; data: const bytes[0]; offset: uint;
+              used: var int): Status;                              // stage bytes
+function available(r: const Reader): uint;                         // nbits + 8 * (len - pos)
+function ensure(r: var Reader; count: uint): Status;               // buffer >= count bits
+function peek(r: var Reader; count: uint; value: var uint): Status;// no consumption
+function drop(r: var Reader; count: uint): Status;                 // consume buffered bits
+function read_bits(r: var Reader; count: uint; value: var uint): Status; // peek + drop
+procedure align(r: var Reader);                                    // skip to byte boundary
+function read_byte(r: var Reader; value: var uint): Status;        // one whole byte
+```
+
+- **Window.** `fill` copies up to `512 - len` bytes from the caller's
+  `data[offset..]` into `buf` by its runtime length; a reader whose bytes were
+  all consumed (`pos = len`) is rewound first, so a stream is staged in chunks.
+  `used` receives the count. A full window with unread bytes is `Full` with
+  `used = 0`. No allocation and no whole-file staging: the caller's buffer is
+  the only input.
+- **Bits.** `ensure(count)` pulls whole bytes from the window and places each
+  above the buffered bits (`acc = acc + byte * shl(1, nbits)`), so `nbits` after
+  a successful call is at most 39. An empty window is `WouldBlock` and changes
+  nothing, which lets the caller refill and retry. `count <= 32`; a larger
+  count is `Invalid` and the accumulator never shifts by more than 63.
+- **Consumption.** `peek` masks the accumulator to `count` bits; `drop`
+  requires `nbits >= count` (`Invalid` otherwise) and shifts the consumed bits
+  out. `read_bits` is `peek` then `drop`, so a failure consumes nothing.
+- **Byte alignment.** `align` discards `nbits mod 8` bits, which reaches the
+  next byte boundary for a stored block; whatever whole bytes are buffered stay
+  in the accumulator. `read_byte` aligns, then drains a whole byte already in
+  the accumulator (`value = acc mod 256`, `acc = shr(acc, 8)`, `nbits -= 8`) or
+  takes one from the window; it is `WouldBlock` only when the accumulator holds
+  no whole byte and the window is empty. `nbits` is always a multiple of 8
+  after `align`, so the `Invalid` branch for `0 < nbits < 8` is defensive.
+- **Failure rule.** Every failure leaves out-parameters untouched except
+  `fill`'s `used` on `Full`, which is defined to be 0. No bad range faults; the
+  errors are `WouldBlock`, `Invalid` and `Full`.
 
 ## Failure modes
 
@@ -137,7 +196,8 @@ shape):
 
 ## Verification
 
-- Host tests for `lib.bitio`, `lib.inflate` and `lib.png` against fixed PNG
+- Host tests for `lib.bitio` (the test-only `bitio_probe` through `langhost`),
+  `lib.inflate` and `lib.png` against fixed PNG
   fixtures, including every filter, colour type and interlace mode.
 - A `--shell` kernel transcript proves the viewer's `check` path over the real
   `image/` corpus.
@@ -157,3 +217,4 @@ shape):
 | Date | Change |
 |---|---|
 | 2026-11-21 | Accepted with the PNG corpus, the `/lib` row-streaming decoder contract, the generic primitive tickets and the fit-to-window viewer using Adam7 pass 1 (ADR 0057). |
+| 2026-11-21 | G1's `lib.bitio` is implemented (`samples/apps/lib/bitio.ig`): a 512-byte window with `init`/`fill`/`available`/`ensure`/`peek`/`drop`/`read_bits`/`align`/`read_byte`, LSB-first DEFLATE order, `WouldBlock`/`Invalid`/`Full` statuses, no new builtin or opcode. `read_byte` drains a whole byte already buffered in the accumulator after `align`, so switching from bits to stored-block bytes never loses data. Proved by the test-only `bitio_probe` on `langhost` and in the `--shell` image. |
