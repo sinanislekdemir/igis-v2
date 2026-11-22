@@ -94,8 +94,8 @@ format, the `/home` volume, the ABI, or the desktop's boot order (ADR 0029).
 ### Failure
 
 - **B11 (MUST):** A missing, unreadable or invalid volume is a named, non-faulting boot
-  failure: `apps: no image` or `apps: mount FAIL (<status>)`, followed by the existing
-  `no entry` halt. No panic, no guard hit, no window opened.
+  failure: `apps: no image` or `apps: mount FAIL (<status>)`, followed by a plain halt.
+  No panic, no guard hit, no window opened.
 - **B12 (MUST):** The volume is attached so that guest writes can never reach the
   image file: every harness passes `snapshot=on` and `xtask run` does the same. QEMU's
   `ide-hd` refuses a read-only block node (`readonly=on` fails with "Block node is
