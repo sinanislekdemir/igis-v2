@@ -6,6 +6,7 @@
 
 use std::env;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -320,8 +321,71 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
     if !status.success() {
         return Err(format!("mke2fs failed with {status}"));
     }
+    check_image(&image)?;
+    println!("apps image: {} (e2fsck clean)", image.display());
 
     Ok(image)
+}
+
+/// Runs `e2fsck -fn` on a freshly built image and fails the build on any
+/// inconsistency (spec 0025, B21).
+///
+/// The reader accepts a strict ext2 subset and treats anything outside it as an
+/// unmountable image, so a staging or `mke2fs` mistake must surface on the host
+/// rather than as an `apps: mount FAIL` at boot. `-n` never writes; a non-zero
+/// exit means the image is not clean, whether or not the tool would fix it.
+fn check_image(image: &Path) -> Result<(), String> {
+    let output = Command::new("e2fsck")
+        .arg("-f")
+        .arg("-n")
+        .arg(image)
+        .output()
+        .map_err(|error| format!("failed to run e2fsck (is e2fsprogs installed?): {error}"))?;
+    if !output.status.success() {
+        let mut report = String::from_utf8_lossy(&output.stdout).into_owned();
+        report.push_str(&String::from_utf8_lossy(&output.stderr));
+        return Err(format!(
+            "e2fsck refused {} ({}):\n{}",
+            image.display(),
+            output.status,
+            report.trim()
+        ));
+    }
+    check_superblock(image)
+}
+
+/// Checks the primary superblock the kernel will actually read.
+///
+/// `e2fsck` falls back to a backup superblock when the primary is damaged and
+/// still exits 0; the reader has no such fallback. This mirrors the reader's
+/// acceptance: ext2 magic, 1 KiB blocks, revision 1 (the `ext2w` subset).
+fn check_superblock(image: &Path) -> Result<(), String> {
+    let mut file = fs::File::open(image)
+        .map_err(|error| format!("{}: {error}", image.display()))?;
+    let mut superblock = [0u8; 1024];
+    file.seek(SeekFrom::Start(1024))
+        .and_then(|_| file.read_exact(&mut superblock))
+        .map_err(|error| format!("{}: {error}", image.display()))?;
+    let magic = u16::from_le_bytes([superblock[56], superblock[57]]);
+    let log_block_size = u32::from_le_bytes([
+        superblock[24],
+        superblock[25],
+        superblock[26],
+        superblock[27],
+    ]);
+    let revision = u32::from_le_bytes([
+        superblock[76],
+        superblock[77],
+        superblock[78],
+        superblock[79],
+    ]);
+    if magic != 0xEF53 || log_block_size != 0 || revision != 1 {
+        return Err(format!(
+            "{}: unsupported ext2 superblock (magic {magic:#06x}, log block {log_block_size}, revision {revision}); the kernel reads the primary superblock only",
+            image.display()
+        ));
+    }
+    Ok(())
 }
 
 /// True when `dir` contains at least one generated `.ppm` corpus file.

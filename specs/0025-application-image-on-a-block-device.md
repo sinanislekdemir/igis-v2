@@ -132,6 +132,13 @@ format, the `/home` volume, the ABI, or the desktop's boot order (ADR 0029).
 - **B20 (SHOULD):** On TCG with four cores, `scripts/image_viewer_qmp.py` opens the
   full-resolution sample in under 120 s end to end. The number is a regression gate, not
   a user-facing promise; the measured value is recorded in the ticket.
+- **B21 (MUST):** `xtask image` runs `e2fsck -fn` on the freshly built application
+  volume (both `apps.img` and `apps-shell.img`) and fails the build on any
+  inconsistency. It also validates the primary superblock the kernel will read (ext2
+  magic, 1 KiB blocks, revision 1), because `e2fsck` falls back to a backup superblock
+  and still exits 0 while the reader has no fallback. The check never writes, and it
+  does not run against the persistent `/home` image, whose dirtiness is the owner's data
+  rather than a build defect.
 
 ## Design
 
@@ -215,8 +222,7 @@ kind), mapped from `ext2w::Entry`; callers do not change.
 
 | # | Question | Trigger / owner |
 |---|----------|-----------------|
-| 1 | Should `xtask image` also run `e2fsck -fn` on `apps.img`? | owner; cheap, catches a bad corpus stage |
-| 2 | Is the 1 KiB block size still the right choice for a 128 MiB volume? | after the change, if reads measure badly |
+| 1 | Is the 1 KiB block size still the right choice for a 128 MiB volume? | after the change, if reads measure badly |
 
 ## Changelog
 
@@ -227,3 +233,4 @@ kind), mapped from `ext2w::Entry`; callers do not change.
 | 2026-11-22 | B12 amended after M15.2: QEMU's `ide-hd` refuses `readonly=on`, so the image is attached with `snapshot=on` and a boot must leave the file byte-identical. |
 | 2026-11-22 | M15.3 landed (1.70 s to ready, 229 MiB free). B8 now names the frame pool; B19/B20 added because `ext2w::read_at` walks from block zero, making the PPM preview cost 329 s once reads are real I/O. |
 | 2026-11-22 | Implemented (M15.5): 1.8 s to `desktop_shell: ready`, 229 MiB free, the viewer opens the full-resolution sample in 45-48 s, `--no-apps` halts with `apps: no image`, and the visual golden is unchanged. |
+| 2026-11-22 | B21 added (open question 1 resolved): `xtask image` fsck-checks the volume it just built, validates the primary superblock, and fails the build on any inconsistency. |

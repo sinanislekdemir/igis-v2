@@ -2355,6 +2355,16 @@ application volume is a read-only ATA disk the kernel mounts on demand through `
   `home_verify: ok` / `editor: ready` / `image_viewer: PASS`, all three images
   `e2fsck` clean, `--no-apps` halts with `apps: no image`.
 
+### Post-M15
+
+- [x] **Build-time fsck (spec 0025 B21).** `xtask image` runs `e2fsck -fn` on the
+  application volume it just built (product and `--shell`) and fails the build with the
+  tool's report on any inconsistency; it also validates the primary superblock (magic,
+  1 KiB blocks, revision 1) because `e2fsck` can fall back to a backup and still exit 0
+  while the reader cannot. The persistent `home.img` is deliberately not checked. Open
+  question 1 is closed: a bad staging tree or `mke2fs` run now stops the build instead
+  of surfacing as `apps: mount FAIL` at boot.
+
 ## Deferred (not UI; pick up when they matter)
 
 | Item | Where | Trigger |
