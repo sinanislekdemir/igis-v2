@@ -14,11 +14,12 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Current state (M13):** **633 host tests**; specs 0001–0023 (0022 and 0023
-  Implemented); ABI v1 at 75 opcodes with builtins 80–91; **M2–M13 complete**.
-  The apps image is a 64 MiB read-only tree with the full-resolution Adam7 PNG
-  corpus under `image/`; `lib.bitio`/`lib.inflate`/`lib.png` stream pass-1 rows into
-  `apps/accessories/image_viewer` through `syslib.blit_rgb`, with no full-image
+- **Current state (M14):** **634 host tests**; specs 0001–0024 (0023 and 0024
+  Implemented); ABI v1 at 75 opcodes with builtins 80–91; **M2–M14 complete**.
+  The apps image is a 128 MiB read-only tree with the full-resolution PPM P6
+  corpus under `image/`; `apps/accessories/image_viewer` dispatches PNG (Adam7
+  pass-1 through `lib.png`/`lib.inflate`) and PPM (fixed-stride row seek and 1/8
+  sampling through `lib.ppm`), both through `syslib.blit_rgb`, with no full-image
   buffer. The Settings app (`apps/utilities/settings`) changes the
   real display mode through the Bochs VBE dispi (spec 0022, ADR 0056): presets,
   allocation-first shadow swap, window reflow and the Apps menu row. A window
@@ -112,9 +113,9 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   71), `core.socket_source` (`1 << 63 | handle`) in `next_any`/`poll_any`, and
   `net_select` (selector + 300 ms recv/select timeouts); `net_echo`'s `accept`
   blocks, `kill_stress` is 300/300 and `mouse` 600/600.
-- **Last commit:** `ed28bad` (viewer decode progress strip) plus the M13 docs
-  commit. `build/home.img` is reset.
-- **Next:** **M13 is complete.** Pick from the deferred backlog in
+- **Last commit:** `5e7a1ad` (dual-format viewer) plus the M14 docs commit.
+  `build/home.img` is reset.
+- **Next:** **M14 is complete.** Pick from the deferred backlog in
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) (TLS Q52, IPv6 Q53, Wi-Fi Q54,
   multi-NIC Q55, backlog Q56, DHCP/DNS follow-ups Q57) or the non-network items.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
@@ -2272,14 +2273,15 @@ PNG support, and read rows by seek with no decode.
   `probe`/`open`/`info`/`read_row`, a tolerant P6 header scanner (256-byte
   refills, comments, absolute offsets, one separator after maxval), the
   P6/maxval-255 subset and the `NotFound`/`Invalid`/`CapacityExceeded`/`IoError`
-  statuses. Proved by `ppm_probe` and its fixtures on `langhost`.
+  statuses. Proved by `ppm_probe` and its fixtures on `langhost`. `b78210c`.
 - [x] **M14.2 Corpus and image.** Convert the four images to full-resolution P6,
   stage `samples/image` as `image/`, and grow the apps image to 128 MiB. `77643c8`.
-- [ ] **M14.3 Viewer dual-format.** Dispatch PNG/PPM, keep the PNG pass-1 path,
+- [x] **M14.3 Viewer dual-format.** Dispatch PNG/PPM, keep the PNG pass-1 path,
   and read PPM preview/thumbnail rows by fixed stride; extend the viewer `check`
-  path.
-- [ ] **M14.4 Proof and docs.** `--shell` transcripts on `-smp 4`/`-smp 1`, a QMP
+  path. `5e7a1ad`.
+- [x] **M14.4 Proof and docs.** `--shell` transcripts on `-smp 4`/`-smp 1`, a QMP
   capture of a PPM preview, the regression batch and the status/docs rows.
+  `5e7a1ad`.
 
 ## Deferred (not UI; pick up when they matter)
 

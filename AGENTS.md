@@ -27,18 +27,19 @@ decisions in `adr/`, and work items in `PLAN.md`.
 
 ## Current state
 
-- Specs 0001–0023 are accepted; **M2–M13 are complete** (desktop, language,
-  filesystems, networking, terminal emulator, runtime display modes, PNG image
+- Specs 0001–0024 are accepted; **M2–M14 are complete** (desktop, language,
+  filesystems, networking, terminal emulator, runtime display modes, PNG/PPM image
   viewer). Current milestone work is tracked in `PLAN.md`.
-- **633 host tests** (555 language + 56 `net` + 22 `ext2w`); ABI v1 has **75 opcodes**
+- **634 host tests** (556 language + 56 `net` + 22 `ext2w`); ABI v1 has **75 opcodes**
   (runtime display modes add builtins 80–83; the machine-level bit and bulk buffer
   primitives are builtins 84–90 and `syslib.blit_rgb` is 91, no opcode).
 - Boot: GRUB/multiboot2 → `system/entrypoint` (the desktop shell), falling back to
   `base/shell`; a graphics-less boot keeps a serial REPL.
-- Filesystems: a read-only 64 MiB ext2 application image (`lib`, `base`, `apps`,
-  `home`, `system`, `image`) with the full-resolution Adam7 PNG corpus at
-  `image/`, and a persistent 8 MiB ext2 `/home` on an ATA disk (`ext2w`,
-  `e2fsck -fn` clean). GUI applications live under `apps/<category>/`.
+- Filesystems: a read-only 128 MiB ext2 application image (`lib`, `base`, `apps`,
+  `home`, `system`, `image`) with the full-resolution PPM P6 corpus at `image/`
+  (the PNG decoder is retained for PNG files), and a persistent 8 MiB ext2
+  `/home` on an ATA disk (`ext2w`, `e2fsck -fn` clean). GUI applications live
+  under `apps/<category>/`.
 - Networking: virtio-net and e1000/e1000e, IPv4/UDP/TCP, with DHCP/DNS/HTTP/`nc`/`purl`
   in `/lib` and `base/`.
 - UI: a kernel window server with service-drawn close and minimize boxes, proportional
@@ -47,9 +48,9 @@ decisions in `adr/`, and work items in `PLAN.md`.
   (`apps/utilities/settings`) that changes the real mode through the Bochs VBE dispi
   (spec 0022, ADR 0056), and source apps (`editor`, `browser`, `calculator`,
   `minesweeper`, `clock_window`, `widgets`, `image_viewer`). The image viewer
-  streams Adam7 pass-1 rows through `lib.png`/`lib.inflate` and
-  `syslib.blit_rgb`, with no full-image buffer and a decode progress strip.
-  Every terminal
+  opens PNG (Adam7 pass-1 stream) and PPM (fixed-stride row seek and 1/8
+  sampling), both through `syslib.blit_rgb`, with no full-image buffer and a
+  decode progress strip. Every terminal
   instance has its own session, shell and cwd; the `Windows` pull-down lists every
   window (minimized rows marked `min`) and `File` opens a clickable window list. A
   window switch or a completed move runs a full-stack repaint (desktop, chrome
@@ -116,7 +117,7 @@ fresh.
 │   └── system/        #   boot and probe applications (same rule)
 ├── samples/tests/     # test-only corpus, staged only by `image --shell`
 │   └── apps/          #   proofs (`base/`) and binary fixtures (`system/`)
-├── samples/image/     # full-resolution PNG corpus staged as `image/`
+├── samples/image/     # full-resolution PPM P6 corpus staged as `image/`
 ├── samples/home/      # single seed tree for `home/` and the writable disk
 ├── samples/lang/      # language examples run by `langhost`
 ├── scripts/           # QEMU/QMP harnesses (screenshots, proofs, regressions)
