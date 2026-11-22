@@ -334,16 +334,18 @@ function png.next_row(d: var Decoder; row: var bytes[16384];
 ### `image_viewer` (implemented)
 
 `samples/apps/apps/accessories/image_viewer.ig` is an ordinary GUI application
-(`uses core, stdlib, syslib, lib.out, lib.file_dialog, lib.png`) and a
-non-blocking `core.spawn` from the Apps menu. Its state is one `png.Decoder`
-(611,360 bytes), one `bytes[16384]` caller row, a 12-byte 2x2 check preview,
-three 256-byte strings, a 64-byte failure label and scalars: 629,000 bytes
-compiled, under the 1 MiB cap.
-There is no full-image buffer and no resampling.
+(`uses core, stdlib, syslib, lib.out, lib.file_dialog, lib.png, lib.ppm`) and a
+non-blocking `core.spawn` from the Apps menu. It dispatches by format: a `.png`
+path uses `lib.png` exactly as before, and a `.ppm` path uses `lib.ppm`. Its
+state is one `png.Decoder` (611,360 bytes), one small `ppm.Decoder`, one
+`bytes[16384]` source row, one `bytes[3072]` sampled preview row, a 12-byte 2x2
+check preview, three 256-byte strings, a 64-byte failure label and scalars:
+648,784 bytes compiled, under the 1 MiB cap. There is no full-image buffer and
+no resampling.
 
 ```
 run image_viewer                  modal file_dialog.open_file("image", chosen)
-run image_viewer <path>           view that PNG
+run image_viewer <path>           view that PNG or PPM
 run image_viewer <path> shot      view, print `image_viewer: ready SxS -> OxO`, pump
 run image_viewer check            deterministic check, `image_viewer: ok`
 ```
@@ -355,7 +357,12 @@ run image_viewer check            deterministic check, `image_viewer: ok`
   arguments prints `image_viewer: ready <src_w>x<src_h> -> <out_w>x<out_h>`
   after the first complete frame and then blocks in `next_event` for the QMP
   capture; Close or Escape leaves.
-- **Window flow.** `png.probe` runs before any window: a failure (or a frame
+- **Dispatch.** A `.png` path is PNG only and a `.ppm` path is PPM only; a path
+  with neither suffix tries `ppm.probe` first and then `png.probe`. A PPM
+  preview is `ceil(width/8) x ceil(height/8)`; `ow > 1,024` is
+  `CapacityExceeded` and a preview too tall for the screen is `Invalid`. The
+  PNG geometry and probe are unchanged.
+- **Window flow.** `probe_image` runs before any window: a failure (or a frame
   that does not fit the screen) opens a 400x120 white error panel with
   `stdlib.ui_message("Cannot open image (status N)")` and waits for its close
   box; nothing faults. Otherwise the content is exactly `out_w x (out_h + 20)`
@@ -363,41 +370,47 @@ run image_viewer check            deterministic check, `image_viewer: ok`
   the 64-byte title cap) or `Image Viewer`. The image occupies the top
   `out_w x out_h` and the bottom 20 pixels are the status strip.
 - **Draw.** On the first frame the content is filled white and the status strip
-  is drawn at 0% and `window_present`ed *before* `png.open`, because the 512 KiB
-  IDAT stage is visible work. Each `png.next_row` result is blitted 1:1 as one
+  is drawn at 0% and `window_present`ed *before* the 512 KiB IDAT stage. For
+  PNG each `png.next_row` result is blitted 1:1 as one
   `syslib.blit_rgb(rect.x, rect.y + y, out_w, 1, row, out_w, 1)` row at the top
-  of the content. The strip has a 1-pixel separator, the 8x8 label
-  `Decoding NN%` (or `Ready` at 100%) and a 6-pixel gray track with a black fill
-  proportional to the decoded rows; it is redrawn and presented every 8 rows,
-  and the last row draws `Ready` and a full bar. Pass 1 for the corpus is
-  472x354 … 576x371, so the preview is the window.
-- **Budget and repaint.** The first frame stages the IDAT prefix with
+  of the content. For PPM `ppm.open` parses only the header; each output row
+  reads source row `sy = y * sh / oh` with `ppm.read_row` and samples columns
+  `sx = x * sw / ow` into `preview_row`, which is blitted the same way. The
+  strip has a 1-pixel separator, the 8x8 label `Decoding NN%` (or `Ready` at
+  100%) and a 6-pixel gray track with a black fill proportional to the rows;
+  it is redrawn and presented every 8 rows, and the last row draws `Ready` and
+  a full bar. Pass 1 for the PNG corpus is 472x354 … 576x371; the PPM corpus
+  preview is the same geometry.
+- **Budget and repaint.** The first PNG frame stages the IDAT prefix with
   `png.open` under the **normal** class (this part fits the normal 10 s /
-  200M-step budget). Only after a successful `open` does `render_image` call
-  `core.realtime_on()` for the row loop, heartbeat immediately and once per
-  decoded row, and leave the task realtime while it pumps events. An `Expose`
-  repaint calls `png.rewind` over the already-staged prefix (no `fs_read`) and
-  runs the same boosted row loop. `lib.inflate` heartbeats internally every 64
-  symbols/header items and every 1 KiB of output, so even the first row (the
-  zlib/DEFLATE header and dynamic-Huffman setup) cannot trip the 1 s watchdog.
-  Admission refusal (`Full`) is reported once and falls back to the normal
+  200M-step budget). Only after a successful `open` does the PNG row loop call
+  `core.realtime_on()`, heartbeat immediately and once per decoded row, and
+  leave the task realtime while it pumps events. An `Expose` repaint calls
+  `png.rewind` over the already-staged prefix (no `fs_read`) and runs the same
+  boosted row loop. `lib.inflate` heartbeats internally every 64 symbols/header
+  items and every 1 KiB of output, so even the first row cannot trip the 1 s
+  watchdog. PPM is promoted the same way when admission allows and heartbeats
+  once per output row; a refusal falls back to the normal class. Admission refusal (`Full`) is reported once and falls back to the normal
   class; it never faults on admission.
 - **Expose.** The owner `Expose` re-reads `window_content_rect` (ADR 0046) and
-  re-runs the draw/present through `png.rewind` over the staged prefix (no
-  `fs_read`); it deliberately skips the white fill and redraws only the status
-  strip at 0% (without a present, so the last complete frame stays on screen
-  until the first 8-row progress present). The service queues an initial expose
-  for the new window, so the image is never blanked. An image buffer is
-  forbidden. A decode failure on that path opens the same error panel.
-  Close/Escape on the image window exits.
+  re-runs the draw/present; it deliberately skips the white fill and redraws
+  only the status strip at 0% (without a present, so the last complete frame
+  stays on screen until the first 8-row progress present). PNG uses
+  `png.rewind` over the staged prefix; PPM re-opens the header and reads its
+  rows again. The service queues an initial expose for the new window, so the
+  image is never blanked. An image buffer is forbidden. A read/decode failure
+  on that path opens the same error panel. Close/Escape on the image window
+  exits.
 - **Check.** `png.probe("system/png_grad_il.png")` must report 16x16 with a
   2x2 interlace-1 output; `png.open` plus two `next_row` calls must yield
   (0,0) black, (1,0) (128,0,64), (0,1) (0,128,32) and (1,1) (128,128,96).
-  With graphics the 2x2 preview is blitted into an 8x8 window and `get_pixel`
-  reads the first two pixels back before the window closes; `langhost` skips
-  that and prints `image_viewer: host ok`. This check is deliberately
-  independent of the test-only `png_probe`; it proves the viewer's own
-  probe/decode/blit path.
+  `ppm.probe("system/ppm_rgb.ppm")` must report 8x8; `ppm.open` plus eight
+  `read_row` calls must match `(x*29%256, y*37%256, (x*11+y*7)%256)` at every
+  pixel. With graphics the 2x2 PNG preview is blitted into an 8x8 window and
+  `get_pixel` reads the first two pixels back before the window closes;
+  `langhost` skips that and prints `image_viewer: host ok`. Both fixture checks
+  are independent of the test-only `png_probe`/`ppm_probe`; they prove the
+  viewer's own probe/open/row/blit path.
 
 ## Failure modes
 
@@ -445,3 +458,4 @@ run image_viewer check            deterministic check, `image_viewer: ok`
 | 2026-11-21 | The viewer is implemented (`samples/apps/apps/accessories/image_viewer.ig`, V1–V4): normal/shot/check modes and the file dialog, probe-before-window with a 400x120 error panel (no faults), a content-sized centred window titled with the basename, `Decoding...` presented before the 512 KiB IDAT stage, one `syslib.blit_rgb` row per decoded pass-1 row, re-decode on `Expose`, and an independent fixture check that blits a 2x2 preview into an 8x8 window and reads two pixels back. State is one decoder plus a 16,384-byte row and a 12-byte preview; there is no image buffer and no resampling. The Apps menu gains `Accessories` → `Image Viewer` (13 rows); `scripts/image_viewer_qmp.py` captures the first frame from the `--shell` image on `-smp 4` and `-smp 1`. No kernel, ABI, builtin or `/lib` change. |
 | 2026-11-22 | The viewer gains a decode progress strip: the window content is `out_w x (out_h + 20)`, the image stays 1:1 at the top and the bottom 20 pixels show a separator, `Decoding NN%` / `Ready` in the 8x8 font and a 6-pixel gray track with a proportional black fill. The strip is drawn at 0% before `png.open`, redrawn and presented every 8 decoded rows, and ends at `Ready`/100%. On `Expose` the white fill is skipped and only the strip is redrawn at 0% (without a present), so the last complete frame stays visible while `png.rewind` re-decodes. The viewer state grows by the color scalar to 629,000 bytes. No lib/kernel/scheduler change. |
 | 2026-11-22 | The active shipped corpus becomes full-resolution uncompressed PPM P6 under `image/` (spec 0024, ADR 0058); the apps image is 128 MiB. The PNG decoder and every PNG requirement here are retained for PNG input, and `lib.png` is unchanged. `samples/apps/lib/ppm.ig` adds the P6 header/row reader, proved by `ppm_probe`. |
+| 2026-11-22 | The viewer dispatches PNG/PPM (spec 0024): `lib.png` is retained unchanged for `.png` paths, and `.ppm` paths use `lib.ppm` with a `ceil(w/8) x ceil(h/8)` preview built by row seek and nearest-column sampling into a 3,072-byte preview row. A path with neither suffix is sniffed (PPM first, then PNG). The PNG branch keeps the normal-class `png.open`, realtime row loop and `png.rewind` on `Expose`; PPM re-opens the header per repaint and is promoted with a per-row heartbeat like PNG (needed under TCG). The check path adds the 8x8 `system/ppm_rgb.ppm` fixture. Viewer state is now 648,784 bytes (one PNG decoder, one small PPM decoder, a 16,384-byte source row and a 3,072-byte preview row). No lib/kernel/scheduler change. |

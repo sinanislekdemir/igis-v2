@@ -1,46 +1,56 @@
 unit image_viewer;
 
-// PNG image viewer (spec 0023; ADR 0057). A client of the window service over
-// the row-streaming `lib.png` decoder: the application state never holds a
-// full-image RGB buffer, only the decoder (611,352 bytes), one 16,384-byte
-// caller row and one 12-byte 2x2 check preview.
+// PNG/PPM image viewer (spec 0023, spec 0024). A client of the window service
+// over the row-streaming `lib.png` decoder and the row-seeking `lib.ppm`
+// reader: the application state never holds a full-image RGB buffer, only the
+// PNG decoder, one 16,384-byte source row, one 3,072-byte preview row and a
+// small 2x2 check preview.
 //
 //   run image_viewer                 modal file dialog, then view the choice
-//   run image_viewer <path>          view one PNG
+//   run image_viewer <path>          view one PNG or PPM
 //   run image_viewer <path> shot     view, print `image_viewer: ready WxH -> WxH`
 //                                    and keep pumping events for the QMP capture
 //   run image_viewer check           deterministic headless check; prints
 //                                    `image_viewer: ok` (or `image_viewer: host ok`)
 //
-// The viewer draws the interlace pass-1 preview 1:1 into a window whose
-// content is exactly the decoded geometry `out_w x out_h` (at least 8x8). It
-// does not resample: the corpus is well under every runtime display mode, so a
-// pass-1 pixel is a screen pixel. A frame that cannot fit, a probe failure or
-// a decode failure opens a small error window instead of faulting.
+// The viewer draws a fit-to-window preview 1:1. A PNG uses the Adam7 pass-1
+// geometry from `lib.png`; a PPM reads every Nth source row and samples every
+// Nth column into `preview_row`, so the preview is `ceil(width/8) x
+// ceil(height/8)` without decoding anything. A frame that cannot fit, a probe
+// failure or a read/decode failure opens a small error window instead of
+// faulting.
 //
 // The first frame is drawn and presented *before* `png.open`: opening stages
 // up to 512 KiB of IDAT payload, which takes visible time on the real corpus.
 // An owner `Expose` re-reads the content rectangle (W12/W28, ADR 0046) and
-// re-runs the whole decode; pass 1 is cheap and there is no image buffer to
-// keep. Close/Escape leaves. Each decoded row reaches the window through one
-// `syslib.blit_rgb` call with `pw = ow, ph = 1`.
+// re-runs the draw; the PNG path uses `png.rewind` over the staged prefix and
+// the PPM path re-opens the header and reads rows again. There is no image
+// buffer to keep. Close/Escape leaves. Each output row reaches the window
+// through one `syslib.blit_rgb` call with `pw = ow, ph = 1`.
 //
-// `check` is independent of the test-only `png_probe`: it probes and decodes
-// `system/png_grad_il.png` itself, asserts the four Adam7 pass-1 pixels, and
-// (with graphics) blits the 2x2 preview into an 8x8 window and reads the first
-// two pixels back with `get_pixel`. `langhost` has no screen and stops after
-// the decode assertions with `image_viewer: host ok`.
+// `check` is independent of the test-only `png_probe`/`ppm_probe`: it probes
+// and decodes `system/png_grad_il.png` itself, asserts the four Adam7 pass-1
+// pixels, then probes/opens `system/ppm_rgb.ppm`, reads all eight rows and
+// asserts every pixel against `(x*29%256, y*37%256, (x*11+y*7)%256)`. With
+// graphics it also blits the 2x2 PNG preview into an 8x8 window and reads the
+// first two pixels back with `get_pixel`. `langhost` has no screen and stops
+// after the two fixture checks with `image_viewer: host ok`.
 
-uses core, stdlib, syslib, lib.out, lib.file_dialog, lib.png;
+uses core, stdlib, syslib, lib.out, lib.file_dialog, lib.png, lib.ppm;
 
 const
   ModeNormal = 0;
   ModeShot = 1;
   ModeCheck = 2;
 
+  KindPng = 0;
+  KindPpm = 1;
+
   PathCapacity = 256;
   TitleCapacity = 64;
   RowCapacity = 16384;
+  PreviewCapacity = 3072;   // 3 * 1024: widest PPM preview
+  PpmPreviewMax = 1024;
 
   // A window content rectangle is at least 8x8 (spec 0011, W9).
   MinContent = 8;
@@ -84,9 +94,14 @@ var
   id: int;
   rect: Rect;
 
-  // Decoder state: one decoder, one caller row and the 2x2 check preview.
+  // Decoder state: one PNG decoder, one PPM decoder, one source row, one
+  // sampled preview row, the 2x2 PNG check preview and the detected format.
   dec: png.Decoder;
+  ppm_dec: ppm.Decoder;
+  kind: int;
   row: bytes[RowCapacity];
+  src_row: bytes[RowCapacity];
+  preview_row: bytes[PreviewCapacity];
   preview: bytes[12];
   got_w: uint;
   ry: uint;
@@ -212,6 +227,78 @@ begin
     path := trimmed;
 end;
 
+// True when `text` ends with `suffix` (an exact byte suffix, case-sensitive).
+function ends_with(text: const string[0]; suffix: const string[0]): bool;
+var
+  lt: int;
+  ls: int;
+  i: int;
+begin
+  lt := int(core.len(text));
+  ls := int(core.len(suffix));
+  if ls > lt then
+    return false;
+  i := 0;
+  while i < ls do
+  begin
+    if text[lt - ls + i] <> suffix[i] then
+      return false;
+    i := i + 1;
+  end;
+  return true;
+end;
+
+// Detects PNG or PPM and fills the source/preview geometry. A `.png` path is
+// PNG only and a `.ppm` path is PPM only; a path with neither suffix is
+// sniffed by trying PPM first and PNG second. PPM previews are
+// ceil(width/8) x ceil(height/8); the preview row buffer caps the width at
+// 1,024 pixels and the caller's screen caps the height.
+function probe_image(source: const string[0]): Status;
+var
+  st: Status;
+begin
+  kind := KindPng;
+  if ends_with(source, ".png") then
+  begin
+    st := png.probe(source, sw, sh, ow, oh, ct, il);
+    if st <> Ok then
+      return st;
+    return Ok;
+  end;
+  if ends_with(source, ".ppm") then
+  begin
+    kind := KindPpm;
+    st := ppm.probe(source, sw, sh);
+    if st <> Ok then
+      return st;
+  end
+  else
+  begin
+    st := ppm.probe(source, sw, sh);
+    if st = Ok then
+      kind := KindPpm
+    else
+    begin
+      st := png.probe(source, sw, sh, ow, oh, ct, il);
+      if st <> Ok then
+        return st;
+      return Ok;
+    end;
+  end;
+
+  if sw = uint(0) or sh = uint(0) then
+    return Invalid;
+  ow := (sw + uint(7)) div uint(8);
+  oh := (sh + uint(7)) div uint(8);
+  if ow > uint(PpmPreviewMax) then
+    return CapacityExceeded;
+  if uint(int(oh) + StatusStripH + 17) > screen_h then
+    return Invalid;
+  ct := uint(0);
+  il := uint(0);
+  return Ok;
+end;
+
 // ---- drawing --------------------------------------------------------------
 
 // Draws the 20-pixel status strip directly below the image: a separator, the
@@ -286,6 +373,9 @@ var
   gw: uint;
   at: uint;
   boosted: bool;
+  sy: uint;
+  sx: uint;
+  x: uint;
 begin
   st := syslib.window_content_rect(id, rect);
   if st <> Ok then
@@ -302,6 +392,67 @@ begin
   end
   else
     draw_strip(uint(0), oh, false);
+
+  if kind = KindPpm then
+  begin
+    st := ppm.open(source, ppm_dec);
+    if st <> Ok then
+      return st;
+    decoded := true;
+    // A full-corpus row-seek preview still spends more than the normal 10 s
+    // CPU budget under TCG, so the PPM row loop is promoted the same way as
+    // PNG and heartbeats once per output row. Admission refusal falls back to
+    // the normal class and is reported once.
+    boosted := false;
+    st := core.realtime_on();
+    if st = Ok then
+    begin
+      boosted := true;
+      core.heartbeat();
+    end
+    else if not boost_warned then
+    begin
+      boost_warned := true;
+      out.say("image_viewer: realtime boost unavailable\n");
+    end;
+    y := uint(0);
+    while y < oh do
+    begin
+      if boosted then
+        core.heartbeat();
+      sy := (y * sh) div oh;
+      st := ppm.read_row(ppm_dec, sy, src_row, gw);
+      if st <> Ok then
+        return st;
+      if gw <> sw then
+        return Invalid;
+      preview_row := "";
+      x := uint(0);
+      while x < ow do
+      begin
+        sx := (x * sw) div ow;
+        st := core.copy_bytes(
+          preview_row, uint(3) * x, src_row, uint(3) * sx, uint(3));
+        if st <> Ok then
+          return st;
+        x := x + uint(1);
+      end;
+      st := syslib.blit_rgb(
+        rect.x, rect.y + int(y), int(ow), 1, preview_row, int(ow), 1);
+      if st <> Ok then
+        return st;
+      y := y + uint(1);
+      if y mod uint(8) = uint(0) then
+      begin
+        draw_strip(y, oh, false);
+        st := syslib.window_present(id);
+        if st <> Ok then
+          return st;
+      end;
+    end;
+    draw_strip(oh, oh, true);
+    return syslib.window_present(id);
+  end;
 
   if decoded then
     st := png.rewind(dec)
@@ -446,7 +597,7 @@ var
   keep: bool;
 begin
   make_title(source);
-  st := png.probe(source, sw, sh, ow, oh, ct, il);
+  st := probe_image(source);
   if st <> Ok then
   begin
     show_error(st);
@@ -483,6 +634,30 @@ begin
     id := 0;
     show_error(st);
     return;
+  end;
+  // The service queues an Expose for the new window. A PPM repaint is fast
+  // enough that a shot would otherwise capture its early progress strip; finish
+  // that repaint before announcing so the capture sees the final `Ready`.
+  if announce and kind = KindPpm then
+  begin
+    status := syslib.next_event(ev);
+    if status = Ok then
+    begin
+      if ev.kind = Expose then
+      begin
+        if ev.window = id then
+        begin
+          st := render_image(source);
+          if st <> Ok then
+          begin
+            status := syslib.window_close(id);
+            id := 0;
+            show_error(st);
+            return;
+          end;
+        end;
+      end;
+    end;
   end;
   if announce then
   begin
@@ -589,6 +764,51 @@ begin
   return core.copy_bytes(preview, uint(6), row, uint(0), uint(6)) = Ok;
 end;
 
+// Probe, open and read every row of the committed 8x8 P6 fixture. Its pixel
+// formula is (x*29%256, y*37%256, (x*11+y*7)%256). This is independent of the
+// test-only `ppm_probe`.
+function check_ppm_fixture(): bool;
+var
+  st: Status;
+  w: uint;
+  h: uint;
+  gw2: uint;
+  y2: uint;
+  x2: uint;
+  er: int;
+  eg: int;
+  eb: int;
+begin
+  check_where := "ppm probe";
+  st := ppm.probe("system/ppm_rgb.ppm", w, h);
+  if st <> Ok or w <> uint(8) or h <> uint(8) then
+    return false;
+  check_where := "ppm open";
+  st := ppm.open("system/ppm_rgb.ppm", ppm_dec);
+  if st <> Ok then
+    return false;
+  y2 := uint(0);
+  while y2 < uint(8) do
+  begin
+    check_where := "ppm row";
+    st := ppm.read_row(ppm_dec, y2, src_row, gw2);
+    if st <> Ok or gw2 <> uint(8) then
+      return false;
+    x2 := uint(0);
+    while x2 < uint(8) do
+    begin
+      er := int((x2 * uint(29)) mod uint(256));
+      eg := int((y2 * uint(37)) mod uint(256));
+      eb := int((x2 * uint(11) + y2 * uint(7)) mod uint(256));
+      if not pixel_is(src_row, x2, er, eg, eb) then
+        return false;
+      x2 := x2 + uint(1);
+    end;
+    y2 := y2 + uint(1);
+  end;
+  return true;
+end;
+
 // Kernel-only proof of the blit path: an 8x8 window receives the 2x2 preview
 // 1:1 and `get_pixel` reads the same two pixels back. The window is always
 // closed, on success or failure.
@@ -641,6 +861,13 @@ begin
     out.say(")\n");
     return;
   end;
+  if not check_ppm_fixture() then
+  begin
+    out.say("image_viewer: check failed (");
+    out.say(check_where);
+    out.say(")\n");
+    return;
+  end;
   if syslib.screen_width() = uint(0) then
   begin
     out.say("image_viewer: host ok\n");
@@ -666,6 +893,7 @@ begin
   id := 0;
   error_status := Ok;
   running := true;
+  kind := KindPng;
   decoded := false;
   boost_warned := false;
   screen_w := syslib.screen_width();

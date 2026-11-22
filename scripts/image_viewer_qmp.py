@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Capture the PNG image viewer's first frame from a headless QEMU boot.
+"""Capture the PNG/PPM image viewer's first frame from a headless QEMU boot.
 
 This is a verification harness, not part of the kernel. It boots the `--shell`
 ISO (the text shell, so no application competes for input), types
 
-    run image_viewer image/simon-twukN12EN7c-unsplash.png shot
+    run image_viewer image/simon-twukN12EN7c-unsplash.ppm shot
 
 waits for the viewer's one deterministic line
 
@@ -12,8 +12,8 @@ waits for the viewer's one deterministic line
 
 and writes the guest framebuffer to a PNG through QMP `screendump`. The `shot`
 mode keeps the viewer pumping events after the ready line, so the captured
-frame is the fully decoded 1:1 Adam7 pass-1 preview. If the QEMU build rejects
-the PNG format, it dumps a PPM and converts it with PIL.
+frame is the fit-to-window PPM preview with its progress strip at `Ready`. If
+the QEMU build rejects the PNG format, it dumps a PPM and converts it with PIL.
 
 Usage:
     cargo xtask image --shell
@@ -46,7 +46,7 @@ DEFAULT_ISO = os.path.join(ROOT, "build", "igis-shell.iso")
 DEFAULT_HOME = os.path.join(ROOT, "build", "home.img")
 DEFAULT_OUTPUT = "/home/sinan/Desktop/igis-image-viewer.png"
 
-SOURCE = "image/simon-twukN12EN7c-unsplash.png"
+SOURCE = "image/simon-twukN12EN7c-unsplash.ppm"
 READY_RE = r"image_viewer: ready (\d+)x(\d+) -> (\d+)x(\d+)"
 PROMPT_RE = r"(?:shell> |igis:/[^>]*> )"
 

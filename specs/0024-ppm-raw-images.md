@@ -1,6 +1,6 @@
 # 0024: Raw PPM images
 
-- **Status:** Accepted
+- **Status:** Implemented
 - **Scope:** `samples/apps/lib` (`ppm`), `samples/apps/apps`
   (`image_viewer`), `samples/image`, `samples/tests/apps`, `langhost`, `xtask`
 - **Supersedes:** none
@@ -108,20 +108,29 @@ add a kernel codec, compression, or any Netpbm format other than P6.
 
 - **V1 (MUST):** `apps/accessories/image_viewer` dispatches by format. A
   `.png` path uses `lib.png`; a `.ppm` path uses `lib.ppm`. A path with neither
-  suffix is sniffed: the PNG signature selects PNG, otherwise a P6 token selects
-  PPM; an unrecognised file opens the existing error panel. The PNG path keeps
-  the spec 0023 behaviour exactly.
+  suffix is sniffed by trying `ppm.probe` first and then `png.probe`; an
+  unrecognised file opens the existing error panel. The PNG path keeps the spec
+  0023 behaviour exactly.
 - **V2 (MUST):** For a PPM source the fit-to-window preview is
-  `ceil(width/8) x ceil(height/8)`: the viewer reads rows `0, 8, 16, ...` with
-  `ppm.read_row` and samples columns `0, 8, 16, ...` when it blits. Each preview
-  row is one seek; nothing outside the visible rows is read and no full image is
-  buffered.
+  `ceil(width/8) x ceil(height/8)`: the viewer reads source row
+  `sy = y * height / out_h` with `ppm.read_row` into a `bytes[16384]`
+  `src_row`, samples column `sx = x * width / out_w` into a
+  `bytes[3072]` `preview_row` (`3 * x` bytes copied per output pixel), and
+  blits `preview_row` as one `syslib.blit_rgb` row. Each preview row is one
+  seek; nothing outside the visible rows is read, no decoding is done and no
+  full image is buffered. `out_w > 1,024` is `CapacityExceeded`.
 - **V3 (MUST):** Thumbnails and zoom-out use fixed-stride row seeking
-  (`read_row` at every `N`th row) with nearest-pixel column sampling. No decode,
-  no resampling state and no image buffer.
+  (`read_row` at every `N`th row) with nearest-pixel column sampling. There is
+  no decode, no resampling state and no image buffer.
 - **V4 (MUST):** The viewer supports the existing `check` and `shot` modes. Its
   `check` path proves a PPM probe/open/row read independently of the test-only
-  `ppm_probe`, and the file dialog still starts at `image`.
+  `ppm_probe` against the 8x8 `system/ppm_rgb.ppm` formula fixture, and the
+  file dialog still starts at `image`.
+- **V5 (MUST):** The PPM preview uses the same `ow x (oh + 20)` window and
+  status strip as PNG: the strip is drawn at 0%, updated every 8 output rows
+  and ends at `Ready`/100%. The PPM row loop is promoted to realtime when
+  admission allows and heartbeats once per output row (admission refusal falls
+  back to the normal class); each row read is bounded.
 
 ## Design
 
@@ -205,3 +214,4 @@ holds the path and geometry.
 |---|---|
 | 2026-11-22 | Accepted with the full-resolution P6 corpus (123.0 MB), the 128 MiB apps image, the `lib.ppm` header/row contract and the PNG/PPM viewer dispatch (ADR 0058). |
 | 2026-11-22 | `samples/apps/lib/ppm.ig` is implemented and proved by `ppm_probe` on `langhost` and in the `--shell` image: `probe`/`open`/`info`/`read_row`, 256-byte header refills with absolute offsets and comments, one whitespace separator after maxval, P6/maxval-255 only, and the status set `NotFound`/`Invalid`/`CapacityExceeded`/`IoError`. |
+| 2026-11-22 | The dual-format viewer is implemented (`apps/accessories/image_viewer`): `.png` keeps the spec 0023 `lib.png` path (normal-class open, realtime row loop, `png.rewind` on `Expose`), `.ppm` uses `lib.ppm` with `ceil(w/8) x ceil(h/8)` row-seek/nearest-column sampling into a 3,072-byte `preview_row` and a per-row realtime heartbeat (needed under TCG), and a suffix-less path tries PPM then PNG. The 20 px status strip is shared and ends at `Ready`. `check` adds the 8x8 `system/ppm_rgb.ppm` formula fixture. The `image_viewer_qmp.py` proof now opens `image/simon-twukN12EN7c-unsplash.ppm`; the Desktop capture is 1024x768 with the `Ready` strip. |
