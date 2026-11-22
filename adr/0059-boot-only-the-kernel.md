@@ -93,6 +93,19 @@ reader.
 |---|---|
 | `readonly=on` on the ATA volume | QEMU's `ide-hd` refuses a read-only block node ("Block node is read-only", verified on 11.1.3); `snapshot=on` discards guest writes to a temporary overlay and leaves the file byte-identical |
 | Keep the module and shrink the corpus to a few MiB | Removes the symptom for the current corpus only; the boot still copies the whole image and pins it, and the next large asset returns to the same place |
+
+## Amendment 2026-11-22: read-path cost
+
+The switch landed better than planned on the two numbers that motivated it: 1.70 s to
+`desktop_shell: ready` and 229 MiB free. It also exposed a cost the in-memory reader had
+hidden. `ext2w::read_at` walks every block from index zero, so once reads are real PIO
+the PPM preview — 20,034 stateless 256-byte `core.fs_read` calls over a 40.9 MB file —
+takes 329 s, against a few seconds from RAM.
+
+Spec 0025 B19 now requires offset-independent reads. M15.4 adds a per-inode block
+lookup and seeks directly before any cache layer or DMA is considered; `read_file` and
+directory walks keep the sequential iterator. The negative point above ("reads are PIO
+and serialized; measured cost decides") is exactly this step.
 | virtio-blk for the image | A second block driver, PCI scan and virtqueue work for a job the ATA driver already does; keep it for the DMA/PIO measurement |
 | Partition table on one disk (image + home) | Adds an MBR parser and offset-aware `e2fsck` for no gain; three IDE units fit the QEMU model already |
 | Boot from the image disk with no ISO | Requires embedding GRUB into a raw image, changes every harness invocation and loses the cheap `-cdrom` boot |

@@ -81,8 +81,8 @@ format, the `/home` volume, the ABI, or the desktop's boot order (ADR 0029).
   removed, together with the `'static` borrow extension in `fs::init`.
 - **B8 (MUST):** Reads are on demand. No part of the image is copied into a kernel
   buffer at boot and no file content is cached; a failed read returns a status and never
-  faults. `available` memory at boot reports the image absent (about 229 MiB free in a
-  256 MiB guest instead of about 101 MiB).
+  faults. The boot frame pool reports the image absent (`frames: ... free`, about
+  229 MiB instead of about 101 MiB in a 256 MiB guest).
 - **B9 (MUST):** The file router takes one mount lock per call and never holds two. The
   lock order is `COMPILER_LOCK → SYSTEM|HOME → ATA channel`; console, window, graphics
   and scheduler locks are never taken below a mount lock. No interrupt handler calls
@@ -126,6 +126,12 @@ format, the `/home` volume, the ABI, or the desktop's boot order (ADR 0029).
   change.
 - **B18 (MUST):** A write to any path outside `home/...` still returns `Invalid`
   (spec 0019 A2).
+- **B19 (MUST):** A read at an offset resolves only the data and pointer blocks it
+  needs: the cost of `read_at(path, offset, len)` must not grow with `offset`. Random
+  and sequential reads of the same bytes return identical data.
+- **B20 (SHOULD):** On TCG with four cores, `scripts/image_viewer_qmp.py` opens the
+  full-resolution sample in under 120 s end to end. The number is a regression gate, not
+  a user-facing promise; the measured value is recorded in the ticket.
 
 ## Design
 
@@ -219,3 +225,4 @@ kind), mapped from `ext2w::Entry`; callers do not change.
 | 2026-11-22 | Initial draft: kernel-only boot medium, read-only ATA volume, one ext2 reader. |
 | 2026-11-22 | Accepted by the owner in the boot-image session; implementation is M15 (PLAN.md). |
 | 2026-11-22 | B12 amended after M15.2: QEMU's `ide-hd` refuses `readonly=on`, so the image is attached with `snapshot=on` and a boot must leave the file byte-identical. |
+| 2026-11-22 | M15.3 landed (1.70 s to ready, 229 MiB free). B8 now names the frame pool; B19/B20 added because `ext2w::read_at` walks from block zero, making the PPM preview cost 329 s once reads are real I/O. |

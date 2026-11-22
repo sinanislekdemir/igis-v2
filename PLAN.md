@@ -34,8 +34,9 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   retire `vfs/ext2` and the GRUB-module path. The measured pre-change boot is 10.4 s
   to `desktop_shell: ready`, with 128 MiB pinned; the target is ≤ 2.5 s. **M15.3 is in
   the tree** (the router holds the read-only `ext2w` mount, `vfs/ext2`, `module.rs` and
-  the GRUB module are gone, the kernel-only ISO boots in 1.7 s and reports 255 MiB
-  available / 229 MiB usable); M15.4 (proof, timing and the remaining docs) is next.
+  the GRUB module are gone, the kernel-only ISO boots in 1.70 s and reports 255 MiB
+  available / 229 MiB usable); **M15.4 (offset-independent `read_at`)** is next, because
+  the PPM preview measured 329 s, then M15.5 closes the milestone.
 - **Historical context (M8–M10; counts below are from those slices):** **505 host
   tests**; specs 0001–0019 (0018 and 0019 Implemented); ABI v1 at 75 opcodes; M5,
   M6, M7.1 and **M8.1–M8.9 complete**, plus **M9.1–M9.4**. The
@@ -2329,10 +2330,20 @@ application volume is a read-only ATA disk the kernel mounts on demand through `
   carries no image. A missing or invalid volume prints `apps: no image` (or
   `apps: mount FAIL (<status>)`) and halts plainly, without a fault. Add
   `xtask run --no-apps` to prove that path. Acceptance: `-smp 4`/`-smp 1`
-  transcripts show both `ext2w` mounts, `tree ok`, `desktop_shell: ready`, `available`
-  about 229 MiB; `--shell` boots; ABI v1 stays 75; `--no-apps` halts with the named
-  line.
-- [ ] **M15.4 Proof, timing and docs.** Re-measure boot-to-ready under QMP (target
+  transcripts show both `ext2w` mounts, `tree ok`, `desktop_shell: ready`, the frame
+  pool at about 229 MiB free; `--shell` boots; ABI v1 stays 75; `--no-apps` halts with
+  the named line.
+- [ ] **M15.4 Offset-independent reads (spec 0025 B19/B20).** `ext2w::read_at` iterates
+  `each_data_block` from block zero, so a read at a 20 MiB offset re-reads every
+  double-indirect pointer block on the way; with real PIO the PPM preview (20,034
+  stateless 256-byte `core.fs_read` calls over 40.9 MB) costs 329 s. Add a
+  `block_at(inode, logical_index)` that resolves one block through the direct, single-
+  and double-indirect pointers and loop over only the logical blocks the range touches;
+  keep `each_data_block` for `read_file` and directory walks. Host test: random-access
+  reads of a file past the direct blocks equal the sequential contents. Re-measure
+  `image_viewer_qmp.py` (B20 gate, under 120 s) and boot-to-ready (1.70 s); raise
+  `CACHE_BLOCKS` only if the metadata cost is still visible. No ABI change.
+- [ ] **M15.5 Proof, timing and docs.** Re-measure boot-to-ready under QMP (target
   ≤ 2.5 s), capture the desktop screenshot, confirm the visual golden is unchanged, run
   the QMP batch, `e2fsck -fn` on `apps.img`, `apps-shell.img` and `home.img`, and
   `--no-home`. Update `AGENTS.md` (one reader, disk image, boot line), `docs/HISTORY.md`,
