@@ -113,7 +113,7 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   71), `core.socket_source` (`1 << 63 | handle`) in `next_any`/`poll_any`, and
   `net_select` (selector + 300 ms recv/select timeouts); `net_echo`'s `accept`
   blocks, `kill_stress` is 300/300 and `mouse` 600/600.
-- **Last commit:** `5e7a1ad` (dual-format viewer) plus the M14 docs commit.
+- **Last commit:** `d103f36` (generated corpus) plus the M14 docs commit.
   `build/home.img` is reset.
 - **Next:** **M14 is complete.** Pick from the deferred backlog in
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) (TLS Q52, IPv6 Q53, Wi-Fi Q54,
@@ -2273,20 +2273,20 @@ PNG support, and read rows by seek with no decode.
   `probe`/`open`/`info`/`read_row`, a tolerant P6 header scanner (256-byte
   refills, comments, absolute offsets, one separator after maxval), the
   P6/maxval-255 subset and the `NotFound`/`Invalid`/`CapacityExceeded`/`IoError`
-  statuses. Proved by `ppm_probe` and its fixtures on `langhost`. `b78210c`.
+  statuses. Proved by `ppm_probe` and its fixtures on `langhost`. `3b867cd`.
 - [x] **M14.2 Corpus and image.** Convert the four images to full-resolution P6,
   stage `samples/image` as `image/`, and grow the apps image to 128 MiB. The
-  generated `.ppm` files are git-ignored; `77643c8` (history rewritten).
+  generated `.ppm` files are git-ignored; `c566a34` (history rewritten).
 - [x] **M14.3 Viewer dual-format.** Dispatch PNG/PPM, keep the PNG pass-1 path,
   and read PPM preview/thumbnail rows by fixed stride; extend the viewer `check`
-  path. `5e7a1ad`.
+  path. `9949213`.
 - [x] **M14.4 Proof and docs.** `--shell` transcripts on `-smp 4`/`-smp 1`, a QMP
   capture of a PPM preview, the regression batch and the status/docs rows.
-  `5e7a1ad`.
+  `9949213`.
 - [x] **M14.5 Generated corpus is not tracked.** Track the original JPEGs in
   `samples/image-src`, add `scripts/make_image_corpus.py`, make `xtask image`
   generate missing PPMs, and git-ignore `samples/image/*.ppm`; the 123 MB
-  generated raster stays out of the repository.
+  generated raster stays out of the repository. `d103f36`.
 
 ## Deferred (not UI; pick up when they matter)
 
