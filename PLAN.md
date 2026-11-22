@@ -14,9 +14,12 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Current state (M12):** **613 host tests**; specs 0001–0022 (0021 and 0022
-  Implemented); ABI v1 at 75 opcodes, with runtime-display builtins 80–83;
-  **M2–M12 complete**. The Settings app (`apps/utilities/settings`) changes the
+- **Current state (M13):** **633 host tests**; specs 0001–0023 (0022 and 0023
+  Implemented); ABI v1 at 75 opcodes with builtins 80–91; **M2–M13 complete**.
+  The apps image is a 64 MiB read-only tree with the full-resolution Adam7 PNG
+  corpus under `image/`; `lib.bitio`/`lib.inflate`/`lib.png` stream pass-1 rows into
+  `apps/accessories/image_viewer` through `syslib.blit_rgb`, with no full-image
+  buffer. The Settings app (`apps/utilities/settings`) changes the
   real display mode through the Bochs VBE dispi (spec 0022, ADR 0056): presets,
   allocation-first shadow swap, window reflow and the Apps menu row. A window
   switch or a completed move runs a full-stack repaint (spec 0011 W31, ADR 0055).
@@ -109,9 +112,9 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   71), `core.socket_source` (`1 << 63 | handle`) in `next_any`/`poll_any`, and
   `net_select` (selector + 300 ms recv/select timeouts); `net_echo`'s `accept`
   blocks, `kill_stress` is 300/300 and `mouse` 600/600.
-- **Last commit:** `af27de8` (DNS `langhost` test) plus the docs commit.
+- **Last commit:** `929502c` (viewer Expose repaint) plus the M13 docs commit.
   `build/home.img` is reset.
-- **Next:** **M10 is complete.** Pick from the deferred backlog in
+- **Next:** **M13 is complete.** Pick from the deferred backlog in
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) (TLS Q52, IPv6 Q53, Wi-Fi Q54,
   multi-NIC Q55, backlog Q56, DHCP/DNS follow-ups Q57) or the non-network items.
 - **Done and committed:** M2.1 graphics foundation (`f57e39e`), M2.2.0–2.2.2 PS/2 mouse
@@ -2235,24 +2238,28 @@ Normative: spec 0023 and ADR 0057.
 Goal: a full-resolution PNG corpus under `/image` and a streaming viewer that fits
 Adam7 pass 1 to the window; no kernel image codec and no full-image buffer.
 
-- [ ] **M13.1 Corpus and image tree.** Convert the four JPEGs at original size to
+- [x] **M13.1 Corpus and image tree.** Convert the four JPEGs at original size to
   8-bit RGB Adam7-interlaced PNG, stage `samples/image` as `/image`, grow the apps
   image to 64 MiB, teach the VFS self-check, `files` and `langhost` the sixth root
-  directory.
-- [ ] **M13.2 Bit and byte primitives.** `core.bit_and/or/xor/shl/shr` and
+  directory. `25c4719`, `f0813c5`; browser root/editor-path fixes `543162e`,
+  `587b586`.
+- [x] **M13.2 Bit and byte primitives.** `core.bit_and/or/xor/shl/shr` and
   `core.copy_bytes/fill_bytes`, then `lib.bitio`, as format-independent layers.
-- [ ] **M13.3 `lib.inflate`.** Streaming zlib/DEFLATE over a 32 KiB window with the
-  stable status set, reusable outside PNG.
-- [ ] **M13.4 `lib.png`.** Row-streaming decoder: colour types 0/2/3/4/6 at 8-bit,
+  `9e363be`, `995a303`.
+- [x] **M13.3 `lib.inflate`.** Bounded zlib/DEFLATE over a 32 KiB window with the
+  stable status set, reusable outside PNG. `05b3f23`; heartbeat, window compaction
+  and header refill `d95b071`, `8d4095d`, `1e43fba`.
+- [x] **M13.4 `lib.png`.** Row-streaming decoder: colour types 0/2/3/4/6 at 8-bit,
   filters 0–4, palette expansion, alpha over white, CRC ignored, Adam7 pass 1 for
-  the preview and row-by-row otherwise.
-- [ ] **M13.5 `syslib.blit_rgb`.** Blit one opaque RGB row into a window's bounded
-  content buffer.
-- [ ] **M13.6 Viewer app.** `apps/accessories/image_viewer`: open from `image`, fit
-  the Adam7 pass-1 preview, stream rows for the full view, `check`/`shot` modes.
-- [ ] **M13.7 Menu row and proof.** Add the `Accessories` row (spec 0012), then host
-  tests, the `--shell` transcript, a QMP screenshot, `-smp 4`/`-smp 1` and an
-  unchanged visual golden.
+  the preview and row-by-row otherwise. `7877d08`, `e680443`.
+- [x] **M13.5 `syslib.blit_rgb`.** Blit one opaque RGB row into a window's bounded
+  content buffer. `c88ba5b`, `38ad043`.
+- [x] **M13.6 Viewer app.** `apps/accessories/image_viewer`: open from `image`, draw
+  the Adam7 pass-1 preview 1:1, stream one blitted row per decoded row,
+  `check`/`shot` modes. `b469f7e`, `929502c`.
+- [x] **M13.7 Menu row and proof.** Add the `Accessories` row (spec 0012), then host
+  tests, the `--shell` transcript, the QMP screenshot, `-smp 4`/`-smp 1` and an
+  unchanged visual golden. `b469f7e`.
 
 ## Deferred (not UI; pick up when they matter)
 

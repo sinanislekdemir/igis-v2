@@ -1,13 +1,13 @@
 # 0023: The PNG corpus and the image viewer
 
-- **Status:** Accepted
+- **Status:** Implemented
 - **Scope:** `samples/apps/lib` (`bitio`, `inflate`, `png`), `samples/apps/apps`
   (`image_viewer`), `compiler`/`interpreter`/`abi` for the generic primitives,
   `kernel` VFS (read-only `image/`), `langhost`, `xtask`, `scripts`
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0057
-- **Updated:** 2026-11-21
+- **Updated:** 2026-11-22
 
 ## Context
 
