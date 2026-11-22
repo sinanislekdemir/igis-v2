@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Importing the sibling harness must not leave a __pycache__ in the repo.
 sys.dont_write_bytecode = True
 
-from tablet_qmp import Qmp, Serial  # noqa: E402
+from tablet_qmp import Qmp, Serial, apps_drive  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHOT_DIR = os.environ.get("IGIS_SHOT_DIR", os.path.join(ROOT, "build", "screenshots"))
@@ -38,9 +38,10 @@ os.makedirs(SHOT_DIR, exist_ok=True)
 DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-boot-desktop.png")
 
 # The desktop bar is `File / Apps / Windows / System`; Terminal is the last
-# Apps row (row 10: y = 22 + 1 + 10*16 + 8 = 191).
+# Apps row (row 11: y = 22 + 1 + 11*16 + 8 = 207). Row 10 is the `#Utilities`
+# section header and is not selectable.
 APPS_LABEL = (64, 10)
-TERMINAL_ROW = (140, 191)
+TERMINAL_ROW = (140, 207)
 
 
 def hid_axis(pixel, extent):
@@ -121,6 +122,7 @@ def main():
         "qemu-system-x86_64",
         "-cdrom",
         iso,
+        *apps_drive(iso),
         "-m",
         "256M",
         "-smp",

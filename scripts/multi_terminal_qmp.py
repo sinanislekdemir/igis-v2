@@ -25,7 +25,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.dont_write_bytecode = True
 
-from tablet_qmp import Qmp, Serial  # noqa: E402
+from tablet_qmp import Qmp, Serial, apps_drive  # noqa: E402
 
 # Measured menu bar: Apps at x = 56, pull-down (52, 22, 220, 178).
 # Terminal is row 10: y = 22 + 1 + 10*16 + 8 = 191.
@@ -85,6 +85,7 @@ def run(args):
         "qemu-system-x86_64",
         "-cdrom",
         iso,
+        *apps_drive(iso),
         "-m",
         "256M",
         "-smp",

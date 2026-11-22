@@ -570,6 +570,11 @@ extern "C" fn kmain_on_stack(mb2_info: u64) -> ! {
                     // invalid one leaves `/home` on the application image.
                     fs::mount_home();
 
+                    // Spec 0025, B3/B5 (M15.2): prove the read-only volume on
+                    // the primary slave is readable. The router keeps reading
+                    // the GRUB module until M15.3, so a failure only logs.
+                    probe_apps_volume();
+
                     // Bring up the application processors: the boot core's
                     // APIC, GDT/IDT, frame allocator and published mounts are
                     // all ready and the module memory is never unmapped. Absent
@@ -620,6 +625,54 @@ extern "C" fn kmain_on_stack(mb2_info: u64) -> ! {
             arch_x86_64::halt();
         }
     }
+}
+
+/// Proves the read-only application volume on `ide0` unit 1 (spec 0025, B3/B5).
+///
+/// M15.2 attaches and reads the disk while the file router still serves the
+/// GRUB module, so nothing depends on this mount: the volume is dropped at the
+/// end of the probe and every failure only prints a line. The success line
+/// proves the ext2 mount, a non-empty `base/shell` and the root listing.
+fn probe_apps_volume() {
+    let Some(disk) = ata::init(ata::Unit::Slave) else {
+        return;
+    };
+    let volume = match ext2w::mount(disk) {
+        Ok(volume) => volume,
+        Err(status) => {
+            println!("apps: mount FAIL ({})", status.name());
+            return;
+        }
+    };
+    println!(
+        "apps: read-only volume, {} byte blocks, {} KiB",
+        volume.block_size(),
+        volume.size_bytes() / 1024
+    );
+    let size = match volume.file_size("base/shell") {
+        Ok(size) if size > 0 => size,
+        Ok(_) => {
+            println!("apps: volume FAIL (base/shell is empty)");
+            return;
+        }
+        Err(status) => {
+            println!("apps: volume FAIL ({})", status.name());
+            return;
+        }
+    };
+    let mut entries = 0u32;
+    let mut name = [0u8; abi::fs::NAME_CAP];
+    loop {
+        match volume.list("", entries, &mut name) {
+            Ok(_) => entries += 1,
+            Err(abi::Status::NotFound) => break,
+            Err(status) => {
+                println!("apps: volume FAIL ({})", status.name());
+                return;
+            }
+        }
+    }
+    println!("apps: volume ok ({entries} root entries, base/shell {size} bytes)");
 }
 
 /// Called by the timer stub in `arch_x86_64` on every tick.

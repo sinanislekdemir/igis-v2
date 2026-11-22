@@ -34,6 +34,12 @@ import tempfile
 import threading
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Importing the sibling harness must not leave a __pycache__ in the repo.
+sys.dont_write_bytecode = True
+
+from tablet_qmp import apps_drive  # noqa: E402
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ISO = os.path.join(ROOT, "build", "igis-shell.iso")
 IMAGE = os.path.join(ROOT, "build", "home.img")
@@ -146,6 +152,7 @@ def qemu_command(cores, socket_path):
         f"file={IMAGE},format=raw,if=ide",
         "-cdrom",
         ISO,
+        *apps_drive(ISO),
         "-m",
         "256M",
         "-smp",

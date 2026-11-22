@@ -37,6 +37,19 @@ def scale(value: int, extent: int) -> int:
     return (value * (extent - 1) * 2 + HID_MAX) // (2 * HID_MAX)
 
 
+def apps_drive(iso):
+    """QEMU -drive arguments for the application volume that matches an ISO.
+
+    QEMU refuses `readonly=on` on an IDE hard disk (ide-hd needs a writable
+    block node), so `snapshot=on` provides the same host protection: guest
+    writes land in a temporary overlay and the image file is never modified.
+    """
+    directory = os.path.dirname(os.path.abspath(iso))
+    name = "apps-shell.img" if os.path.basename(iso) == "igis-shell.iso" else "apps.img"
+    path = os.path.join(directory, name)
+    return ["-drive", f"file={path},format=raw,if=ide,index=1,snapshot=on"]
+
+
 class Serial:
     """Reads QEMU's stdio serial stream and lets tests wait for lines."""
 

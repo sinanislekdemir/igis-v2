@@ -550,13 +550,27 @@ fn run(args: &[String]) -> ExitCode {
     let mut qemu = Command::new("qemu-system-x86_64");
     qemu.current_dir(root());
 
-    // The home disk is the primary-master IDE disk (spec 0019, H2). It is
-    // added before the CD-ROM so the fixed drive order keeps it on ide0 and
-    // the boot ISO on the CD-ROM interface.
+    // The home disk is the primary-master IDE disk (spec 0019, H2) and the
+    // application volume the primary slave (spec 0025, B3/B14). Both are added
+    // before the CD-ROM, with an explicit unit so the fixed `ide0` layout does
+    // not depend on argument order.
     if !no_home {
         qemu.arg("-drive")
-            .arg("file=build/home.img,format=raw,if=ide");
+            .arg("file=build/home.img,format=raw,if=ide,index=0");
     }
+
+    // The application volume is the primary slave (spec 0025, B3/B14) and
+    // must never be written by the guest. QEMU refuses `readonly=on` on an IDE
+    // hard disk (ide-hd needs a writable block node), so `snapshot=on` is the
+    // equivalent host protection: writes go to a temporary overlay and
+    // `build/apps.img` is never modified. The kernel also mounts it read-only.
+    let apps = if shell {
+        "build/apps-shell.img"
+    } else {
+        "build/apps.img"
+    };
+    qemu.arg("-drive")
+        .arg(format!("file={apps},format=raw,if=ide,index=1,snapshot=on"));
 
     qemu.arg("-cdrom")
         .arg(&iso)

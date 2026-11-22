@@ -73,7 +73,7 @@ fn image() -> &'static Ext2<'static> {
 /// marked clean when it opens. The self-check itself never writes, so a boot
 /// leaves no trace on the disk.
 pub fn mount_home() {
-    let Some(disk) = crate::ata::init() else {
+    let Some(disk) = crate::ata::init(crate::ata::Unit::Master) else {
         println!("ext2w: no home disk");
         return;
     };

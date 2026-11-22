@@ -27,7 +27,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.dont_write_bytecode = True
 
-from tablet_qmp import Qmp, Serial  # noqa: E402
+from tablet_qmp import Qmp, Serial, apps_drive  # noqa: E402
 
 # `console::open_windows`: log content (8, 26) 1000x712, frame 1002x729.
 # The hide box is the 11x11 square at frame + (w - 15, 3).
@@ -91,6 +91,7 @@ def run(args):
         "qemu-system-x86_64",
         "-cdrom",
         iso,
+        *apps_drive(iso),
         "-m",
         "256M",
         "-smp",

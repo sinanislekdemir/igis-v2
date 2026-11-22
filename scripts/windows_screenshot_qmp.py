@@ -29,6 +29,12 @@ import tempfile
 import threading
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Importing the sibling harness must not leave a __pycache__ in the repo.
+sys.dont_write_bytecode = True
+
+from tablet_qmp import apps_drive  # noqa: E402
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHOT_DIR = os.environ.get("IGIS_SHOT_DIR", os.path.join(ROOT, "build", "screenshots"))
 os.makedirs(SHOT_DIR, exist_ok=True)
@@ -189,6 +195,7 @@ def main():
         "qemu-system-x86_64",
         "-cdrom",
         iso,
+        *apps_drive(iso),
         "-m",
         "256M",
         "-smp",

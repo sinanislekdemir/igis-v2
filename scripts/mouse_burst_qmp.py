@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Importing the sibling harness must not leave a __pycache__ in the repo.
 sys.dont_write_bytecode = True
 
-from tablet_qmp import Qmp, Serial  # noqa: E402
+from tablet_qmp import Qmp, Serial, apps_drive  # noqa: E402
 
 POINTER_RE = r"pointer: (-?\d+) (-?\d+) (\d+)"
 
@@ -101,6 +101,7 @@ def main():
         "qemu-system-x86_64",
         "-cdrom",
         iso,
+        *apps_drive(iso),
         "-m",
         "256M",
         "-smp",

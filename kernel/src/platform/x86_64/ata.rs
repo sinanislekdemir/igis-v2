@@ -1,11 +1,15 @@
-//! A minimal ATA PIO driver for the `home` disk (spec 0019, H3; ADR 0040).
+//! A minimal ATA PIO driver for the two drives on the primary channel
+//! (spec 0019, H3; spec 0025, B3/B5; ADR 0040).
 //!
-//! One device: the primary master on `0x1F0..=0x1F7` with the control block at
-//! `0x3F6`. Identification requires LBA28; transfers are one 512-byte sector
-//! at a time, polled with a bounded BSY/DRQ wait and a 400 ns I/O delay. There
-//! are no interrupts, no DMA and no write-back cache. An absent, non-ATA or
-//! unreadable disk is never fatal: [`init`] returns `None` and the system boots
-//! with `/home` read-only (spec 0019, H3).
+//! Both units share one register set: `0x1F0..=0x1F7` with the control block at
+//! `0x3F6`. The drive is selected per command, and [`CHANNEL`] serialises every
+//! port sequence on the channel (identify, read, write) because a command
+//! written by one unit would otherwise land in the other unit's task file.
+//! Identification requires LBA28; transfers are one 512-byte sector at a time,
+//! polled with a bounded BSY/DRQ wait and a 400 ns I/O delay. There are no
+//! interrupts, no DMA and no write-back cache. An absent, non-ATA or unreadable
+//! disk is never fatal: [`init`] returns `None` and the caller keeps its
+//! previous state (spec 0019, H3).
 //!
 //! The driver sits behind [`ext2w::SectorDevice`] so the filesystem does not
 //! know whether it is talking to ATA or a host memory buffer.
@@ -15,6 +19,7 @@ use arch_x86_64::port::{inb, insw, outb, outsw};
 use ext2w::SectorDevice;
 
 use crate::println;
+use crate::sync::SpinLock;
 
 /// Primary bus I/O base: data, error/features, sector count, LBA0..2, drive,
 /// status/command.
@@ -41,6 +46,8 @@ const STATUS_BSY: u8 = 0x80;
 /// The drive/head register value for the primary master in LBA mode: bit 7
 /// and bit 5 set, bit 6 (`LBA`) set, drive-select bit 4 clear.
 const DRIVE_MASTER: u8 = 0xE0;
+/// The primary slave uses the same value with drive-select bit 4 set.
+const DRIVE_SLAVE: u8 = 0xF0;
 const CMD_READ_SECTORS: u8 = 0x20;
 const CMD_WRITE_SECTORS: u8 = 0x30;
 const CMD_FLUSH_CACHE: u8 = 0xE7;
@@ -50,9 +57,43 @@ const CONTROL_SRST: u8 = 0x04;
 /// A poll limit that maps to roughly 0.4 s at the I/O delay below.
 const POLL_LIMIT: u32 = 1_000_000;
 
-/// One identified primary-master ATA disk (LBA28).
+/// One lock for the whole primary channel.
+///
+/// Both drives share `0x1F0..=0x1F7` and the control block at `0x3F6`, so a
+/// port sequence from one unit must not interleave with another (spec 0025,
+/// B5). There is deliberately no per-device lock: selecting a drive changes the
+/// state of the shared channel.
+static CHANNEL: SpinLock<()> = SpinLock::new(());
+
+/// The unit on the primary channel.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Unit {
+    Master,
+    Slave,
+}
+
+impl Unit {
+    /// The drive/head register value for this unit in LBA mode.
+    fn drive(self) -> u8 {
+        match self {
+            Unit::Master => DRIVE_MASTER,
+            Unit::Slave => DRIVE_SLAVE,
+        }
+    }
+
+    /// The name used in the boot log.
+    fn label(self) -> &'static str {
+        match self {
+            Unit::Master => "master",
+            Unit::Slave => "slave",
+        }
+    }
+}
+
+/// One identified ATA disk (LBA28) and the drive value that selects it.
 pub struct AtaDisk {
     sectors: u32,
+    drive: u8,
 }
 
 impl AtaDisk {
@@ -66,12 +107,12 @@ impl AtaDisk {
             return Err(Status::IoError);
         }
         // SAFETY: the ATA task-file ports are fixed platform I/O. The caller
-        // has identified this device as the primary master and the LBA is
+        // holds the channel lock, has identified this device and the LBA is
         // inside its recorded capacity.
         unsafe {
             outb(
                 IO_BASE + REG_DRIVE,
-                DRIVE_MASTER | ((index >> 24) & 0x0F) as u8,
+                self.drive | ((index >> 24) & 0x0F) as u8,
             );
             // ATA requires a 400 ns settle after selecting the drive before the
             // remaining task-file registers are written.
@@ -137,6 +178,9 @@ impl SectorDevice for AtaDisk {
 
     fn read_sector(&self, index: u64, out: &mut [u8; 512]) -> Result<(), Status> {
         let index = u32::try_from(index).map_err(|_| Status::IoError)?;
+        // The channel is shared by both units and the reset below also touches
+        // it, so the whole sequence runs under the one lock (spec 0025, B5).
+        let _channel = CHANNEL.lock();
         match self.read_one(index, out) {
             Ok(()) => Ok(()),
             Err(status) => {
@@ -148,6 +192,7 @@ impl SectorDevice for AtaDisk {
 
     fn write_sector(&mut self, index: u64, data: &[u8; 512]) -> Result<(), Status> {
         let index = u32::try_from(index).map_err(|_| Status::IoError)?;
+        let _channel = CHANNEL.lock();
         match self.write_one(index, data) {
             Ok(()) => Ok(()),
             Err(status) => {
@@ -158,32 +203,44 @@ impl SectorDevice for AtaDisk {
     }
 }
 
-/// Identifies the primary master and returns the disk, or `None`.
+/// Identifies `unit` on the primary channel and returns the disk, or `None`.
 ///
 /// The log says which case happened; a missing or non-ATA device leaves the
-/// caller with no home mount rather than an error.
-pub fn init() -> Option<AtaDisk> {
-    match identify() {
+/// caller with no mount rather than an error.
+pub fn init(unit: Unit) -> Option<AtaDisk> {
+    let found = {
+        // Identification is a task-file sequence on the shared channel.
+        let _channel = CHANNEL.lock();
+        identify(unit)
+    };
+    match found {
         Some(sectors) => {
             println!(
-                "ata: primary master, LBA28, {sectors} sectors ({} KiB)",
+                "ata: primary {}, LBA28, {sectors} sectors ({} KiB)",
+                unit.label(),
                 u64::from(sectors) * 512 / 1024
             );
-            Some(AtaDisk { sectors })
+            Some(AtaDisk {
+                sectors,
+                drive: unit.drive(),
+            })
         }
         None => {
-            println!("ata: no primary master");
+            println!("ata: no primary {}", unit.label());
             None
         }
     }
 }
 
 /// Reads the identify response, or returns `None` for an absent/non-ATA device.
-fn identify() -> Option<u32> {
-    // SAFETY: identifying the primary master is a fixed task-file sequence; the
-    // ports are the standard ATA ones and no other driver owns them.
+///
+/// The caller holds [`CHANNEL`].
+fn identify(unit: Unit) -> Option<u32> {
+    // SAFETY: identifying a unit is a fixed task-file sequence; the ports are
+    // the standard ATA ones, the channel lock is held and no other driver owns
+    // them.
     unsafe {
-        outb(IO_BASE + REG_DRIVE, DRIVE_MASTER);
+        outb(IO_BASE + REG_DRIVE, unit.drive());
         io_delay();
         outb(IO_BASE + REG_SECCOUNT, 0);
         outb(IO_BASE + REG_LBA0, 0);
