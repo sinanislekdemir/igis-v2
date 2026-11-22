@@ -32,11 +32,12 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 - **Next (M15):** spec 0025 + ADR 0059 are accepted: boot with only `kernel.elf`,
   mount the 128 MiB application volume read-only from `ide0` unit 1 through `ext2w`,
   retire `vfs/ext2` and the GRUB-module path. The measured pre-change boot is 10.4 s
-  to `desktop_shell: ready`, with 128 MiB pinned; the target is ≤ 2.5 s. **M15.3 is in
+  to `desktop_shell: ready`, with 128 MiB pinned; the target is ≤ 2.5 s. **M15.4 is in
   the tree** (the router holds the read-only `ext2w` mount, `vfs/ext2`, `module.rs` and
-  the GRUB module are gone, the kernel-only ISO boots in 1.70 s and reports 255 MiB
-  available / 229 MiB usable); **M15.4 (offset-independent `read_at`)** is next, because
-  the PPM preview measured 329 s, then M15.5 closes the milestone.
+  the GRUB module are gone, the kernel-only ISO boots in 1.78 s and reports 255 MiB
+  available / 229 MiB usable; offset-independent `read_at` brings the PPM preview from
+  329 s to 48.2 s); **M15.5 (proof, timing and docs)** is next, then the milestone
+  closes.
 - **Historical context (M8–M10; counts below are from those slices):** **505 host
   tests**; specs 0001–0019 (0018 and 0019 Implemented); ABI v1 at 75 opcodes; M5,
   M6, M7.1 and **M8.1–M8.9 complete**, plus **M9.1–M9.4**. The
@@ -2333,7 +2334,7 @@ application volume is a read-only ATA disk the kernel mounts on demand through `
   transcripts show both `ext2w` mounts, `tree ok`, `desktop_shell: ready`, the frame
   pool at about 229 MiB free; `--shell` boots; ABI v1 stays 75; `--no-apps` halts with
   the named line.
-- [ ] **M15.4 Offset-independent reads (spec 0025 B19/B20).** `ext2w::read_at` iterates
+- [x] **M15.4 Offset-independent reads (spec 0025 B19/B20).** `ext2w::read_at` iterates
   `each_data_block` from block zero, so a read at a 20 MiB offset re-reads every
   double-indirect pointer block on the way; with real PIO the PPM preview (20,034
   stateless 256-byte `core.fs_read` calls over 40.9 MB) costs 329 s. Add a
@@ -2342,7 +2343,12 @@ application volume is a read-only ATA disk the kernel mounts on demand through `
   keep `each_data_block` for `read_file` and directory walks. Host test: random-access
   reads of a file past the direct blocks equal the sequential contents. Re-measure
   `image_viewer_qmp.py` (B20 gate, under 120 s) and boot-to-ready (1.70 s); raise
-  `CACHE_BLOCKS` only if the metadata cost is still visible. No ABI change.
+  `CACHE_BLOCKS` only if the metadata cost is still visible. No ABI change. Landed:
+  `block_at` resolves only the touched path; the host test stages a 2 MiB file and
+  checks direct/single/double offsets, a block-crossing range, EOF and a 3-byte read.
+  Measured on `-smp 4`: `image_viewer_qmp.py` **48.2 s** (329 s before) and
+  boot-to-ready 1.78 s; `CACHE_BLOCKS` stays 8 because the metadata cost is no longer
+  visible. 635 host tests, `home_verify: ok`, `terminal: ok`, `e2fsck` clean.
 - [ ] **M15.5 Proof, timing and docs.** Re-measure boot-to-ready under QMP (target
   ≤ 2.5 s), capture the desktop screenshot, confirm the visual golden is unchanged, run
   the QMP batch, `e2fsck -fn` on `apps.img`, `apps-shell.img` and `home.img`, and

@@ -116,6 +116,40 @@ fn make_image() -> Option<Vec<u8>> {
     Some(std::fs::read(&image).expect("read image"))
 }
 
+/// Builds an ext2 image of `size_kib` KiB holding one regular file, or returns
+/// `None` when `mke2fs` is unavailable.
+fn make_image_with_file(size_kib: u32, name: &str, contents: &[u8]) -> Option<Vec<u8>> {
+    if !mke2fs_available() {
+        eprintln!("ext2w: skipping test: `mke2fs` is not installed");
+        return None;
+    }
+
+    let temp = TempDir::new("large-image");
+    let staging = temp.path().join("root");
+    std::fs::create_dir_all(&staging).expect("create staging tree");
+    std::fs::write(staging.join(name), contents).expect("write large file");
+
+    let image = temp.path().join("large.img");
+    let output = Command::new("mke2fs")
+        .arg("-q")
+        .arg("-t")
+        .arg("ext2")
+        .arg("-b")
+        .arg("1024")
+        .arg("-d")
+        .arg(&staging)
+        .arg("-F")
+        .arg(&image)
+        .arg(format!("{size_kib}K"))
+        .output()
+        .expect("run mke2fs");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        panic!("mke2fs failed ({}): {stderr}", output.status);
+    }
+    Some(std::fs::read(&image).expect("read image"))
+}
+
 fn list_names<D: SectorDevice>(fs: &ext2w::Fs<D>, path: &str) -> Vec<(String, Entry)> {
     let mut name = [0u8; 64];
     let mut names = Vec::new();
@@ -205,6 +239,99 @@ fn reads_a_file_by_offset_and_whole() {
         fs.read_file("readme.txt", &mut small),
         Err(Status::CapacityExceeded)
     );
+}
+
+fn large_payload() -> Vec<u8> {
+    (0..2 * 1024 * 1024 + 37)
+        .map(|index| ((index / 3) ^ (index * 7)) as u8)
+        .collect()
+}
+
+/// A 2 MiB file needs the double-indirect pointer (direct covers 12 blocks,
+/// single indirect 256), so offsets in all three ranges must resolve without
+/// walking the blocks before them (spec 0025 B19).
+#[test]
+fn reads_past_the_direct_blocks_by_offset() {
+    let payload = large_payload();
+    let Some(bytes) = make_image_with_file(8 * 1024, "large.bin", &payload) else {
+        return;
+    };
+    let fs = mount(MemoryDevice::new(bytes)).expect("image mounts");
+    assert_eq!(fs.file_size("large.bin"), Ok(payload.len() as u64));
+
+    // Sequential baselines: the whole-file reader and a chunked read_at loop.
+    let mut whole = vec![0u8; payload.len()];
+    assert_eq!(fs.read_file("large.bin", &mut whole), Ok(payload.len()));
+    assert_eq!(whole, payload, "read_file differs from the staged bytes");
+
+    let mut sequential = Vec::with_capacity(payload.len());
+    let mut offset = 0u64;
+    let mut chunk = [0u8; 777];
+    while offset < payload.len() as u64 {
+        let read = fs
+            .read_at("large.bin", offset, &mut chunk)
+            .expect("chunked read");
+        assert!(read > 0 && read <= chunk.len());
+        sequential.extend_from_slice(&chunk[..read]);
+        offset += read as u64;
+    }
+    assert_eq!(sequential, payload, "chunked read_at differs from read_file");
+
+    // Direct (blocks 0..12), single-indirect (12..268) and double-indirect
+    // (268..) offsets return the sequential bytes.
+    const DIRECT: u64 = 5 * 1024 + 11;
+    const SINGLE: u64 = (12 + 200) * 1024 + 7;
+    const DOUBLE: u64 = (12 + 256 + 1000) * 1024 + 3;
+    for start in [
+        0,
+        1,
+        1023,
+        1024,
+        DIRECT,
+        SINGLE,
+        DOUBLE,
+        268 * 1024 - 8,
+        payload.len() as u64 - 17,
+    ] {
+        let end = (start as usize + 300).min(payload.len());
+        let mut buffer = [0u8; 300];
+        let read = fs
+            .read_at("large.bin", start, &mut buffer)
+            .expect("offset read");
+        assert_eq!(read, end - start as usize);
+        assert_eq!(
+            &buffer[..read],
+            &payload[start as usize..end],
+            "read at {start}"
+        );
+    }
+
+    // One range crossing a block boundary in the double-indirect tree.
+    let crossing = 268 * 1024 - 8;
+    let mut buffer = [0u8; 32];
+    assert_eq!(
+        fs.read_at("large.bin", crossing as u64, &mut buffer),
+        Ok(32)
+    );
+    assert_eq!(&buffer, &payload[crossing..crossing + 32]);
+
+    // Three bytes from a large offset are exactly those bytes.
+    let tail = payload.len() - 11;
+    let mut three = [0u8; 3];
+    assert_eq!(fs.read_at("large.bin", tail as u64, &mut three), Ok(3));
+    assert_eq!(&three, &payload[tail..tail + 3]);
+
+    // EOF and past EOF stay Ok(0); an empty destination does too.
+    let mut at_eof = [0u8; 8];
+    assert_eq!(
+        fs.read_at("large.bin", payload.len() as u64, &mut at_eof),
+        Ok(0)
+    );
+    assert_eq!(
+        fs.read_at("large.bin", payload.len() as u64 + 100, &mut at_eof),
+        Ok(0)
+    );
+    assert_eq!(fs.read_at("large.bin", 100, &mut []), Ok(0));
 }
 
 #[test]

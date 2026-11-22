@@ -575,37 +575,83 @@ impl<D: SectorDevice> Fs<D> {
     /// An offset at or past the file's end returns `Ok(0)`, so end-of-file is
     /// not an error. A missing component is [`Status::NotFound`] and a
     /// non-regular entry is [`Status::Invalid`].
+    ///
+    /// Only the logical blocks the range touches are resolved (spec 0025 B19),
+    /// so the cost does not grow with `offset`; a hole inside the range is
+    /// [`Status::Invalid`] and a file that needs the triple-indirect pointer is
+    /// [`Status::IoError`], as for the sequential iterator.
     pub fn read_at(&self, path: &str, offset: u64, out: &mut [u8]) -> Result<usize, Status> {
         let inode = self.regular_inode(path)?;
         if offset >= inode.size || out.is_empty() {
             return Ok(0);
         }
 
-        let mut block_start = 0u64;
+        let first = (offset / BLOCK_SIZE as u64) as u32;
+        let last_byte = offset
+            .saturating_add(out.len() as u64 - 1)
+            .min(inode.size - 1);
+        let last = (last_byte / BLOCK_SIZE as u64) as u32;
+
         let mut written = 0usize;
-        self.each_data_block(&inode, &mut |index, _valid| {
-            let start = block_start;
-            block_start += BLOCK_SIZE as u64;
-            if written == out.len() {
-                return Ok(false);
-            }
-            let end = (start + BLOCK_SIZE as u64).min(inode.size);
-            if end <= offset {
-                return Ok(true);
-            }
+        let mut logical = first;
+        while logical <= last {
+            let block_number = self.block_at(&inode, logical)?;
+            let start = u64::from(logical) * BLOCK_SIZE as u64;
             let from = offset.saturating_sub(start) as usize;
+            let end = (start + BLOCK_SIZE as u64).min(inode.size);
             let to = (end - start) as usize;
-            if from >= to {
-                return Ok(true);
-            }
-            let mut block = [0u8; BLOCK_SIZE];
-            self.block(index, &mut block)?;
             let count = (to - from).min(out.len() - written);
-            out[written..written + count].copy_from_slice(&block[from..from + count]);
-            written += count;
-            Ok(written < out.len())
-        })?;
+            if count > 0 {
+                let mut block = [0u8; BLOCK_SIZE];
+                self.block(block_number, &mut block)?;
+                out[written..written + count].copy_from_slice(&block[from..from + count]);
+                written += count;
+            }
+            logical += 1;
+        }
         Ok(written)
+    }
+
+    /// Returns the physical block that holds logical block `index` of `inode`,
+    /// reading only the pointer blocks on the way (spec 0025 B19).
+    ///
+    /// Direct pointers are read from the inode, single-indirect from
+    /// `blocks[12]` and double-indirect from `blocks[13]` → inner block. A zero
+    /// pointer is [`Status::Invalid`] (the subset has no holes). An index at or
+    /// past `ceil(size / BLOCK_SIZE)` is [`Status::IoError`], as is a file that
+    /// needs the triple-indirect pointer.
+    fn block_at(&self, inode: &Inode, index: u32) -> Result<u32, Status> {
+        let total = inode.size.div_ceil(BLOCK_SIZE as u64);
+        if total > self.max_double_indirect_blocks() as u64 || inode.blocks[14] != 0 {
+            // The file needs the triple-indirect pointer, which the subset does
+            // not support.
+            return Err(Status::IoError);
+        }
+        if u64::from(index) >= total {
+            return Err(Status::IoError);
+        }
+
+        let per_block = (BLOCK_SIZE / 4) as u32;
+        if index < 12 {
+            return nonzero(inode.blocks[index as usize]);
+        }
+        if index < 12 + per_block {
+            let indirect = nonzero(inode.blocks[12])?;
+            let mut pointers = [0u8; BLOCK_SIZE];
+            self.block(indirect, &mut pointers)?;
+            return nonzero(read_u32(&pointers, (index - 12) as usize * 4)?);
+        }
+
+        let index = index - 12 - per_block;
+        let outer_index = (index / per_block) as usize;
+        let inner_index = (index % per_block) as usize;
+        let indirect = nonzero(inode.blocks[13])?;
+        let mut outer = [0u8; BLOCK_SIZE];
+        self.block(indirect, &mut outer)?;
+        let inner_number = nonzero(read_u32(&outer, outer_index * 4)?)?;
+        let mut inner = [0u8; BLOCK_SIZE];
+        self.block(inner_number, &mut inner)?;
+        nonzero(read_u32(&inner, inner_index * 4)?)
     }
 
     /// Reads one entry of the directory at `path` by 0-based index (spec 0013,
