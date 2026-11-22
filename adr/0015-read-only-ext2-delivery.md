@@ -1,8 +1,9 @@
 # 0015: Deliver applications on a read-only ext2 image over an in-memory block device
 
-- **Status:** Accepted
+- **Status:** Superseded by 0059
 - **Date:** 2026-11-12
 - **Deciders:** project owner
+- **Superseded by:** 0059 (boot only the kernel; mount the image from an ATA disk)
 - **Related specs:** 0001 (vision), 0002 (architecture)
 
 ## Context

@@ -14,8 +14,9 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Current state (M14):** **634 host tests**; specs 0001–0024 (0023 and 0024
-  Implemented); ABI v1 at 75 opcodes with builtins 80–91; **M2–M14 complete**.
+- **Current state (M14):** **634 host tests**; specs 0001–0025 (0023 and 0024
+  Implemented, 0025 accepted); ABI v1 at 75 opcodes with builtins 80–91; **M2–M14
+  complete**.
   The apps image is a 128 MiB read-only tree with the full-resolution PPM P6
   corpus under `image/`; `apps/accessories/image_viewer` dispatches PNG (Adam7
   pass-1 through `lib.png`/`lib.inflate`) and PPM (fixed-stride row seek and 1/8
@@ -28,6 +29,13 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   image has top-level `apps/<category>/`, and the Apps pull-down is sectioned.
   `/home` is a separate 8 MiB ext2 image on an ATA disk, read-write through
   `ext2w`. `scripts/multi_terminal_qmp.py` proves two independent terminals.
+- **Next (M15):** spec 0025 + ADR 0059 are accepted: boot with only `kernel.elf`,
+  mount the 128 MiB application volume read-only from `ide0` unit 1 through `ext2w`,
+  retire `vfs/ext2` and the GRUB-module path. The measured pre-change boot is 10.4 s
+  to `desktop_shell: ready`, with 128 MiB pinned; the target is ≤ 2.5 s and ~229 MiB
+  free in a 256 MiB guest. **M15.2 is in the tree** (volume attached at `ide0` unit 1,
+  ATA `Unit`/channel lock, `apps_drive()` harness helper, boot probe); M15.3 (the
+  mount switch) is next.
 - **Historical context (M8–M10; counts below are from those slices):** **505 host
   tests**; specs 0001–0019 (0018 and 0019 Implemented); ABI v1 at 75 opcodes; M5,
   M6, M7.1 and **M8.1–M8.9 complete**, plus **M9.1–M9.4**. The
@@ -2287,6 +2295,48 @@ PNG support, and read rows by seek with no decode.
   `samples/image-src`, add `scripts/make_image_corpus.py`, make `xtask image`
   generate missing PPMs, and git-ignore `samples/image/*.ppm`; the 123 MB
   generated raster stays out of the repository. `d103f36`.
+
+## M15: boot with only the kernel
+
+Normative: spec 0025 and ADR 0059. Goal: GRUB loads only `kernel.elf`; the 128 MiB
+application volume is a read-only ATA disk the kernel mounts on demand through `ext2w`;
+`vfs/ext2` and the GRUB-module path are retired. Measured starting point: 10.4 s to
+`desktop_shell: ready`, 101 MiB available in a 256 MiB guest.
+
+- [x] **M15.1 Spec and decision.** Accept spec 0025 (kernel-only boot medium, `ide0`
+  unit 1 read-only volume, one ext2 reader, harness helper, failure line) and ADR 0059;
+  mark ADR 0015 superseded; resolve OPEN-QUESTIONS Q59; add the index rows. No code.
+- [x] **M15.2 Attach the volume (no behaviour change).** Build and attach
+  `build/apps.img`/`build/apps-shell.img` at `ide0` unit 1 in `xtask run` and in every
+  QMP harness, while `grub.cfg` still carries the module. `ata.rs` gains
+  `Unit { Master, Slave }`, `init(Unit)`, per-command drive selection and one
+  primary-channel lock; boot logs both drives. `scripts/tablet_qmp.py` gains one
+  drive-argument helper keyed by the ISO path (`igis.iso` → `apps.img`,
+  `igis-shell.iso` → `apps-shell.img`) and the harnesses use it. QEMU's `ide-hd`
+  refuses `readonly=on`, so the volume is attached with `snapshot=on` (spec 0025 B12
+  amended) and a boot leaves the file byte-identical. Proof: the `-smp 4`/`-smp 1`
+  transcripts show `ata: primary master` and `ata: primary slave` with the right sector
+  counts and `apps: volume ok (7 root entries, base/shell 15416 bytes)`; the desktop
+  still boots from the module; `--no-home` and `--shell` still boot;
+  `boot_desktop_qmp.py` (its stale Terminal row 10 → 11 fixed), `home_persistence_qmp.py`
+  and `image_viewer_qmp.py` pass; `e2fsck -fn` clean.
+- [ ] **M15.3 Mount from the volume (the switch).** `fs.rs` holds the application mount
+  as `SpinLock<Option<ext2w::Fs<AtaDisk>>>`, publishes it through `init(apps)` and maps
+  `ext2w::Entry` to the router's entry; all read paths take exactly one mount lock. `main`
+  identifies both drives, mounts the volume read-only, runs `tree ok` and keeps the
+  existing order (mounts before the APs, `repl::boot` last). Delete `vfs/ext2`,
+  `module.rs` and the module scan in `mb2`; drop `module2` from `grub.cfg` so the ISO
+  carries no image. A missing or invalid volume prints `apps: no image` (or
+  `apps: mount FAIL (<status>)`) and reaches the existing `no entry` halt without a
+  fault. Add `xtask run --no-apps` to prove that path. Acceptance: `-smp 4`/`-smp 1`
+  transcripts show both `ext2w` mounts, `tree ok`, `desktop_shell: ready`, `available`
+  about 229 MiB; `--shell` boots; ABI v1 stays 75; `--no-apps` halts with the named
+  line.
+- [ ] **M15.4 Proof, timing and docs.** Re-measure boot-to-ready under QMP (target
+  ≤ 2.5 s), capture the desktop screenshot, confirm the visual golden is unchanged, run
+  the QMP batch, `e2fsck -fn` on `apps.img`, `apps-shell.img` and `home.img`, and
+  `--no-home`. Update `AGENTS.md` (one reader, disk image, boot line), `docs/HISTORY.md`,
+  spec 0025 status to Implemented, and this file's resume point.
 
 ## Deferred (not UI; pick up when they matter)
 

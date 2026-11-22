@@ -39,7 +39,7 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0012 | [Implement the kernel and runtime in Rust](0012-rust-implementation-language.md) | Accepted | 2026-11-12 |
 | 0013 | [x86_64 first, with a multi-architecture layout from day one](0013-x86_64-first-multi-arch.md) | Accepted | 2026-11-12 |
 | 0014 | [Boot via GRUB and multiboot2, with a hand-written long-mode transition](0014-grub-multiboot2-boot.md) | Accepted | 2026-11-12 |
-| 0015 | [Deliver applications on a read-only ext2 image over an in-memory block device](0015-read-only-ext2-delivery.md) | Accepted | 2026-11-12 |
+| 0015 | [Deliver applications on a read-only ext2 image over an in-memory block device](0015-read-only-ext2-delivery.md) | Superseded by 0059 | 2026-11-12 |
 | 0016 | [Realtime tasks run without quantum preemption under a heartbeat contract](0016-realtime-heartbeat.md) | Accepted | 2026-11-12 |
 | 0017 | [The REPL is a kernel service; applications request runs through a spawn queue](0017-repl-spawn-service.md) | Accepted (boot order superseded by 0029) | 2026-11-12 |
 | 0018 | [Floating point is in the first milestone: one `f64` type and a per-task FPU region](0018-floating-point.md) | Accepted | 2026-11-13 |
@@ -83,3 +83,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0056 | [Runtime display modes use the Bochs VBE dispi, not a real-mode BIOS trampoline](0056-runtime-display-mode-bochs-vbe.md) | Accepted | 2026-11-21 |
 | 0057 | [PNG row streaming with an Adam7 pass-1 preview](0057-png-row-streaming-preview.md) | Accepted (amended 2026-11-22) | 2026-11-21 |
 | 0058 | [Ship the image corpus as uncompressed PPM P6 and keep PNG support](0058-ppm-raw-corpus.md) | Accepted | 2026-11-22 |
+| 0059 | [Boot only the kernel and mount the application image from an ATA disk](0059-boot-only-the-kernel.md) | Accepted | 2026-11-22 |

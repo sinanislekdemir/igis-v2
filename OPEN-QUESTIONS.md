@@ -4,8 +4,8 @@ Parked decisions for igis-v2. This is the working register; each spec's own
 "Open questions" section remains authoritative for that document. When an item is
 resolved, record the answer in the relevant spec or in a new ADR, then remove it here.
 
-**Status:** implementation phase. Last updated: 2026-11-19.
-**Snapshot:** specs 0001–0020, ADRs 0001–0050.
+**Status:** implementation phase. Last updated: 2026-11-22.
+**Snapshot:** specs 0001–0025, ADRs 0001–0059.
 
 ## How to use
 
@@ -93,11 +93,18 @@ self-check proves the rule (`stack: layout ok`). Spec 0004 C6, spec 0002 H2.
 | Q57 | DHCP lease renewal, DNS caching, ICMP errors | M10.8 implements DISCOVER/OFFER/REQUEST/ACK and applies the lease; renewal, T1/T2 timers, a DNS cache and ICMP unreachable/time-exceeded reporting are follow-ups. A deterministic offline DNS responder is also open (slirp forwards DNS; guest UDP to the host alias is verified in M10.3) | M10.8 follow-up; spec 0020 open question 6 |
 | Q58 | Network trust model | No capability check (vision R14), so any task may reconfigure the single NIC and open sockets; sockets are owner-checked and there is no raw/promiscuous mode. A future multi-user or hostile-app model would need an authority rule | first multi-user or remote-service target |
 
-## H. Kernel structure
+## Decided in the 2026-11-22 boot-image session
 
-| # | Question | Options / recommendation | Trigger |
-|---|----------|--------------------------|---------|
-| Q59 | One ext2 reader for the image and the home disk | `vfs/ext2` reads the in-memory GRUB image through a borrowed slice; `ext2w` owns the writable home disk and caches blocks in a `RefCell`. `RefCell` is not `Sync`, so an `ext2w::Fs` cannot be shared with the APs as-is. Unifying needs a `Sync` cache (or a `MemoryDisk` plus a lock-free cache) and a full boot/fsck proof; keeping both is deliberate (ADR 0052) | a third filesystem, a cache bug, or a measurable duplicate-maintenance cost |
+**One ext2 reader and a kernel-only boot medium (spec 0025, ADR 0059; resolves Q59).**
+The application image no longer travels as a GRUB module: `grub.cfg` loads only
+`kernel.elf`, and the 128 MiB ext2 volume sits on `ide0` unit 1 (read-only) where the
+kernel mounts it with `ext2w` on demand. `/home` keeps `ide0` unit 0 and the boot CD
+`ide1` unit 0. `vfs/ext2` and the module byte-slice path are retired, so both mounts use
+the host-tested reader; `ext2w`'s `RefCell` cache is shared across cores behind the
+existing per-mount `SpinLock`, the rule `/home` already followed. X1/X2 image contents,
+the ABI and the file API are unchanged; every harness attaches the volume through a
+`snapshot=on` overlay and takes its drive arguments from one helper keyed by the ISO
+path.
 
 ## Decided in the 2026-11-16 guards session
 
