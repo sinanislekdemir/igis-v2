@@ -157,10 +157,10 @@ fn image(shell: bool, reset_home: bool, net_irq: &str) -> ExitCode {
 ///
 /// The shipped corpus is `samples/apps/`. The `home` fallback comes from
 /// `samples/home/`, the same seed the writable disk uses, so it has one source.
-/// The PNG corpus comes from `samples/image/` and is served read-only at
-/// `image/` (spec 0023). The staging directory and the image live under
-/// `build/`; `mke2fs -d` copies the staged tree into a fresh 64 MiB ext2
-/// filesystem with 1 KiB blocks. The image carries application source (ADR
+/// The PPM corpus comes from `samples/image/` and is served read-only at
+/// `image/` (spec 0024; the PNG decoder is retained for PNG files). The
+/// staging directory and the image live under `build/`; `mke2fs -d` copies the
+/// staged tree into a fresh 128 MiB ext2 filesystem with 1 KiB blocks. The image carries application source (ADR
 /// 0019) and the image corpus, and preserves the source tree (spec 0018, X1):
 /// `lib`, `base`, `apps`, `home`, `system` and `image` become real directories,
 /// and no file sits at the image root.
@@ -286,11 +286,15 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
         .arg("ext2")
         .arg("-b")
         .arg("1024")
+        .arg("-m")
+        .arg("0")
+        .arg("-N")
+        .arg("8192")
         .arg("-d")
         .arg(&staging)
         .arg("-F")
         .arg(&image)
-        .arg("64M")
+        .arg("128M")
         .status()
         .map_err(|error| format!("failed to run mke2fs: {error}"))?;
     if !status.success() {
@@ -331,6 +335,8 @@ fn home_image(reset: bool) -> Result<PathBuf, String> {
         .arg("ext2")
         .arg("-b")
         .arg("1024")
+        .arg("-m")
+        .arg("0")
         .arg("-d")
         .arg(&staging)
         .arg("-F")
