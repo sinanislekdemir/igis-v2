@@ -38,7 +38,7 @@ fn main() -> ExitCode {
         other => {
             eprintln!("unknown command: {other}");
             eprintln!(
-                "usage: cargo xtask <build|image [--shell] [--reset-home] [--net-irq intx|poll]|run [--headless] [--no-tablet] [--no-net] [--net-device virtio|e1000|e1000e] [--net-irq intx|poll] [--no-home] [--reset-home] [--shell] [--cores N]|clean>"
+                "usage: cargo xtask <build|image [--shell] [--reset-home] [--net-irq intx|poll]|run [--headless] [--no-tablet] [--no-net] [--net-device virtio|e1000|e1000e] [--net-irq intx|poll] [--no-home] [--no-apps] [--reset-home] [--shell] [--cores N]|clean>"
             );
             ExitCode::FAILURE
         }
@@ -106,14 +106,14 @@ fn image(shell: bool, reset_home: bool, net_irq: &str) -> ExitCode {
     fs::create_dir_all(&grub).expect("create ISO tree");
     fs::copy(&elf, boot.join("kernel.elf")).expect("copy kernel ELF");
 
-    let apps = match apps_image(shell) {
-        Ok(image) => image,
-        Err(message) => {
-            eprintln!("apps image: {message}");
-            return ExitCode::FAILURE;
-        }
-    };
-    fs::copy(&apps, boot.join("apps.img")).expect("copy apps image");
+    // The application image is the ATA volume (spec 0025, B3/B13), not an ISO
+    // file: build it, but keep it out of the boot medium. A stale copy from an
+    // earlier tree would still be packed by grub2-mkrescue, so remove it.
+    if let Err(message) = apps_image(shell) {
+        eprintln!("apps image: {message}");
+        return ExitCode::FAILURE;
+    }
+    let _ = fs::remove_file(boot.join("apps.img"));
 
     if let Err(message) = home_image(reset_home) {
         eprintln!("home image: {message}");
@@ -125,14 +125,13 @@ fn image(shell: bool, reset_home: bool, net_irq: &str) -> ExitCode {
     } else {
         "multiboot2 /boot/kernel.elf"
     };
-    let module = "module2 /boot/apps.img apps";
     let config = format!(
         "serial --unit=0 --speed=115200\n\
          terminal_input serial\n\
          terminal_output serial\n\
          set timeout=0\n\
          set default=0\n\n\
-         menuentry \"igis-v2\" {{\n    {cmdline}\n    {module}\n    boot\n}}\n"
+         menuentry \"igis-v2\" {{\n    {cmdline}\n    boot\n}}\n"
     );
     fs::write(grub.join("grub.cfg"), config).expect("write grub.cfg");
 
@@ -526,8 +525,11 @@ fn run(args: &[String]) -> ExitCode {
         }
     }
     // The home disk is optional (spec 0019, H2/H3); `--no-home` proves the
-    // read-only fallback exactly as an image without the drive would.
+    // read-only fallback exactly as an image without the drive would. The
+    // application volume is required; `--no-apps` omits it to prove the named
+    // `apps: no image` boot failure (spec 0025, B11).
     let no_home = args.iter().any(|arg| arg == "--no-home");
+    let no_apps = args.iter().any(|arg| arg == "--no-apps");
     // Guest cores; the kernel brings up at most `MAX_CORES`. `-smp 1` is the
     // single-core path, `-smp 2` proves absent APIC ids are tolerated.
     let mut cores = 4u32;
@@ -564,13 +566,15 @@ fn run(args: &[String]) -> ExitCode {
     // hard disk (ide-hd needs a writable block node), so `snapshot=on` is the
     // equivalent host protection: writes go to a temporary overlay and
     // `build/apps.img` is never modified. The kernel also mounts it read-only.
-    let apps = if shell {
-        "build/apps-shell.img"
-    } else {
-        "build/apps.img"
-    };
-    qemu.arg("-drive")
-        .arg(format!("file={apps},format=raw,if=ide,index=1,snapshot=on"));
+    if !no_apps {
+        let apps = if shell {
+            "build/apps-shell.img"
+        } else {
+            "build/apps.img"
+        };
+        qemu.arg("-drive")
+            .arg(format!("file={apps},format=raw,if=ide,index=1,snapshot=on"));
+    }
 
     qemu.arg("-cdrom")
         .arg(&iso)

@@ -4,7 +4,6 @@
 mod clock;
 mod event;
 mod mb2;
-mod module;
 mod net;
 mod repl;
 mod stream;
@@ -22,7 +21,7 @@ pub(crate) use mm::{frame, guard};
 pub(crate) use platform::x86_64::{ata, mouse, pci, smp, usb};
 pub(crate) use sched::task;
 pub(crate) use ui::{console, display, font, font8x8, gfx, session, window};
-pub(crate) use vfs::{ext2, fs};
+pub(crate) use vfs::fs;
 
 use arch_x86_64::{apic, gdt, idt, ioapic, keyboard, serial};
 
@@ -499,181 +498,109 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
 /// The rest of `kmain`, on the guarded stack.
 ///
 /// The multiboot2 structure is still identity-mapped and owned by the
-/// bootloader; the frame allocator already reserved it.
-extern "C" fn kmain_on_stack(mb2_info: u64) -> ! {
-    println!("modules:");
-    mb2::for_each_module(mb2_info as usize, |found, command| {
-        let command = core::str::from_utf8(command).unwrap_or("<non-utf8>");
-        println!(
-            "  {:#x}..{:#x} ({} KiB) `{command}`",
-            found.start,
-            found.end,
-            found.len() / 1024
-        );
-    });
-    match module::find(mb2_info as usize, "apps") {
-        Some(apps) => {
-            println!(
-                "  apps: {:#x}..{:#x} ({} KiB)",
-                apps.start(),
-                apps.start() + apps.len(),
-                apps.len() / 1024
-            );
-            let device = ext2::BlockDevice::new(apps.bytes());
-            match ext2::Ext2::mount(device) {
-                Ok(image) => {
-                    println!(
-                        "ext2: mounted, {} byte blocks, {} KiB",
-                        image.block_size(),
-                        image.size_bytes() / 1024
-                    );
-                    // Publish the router before anything reads a path: the boot
-                    // source, `core.spawn`, the compiler's `/lib` reader and the
-                    // file builtins all go through `fs` (spec 0019, A4/A5).
-                    fs::init(&image);
-                    let mut entries = 0u32;
-                    let mut name = [0u8; abi::fs::NAME_CAP];
-                    loop {
-                        match fs::list("", entries, &mut name) {
-                            Ok(entry) => {
-                                let name = core::str::from_utf8(&name[..entry.name_len])
-                                    .unwrap_or("<non-utf8>");
-                                println!("  {name:<24} {:>6} bytes", entry.size);
-                                entries += 1;
-                            }
-                            Err(abi::Status::NotFound) => break,
-                            Err(status) => {
-                                println!("  root listing failed: {}", status.name());
-                                break;
-                            }
-                        }
-                    }
-                    println!("  {entries} root entries");
-                    match fs::file_size("base/shell") {
-                        Ok(size) => println!("ext2: base/shell is {size} bytes"),
-                        Err(status) => println!("ext2: base/shell: {}", status.name()),
-                    }
-
-                    // Spec 0018, L1/L6: the image is a real tree and the file
-                    // API walks paths. Prove the walk before any request can be
-                    // served; a mismatch halts like the other boot self-checks.
-                    match fs::tree_self_check() {
-                        Ok(()) => println!("ext2: tree ok"),
-                        Err(step) => {
-                            println!("ext2: tree FAIL at step {step}");
-                            arch_x86_64::halt();
-                        }
-                    }
-
-                    // Spec 0019, H1/H3: a real home disk is optional. A present
-                    // image is mounted through `ext2w` and proved; an absent or
-                    // invalid one leaves `/home` on the application image.
-                    fs::mount_home();
-
-                    // Spec 0025, B3/B5 (M15.2): prove the read-only volume on
-                    // the primary slave is readable. The router keeps reading
-                    // the GRUB module until M15.3, so a failure only logs.
-                    probe_apps_volume();
-
-                    // Bring up the application processors: the boot core's
-                    // APIC, GDT/IDT, frame allocator and published mounts are
-                    // all ready and the module memory is never unmapped. Absent
-                    // ids simply do not report.
-                    stream::init();
-
-                    // Spec 0004 C6: the guarded-stack placement invariant.
-                    // `Region::allocate_guarded` enforces it and rejects a bad
-                    // geometry as `Status::Invalid`; the same rule is run here
-                    // over scratch tuples, so a broken layout cannot reach a
-                    // task guard. Pure arithmetic; no frame is allocated.
-                    match task::stack_layout_self_check() {
-                        Ok(()) => println!("stack: layout ok"),
-                        Err(step) => {
-                            println!("stack: layout FAIL at step {step}");
-                            arch_x86_64::halt();
-                        }
-                    }
-
-                    // Q50: the id-tagged kill record and the block re-check,
-                    // proved on real slot state with a scratch task. Runs before
-                    // the APs start, so no other core can claim that task.
-                    match task::kill_self_check() {
-                        Ok(()) => println!("kill: records ok"),
-                        Err(step) => {
-                            println!("kill: records FAIL at step {step}");
-                            arch_x86_64::halt();
-                        }
-                    }
-
-                    smp::start();
-
-                    // The REPL leaves the boot task in the runnable set; the
-                    // scheduler loop owns it and the service queue from here.
-                    let _boot_task = repl::boot();
-                    sched::run_forever();
-                }
-                Err(status) => {
-                    println!("ext2: mount refused ({})", status.name());
-                    println!("no entry");
-                    arch_x86_64::halt();
-                }
-            }
-        }
-        None => {
-            println!("  apps: missing");
-            println!("no entry");
-            arch_x86_64::halt();
-        }
-    }
-}
-
-/// Proves the read-only application volume on `ide0` unit 1 (spec 0025, B3/B5).
-///
-/// M15.2 attaches and reads the disk while the file router still serves the
-/// GRUB module, so nothing depends on this mount: the volume is dropped at the
-/// end of the probe and every failure only prints a line. The success line
-/// proves the ext2 mount, a non-empty `base/shell` and the root listing.
-fn probe_apps_volume() {
+/// bootloader; the frame allocator already reserved it. The mounts no longer
+/// need it, so the argument stays only for `switch_to`'s shape.
+extern "C" fn kmain_on_stack(_mb2_info: u64) -> ! {
+    // The application volume is the primary slave (spec 0025, B3/B6). The mount
+    // runs on the boot core after the APIC clock is running and before any AP
+    // starts, so every core sees one published router.
     let Some(disk) = ata::init(ata::Unit::Slave) else {
-        return;
+        println!("apps: no image");
+        arch_x86_64::halt();
     };
-    let volume = match ext2w::mount(disk) {
-        Ok(volume) => volume,
+    let apps = match ext2w::mount(disk) {
+        Ok(apps) => apps,
         Err(status) => {
             println!("apps: mount FAIL ({})", status.name());
-            return;
+            arch_x86_64::halt();
         }
     };
     println!(
         "apps: read-only volume, {} byte blocks, {} KiB",
-        volume.block_size(),
-        volume.size_bytes() / 1024
+        apps.block_size(),
+        apps.size_bytes() / 1024
     );
-    let size = match volume.file_size("base/shell") {
-        Ok(size) if size > 0 => size,
-        Ok(_) => {
-            println!("apps: volume FAIL (base/shell is empty)");
-            return;
+
+    // Spec 0018, L1/L6; spec 0025, B10: the volume is a real tree and the file
+    // API walks paths. Prove the walk before the router can serve anything; a
+    // mismatch halts like the other boot self-checks.
+    match fs::tree_self_check(&apps) {
+        Ok(()) => println!("ext2: tree ok"),
+        Err(step) => {
+            println!("ext2: tree FAIL at step {step}");
+            arch_x86_64::halt();
         }
-        Err(status) => {
-            println!("apps: volume FAIL ({})", status.name());
-            return;
-        }
-    };
+    }
+
     let mut entries = 0u32;
     let mut name = [0u8; abi::fs::NAME_CAP];
     loop {
-        match volume.list("", entries, &mut name) {
-            Ok(_) => entries += 1,
+        match apps.list("", entries, &mut name) {
+            Ok(entry) => {
+                let name = core::str::from_utf8(&name[..entry.name_len]).unwrap_or("<non-utf8>");
+                println!("  {name:<24} {:>6} bytes", entry.size);
+                entries += 1;
+            }
             Err(abi::Status::NotFound) => break,
             Err(status) => {
-                println!("apps: volume FAIL ({})", status.name());
-                return;
+                println!("  root listing failed: {}", status.name());
+                break;
             }
         }
     }
-    println!("apps: volume ok ({entries} root entries, base/shell {size} bytes)");
+    println!("  {entries} root entries");
+    match apps.file_size("base/shell") {
+        Ok(size) => println!("apps: volume ok ({entries} root entries, base/shell {size} bytes)"),
+        Err(status) => println!("ext2: base/shell: {}", status.name()),
+    }
+
+    // Publish the router before anything reads a path: the boot source,
+    // `core.spawn`, the compiler's `/lib` reader and the file builtins all go
+    // through `fs` (spec 0019, A4/A5; spec 0025, B6).
+    fs::init(apps);
+
+    // Spec 0019, H1/H3: a real home disk is optional. A present image is
+    // mounted through `ext2w` and proved; an absent or invalid one leaves
+    // `/home` on the application volume.
+    fs::mount_home();
+
+    // Bring up the application processors: the boot core's APIC, GDT/IDT,
+    // frame allocator and published mounts are all ready. Absent ids simply do
+    // not report.
+    stream::init();
+
+    // Spec 0004 C6: the guarded-stack placement invariant.
+    // `Region::allocate_guarded` enforces it and rejects a bad
+    // geometry as `Status::Invalid`; the same rule is run here
+    // over scratch tuples, so a broken layout cannot reach a
+    // task guard. Pure arithmetic; no frame is allocated.
+    match task::stack_layout_self_check() {
+        Ok(()) => println!("stack: layout ok"),
+        Err(step) => {
+            println!("stack: layout FAIL at step {step}");
+            arch_x86_64::halt();
+        }
+    }
+
+    // Q50: the id-tagged kill record and the block re-check,
+    // proved on real slot state with a scratch task. Runs before
+    // the APs start, so no other core can claim that task.
+    match task::kill_self_check() {
+        Ok(()) => println!("kill: records ok"),
+        Err(step) => {
+            println!("kill: records FAIL at step {step}");
+            arch_x86_64::halt();
+        }
+    }
+
+    smp::start();
+
+    // The REPL leaves the boot task in the runnable set; the
+    // scheduler loop owns it and the service queue from here.
+    let _boot_task = repl::boot();
+    sched::run_forever();
 }
+
 
 /// Called by the timer stub in `arch_x86_64` on every tick.
 #[no_mangle]

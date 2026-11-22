@@ -32,10 +32,10 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 - **Next (M15):** spec 0025 + ADR 0059 are accepted: boot with only `kernel.elf`,
   mount the 128 MiB application volume read-only from `ide0` unit 1 through `ext2w`,
   retire `vfs/ext2` and the GRUB-module path. The measured pre-change boot is 10.4 s
-  to `desktop_shell: ready`, with 128 MiB pinned; the target is ≤ 2.5 s and ~229 MiB
-  free in a 256 MiB guest. **M15.2 is in the tree** (volume attached at `ide0` unit 1,
-  ATA `Unit`/channel lock, `apps_drive()` harness helper, boot probe); M15.3 (the
-  mount switch) is next.
+  to `desktop_shell: ready`, with 128 MiB pinned; the target is ≤ 2.5 s. **M15.3 is in
+  the tree** (the router holds the read-only `ext2w` mount, `vfs/ext2`, `module.rs` and
+  the GRUB module are gone, the kernel-only ISO boots in 1.7 s and reports 255 MiB
+  available / 229 MiB usable); M15.4 (proof, timing and the remaining docs) is next.
 - **Historical context (M8–M10; counts below are from those slices):** **505 host
   tests**; specs 0001–0019 (0018 and 0019 Implemented); ABI v1 at 75 opcodes; M5,
   M6, M7.1 and **M8.1–M8.9 complete**, plus **M9.1–M9.4**. The
@@ -2320,15 +2320,15 @@ application volume is a read-only ATA disk the kernel mounts on demand through `
   still boots from the module; `--no-home` and `--shell` still boot;
   `boot_desktop_qmp.py` (its stale Terminal row 10 → 11 fixed), `home_persistence_qmp.py`
   and `image_viewer_qmp.py` pass; `e2fsck -fn` clean.
-- [ ] **M15.3 Mount from the volume (the switch).** `fs.rs` holds the application mount
-  as `SpinLock<Option<ext2w::Fs<AtaDisk>>>`, publishes it through `init(apps)` and maps
-  `ext2w::Entry` to the router's entry; all read paths take exactly one mount lock. `main`
+- [x] **M15.3 Mount from the volume (the switch).** `fs.rs` holds the application mount
+  as `SpinLock<Option<ext2w::Fs<AtaDisk>>>`, publishes it through `init(apps)` and
+  returns `ext2w::Entry` directly; all read paths take exactly one mount lock. `main`
   identifies both drives, mounts the volume read-only, runs `tree ok` and keeps the
   existing order (mounts before the APs, `repl::boot` last). Delete `vfs/ext2`,
   `module.rs` and the module scan in `mb2`; drop `module2` from `grub.cfg` so the ISO
   carries no image. A missing or invalid volume prints `apps: no image` (or
-  `apps: mount FAIL (<status>)`) and reaches the existing `no entry` halt without a
-  fault. Add `xtask run --no-apps` to prove that path. Acceptance: `-smp 4`/`-smp 1`
+  `apps: mount FAIL (<status>)`) and halts plainly, without a fault. Add
+  `xtask run --no-apps` to prove that path. Acceptance: `-smp 4`/`-smp 1`
   transcripts show both `ext2w` mounts, `tree ok`, `desktop_shell: ready`, `available`
   about 229 MiB; `--shell` boots; ABI v1 stays 75; `--no-apps` halts with the named
   line.

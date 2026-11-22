@@ -82,9 +82,9 @@ pub fn init(info: usize, framebuffer: Option<Framebuffer>) {
     let info_size = unsafe { core::ptr::read_unaligned(info as *const u32) } as u64;
     mark_used(words, info as u64, info as u64 + info_size);
 
-    // Bootloader modules (the ext2 application image) are outside the kernel
-    // image but must never be handed out as frames: the loader reads them for
-    // the lifetime of the system.
+    // Any bootloader module is outside the kernel image but must never be
+    // handed out as frames: the bootloader owns it for the lifetime of the
+    // system.
     mb2::for_each_module(info, |module, _command| {
         mark_used(words, module.start, module.end);
     });

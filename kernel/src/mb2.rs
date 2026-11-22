@@ -110,12 +110,6 @@ pub struct Module {
     pub end: u64,
 }
 
-impl Module {
-    pub fn len(&self) -> usize {
-        (self.end - self.start) as usize
-    }
-}
-
 /// Visits every module tag with its inline command line.
 ///
 /// Layout (multiboot2 3.6.6): `type`, `size`, `mod_start`, `mod_end`, then the
@@ -138,36 +132,6 @@ pub fn for_each_module(info: usize, mut visit: impl FnMut(Module, &[u8])) {
             visit(Module { start, end }, &bytes[..length]);
         }
     });
-}
-
-/// Finds the module whose command line is exactly `name`.
-///
-/// The range is validated against the memory map: it must be non-empty, lie
-/// inside one available region and fit in `usize` arithmetic. A module that
-/// fails any check is treated as absent rather than read.
-pub fn module(info: usize, name: &str) -> Option<Module> {
-    let mut found = None;
-
-    for_each_module(info, |module, command| {
-        if found.is_some() || command != name.as_bytes() {
-            return;
-        }
-
-        let mut available = false;
-        memory_regions(info, |region| {
-            if region.kind == 1
-                && region.base <= module.start
-                && module.end <= region.base.saturating_add(region.len)
-            {
-                available = true;
-            }
-        });
-        if available && module.end <= usize::MAX as u64 {
-            found = Some(module);
-        }
-    });
-
-    found
 }
 
 pub fn memory_regions(info: usize, mut visit: impl FnMut(MemoryRegion)) {

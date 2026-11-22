@@ -35,12 +35,13 @@ decisions in `adr/`, and work items in `PLAN.md`.
   primitives are builtins 84–90 and `syslib.blit_rgb` is 91, no opcode).
 - Boot: GRUB/multiboot2 → `system/entrypoint` (the desktop shell), falling back to
   `base/shell`; a graphics-less boot keeps a serial REPL.
-- Filesystems: a read-only 128 MiB ext2 application image (`lib`, `base`, `apps`,
-  `home`, `system`, `image`) with the full-resolution PPM P6 corpus at `image/`
-  generated from the tracked `samples/image-src/` sources (the generated `.ppm`
-  files are git-ignored; the PNG decoder is retained for PNG files), and a
-  persistent 8 MiB ext2 `/home` on an ATA disk (`ext2w`, `e2fsck -fn` clean).
-  GUI applications live under `apps/<category>/`.
+- Filesystems: a read-only 128 MiB ext2 application volume (`lib`, `base`, `apps`,
+  `home`, `system`, `image`) on `ide0` unit 1, mounted on demand by the kernel through
+  `ext2w`; boot loads only `kernel.elf` and the ISO carries no image. The
+  full-resolution PPM P6 corpus at `image/` is generated from the tracked
+  `samples/image-src/` sources (the generated `.ppm` files are git-ignored; the PNG
+  decoder is retained for PNG files). A persistent 8 MiB ext2 `/home` is the primary
+  master (`ext2w`, `e2fsck -fn` clean). GUI applications live under `apps/<category>/`.
 - Networking: virtio-net and e1000/e1000e, IPv4/UDP/TCP, with DHCP/DNS/HTTP/`nc`/`purl`
   in `/lib` and `base/`.
 - UI: a kernel window server with service-drawn close and minimize boxes, proportional
@@ -109,7 +110,7 @@ fresh.
 │   ├── platform/x86_64/  # PC devices: ATA, PCI, UHCI/HID, PS/2, AP bring-up
 │   ├── sched/         #   interpreter loop and the task table
 │   ├── ui/            #   console, sessions, fonts, framebuffer shadow, window server
-│   └── vfs/           #   in-memory ext2 image reader and the path router
+│   └── vfs/           #   path router over the two ext2w mounts
 ├── stdlib/            # standard library source, embedded into the compiler
 ├── samples/apps/      # shipped corpus staged into every image
 │   ├── lib/           #   importable modules (`*.ig`, names kept)
@@ -135,9 +136,10 @@ Kernel layout (ADR 0052): `arch/x86_64` is the ISA/boot layer;
 bring-up; `mm`, `sched`, `ui` and `vfs` group the remaining kernel services, and the
 boot/service modules stay at the crate root. Crate-root re-exports keep the historical
 `crate::gfx`-style paths. The crate is still one compilation unit; a future `platform`
-crate can take `platform/x86_64` wholesale. The two ext2 readers are deliberate:
-`vfs/ext2` reads the in-memory GRUB image, while `ext2w` owns the writable disk and its
-`RefCell` cache is not `Sync` (Q59).
+crate can take `platform/x86_64` wholesale. One ext2 reader serves both mounts: the
+application volume is a read-only `ext2w` mount on the primary slave and `/home` the
+writable one on the primary master; `ext2w`'s `RefCell` cache is not `Sync`, so each
+mount is behind its own `SpinLock` (Q59).
 
 ## Toolchain
 
