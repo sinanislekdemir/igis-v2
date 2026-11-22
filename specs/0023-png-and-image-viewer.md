@@ -334,7 +334,7 @@ function png.next_row(d: var Decoder; row: var bytes[16384];
 (`uses core, stdlib, syslib, lib.out, lib.file_dialog, lib.png`) and a
 non-blocking `core.spawn` from the Apps menu. Its state is one `png.Decoder`
 (611,360 bytes), one `bytes[16384]` caller row, a 12-byte 2x2 check preview,
-three 256-byte strings, a 64-byte failure label and scalars: 628,992 bytes
+three 256-byte strings, a 64-byte failure label and scalars: 629,000 bytes
 compiled, under the 1 MiB cap.
 There is no full-image buffer and no resampling.
 
@@ -355,15 +355,19 @@ run image_viewer check            deterministic check, `image_viewer: ok`
 - **Window flow.** `png.probe` runs before any window: a failure (or a frame
   that does not fit the screen) opens a 400x120 white error panel with
   `stdlib.ui_message("Cannot open image (status N)")` and waits for its close
-  box; nothing faults. Otherwise the content is exactly `out_w x out_h`
-  (at least 8x8), centred, titled with the path basename (safe-truncated to the
-  64-byte title cap) or `Image Viewer`.
-- **Draw.** On the first frame the content is filled white and `Decoding...` is
-  drawn and `window_present`ed *before* `png.open`, because the 512 KiB IDAT
-  stage is visible work. Then each `png.next_row` result is blitted 1:1 as one
-  `syslib.blit_rgb(rect.x, rect.y + y, out_w, 1, row, out_w, 1)` row, followed
-  by one `window_present`. Pass 1 for the corpus is 472x354 … 576x371, so the
-  preview is the window.
+  box; nothing faults. Otherwise the content is exactly `out_w x (out_h + 20)`
+  (width at least 8), centred, titled with the path basename (safe-truncated to
+  the 64-byte title cap) or `Image Viewer`. The image occupies the top
+  `out_w x out_h` and the bottom 20 pixels are the status strip.
+- **Draw.** On the first frame the content is filled white and the status strip
+  is drawn at 0% and `window_present`ed *before* `png.open`, because the 512 KiB
+  IDAT stage is visible work. Each `png.next_row` result is blitted 1:1 as one
+  `syslib.blit_rgb(rect.x, rect.y + y, out_w, 1, row, out_w, 1)` row at the top
+  of the content. The strip has a 1-pixel separator, the 8x8 label
+  `Decoding NN%` (or `Ready` at 100%) and a 6-pixel gray track with a black fill
+  proportional to the decoded rows; it is redrawn and presented every 8 rows,
+  and the last row draws `Ready` and a full bar. Pass 1 for the corpus is
+  472x354 … 576x371, so the preview is the window.
 - **Budget and repaint.** The first frame stages the IDAT prefix with
   `png.open` under the **normal** class (this part fits the normal 10 s /
   200M-step budget). Only after a successful `open` does `render_image` call
@@ -377,11 +381,12 @@ run image_viewer check            deterministic check, `image_viewer: ok`
   class; it never faults on admission.
 - **Expose.** The owner `Expose` re-reads `window_content_rect` (ADR 0046) and
   re-runs the draw/present through `png.rewind` over the staged prefix (no
-  `fs_read`); it deliberately skips the white fill and `Decoding...` present so
-  the previously drawn image stays visible during the re-decode (the service
-  queues an initial expose for the new window). An image buffer is forbidden. A
-  decode failure on that path opens the same error panel. Close/Escape on the
-  image window exits.
+  `fs_read`); it deliberately skips the white fill and redraws only the status
+  strip at 0% (without a present, so the last complete frame stays on screen
+  until the first 8-row progress present). The service queues an initial expose
+  for the new window, so the image is never blanked. An image buffer is
+  forbidden. A decode failure on that path opens the same error panel.
+  Close/Escape on the image window exits.
 - **Check.** `png.probe("system/png_grad_il.png")` must report 16x16 with a
   2x2 interlace-1 output; `png.open` plus two `next_row` calls must yield
   (0,0) black, (1,0) (128,0,64), (0,1) (0,128,32) and (1,1) (128,128,96).
@@ -435,3 +440,4 @@ run image_viewer check            deterministic check, `image_viewer: ok`
 | 2026-11-22 | `lib.inflate` signals progress to the scheduler (`core.heartbeat()`) every 64 decoded literal/length or distance symbols, every 64 dynamic-header length items and every 1024 produced output bytes. A realtime `png.next_row` that spends more than one second in the zlib header or a large block is no longer killed by the 1 s watchdog; a normal task's heartbeat is a no-op (spec 0007). Decoded bytes, statuses, resumability and the API are unchanged; the inflater state grows by one 8-byte `tick` to 40,824 bytes (the PNG decoder is 611,360 bytes). Proved by `inflate_probe` and `png_probe` on `langhost` and the `--shell` image. |
 | 2026-11-22 | The bit-reader window compacts: `bitio.fill` moves unread bytes to the front with the overlap-safe `core.copy_bytes` when `pos > 0`, and `inflate.top_up` no longer computes or gives up on free space, so a full 512-byte window accepts new input instead of reporting `Full`. This fixes the real-corpus `CapacityExceeded` at row 38: a 512 KiB IDAT stage must decode to the 368,317-byte Adam7 pass-1 prefix without a spurious `WouldBlock` at a window boundary. The new `long` probe vector (64 KiB, 12-symbol pseudorandom, 34,373 B compressed) reliably fails before the fix (`WouldBlock` at `in_pos=28160, pos=499, nbits=7`) and passes after; API, statuses, decoded bytes and state size are unchanged. |
 | 2026-11-21 | The viewer is implemented (`samples/apps/apps/accessories/image_viewer.ig`, V1–V4): normal/shot/check modes and the file dialog, probe-before-window with a 400x120 error panel (no faults), a content-sized centred window titled with the basename, `Decoding...` presented before the 512 KiB IDAT stage, one `syslib.blit_rgb` row per decoded pass-1 row, re-decode on `Expose`, and an independent fixture check that blits a 2x2 preview into an 8x8 window and reads two pixels back. State is one decoder plus a 16,384-byte row and a 12-byte preview; there is no image buffer and no resampling. The Apps menu gains `Accessories` → `Image Viewer` (13 rows); `scripts/image_viewer_qmp.py` captures the first frame from the `--shell` image on `-smp 4` and `-smp 1`. No kernel, ABI, builtin or `/lib` change. |
+| 2026-11-22 | The viewer gains a decode progress strip: the window content is `out_w x (out_h + 20)`, the image stays 1:1 at the top and the bottom 20 pixels show a separator, `Decoding NN%` / `Ready` in the 8x8 font and a 6-pixel gray track with a proportional black fill. The strip is drawn at 0% before `png.open`, redrawn and presented every 8 decoded rows, and ends at `Ready`/100%. On `Expose` the white fill is skipped and only the strip is redrawn at 0% (without a present), so the last complete frame stays visible while `png.rewind` re-decodes. The viewer state grows by the color scalar to 629,000 bytes. No lib/kernel/scheduler change. |

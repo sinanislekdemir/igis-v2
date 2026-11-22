@@ -45,6 +45,9 @@ const
   // A window content rectangle is at least 8x8 (spec 0011, W9).
   MinContent = 8;
 
+  // The decode progress strip directly below the image (spec 0023).
+  StatusStripH = 20;
+
   // Error panel content, centred like the image window.
   ErrorW = 400;
   ErrorH = 120;
@@ -54,6 +57,7 @@ const
 var
   black: uint;
   white: uint;
+  gray: uint;
   status: Status;
   ev: Event;
   screen_w: uint;
@@ -210,12 +214,63 @@ end;
 
 // ---- drawing --------------------------------------------------------------
 
-// One complete image frame: one blitted row per decoded row. On the first
-// frame the content is also filled white and `Decoding...` is presented before
-// the staged-IDAT work; an `Expose` repaint deliberately skips that blanking
-// so the previous image stays visible while `png.rewind` and the row loop run
-// (the service queues an initial expose for the new window). Returns the first
-// failing status so the caller can open the error window.
+// Draws the 20-pixel status strip directly below the image: a separator, the
+// `Decoding NN%` / `Ready` label and a 6-pixel progress bar. The strip lies
+// inside the content rectangle; the image area is never touched here.
+procedure draw_strip(done: uint; total: uint; ready: bool);
+var
+  top: int;
+  bar_x: int;
+  bar_w: int;
+  fill_w: int;
+  pct: int;
+  used: int;
+begin
+  top := rect.y + int(oh);
+  status := syslib.fill_rect(rect.x, top, content_w, StatusStripH, white);
+  status := syslib.fill_rect(rect.x, top, content_w, 1, gray);
+  bar_x := rect.x + 4;
+  bar_w := content_w - 8;
+  if bar_w > 0 then
+  begin
+    status := syslib.fill_rect(bar_x, top + 12, bar_w, 6, gray);
+    if ready then
+      fill_w := bar_w
+    else
+    begin
+      pct := 0;
+      if total > uint(0) then
+        pct := (int(done) * 100) div int(total);
+      fill_w := (bar_w * pct) div 100;
+    end;
+    if fill_w > 0 then
+      status := syslib.fill_rect(bar_x, top + 12, fill_w, 6, black);
+  end;
+  if ready then
+  begin
+    if content_w >= 5 * 8 then
+      status := syslib.draw_text(rect.x + 4, top + 2, "Ready", black);
+  end
+  else if content_w >= 13 * 8 then
+  begin
+    status := syslib.draw_text(rect.x + 4, top + 2, "Decoding ", black);
+    pct := 0;
+    if total > uint(0) then
+      pct := (int(done) * 100) div int(total);
+    used := core.format_int_into(digits, pct, uint(10), uint(0));
+    status := syslib.draw_text(rect.x + 4 + 9 * 8, top + 2, digits, black);
+    status := syslib.draw_text(
+      rect.x + 4 + (9 + int(core.len(digits))) * 8, top + 2, "%", black);
+  end;
+end;
+
+// One complete image frame: one blitted row per decoded row, plus the status
+// strip. On the first frame the whole content is also filled white and the
+// strip at 0% is presented before the staged-IDAT work. An `Expose` repaint
+// deliberately skips the blanking, redraws only the strip at 0% (without a
+// present, so the last complete frame stays on screen), then `png.rewind`s and
+// runs the same row loop with a progress present every 8 rows. Returns the
+// first failing status so the caller can open the error window.
 //
 // The first frame stages the 512 KiB IDAT prefix with `png.open` under the
 // normal class, which fits the normal budget. Only the row loop is promoted to
@@ -240,13 +295,13 @@ begin
     st := syslib.fill_rect(rect.x, rect.y, content_w, content_h, white);
     if st <> Ok then
       return st;
-    st := syslib.draw_text(rect.x + 8, rect.y + 8, "Decoding...", black);
-    if st <> Ok then
-      return st;
+    draw_strip(uint(0), oh, false);
     st := syslib.window_present(id);
     if st <> Ok then
       return st;
-  end;
+  end
+  else
+    draw_strip(uint(0), oh, false);
 
   if decoded then
     st := png.rewind(dec)
@@ -284,7 +339,15 @@ begin
     if st <> Ok then
       return st;
     y := y + uint(1);
+    if y mod uint(8) = uint(0) then
+    begin
+      draw_strip(y, oh, false);
+      st := syslib.window_present(id);
+      if st <> Ok then
+        return st;
+    end;
   end;
+  draw_strip(oh, oh, true);
   return syslib.window_present(id);
 end;
 
@@ -390,11 +453,9 @@ begin
     return;
   end;
   content_w := int(ow);
-  content_h := int(oh);
+  content_h := int(oh) + StatusStripH;
   if content_w < MinContent then
     content_w := MinContent;
-  if content_h < MinContent then
-    content_h := MinContent;
   if screen_w < uint(content_w + 2) or screen_h < uint(content_h + 17) then
   begin
     show_error(Invalid);
@@ -601,6 +662,7 @@ procedure main(args: const string[1024]);
 begin
   black := stdlib.ui_black();
   white := stdlib.ui_white();
+  gray := stdlib.ui_gray();
   id := 0;
   error_status := Ok;
   running := true;
