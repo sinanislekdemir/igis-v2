@@ -210,9 +210,12 @@ end;
 
 // ---- drawing --------------------------------------------------------------
 
-// One complete image frame: white content, the `Decoding...` notice presented
-// before the staged-IDAT work, then one blitted row per decoded row. Returns
-// the first failing status so the caller can open the error window.
+// One complete image frame: one blitted row per decoded row. On the first
+// frame the content is also filled white and `Decoding...` is presented before
+// the staged-IDAT work; an `Expose` repaint deliberately skips that blanking
+// so the previous image stays visible while `png.rewind` and the row loop run
+// (the service queues an initial expose for the new window). Returns the first
+// failing status so the caller can open the error window.
 //
 // The first frame stages the 512 KiB IDAT prefix with `png.open` under the
 // normal class, which fits the normal budget. Only the row loop is promoted to
@@ -232,15 +235,18 @@ begin
   st := syslib.window_content_rect(id, rect);
   if st <> Ok then
     return st;
-  st := syslib.fill_rect(rect.x, rect.y, content_w, content_h, white);
-  if st <> Ok then
-    return st;
-  st := syslib.draw_text(rect.x + 8, rect.y + 8, "Decoding...", black);
-  if st <> Ok then
-    return st;
-  st := syslib.window_present(id);
-  if st <> Ok then
-    return st;
+  if not decoded then
+  begin
+    st := syslib.fill_rect(rect.x, rect.y, content_w, content_h, white);
+    if st <> Ok then
+      return st;
+    st := syslib.draw_text(rect.x + 8, rect.y + 8, "Decoding...", black);
+    if st <> Ok then
+      return st;
+    st := syslib.window_present(id);
+    if st <> Ok then
+      return st;
+  end;
 
   if decoded then
     st := png.rewind(dec)

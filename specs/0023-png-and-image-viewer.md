@@ -358,9 +358,9 @@ run image_viewer check            deterministic check, `image_viewer: ok`
   box; nothing faults. Otherwise the content is exactly `out_w x out_h`
   (at least 8x8), centred, titled with the path basename (safe-truncated to the
   64-byte title cap) or `Image Viewer`.
-- **Draw.** The content is filled white and `Decoding...` is drawn and
-  `window_present`ed *before* `png.open`, because the 512 KiB IDAT stage is
-  visible work. Then each `png.next_row` result is blitted 1:1 as one
+- **Draw.** On the first frame the content is filled white and `Decoding...` is
+  drawn and `window_present`ed *before* `png.open`, because the 512 KiB IDAT
+  stage is visible work. Then each `png.next_row` result is blitted 1:1 as one
   `syslib.blit_rgb(rect.x, rect.y + y, out_w, 1, row, out_w, 1)` row, followed
   by one `window_present`. Pass 1 for the corpus is 472x354 … 576x371, so the
   preview is the window.
@@ -377,8 +377,11 @@ run image_viewer check            deterministic check, `image_viewer: ok`
   class; it never faults on admission.
 - **Expose.** The owner `Expose` re-reads `window_content_rect` (ADR 0046) and
   re-runs the draw/present through `png.rewind` over the staged prefix (no
-  `fs_read`); an image buffer is forbidden. A decode failure on that path opens
-  the same error panel. Close/Escape on the image window exits.
+  `fs_read`); it deliberately skips the white fill and `Decoding...` present so
+  the previously drawn image stays visible during the re-decode (the service
+  queues an initial expose for the new window). An image buffer is forbidden. A
+  decode failure on that path opens the same error panel. Close/Escape on the
+  image window exits.
 - **Check.** `png.probe("system/png_grad_il.png")` must report 16x16 with a
   2x2 interlace-1 output; `png.open` plus two `next_row` calls must yield
   (0,0) black, (1,0) (128,0,64), (0,1) (0,128,32) and (1,1) (128,128,96).
