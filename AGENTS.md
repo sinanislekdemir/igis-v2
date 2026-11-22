@@ -37,9 +37,10 @@ decisions in `adr/`, and work items in `PLAN.md`.
   `base/shell`; a graphics-less boot keeps a serial REPL.
 - Filesystems: a read-only 128 MiB ext2 application image (`lib`, `base`, `apps`,
   `home`, `system`, `image`) with the full-resolution PPM P6 corpus at `image/`
-  (the PNG decoder is retained for PNG files), and a persistent 8 MiB ext2
-  `/home` on an ATA disk (`ext2w`, `e2fsck -fn` clean). GUI applications live
-  under `apps/<category>/`.
+  generated from the tracked `samples/image-src/` sources (the generated `.ppm`
+  files are git-ignored; the PNG decoder is retained for PNG files), and a
+  persistent 8 MiB ext2 `/home` on an ATA disk (`ext2w`, `e2fsck -fn` clean).
+  GUI applications live under `apps/<category>/`.
 - Networking: virtio-net and e1000/e1000e, IPv4/UDP/TCP, with DHCP/DNS/HTTP/`nc`/`purl`
   in `/lib` and `base/`.
 - UI: a kernel window server with service-drawn close and minimize boxes, proportional
@@ -117,7 +118,8 @@ fresh.
 │   └── system/        #   boot and probe applications (same rule)
 ├── samples/tests/     # test-only corpus, staged only by `image --shell`
 │   └── apps/          #   proofs (`base/`) and binary fixtures (`system/`)
-├── samples/image/     # full-resolution PPM P6 corpus staged as `image/`
+├── samples/image-src/ # source JPEGs for the generated PPM corpus
+├── samples/image/     # generated PPM P6 corpus (git-ignored, staged as `image/`)
 ├── samples/home/      # single seed tree for `home/` and the writable disk
 ├── samples/lang/      # language examples run by `langhost`
 ├── scripts/           # QEMU/QMP harnesses (screenshots, proofs, regressions)
@@ -147,6 +149,7 @@ crate can take `platform/x86_64` wholesale. The two ext2 readers are deliberate:
 | extra components | `rust-src` (nightly), required for `-Z build-std` |
 | QEMU | qemu-system-x86_64 10.2.2 |
 | boot tooling | GRUB 2.12 (`grub2-mkrescue`), xorriso |
+| image corpus | Python 3 + Pillow (`scripts/make_image_corpus.py`) |
 
 ## Build commands
 
@@ -155,7 +158,7 @@ The kernel is cross-built for `x86_64-unknown-none`; `xtask` itself builds for t
 | Command | Purpose |
 |---------|---------|
 | `cargo xtask build` | build the kernel ELF (release) |
-| `cargo xtask image` | build and assemble `build/igis.iso` with GRUB and ensure `build/home.img` |
+| `cargo xtask image` | generate the PPM corpus if missing, then build and assemble `build/igis.iso` with GRUB and ensure `build/home.img` |
 | `cargo xtask run` | image + QEMU with a display and the home disk, serial on stdio |
 | `cargo xtask run --headless` | image + QEMU with no display (serial only) |
 | `cargo xtask clean` | remove build artifacts |

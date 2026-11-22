@@ -157,13 +157,17 @@ fn image(shell: bool, reset_home: bool, net_irq: &str) -> ExitCode {
 ///
 /// The shipped corpus is `samples/apps/`. The `home` fallback comes from
 /// `samples/home/`, the same seed the writable disk uses, so it has one source.
-/// The PPM corpus comes from `samples/image/` and is served read-only at
+/// The PPM corpus is generated from the tracked `samples/image-src/`
+/// photographs into `samples/image/` by `scripts/make_image_corpus.py`
+/// (Python + Pillow) when no generated `.ppm` exists; the generated files are
+/// git-ignored build input, not source. The corpus is served read-only at
 /// `image/` (spec 0024; the PNG decoder is retained for PNG files). The
 /// staging directory and the image live under `build/`; `mke2fs -d` copies the
-/// staged tree into a fresh 128 MiB ext2 filesystem with 1 KiB blocks. The image carries application source (ADR
-/// 0019) and the image corpus, and preserves the source tree (spec 0018, X1):
-/// `lib`, `base`, `apps`, `home`, `system` and `image` become real directories,
-/// and no file sits at the image root.
+/// staged tree into a fresh 128 MiB ext2 filesystem with 1 KiB blocks. The
+/// image carries application source (ADR 0019) and the image corpus, and
+/// preserves the source tree (spec 0018, X1): `lib`, `base`, `apps`, `home`,
+/// `system` and `image` become real directories, and no file sits at the image
+/// root.
 ///
 /// The boot entry is `system/entrypoint` (spec 0018, A3): `base/desktop_shell`
 /// is staged a second time under that name so the boot unit can be the desktop
@@ -182,7 +186,8 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
     }
     // Spec 0018, L1: the source root holds only image directories.
     let top_level = ["lib", "base", "apps", "home", "system"];
-    // The staged image also carries the read-only PNG corpus (spec 0023).
+    // The staged image also carries the read-only PPM corpus (spec 0024; the
+    // PNG decoder is retained for PNG files).
     let staged_dirs = ["lib", "base", "apps", "home", "system", "image"];
     let entries =
         fs::read_dir(&source).map_err(|error| format!("{}: {error}", source.display()))?;
@@ -223,8 +228,24 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
     }
     stage_tree(&home_seed, &staging.join("home"), false)?;
 
-    // The PNG corpus is served read-only at `image/` (spec 0023).
+    // The generated PPM corpus is served read-only at `image/` (spec 0024).
+    // The tracked source photographs live in `samples/image-src/`; the PPMs
+    // are a generated, git-ignored build input. Generate them on demand.
+    let image_sources = root().join("samples").join("image-src");
+    if !image_sources.is_dir() {
+        return Err(format!("{} is not a directory", image_sources.display()));
+    }
     let image_seed = root().join("samples").join("image");
+    if !has_ppm(&image_seed) {
+        let generator = root().join("scripts").join("make_image_corpus.py");
+        let status = Command::new("python3")
+            .arg(&generator)
+            .status()
+            .map_err(|error| format!("failed to run {}: {error}", generator.display()))?;
+        if !status.success() {
+            return Err(format!("image corpus generation failed with {status}"));
+        }
+    }
     if !image_seed.is_dir() {
         return Err(format!("{} is not a directory", image_seed.display()));
     }
@@ -302,6 +323,20 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
     }
 
     Ok(image)
+}
+
+/// True when `dir` contains at least one generated `.ppm` corpus file.
+fn has_ppm(dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    entries.filter_map(Result::ok).any(|entry| {
+        entry
+            .path()
+            .extension()
+            .and_then(|extension| extension.to_str())
+            == Some("ppm")
+    })
 }
 
 /// Ensures the writable home image exists (spec 0019, H1/H2).

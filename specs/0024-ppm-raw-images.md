@@ -2,7 +2,8 @@
 
 - **Status:** Implemented
 - **Scope:** `samples/apps/lib` (`ppm`), `samples/apps/apps`
-  (`image_viewer`), `samples/image`, `samples/tests/apps`, `langhost`, `xtask`
+  (`image_viewer`), `samples/image`, `samples/image-src`, `scripts`,
+  `samples/tests/apps`, `langhost`, `xtask`
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0058
@@ -33,16 +34,25 @@ add a kernel codec, compression, or any Netpbm format other than P6.
 ### Corpus and image
 
 - **C1 (MUST):** The shipped corpus at `image/` is uncompressed binary PPM
-  (Netpbm P6, 8-bit RGB, maxval 255), staged from `samples/image`. Every file
-  keeps its original dimensions; no file is resized, cropped or colour-managed.
-- **C2 (MUST):** The four corpus files are 3776×2832, 3000×2000, 4000×2667 and
-  4608×2963. The corpus is about 123.0 MB; the applications image is **128 MiB**
-  for both the product and the `--shell` image.
+  (Netpbm P6, 8-bit RGB, maxval 255), staged from `samples/image`. The source
+  photographs are tracked in `samples/image-src/`; the PPMs are generated from
+  them by `scripts/make_image_corpus.py` and are git-ignored build input, not
+  committed source. Every file keeps its original dimensions; no file is
+  resized, cropped or colour-managed.
+- **C2 (MUST):** The four generated corpus files are 3776×2832, 3000×2000,
+  4000×2667 and 4608×2963. The generated corpus is about 123.0 MB; the tracked
+  JPEG sources are about 5.2 MB; the applications image is **128 MiB** for both
+  the product and the `--shell` image.
 - **C3 (MUST):** The PNG decoder and its corpus requirements stay in the tree
   for PNG input (spec 0023); the PNG path is not removed or reduced. An
   application or user file that is a PNG still decodes through `lib.png`.
 - **C4 (MUST):** No kernel codec, opcode or VFS special case is added for PPM.
   The reader is ordinary `/lib` source.
+- **C5 (MUST):** `cargo xtask image` generates the PPMs with
+  `scripts/make_image_corpus.py` when `samples/image/` contains no `.ppm`;
+  `--force` regenerates them after a source change. The generator requires
+  Python 3 and Pillow. A fresh clone therefore carries the ~5.2 MB JPEG sources
+  and not the ~123 MB generated PPMs; `samples/image/*.ppm` is git-ignored.
 
 ### `lib.ppm`
 

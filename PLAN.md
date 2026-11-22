@@ -2275,13 +2275,18 @@ PNG support, and read rows by seek with no decode.
   P6/maxval-255 subset and the `NotFound`/`Invalid`/`CapacityExceeded`/`IoError`
   statuses. Proved by `ppm_probe` and its fixtures on `langhost`. `b78210c`.
 - [x] **M14.2 Corpus and image.** Convert the four images to full-resolution P6,
-  stage `samples/image` as `image/`, and grow the apps image to 128 MiB. `77643c8`.
+  stage `samples/image` as `image/`, and grow the apps image to 128 MiB. The
+  generated `.ppm` files are git-ignored; `77643c8` (history rewritten).
 - [x] **M14.3 Viewer dual-format.** Dispatch PNG/PPM, keep the PNG pass-1 path,
   and read PPM preview/thumbnail rows by fixed stride; extend the viewer `check`
   path. `5e7a1ad`.
 - [x] **M14.4 Proof and docs.** `--shell` transcripts on `-smp 4`/`-smp 1`, a QMP
   capture of a PPM preview, the regression batch and the status/docs rows.
   `5e7a1ad`.
+- [x] **M14.5 Generated corpus is not tracked.** Track the original JPEGs in
+  `samples/image-src`, add `scripts/make_image_corpus.py`, make `xtask image`
+  generate missing PPMs, and git-ignore `samples/image/*.ppm`; the 123 MB
+  generated raster stays out of the repository.
 
 ## Deferred (not UI; pick up when they matter)
 

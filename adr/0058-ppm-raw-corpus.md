@@ -93,3 +93,14 @@ committed as `samples/image/*.ppm` (123.0 MB total). The applications image was
 grown to 128 MiB (`mke2fs -m 0 -N 8192`); boot and `e2fsck -fn` are clean.
 `lib.ppm` and its probe are ordinary `/lib` modules and the PNG decoder is
 unchanged, so the corpus decision does not remove any PNG requirement.
+
+## Amendment 2026-11-22: sources are tracked, generated PPMs are not
+
+The 123.0 MB PPM corpus is a build artifact, not source. The four original JPEG
+photographs (5.2 MB total) are tracked in `samples/image-src/`; `scripts/make_image_corpus.py`
+(Python + Pillow) decodes them at their original dimensions and writes `samples/image/*.ppm`.
+`cargo xtask image` runs the generator when no `.ppm` exists, and the generated PPMs are
+git-ignored (`/samples/image/*.ppm`); `--force` regenerates them. The repository therefore
+carries the 5.2 MB sources and the generator instead of 123 MB of derived raster. The
+generated corpus is reproducible; the PNG decoder, tests and viewer path remain unchanged.
+A fresh image build needs Pillow only when the generated PPMs are absent.
