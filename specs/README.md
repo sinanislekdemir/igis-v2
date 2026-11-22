@@ -30,6 +30,7 @@ revised as understanding improves, and their history lives in git.
 | 0021 | [The terminal emulator and console sessions](0021-terminal-emulator.md) | Implemented | abi, compiler, interpreter, kernel console/session/sched/task/repl, langhost, samples/apps | 2026-11-20 |
 | 0022 | [Runtime display modes and the Settings application](0022-runtime-display-modes.md) | Implemented | abi, compiler, interpreter, kernel display/gfx/window/frame, arch/x86_64, samples/apps, scripts | 2026-11-21 |
 | 0023 | [The PNG corpus and the image viewer](0023-png-and-image-viewer.md) | Implemented | samples/apps/lib, samples/apps/apps, compiler, interpreter, abi, kernel VFS, langhost, xtask, scripts | 2026-11-22 |
+| 0024 | [Raw PPM images](0024-ppm-raw-images.md) | Accepted | samples/apps/lib, samples/apps/apps, samples/image, samples/tests/apps, langhost, xtask | 2026-11-22 |
 
 ## Lifecycle
 

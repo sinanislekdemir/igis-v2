@@ -3178,6 +3178,42 @@ fn the_png_probe_decodes_the_png_fixtures() {
         .expect("test thread panicked");
 }
 
+/// `ppm_probe` exercises the row-seeking `lib.ppm` module (spec 0024) through
+/// the `/lib` import path against committed P6 fixtures: `probe` geometry,
+/// `open`/`info`, and every pixel of every row of an 8x8 formula image, both
+/// plain and with leading whitespace, comments and a header longer than one
+/// 256-byte read. A P5 magic, a P3 magic and maxval 65535 must be Invalid, a
+/// missing file NotFound, a short raster Invalid on the row read, and a
+/// 6000-pixel row CapacityExceeded, all without a fault.
+#[test]
+fn the_ppm_probe_reads_the_p6_fixtures() {
+    // The unoptimised compiler frame is much larger than the default 2 MiB
+    // test-thread stack. This is test scaffolding only; the kernel stack bound
+    // is unrelated.
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let path = app_path("ppm_probe");
+            let source = std::fs::read(&path)
+                .unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+            let package = langhost::compile(&source, "ppm_probe").expect("the probe compiles");
+            let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET)
+                .expect("verifies and runs");
+            assert_eq!(result.reason, ExitReason::Ok);
+            assert_eq!(
+                result.output,
+                b"ppm: rgb ok\n\
+                  ppm: comment ok\n\
+                  ppm: rejects ok\n\
+                  ppm: ok\n"
+                    .to_vec()
+            );
+        })
+        .expect("spawn test thread")
+        .join()
+        .expect("test thread panicked");
+}
+
 /// `image_viewer check` exercises the viewer's own probe/decode/blit path
 /// (spec 0023, V1-V4) on the host: it probes the 16x16 Adam7 fixture, decodes
 /// its 2x2 pass-1 preview and asserts all four RGB pixels. The window blit is

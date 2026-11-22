@@ -2261,6 +2261,26 @@ Adam7 pass 1 to the window; no kernel image codec and no full-image buffer.
   tests, the `--shell` transcript, the QMP screenshot, `-smp 4`/`-smp 1` and an
   unchanged visual golden. `b469f7e`.
 
+## M14: PPM raw images
+
+Normative: spec 0024 and ADR 0058.
+Goal: ship the full-resolution corpus as uncompressed PPM P6 under `/image`, keep
+PNG support, and read rows by seek with no decode.
+
+- [x] **M14.1 Spec/ADR and `lib/ppm`.** Accept spec 0024 and ADR 0058, add the
+  128 MiB image decision, and implement `samples/apps/lib/ppm.ig` with
+  `probe`/`open`/`info`/`read_row`, a tolerant P6 header scanner (256-byte
+  refills, comments, absolute offsets, one separator after maxval), the
+  P6/maxval-255 subset and the `NotFound`/`Invalid`/`CapacityExceeded`/`IoError`
+  statuses. Proved by `ppm_probe` and its fixtures on `langhost`.
+- [x] **M14.2 Corpus and image.** Convert the four images to full-resolution P6,
+  stage `samples/image` as `image/`, and grow the apps image to 128 MiB. `77643c8`.
+- [ ] **M14.3 Viewer dual-format.** Dispatch PNG/PPM, keep the PNG pass-1 path,
+  and read PPM preview/thumbnail rows by fixed stride; extend the viewer `check`
+  path.
+- [ ] **M14.4 Proof and docs.** `--shell` transcripts on `-smp 4`/`-smp 1`, a QMP
+  capture of a PPM preview, the regression batch and the status/docs rows.
+
 ## Deferred (not UI; pick up when they matter)
 
 | Item | Where | Trigger |

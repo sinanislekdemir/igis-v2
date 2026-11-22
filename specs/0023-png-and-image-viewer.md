@@ -32,12 +32,15 @@ colour, gamma/colour-management or a kernel codec.
 
 - **P1 (MUST):** PNG decoding lives entirely in `/lib`; no kernel codec, opcode
   or VFS special case is added for an image format.
-- **P2 (MUST):** The corpus lives at `image/` in the application image and is
-  staged from `samples/image`. The apps image is 64 MiB for both the product and
-  the `--shell` image.
-- **P3 (MUST):** Every corpus file is an 8-bit RGB (colour type 2),
-  non-premultiplied, full-resolution PNG with Adam7 interlace. Files are converted
-  at their original dimensions; no file is resized.
+- **P2 (MUST):** The PNG decoder is retained for PNG files and the PNG
+  requirements in this specification still apply to PNG input. The active
+  shipped corpus is uncompressed PPM P6 under `image/` per spec 0024, staged
+  from `samples/image`; the apps image is 128 MiB for both the product and the
+  `--shell` image.
+- **P3 (MUST):** When the corpus is PNG, every corpus file is an 8-bit RGB
+  (colour type 2), non-premultiplied, full-resolution PNG with Adam7 interlace.
+  Files are converted at their original dimensions; no file is resized. The
+  active PPM corpus and its dimensions are governed by spec 0024 C1–C2.
 - **P4 (MUST):** The decoder accepts an 8-bit colour type 0 (grey), 2 (RGB),
   3 (palette), 4 (grey+alpha) or 6 (RGBA) image. 16-bit and other bit depths are
   rejected with `Invalid` rather than truncated.
@@ -441,3 +444,4 @@ run image_viewer check            deterministic check, `image_viewer: ok`
 | 2026-11-22 | The bit-reader window compacts: `bitio.fill` moves unread bytes to the front with the overlap-safe `core.copy_bytes` when `pos > 0`, and `inflate.top_up` no longer computes or gives up on free space, so a full 512-byte window accepts new input instead of reporting `Full`. This fixes the real-corpus `CapacityExceeded` at row 38: a 512 KiB IDAT stage must decode to the 368,317-byte Adam7 pass-1 prefix without a spurious `WouldBlock` at a window boundary. The new `long` probe vector (64 KiB, 12-symbol pseudorandom, 34,373 B compressed) reliably fails before the fix (`WouldBlock` at `in_pos=28160, pos=499, nbits=7`) and passes after; API, statuses, decoded bytes and state size are unchanged. |
 | 2026-11-21 | The viewer is implemented (`samples/apps/apps/accessories/image_viewer.ig`, V1–V4): normal/shot/check modes and the file dialog, probe-before-window with a 400x120 error panel (no faults), a content-sized centred window titled with the basename, `Decoding...` presented before the 512 KiB IDAT stage, one `syslib.blit_rgb` row per decoded pass-1 row, re-decode on `Expose`, and an independent fixture check that blits a 2x2 preview into an 8x8 window and reads two pixels back. State is one decoder plus a 16,384-byte row and a 12-byte preview; there is no image buffer and no resampling. The Apps menu gains `Accessories` → `Image Viewer` (13 rows); `scripts/image_viewer_qmp.py` captures the first frame from the `--shell` image on `-smp 4` and `-smp 1`. No kernel, ABI, builtin or `/lib` change. |
 | 2026-11-22 | The viewer gains a decode progress strip: the window content is `out_w x (out_h + 20)`, the image stays 1:1 at the top and the bottom 20 pixels show a separator, `Decoding NN%` / `Ready` in the 8x8 font and a 6-pixel gray track with a proportional black fill. The strip is drawn at 0% before `png.open`, redrawn and presented every 8 decoded rows, and ends at `Ready`/100%. On `Expose` the white fill is skipped and only the strip is redrawn at 0% (without a present), so the last complete frame stays visible while `png.rewind` re-decodes. The viewer state grows by the color scalar to 629,000 bytes. No lib/kernel/scheduler change. |
+| 2026-11-22 | The active shipped corpus becomes full-resolution uncompressed PPM P6 under `image/` (spec 0024, ADR 0058); the apps image is 128 MiB. The PNG decoder and every PNG requirement here are retained for PNG input, and `lib.png` is unchanged. `samples/apps/lib/ppm.ig` adds the P6 header/row reader, proved by `ppm_probe`. |
