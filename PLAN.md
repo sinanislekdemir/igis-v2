@@ -14,10 +14,14 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Current state (M14):** **634 host tests**; specs 0001–0025 (0023 and 0024
-  Implemented, 0025 accepted); ABI v1 at 75 opcodes with builtins 80–91; **M2–M14
-  complete**.
-  The apps image is a 128 MiB read-only tree with the full-resolution PPM P6
+- **Current state (M15):** **635 host tests**; specs 0001–0025 (0025 Implemented);
+  ABI v1 at 75 opcodes with builtins 80–91; **M2–M15 complete**. Boot loads only
+  `kernel.elf`: the ISO carries no application image, and the 128 MiB read-only ext2
+  volume on `ide0` unit 1 is mounted on demand through `ext2w` (229 MiB free in a
+  256 MiB guest), with `/home` on the primary master. On TCG/4 cores the desktop is
+  ready in ~1.8 s (10.4 s while the image was a GRUB module) and the PPM preview opens
+  in ~48 s after `read_at` learned to seek. The rest is unchanged:
+  the full-resolution PPM P6
   corpus under `image/`; `apps/accessories/image_viewer` dispatches PNG (Adam7
   pass-1 through `lib.png`/`lib.inflate`) and PPM (fixed-stride row seek and 1/8
   sampling through `lib.ppm`), both through `syslib.blit_rgb`, with no full-image
@@ -27,17 +31,10 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   switch or a completed move runs a full-stack repaint (spec 0011 W31, ADR 0055).
   The terminal is an application emulator over kernel console sessions (spec 0021, ADR 0053), the
   image has top-level `apps/<category>/`, and the Apps pull-down is sectioned.
-  `/home` is a separate 8 MiB ext2 image on an ATA disk, read-write through
+  `/home` is a separate 8 MiB ext2 image on the primary master, read-write through
   `ext2w`. `scripts/multi_terminal_qmp.py` proves two independent terminals.
-- **Next (M15):** spec 0025 + ADR 0059 are accepted: boot with only `kernel.elf`,
-  mount the 128 MiB application volume read-only from `ide0` unit 1 through `ext2w`,
-  retire `vfs/ext2` and the GRUB-module path. The measured pre-change boot is 10.4 s
-  to `desktop_shell: ready`, with 128 MiB pinned; the target is ≤ 2.5 s. **M15.4 is in
-  the tree** (the router holds the read-only `ext2w` mount, `vfs/ext2`, `module.rs` and
-  the GRUB module are gone, the kernel-only ISO boots in 1.78 s and reports 255 MiB
-  available / 229 MiB usable; offset-independent `read_at` brings the PPM preview from
-  329 s to 48.2 s); **M15.5 (proof, timing and docs)** is next, then the milestone
-  closes.
+- **Next:** no milestone is in progress. The deferred table below and
+  [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) hold the parked work.
 - **Historical context (M8–M10; counts below are from those slices):** **505 host
   tests**; specs 0001–0019 (0018 and 0019 Implemented); ABI v1 at 75 opcodes; M5,
   M6, M7.1 and **M8.1–M8.9 complete**, plus **M9.1–M9.4**. The
@@ -2349,11 +2346,14 @@ application volume is a read-only ATA disk the kernel mounts on demand through `
   Measured on `-smp 4`: `image_viewer_qmp.py` **48.2 s** (329 s before) and
   boot-to-ready 1.78 s; `CACHE_BLOCKS` stays 8 because the metadata cost is no longer
   visible. 635 host tests, `home_verify: ok`, `terminal: ok`, `e2fsck` clean.
-- [ ] **M15.5 Proof, timing and docs.** Re-measure boot-to-ready under QMP (target
+- [x] **M15.5 Proof, timing and docs.** Re-measure boot-to-ready under QMP (target
   ≤ 2.5 s), capture the desktop screenshot, confirm the visual golden is unchanged, run
   the QMP batch, `e2fsck -fn` on `apps.img`, `apps-shell.img` and `home.img`, and
   `--no-home`. Update `AGENTS.md` (one reader, disk image, boot line), `docs/HISTORY.md`,
-  spec 0025 status to Implemented, and this file's resume point.
+  spec 0025 status to Implemented, and this file's resume point. Landed: boot ~1.8 s,
+  viewer 45-48 s, golden `686d0330…de52754c` unchanged, `terminal: ok` /
+  `home_verify: ok` / `editor: ready` / `image_viewer: PASS`, all three images
+  `e2fsck` clean, `--no-apps` halts with `apps: no image`.
 
 ## Deferred (not UI; pick up when they matter)
 

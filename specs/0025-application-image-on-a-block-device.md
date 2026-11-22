@@ -1,6 +1,6 @@
 # 0025: The application image on a block device
 
-- **Status:** Accepted
+- **Status:** Implemented
 - **Scope:** `xtask`, `kernel` (`main`, `platform/x86_64/ata`, `vfs/fs`, `vfs/ext2`),
   `ext2w`, `scripts`; boot delivery of `samples/apps`
 - **Supersedes:** none (amends spec 0018 X1–X2 delivery; spec 0019 unchanged)
@@ -226,3 +226,4 @@ kind), mapped from `ext2w::Entry`; callers do not change.
 | 2026-11-22 | Accepted by the owner in the boot-image session; implementation is M15 (PLAN.md). |
 | 2026-11-22 | B12 amended after M15.2: QEMU's `ide-hd` refuses `readonly=on`, so the image is attached with `snapshot=on` and a boot must leave the file byte-identical. |
 | 2026-11-22 | M15.3 landed (1.70 s to ready, 229 MiB free). B8 now names the frame pool; B19/B20 added because `ext2w::read_at` walks from block zero, making the PPM preview cost 329 s once reads are real I/O. |
+| 2026-11-22 | Implemented (M15.5): 1.8 s to `desktop_shell: ready`, 229 MiB free, the viewer opens the full-resolution sample in 45-48 s, `--no-apps` halts with `apps: no image`, and the visual golden is unchanged. |

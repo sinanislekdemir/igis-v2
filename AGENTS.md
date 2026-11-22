@@ -27,10 +27,11 @@ decisions in `adr/`, and work items in `PLAN.md`.
 
 ## Current state
 
-- Specs 0001–0024 are accepted; **M2–M14 are complete** (desktop, language,
+- Specs 0001–0025 are accepted; **M2–M15 are complete** (desktop, language,
   filesystems, networking, terminal emulator, runtime display modes, PNG/PPM image
-  viewer). Current milestone work is tracked in `PLAN.md`.
-- **634 host tests** (556 language + 56 `net` + 22 `ext2w`); ABI v1 has **75 opcodes**
+  viewer, kernel-only boot with the application volume on disk). Current milestone work
+  is tracked in `PLAN.md`.
+- **635 host tests** (556 language + 56 `net` + 23 `ext2w`); ABI v1 has **75 opcodes**
   (runtime display modes add builtins 80–83; the machine-level bit and bulk buffer
   primitives are builtins 84–90 and `syslib.blit_rgb` is 91, no opcode).
 - Boot: GRUB/multiboot2 → `system/entrypoint` (the desktop shell), falling back to
