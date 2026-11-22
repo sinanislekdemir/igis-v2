@@ -48,7 +48,8 @@ decisions in `adr/`, and work items in `PLAN.md`.
   (spec 0022, ADR 0056), and source apps (`editor`, `browser`, `calculator`,
   `minesweeper`, `clock_window`, `widgets`, `image_viewer`). The image viewer
   streams Adam7 pass-1 rows through `lib.png`/`lib.inflate` and
-  `syslib.blit_rgb`, with no full-image buffer. Every terminal
+  `syslib.blit_rgb`, with no full-image buffer and a decode progress strip.
+  Every terminal
   instance has its own session, shell and cwd; the `Windows` pull-down lists every
   window (minimized rows marked `min`) and `File` opens a clickable window list. A
   window switch or a completed move runs a full-stack repaint (desktop, chrome

@@ -112,8 +112,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   71), `core.socket_source` (`1 << 63 | handle`) in `next_any`/`poll_any`, and
   `net_select` (selector + 300 ms recv/select timeouts); `net_echo`'s `accept`
   blocks, `kill_stress` is 300/300 and `mouse` 600/600.
-- **Last commit:** `929502c` (viewer Expose repaint) plus the M13 docs commit.
-  `build/home.img` is reset.
+- **Last commit:** `ed28bad` (viewer decode progress strip) plus the M13 docs
+  commit. `build/home.img` is reset.
 - **Next:** **M13 is complete.** Pick from the deferred backlog in
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) (TLS Q52, IPv6 Q53, Wi-Fi Q54,
   multi-NIC Q55, backlog Q56, DHCP/DNS follow-ups Q57) or the non-network items.
