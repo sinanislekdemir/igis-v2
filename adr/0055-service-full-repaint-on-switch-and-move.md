@@ -1,6 +1,6 @@
 # 0055: A switch or a completed move rebuilds the window stack in the service
 
-- **Status:** Accepted
+- **Status:** Superseded by 0060 (recomposition replaces the erase and repaint machinery)
 - **Date:** 2026-11-20
 - **Deciders:** project owner
 - **Spec:** 0011 (windows, W11/W17/W21/W27/W31)

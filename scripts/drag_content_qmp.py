@@ -12,8 +12,10 @@ real boot desktop with QEMU's absolute tablet:
 2. Drag the calculator by its title bar from (330, 108) to (580, 308), i.e. a
    frame origin of (430, 300). Capture the screen and verify programmatically
    that the calculator's display frame and panel border are present at the new
-   content origin and gone from the old one. A window whose content did not
-   follow would leave the underlay there.
+   content origin and that its solid-white content panel is gone from the old
+   one. The old area is recomposed from the surfaces underneath (the System
+   Log), so the check tests the calculator's own white panel rather than
+   arbitrary black ink that the log may have scrolled there.
 3. Click the `7` button at the new content origin + (42, 138) and require the
    display-interior pixels to change. A client that kept the stale content
    rectangle would miss the button and the display would stay `0`.
@@ -290,6 +292,17 @@ def run(args):
             before, old_content_x, old_content_y, old_content_y + CONTENT_H
         )
         panel = before.getpixel((content_x + 2, content_y + 2))
+        # The old area is whatever the compositor restored (`System Log`
+        # background, desktop dither or empty space); black ink there is not a
+        # calculator pixel. The calculator's own content panel is solid white,
+        # so a small white patch at the old content origin is the reliable
+        # "the old frame is gone" test.
+        old_white = sum(
+            1
+            for yy in range(old_content_y + 2, old_content_y + 7)
+            for xx in range(old_content_x + 2, old_content_x + 7)
+            if before.getpixel((xx, yy)) == WHITE
+        )
         print(
             f"[harness] after drag: new display edge {new_edge}/{DISPLAY_W} black, "
             f"new panel border {new_border}/{CONTENT_H} black, "
@@ -297,13 +310,14 @@ def run(args):
         )
         print(
             f"[harness] after drag: old display edge {old_edge}/{DISPLAY_W} black, "
-            f"old panel border {old_border}/{CONTENT_H} black"
+            f"old panel border {old_border}/{CONTENT_H} black, "
+            f"old white patch {old_white}/25"
         )
         content_ok = (
             new_edge >= DISPLAY_W - 4
             and new_border >= CONTENT_H - 10
             and panel == WHITE
-            and old_edge <= 10
+            and old_white <= 12
             and old_border <= CONTENT_H // 2
         )
         if not content_ok:

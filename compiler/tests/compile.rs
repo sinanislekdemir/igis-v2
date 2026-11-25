@@ -6672,6 +6672,8 @@ begin
   status := syslib.window_content_rect(id, rect);
   other := rect.h;
   status := syslib.window_present(id);
+  status := syslib.window_begin(id);
+  status := syslib.window_begin(0);
   status := syslib.window_close(id);
   focus := syslib.window_focus();
 end;
@@ -6701,10 +6703,14 @@ end;
             builtin::WINDOW_FRAME_RECT,
             builtin::WINDOW_CONTENT_RECT,
             builtin::WINDOW_PRESENT,
+            builtin::WINDOW_BEGIN,
+            builtin::WINDOW_BEGIN,
             builtin::WINDOW_CLOSE,
             builtin::WINDOW_FOCUS,
         ]
     );
+    assert_eq!(builtin::WINDOW_BEGIN, 92);
+    assert_eq!(builtin::effect(builtin::WINDOW_BEGIN), Some((1, 1)));
 }
 
 #[test]
@@ -6854,6 +6860,30 @@ begin
 end;
 "#,
             "`syslib.window_present` expects an `int` window id",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.window_begin();
+end;
+"#,
+            "`syslib.window_begin` expects 1 argument",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.window_begin(uint(1));
+end;
+"#,
+            "`syslib.window_begin` expects an `int` window id",
         ),
     ];
     for (source, expected) in cases {
@@ -9070,7 +9100,7 @@ end;
 }
 
 #[test]
-fn region_claim_and_release_are_builtins_60_and_61_and_check_their_signatures() {
+fn plane_builtins_are_93_to_97_and_check_their_signatures() {
     use abi::opcodes::{self, builtin};
 
     let source = r#"
@@ -9082,14 +9112,19 @@ var
   y: int;
   w: int;
   h: int;
+  id: int;
 procedure main(args: const string[1024]);
 begin
-  status := syslib.region_claim(x, y, w, h);
-  status := syslib.region_claim(0, 0, 1024, 22);
-  status := syslib.region_release();
+  status := syslib.plane_create(x, y, w, h, id);
+  status := syslib.plane_create(0, 0, 1024, 22, id);
+  status := syslib.plane_begin(id);
+  status := syslib.plane_present(id);
+  status := syslib.plane_destroy(id);
+  status := syslib.work_area_reserve(22);
+  status := syslib.work_area_reserve(0);
 end;
 "#;
-    let package = compile(source.as_bytes(), "t.ig").expect("region claim compiles");
+    let package = compile(source.as_bytes(), "t.ig").expect("plane surface compiles");
     let header = CodeHeader::from_bytes(&package.code[..40]).expect("header");
     let start = 40 + 24 * header.function_count as usize;
     let instructions = &package.code[start..start + header.code_len as usize];
@@ -9108,15 +9143,25 @@ end;
     assert_eq!(
         seen,
         vec![
-            builtin::REGION_CLAIM,
-            builtin::REGION_CLAIM,
-            builtin::REGION_RELEASE
+            builtin::PLANE_CREATE,
+            builtin::PLANE_CREATE,
+            builtin::PLANE_BEGIN,
+            builtin::PLANE_PRESENT,
+            builtin::PLANE_DESTROY,
+            builtin::WORK_AREA_RESERVE,
+            builtin::WORK_AREA_RESERVE,
         ]
     );
-    assert_eq!(builtin::REGION_CLAIM, 60);
-    assert_eq!(builtin::REGION_RELEASE, 61);
-    assert_eq!(builtin::effect(builtin::REGION_CLAIM), Some((4, 1)));
-    assert_eq!(builtin::effect(builtin::REGION_RELEASE), Some((0, 1)));
+    assert_eq!(builtin::PLANE_CREATE, 93);
+    assert_eq!(builtin::PLANE_DESTROY, 94);
+    assert_eq!(builtin::PLANE_BEGIN, 95);
+    assert_eq!(builtin::PLANE_PRESENT, 96);
+    assert_eq!(builtin::WORK_AREA_RESERVE, 97);
+    assert_eq!(builtin::effect(builtin::PLANE_CREATE), Some((5, 1)));
+    assert_eq!(builtin::effect(builtin::PLANE_DESTROY), Some((1, 1)));
+    assert_eq!(builtin::effect(builtin::PLANE_BEGIN), Some((1, 1)));
+    assert_eq!(builtin::effect(builtin::PLANE_PRESENT), Some((1, 1)));
+    assert_eq!(builtin::effect(builtin::WORK_AREA_RESERVE), Some((1, 1)));
 
     let cases = [
         (
@@ -9124,12 +9169,27 @@ end;
 unit t;
 uses core, syslib;
 var status: Status;
+var id: int;
 procedure main(args: const string[1024]);
 begin
-  status := syslib.region_claim(0, 0, 10);
+  status := syslib.plane_create(0, 0, 10, 10);
+  id := 0;
 end;
 "#,
-            "`syslib.region_claim` expects 4 arguments",
+            "`syslib.plane_create` expects 5 arguments",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+var id: int;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.plane_create(0, 0, uint(10), 10, id);
+end;
+"#,
+            "`syslib.plane_create` expects an `int` w",
         ),
         (
             r#"
@@ -9138,10 +9198,10 @@ uses core, syslib;
 var status: Status;
 procedure main(args: const string[1024]);
 begin
-  status := syslib.region_claim(0, 0, uint(10), 10);
+  status := syslib.plane_create(0, 0, 10, 10, status);
 end;
 "#,
-            "`syslib.region_claim` expects an `int` w",
+            "`syslib.plane_create` expects `var id: int`",
         ),
         (
             r#"
@@ -9150,10 +9210,59 @@ uses core, syslib;
 var status: Status;
 procedure main(args: const string[1024]);
 begin
-  status := syslib.region_release(1);
+  status := syslib.plane_destroy(uint(1));
 end;
 "#,
-            "`syslib.region_release` expects 0 arguments",
+            "`syslib.plane_destroy` expects an `int` plane id",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.plane_begin();
+end;
+"#,
+            "`syslib.plane_begin` expects 1 argument",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+var id: int;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.plane_present(id, id);
+end;
+"#,
+            "`syslib.plane_present` expects 1 argument",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.work_area_reserve(uint(22));
+end;
+"#,
+            "`syslib.work_area_reserve` expects an `int` height",
+        ),
+        (
+            r#"
+unit t;
+uses core, syslib;
+var status: Status;
+procedure main(args: const string[1024]);
+begin
+  status := syslib.work_area_reserve();
+end;
+"#,
+            "`syslib.work_area_reserve` expects 1 argument",
         ),
     ];
     for (source, expected) in cases {

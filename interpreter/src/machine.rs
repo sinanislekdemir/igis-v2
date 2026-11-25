@@ -331,13 +331,14 @@ pub trait Host {
         0
     }
 
-    /// Copies a rectangle from the shadow to the framebuffer
-    /// (`syslib.present`). The interpreter has rejected `w <= 0` and `h <= 0`.
+    /// Recomposes and presents a screen rectangle (`syslib.present`, spec
+    /// 0026, C7). The interpreter has rejected `w <= 0` and `h <= 0`.
     fn present(&mut self, _x: i64, _y: i64, _w: i64, _h: i64) -> Status {
         Status::Invalid
     }
 
-    /// Fills the whole screen and presents it (`syslib.clear`, G6).
+    /// Fills the caller's open draw scope (`syslib.clear`, spec 0026, C5).
+    /// There is no screen-wide clear; with no scope the call is `Invalid`.
     fn clear(&mut self, _color: u32) -> Status {
         Status::Invalid
     }
@@ -502,6 +503,14 @@ pub trait Host {
         Status::Invalid
     }
 
+    /// Opens the caller's draw scope on one of its windows (`syslib.window_begin`,
+    /// spec 0026, C3); `id == 0` clears the scope (there is no screen surface).
+    /// The caller must own the window; the default is a disabled service
+    /// (`Invalid`).
+    fn window_begin(&mut self, _id: u64) -> Status {
+        Status::Invalid
+    }
+
     /// Whether `id` is minimized (`syslib.window_minimized`, spec 0011 W30).
     /// The default is `false`, the disabled-window-service result.
     fn window_minimized(&mut self, _id: u64) -> bool {
@@ -531,19 +540,43 @@ pub trait Host {
         Status::Invalid
     }
 
-    /// Takes the one machine-wide persistent pointer-region claim
-    /// (`syslib.region_claim`, spec 0011, W27; ADR 0045). The calling task is
-    /// the owner; a queued press inside the rectangle is delivered only to it.
-    /// The machine has already rejected a non-positive extent. The default is a
-    /// disabled service (`Invalid`), so `langhost` and a bare host stay safe.
-    fn region_claim(&mut self, _x: i64, _y: i64, _w: i64, _h: i64) -> Status {
+    // ---- plane surfaces and the work area (spec 0026, C11–C14) ----------
+    //
+    // A plane is a screen rectangle above every window with its own canvas.
+    // The defaults model the disabled service, so a bare host stays
+    // deterministic and every plane call is `Invalid` (the unknown-id destroy
+    // is `NotFound`, as for a window).
+
+    /// Creates a plane (`syslib.plane_create`): a retired screen rectangle with
+    /// a zeroed canvas, clamped to the screen. Returns the new id, or
+    /// `Invalid`/`Full` under the spec 0026 C11 rules.
+    fn plane_create(&mut self, _x: i64, _y: i64, _w: i64, _h: i64) -> Result<u64, Status> {
+        Err(Status::Invalid)
+    }
+
+    /// Destroys a plane owned by the caller (`syslib.plane_destroy`). The
+    /// default is `NotFound`: a disabled service has no plane to destroy.
+    fn plane_destroy(&mut self, _id: u64) -> Status {
+        Status::NotFound
+    }
+
+    /// Opens the caller's draw scope on one of its planes
+    /// (`syslib.plane_begin`). The default is a disabled service (`Invalid`).
+    fn plane_begin(&mut self, _id: u64) -> Status {
         Status::Invalid
     }
 
-    /// Releases the caller's pointer-region claim (`syslib.region_release`,
-    /// spec 0011, W27). The default is a disabled service (`Invalid`). The
-    /// kernel also wakes every input waiter after the release.
-    fn region_release(&mut self) -> Status {
+    /// Closes the caller's plane scope and recomposites its rectangle
+    /// (`syslib.plane_present`). The default is a disabled service (`Invalid`).
+    fn plane_present(&mut self, _id: u64) -> Status {
+        Status::Invalid
+    }
+
+    /// Reserves a machine-wide top strip for window placement
+    /// (`syslib.work_area_reserve`, spec 0026, C13). `0` clears it. The machine
+    /// has already rejected a negative height; the default is a disabled
+    /// service (`Invalid`).
+    fn work_area_reserve(&mut self, _height: i64) -> Status {
         Status::Invalid
     }
 
@@ -2308,6 +2341,11 @@ impl Machine {
                         let status = host.window_present(window);
                         self.push(stack, status as u64)?;
                     }
+                    builtin::WINDOW_BEGIN => {
+                        let window = self.pop(stack)?;
+                        let status = host.window_begin(window);
+                        self.push(stack, status as u64)?;
+                    }
                     builtin::WINDOW_MINIMIZED => {
                         let window = self.pop(stack)?;
                         let minimized = host.window_minimized(window);
@@ -2333,11 +2371,14 @@ impl Machine {
                         let status = host.popup_release();
                         self.push(stack, status as u64)?;
                     }
-                    // Persistent pointer-region claim (spec 0011, W27; ADR
-                    // 0045). Like the modal grab, the machine rejects a
-                    // non-positive extent before the host call; the host owns
-                    // ownership and the one-claim rule.
-                    builtin::REGION_CLAIM => {
+                    // Plane surfaces (spec 0026, C11). `plane_create` follows
+                    // `window_open`: the id reference is below the four
+                    // coordinates and is written only on `Ok`. The machine
+                    // rejects a non-positive extent before the host call, so
+                    // every host agrees; the host clamps the rectangle to its
+                    // screen and owns the 8-plane limit.
+                    builtin::PLANE_CREATE => {
+                        let id_bits = self.pop(stack)?;
                         let h = self.pop(stack)?;
                         let w = self.pop(stack)?;
                         let y = self.pop(stack)?;
@@ -2345,13 +2386,48 @@ impl Machine {
                         if w as i64 <= 0 || h as i64 <= 0 {
                             self.push(stack, Status::Invalid as u64)?;
                         } else {
-                            let status = host.region_claim(x as i64, y as i64, w as i64, h as i64);
-                            self.push(stack, status as u64)?;
+                            match host.plane_create(x as i64, y as i64, w as i64, h as i64) {
+                                Ok(plane) => {
+                                    self.write_bytes(
+                                        id_bits,
+                                        &plane.to_le_bytes(),
+                                        state,
+                                        stack,
+                                        constants,
+                                        args,
+                                    )?;
+                                    self.push(stack, Status::Ok as u64)?;
+                                }
+                                Err(status) => self.push(stack, status as u64)?,
+                            }
                         }
                     }
-                    builtin::REGION_RELEASE => {
-                        let status = host.region_release();
+                    builtin::PLANE_DESTROY => {
+                        let plane = self.pop(stack)?;
+                        let status = host.plane_destroy(plane);
                         self.push(stack, status as u64)?;
+                    }
+                    builtin::PLANE_BEGIN => {
+                        let plane = self.pop(stack)?;
+                        let status = host.plane_begin(plane);
+                        self.push(stack, status as u64)?;
+                    }
+                    builtin::PLANE_PRESENT => {
+                        let plane = self.pop(stack)?;
+                        let status = host.plane_present(plane);
+                        self.push(stack, status as u64)?;
+                    }
+                    // The work area (spec 0026, C13): a negative height is
+                    // `Invalid` before the host call; the host applies it
+                    // machine-wide and reports disabled graphics.
+                    builtin::WORK_AREA_RESERVE => {
+                        let height = self.pop(stack)?;
+                        if (height as i64) < 0 {
+                            self.push(stack, Status::Invalid as u64)?;
+                        } else {
+                            let status = host.work_area_reserve(height as i64);
+                            self.push(stack, status as u64)?;
+                        }
                     }
                     // System control (spec 0017). No operands: the host owns
                     // the stop/reset path and the status is only observable on

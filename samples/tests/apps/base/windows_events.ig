@@ -49,7 +49,6 @@ var
   rect: Rect;
   screen_w: uint;
   screen_h: uint;
-  white: uint;
   black: uint;
   cyan: uint;
   magenta: uint;
@@ -108,6 +107,9 @@ end;
 // content rectangle the service reported.
 procedure draw_content(id: int; fill: uint; label: const string[0]);
 begin
+  // One scope per task: opening a later window took it, so select the target
+  // explicitly (spec 0026, C3). Coordinates stay absolute screen values.
+  status := syslib.window_begin(id);
   status := syslib.window_content_rect(id, rect);
   if status = Ok then
   begin
@@ -122,7 +124,6 @@ begin
   failed := false;
   fail_step := 0;
   step := 0;
-  white := uint(0x00FFFFFF);
   black := uint(0x00000000);
   cyan := uint(0x0022BBDD);
   magenta := uint(0x00DD66AA);
@@ -139,8 +140,9 @@ begin
     // The kernel's terminal and system-log windows exist from boot (spec
     // 0012); the idle focus is the previously topmost window, not 0.
     baseline := syslib.window_focus();
-    status := syslib.clear(white);
-    status := syslib.fill_dither(0, 0, int(screen_w), int(screen_h), black);
+    // The service paints the dither desktop (spec 0026, C14); the old
+    // screen-wide `clear`/`fill_dither` pair is gone (C20) and produced exactly
+    // this pattern.
     flushed := syslib.event_flush();
     status := syslib.inject_pointer(-100000, -100000, uint(0));
     flushed := syslib.event_flush();
@@ -227,6 +229,7 @@ begin
           begin
             seen := true;
             verify("A expose fields", ev.x = 0 and ev.y = 0 and ev.code = uint(0));
+            status := syslib.window_begin(a);
             status := syslib.fill_rect(90, 110, 80, 40, marker);
             status := syslib.window_present(a);
           end
@@ -298,6 +301,7 @@ begin
           if ev.window = a then
           begin
             seen := true;
+            status := syslib.window_begin(a);
             status := syslib.fill_rect(90, 110, 80, 40, marker);
             status := syslib.window_present(a);
           end

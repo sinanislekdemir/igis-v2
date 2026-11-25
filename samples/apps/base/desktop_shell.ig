@@ -26,19 +26,19 @@ unit desktop_shell;
 //
 // Both pull-downs are drawn with the M2.4.3 menu model
 // (`stdlib.ui_menu_dropdown`/`ui_menu_hit`/`ui_menu_move`/`ui_menu_key`) and
-// the M2.4.4 dialog helpers (`ui_message`/`ui_dialog_button`). They are
-// app-drawn and have no window, so opening one takes the machine-wide modal
-// popup input grab (spec 0011, W26; ADR 0044): every queued pointer and key
-// event goes to this task while the menu is open, which is what makes a row
-// that lies over another window reachable. The About panel is an ordinary
-// desktop-owned window, so the window service restores what it covered through
-// the usual Expose protocol.
+// the M2.4.4 dialog helpers (`ui_message`/`ui_dialog_button`). The menu bar and
+// every open pull-down are **planes** (spec 0026, C11/C12): screen rectangles
+// above all windows with retained canvases. Opening a menu creates its plane
+// and takes the machine-wide modal popup input grab (spec 0011, W26; ADR
+// 0044), so every queued pointer and key event goes to this task; destroying
+// the plane on close recomposites what it covered. The About panel is an
+// ordinary desktop-owned window.
 //
 // The shell draws its own window content and presents it with
 // `syslib.window_present`; an `Expose` for its id repaints that content. Window
-// lifetime, z-order and chrome belong to the kernel service, so the shell never
-// draws outside its content rectangle except for the menu bar and its pull-down,
-// which occupy the top rows where no window starts by convention.
+// lifetime, z-order and chrome belong to the kernel service. The persistent
+// bar plane is above every window, and `work_area_reserve` keeps window frames
+// below it (spec 0026, C13).
 //
 // The window list uses `syslib.window_info` (builtin 40), which returns the
 // topmost window first. `check` mode injects one pointer-down per item and
@@ -120,10 +120,14 @@ var
   app_runs: int;
   window_runs: int;
   terminal_runs: int;
-  // The persistent menu-bar pointer-region claim (M8.4, spec 0011 W27). The
-  // modal grab only starts once a menu opens; the bar click that opens it must
-  // already belong to this task.
+  // The persistent menu-bar plane (spec 0026, C11): created after startup and
+  // recreated at the new geometry after a mode change. `bar` is 0 when
+  // creation failed. `menu_plane` is the one open pull-down plane.
   bar_status: Status;
+  area_status: Status;
+  bar: int;
+  menu_plane: int;
+  halt_plane: int;
   // Proportional menu-bar layout, derived from the measured label widths
   // (spec 0015) so the hit ranges and the drawn labels cannot drift.
   menu_file_x: int;
@@ -184,7 +188,6 @@ var
   restart_runs: int;
   halt_runs: int;
   action: int;
-  under_id: int;
   hit_row: int;
 
   // Check-mode bookkeeping.
@@ -234,19 +237,23 @@ begin
   return int(syslib.text_width_prop(text));
 end;
 
-// The menu bar is app-drawn and has no window either, but unlike a pull-down it
-// is permanent: the press that opens a menu arrives before any modal grab
-// exists, and another client blocked in `next_event` can otherwise take it
-// from the one machine-wide queue. Claim the bar strip for as long as the
-// shell runs (spec 0011, W27; ADR 0045): a queued pointer-down inside it is
-// routed here even while a launched app is waiting for input. The modal grab
-// still covers an open pull-down and takes precedence. A failed claim (another
-// owner, or graphics disabled) is reported and the shell keeps running.
-procedure claim_menu_bar();
+// The menu bar is a persistent plane (spec 0026, C11): retained pixels above
+// every window, created after startup and recreated at the new geometry after
+// a mode change. The work area keeps window frames below it (C13), so a title
+// bar can never be dragged under the bar. A failed creation is reported and
+// the shell keeps running; `draw_menu_bar` then has nothing to present.
+procedure create_bar_plane();
 begin
-  bar_status := syslib.region_claim(0, 0, screen_w, MenuHeight);
+  bar := 0;
+  bar_status := syslib.plane_create(0, 0, screen_w, MenuHeight, bar);
   if bar_status <> Ok then
-    out.say("desktop_shell: menu bar claim failed\n");
+    out.say("desktop_shell: menu bar plane failed\n");
+end;
+
+procedure setup_work_area();
+begin
+  area_status := syslib.work_area_reserve(MenuHeight);
+  create_bar_plane();
 end;
 
 // HH:MM from the monotonic clock, right-aligned in the menu bar. The width is
@@ -397,13 +404,13 @@ begin
   menu_system_end := menu_system_x + tw("System");
 end;
 
-// The menu bar is application-drawn (no global work area in M2.3.4). It stays
-// in the top 22 rows; app windows are expected to open below it. The labels and
-// the clock use the proportional font (spec 0015): positions come from the
-// measured widths, not from 8-pixel cells.
-// A runtime mode change (spec 0022) marks every window for an `Expose`; the
-// shell also has to pick up the new screen geometry, because the menu bar and
-// its pointer-region claim are drawn outside any window.
+// The menu bar is a plane, not a window. Labels and the clock use the
+// proportional font (spec 0015): positions come from the measured widths, not
+// from 8-pixel cells. A runtime mode change (spec 0022) reflows the windows in
+// the service and marks them for an `Expose`; the shell also has to rebuild
+// the bar plane at the new screen width and reapply the work area (spec 0026,
+// C17). An open pull-down is discarded with its plane: its saved rectangle is
+// stale.
 procedure refresh_screen();
 var
   width: int;
@@ -416,13 +423,29 @@ begin
     screen_w := width;
     screen_h := height;
     if screen_w > 0 and screen_h > 0 then
-      claim_menu_bar();
+    begin
+      if menu_plane > 0 then
+      begin
+        status := syslib.plane_destroy(menu_plane);
+        menu_plane := 0;
+        app_open := false;
+        system_open := false;
+        windows_open := false;
+        status := syslib.popup_release();
+      end;
+      if bar > 0 then
+        status := syslib.plane_destroy(bar);
+      setup_work_area();
+    end;
   end;
 end;
 
 procedure draw_menu_bar();
 begin
   refresh_screen();
+  if bar <= 0 then
+    return;
+  status := syslib.plane_begin(bar);
   status := syslib.fill_rect(0, 0, screen_w, MenuHeight, white);
   // The Apple square is aligned with the proportional cap rows (line top 7 +
   // the glyph box's two-row top bearing), not with the old 8×8 cell.
@@ -452,10 +475,7 @@ begin
     status := syslib.draw_text_prop(menu_system_x, 7, "System", black);
   status := syslib.fill_rect(0, MenuHeight - 1, screen_w, 1, black);
   draw_clock(screen_w - 8);
-  // The bar is application-drawn into the shadow; present its rows so the
-  // framebuffer shows it (a window repair may have presented only its own
-  // damage union).
-  status := syslib.present(0, 0, screen_w, MenuHeight);
+  status := syslib.plane_present(bar);
 end;
 
 // Draws the shell's own window content and presents it. The service clips the
@@ -466,6 +486,7 @@ procedure draw_shell_window();
 begin
   if own > 0 and not syslib.window_minimized(own) then
   begin
+    status := syslib.window_begin(own);
     status := syslib.window_content_rect(own, rect);
     if status = Ok then
     begin
@@ -581,6 +602,7 @@ procedure draw_window_list();
 begin
   if winlist_id <= 0 or syslib.window_minimized(winlist_id) then
     return;
+  status := syslib.window_begin(winlist_id);
   status := syslib.window_content_rect(winlist_id, winlist_rect);
   if status <> Ok then
     return;
@@ -711,11 +733,13 @@ end;
 
 procedure draw_system_menu();
 begin
+  if menu_plane <= 0 then
+    return;
+  status := syslib.plane_begin(menu_plane);
   status := stdlib.ui_menu_dropdown(
     menu_system_x - 4, MenuHeight, SysMenuWidth,
     sys_items, sys_keys, SysMenuCount, system_selected, sys_checked, sys_disabled, true);
-  status := syslib.present(
-    menu_system_x - 4, MenuHeight, SysMenuWidth, SysMenuCount * 16 + 2);
+  status := syslib.plane_present(menu_plane);
 end;
 
 procedure open_system_menu();
@@ -724,6 +748,14 @@ begin
     close_apps_menu();
   if windows_open then
     close_windows_menu();
+  menu_plane := 0;
+  status := syslib.plane_create(
+    menu_system_x - 4, MenuHeight, SysMenuWidth, SysMenuCount * 16 + 2, menu_plane);
+  if status <> Ok then
+  begin
+    out.say("desktop_shell: system menu plane failed\n");
+    return;
+  end;
   system_open := true;
   system_selected := stdlib.ui_menu_first(SysMenuCount, sys_items, sys_disabled);
   system_runs := system_runs + 1;
@@ -760,13 +792,13 @@ end;
 
 procedure draw_windows_menu();
 begin
-  if window_count <= 0 then
+  if menu_plane <= 0 or window_count <= 0 then
     return;
+  status := syslib.plane_begin(menu_plane);
   status := stdlib.ui_menu_dropdown(
     menu_windows_x - 4, MenuHeight, WindowMenuWidth,
     window_items, window_keys, window_count, windows_selected, uint(0), uint(0), true);
-  status := syslib.present(
-    menu_windows_x - 4, MenuHeight, WindowMenuWidth, window_count * 16 + 2);
+  status := syslib.plane_present(menu_plane);
 end;
 
 procedure open_windows_menu();
@@ -778,6 +810,14 @@ begin
   build_windows_menu();
   if window_count <= 0 then
     return;
+  menu_plane := 0;
+  status := syslib.plane_create(
+    menu_windows_x - 4, MenuHeight, WindowMenuWidth, window_count * 16 + 2, menu_plane);
+  if status <> Ok then
+  begin
+    out.say("desktop_shell: windows menu plane failed\n");
+    return;
+  end;
   windows_open := true;
   windows_selected := stdlib.ui_menu_first(window_count, window_items, uint(0));
   windows_runs := windows_runs + 1;
@@ -796,8 +836,11 @@ begin
   windows_selected := -1;
   out.say("desktop_shell: windows menu closed\n");
   status := syslib.popup_release();
-  repair_menu_area(
-    menu_windows_x - 4, MenuHeight, WindowMenuWidth, window_count * 16 + 2);
+  if menu_plane > 0 then
+  begin
+    status := syslib.plane_destroy(menu_plane);
+    menu_plane := 0;
+  end;
   draw_menu_bar();
   draw_shell_window();
 end;
@@ -948,11 +991,13 @@ end;
 
 procedure draw_apps_menu();
 begin
+  if menu_plane <= 0 then
+    return;
+  status := syslib.plane_begin(menu_plane);
   status := stdlib.ui_menu_dropdown(
     menu_apps_x - 4, MenuHeight, AppMenuWidth,
     app_items, app_keys, AppMenuCount, app_selected, uint(0), uint(0), true);
-  status := syslib.present(
-    menu_apps_x - 4, MenuHeight, AppMenuWidth, AppMenuCount * 16 + 2);
+  status := syslib.plane_present(menu_plane);
 end;
 
 procedure open_apps_menu();
@@ -961,12 +1006,20 @@ begin
     close_system_menu();
   if windows_open then
     close_windows_menu();
+  menu_plane := 0;
+  status := syslib.plane_create(
+    menu_apps_x - 4, MenuHeight, AppMenuWidth, AppMenuCount * 16 + 2, menu_plane);
+  if status <> Ok then
+  begin
+    out.say("desktop_shell: apps menu plane failed\n");
+    return;
+  end;
   app_open := true;
   app_selected := stdlib.ui_menu_first(AppMenuCount, app_items, uint(0));
   apps_opened := apps_opened + 1;
-  // The menu is app-drawn and has no window: the grab makes this task the only
-  // recipient of queued input while it is open (spec 0011, W26). The rectangle
-  // is advisory; the click handler below decides inside/outside.
+  // The modal grab makes this task the only recipient of queued input while
+  // the menu plane is open (spec 0011, W26); the plane also owns a press inside
+  // its rectangle (spec 0026, C12).
   grab_status := syslib.popup_grab(
     menu_apps_x - 4, MenuHeight, AppMenuWidth, AppMenuCount * 16 + 2);
   out.say("desktop_shell: apps menu open\n");
@@ -981,53 +1034,17 @@ begin
   app_open := false;
   app_selected := -1;
   status := syslib.popup_release();
-  repair_menu_area(
-    menu_apps_x - 4, MenuHeight, AppMenuWidth, AppMenuCount * 16 + 2);
+  // Destroying the plane recomposites everything it covered (spec 0026, C11):
+  // no repair_menu_area and no client round trip.
+  if menu_plane > 0 then
+  begin
+    status := syslib.plane_destroy(menu_plane);
+    menu_plane := 0;
+  end;
   draw_menu_bar();
   draw_shell_window();
   apps_closed := apps_closed + 1;
   out.say("desktop_shell: apps menu closed\n");
-end;
-
-// Erases the pull-down pixels. The shared shadow has no window for the menu, so
-// the topmost *visible* window whose frame intersects the menu area is raised:
-// the service repaints its chrome and marks its `Expose`, and the owner (the
-// console pump for the terminal, the app otherwise) restores its content. A
-// minimized window must be skipped: raising it would restore it just to repaint
-// the menu, which is exactly how a minimized System Log came back. When no
-// visible window is under the menu, the shell repaints the service desktop
-// pattern itself. The desktop window is raised afterwards so focus returns to
-// the shell.
-procedure repair_menu_area(mx: int; my: int; mw: int; mh: int);
-begin
-  under_id := 0;
-  pos := 0;
-  status := syslib.window_info(uint(pos), win_id, win_rect, win_title);
-  while status = Ok and pos < 32 and under_id = 0 do
-  begin
-    if not syslib.window_minimized(win_id) then
-      if not (win_rect.x + win_rect.w <= mx) then
-        if not (win_rect.x >= mx + mw) then
-          if not (win_rect.y + win_rect.h <= my) then
-            if not (win_rect.y >= my + mh) then
-              under_id := win_id;
-    pos := pos + 1;
-    status := syslib.window_info(uint(pos), win_id, win_rect, win_title);
-  end;
-  if under_id > 0 and under_id <> own then
-    status := syslib.window_raise(under_id)
-  else if under_id = 0 then
-  begin
-    // Only the desktop (or a minimized window) was under the menu: restore its
-    // white + dither pattern without touching any window state.
-    status := syslib.fill_rect(mx, my, mw, mh, white);
-    status := syslib.fill_dither(mx, my, mw, mh, black);
-    status := syslib.present(mx, my, mw, mh);
-  end;
-  // Do not restore a minimized Desktop window just to return focus after the
-  // menu; the minimized window stays hidden until the user raises it.
-  if own > 0 and not syslib.window_minimized(own) then
-    status := syslib.window_raise(own);
 end;
 
 procedure close_system_menu();
@@ -1037,8 +1054,11 @@ begin
   system_open := false;
   system_selected := -1;
   status := syslib.popup_release();
-  repair_menu_area(
-    menu_system_x - 4, MenuHeight, SysMenuWidth, SysMenuCount * 16 + 2);
+  if menu_plane > 0 then
+  begin
+    status := syslib.plane_destroy(menu_plane);
+    menu_plane := 0;
+  end;
   draw_menu_bar();
   draw_shell_window();
 end;
@@ -1185,8 +1205,9 @@ begin
 end;
 
 // The final screen for a desktop-requested halt (System > Halt / Ctrl+H). It is
-// a plain full-screen draw, not a window: `core.halt` follows immediately, so
-// no window, expose or repair can paint over it.
+// a full-screen plane above every window and the bar (spec 0026, C11): a plane
+// canvas is retained, so no later recomposition can paint over it before
+// `core.halt` stops the machine.
 procedure draw_halt_screen();
 var
   message: string[64];
@@ -1195,12 +1216,20 @@ var
   y: int;
 begin
   message := "You may now shut down your computer.";
+  halt_plane := 0;
+  status := syslib.plane_create(0, 0, screen_w, screen_h, halt_plane);
+  if halt_plane <= 0 then
+  begin
+    out.say("desktop_shell: halt screen plane failed\n");
+    return;
+  end;
+  status := syslib.plane_begin(halt_plane);
   status := syslib.fill_rect(0, 0, screen_w, screen_h, black);
   width := tw(message);
   x := (screen_w - width) div 2;
   y := screen_h div 2;
   status := syslib.draw_text_prop(x, y, message, white);
-  status := syslib.present(0, 0, screen_w, screen_h);
+  status := syslib.plane_present(halt_plane);
 end;
 
 procedure request_halt();
@@ -1350,6 +1379,7 @@ var
 begin
   if about_id = 0 or syslib.window_minimized(about_id) then
     return;
+  status := syslib.window_begin(about_id);
   status := syslib.window_content_rect(about_id, about_rect);
   if status = Ok then
   begin
@@ -1592,10 +1622,11 @@ begin
   // the spawn is skipped in check mode.
   probe_spawn := true;
   shell_launched := true;
-  // The claim is `Ok` on an image without the boot desktop and `Full` when the
-  // running boot desktop already holds the bar, which is the expected result
-  // when `run desktop_shell check` is issued from the desktop's terminal.
-  verify("menu bar claim", bar_status = Ok or bar_status = Full);
+  // The bar plane and the work area are machine-wide surfaces created after
+  // startup; a second desktop instance may create its own plane (up to 8).
+  verify(
+    "menu bar plane",
+    area_status = Ok and bar_status = Ok and bar > 0);
 
   draw_menu_bar();
   status := syslib.window_open(600, 72, 360, 164, "Desktop", own);
@@ -1969,13 +2000,6 @@ begin
     draw_shell_window();
   end;
 
-  // Release the bar claim before the verdict line: a caller can then claim it
-  // (or a second `check` can) without inheriting this instance's rectangle.
-  if bar_status = Ok then
-    verify("menu bar claim released", syslib.region_release() = Ok)
-  else
-    verify("menu bar claim owned elsewhere", bar_status = Full);
-
   if failed then
   begin
     out.say("desktop_shell: FAIL at step ");
@@ -2098,6 +2122,9 @@ begin
   about_runs := 0;
   restart_runs := 0;
   halt_runs := 0;
+  bar := 0;
+  menu_plane := 0;
+  halt_plane := 0;
   if args = "check" then
   begin
     if screen_w = 0 or screen_h = 0 then
@@ -2106,7 +2133,7 @@ begin
       out.say("desktop_shell: screen too small\n")
     else
     begin
-      claim_menu_bar();
+      setup_work_area();
       check_mode();
     end;
   end
@@ -2122,11 +2149,9 @@ begin
   end
   else
   begin
-    claim_menu_bar();
+    setup_work_area();
     normal_mode();
-    // The Desktop window was closed and the shell is leaving; a terminated
-    // task releases the claim through `Task::reclaim` anyway (spec 0011, W27).
-    if bar_status = Ok then
-      status := syslib.region_release();
+    // A terminated task releases its planes through `Task::reclaim` (spec
+    // 0026, C1); there is no explicit release step.
   end;
 end;

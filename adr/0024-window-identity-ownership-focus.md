@@ -1,6 +1,6 @@
 # 0024: Windows are kernel table records with monotonic ids, content-size geometry and owner-checked lifecycle
 
-- **Status:** Accepted
+- **Status:** Accepted; the "no per-window canvas" clause is superseded by ADR 0060
 - **Date:** 2026-11-16
 - **Deciders:** igis-v2 design
 - **Related specs:** `0003-language.md`, `0005-host-interface.md`, `0009-graphics-and-windows.md`, `0010-input-and-events.md`, `0011-windows.md`

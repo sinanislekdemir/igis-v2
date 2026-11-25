@@ -1,6 +1,6 @@
 # 0046: A topmost move copies a content snapshot; the client re-reads the content rectangle
 
-- **Status:** Accepted
+- **Status:** Superseded by 0060 (the canvas makes the move a pure origin change)
 - **Date:** 2026-11-18
 - **Deciders:** igis-v2 kernel/UI
 - **Related specs:** 0011 (W12/W17 clarified, W28 added), 0012 (D12), 0009 (one shadow), 0010 (input), 0024 (window records)

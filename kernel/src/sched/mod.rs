@@ -259,19 +259,19 @@ impl Host for KernelHost {
     }
 
     fn fill_rect(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) -> Status {
-        crate::gfx::fill_rect(x, y, w, h, color)
+        self.drawing(|canvas| crate::gfx::fill_rect_on(canvas, x, y, w, h, color))
     }
 
     fn fill_dither(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) -> Status {
-        crate::gfx::fill_dither(x, y, w, h, color)
+        self.drawing(|canvas| crate::gfx::fill_dither_on(canvas, x, y, w, h, color))
     }
 
     fn draw_rect(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) -> Status {
-        crate::gfx::draw_rect(x, y, w, h, color)
+        self.drawing(|canvas| crate::gfx::draw_rect_on(canvas, x, y, w, h, color))
     }
 
     fn draw_text(&mut self, x: i64, y: i64, text: &[u8], color: u32) -> Status {
-        crate::gfx::draw_text(x, y, text, color)
+        self.drawing(|canvas| crate::gfx::draw_text_on(canvas, x, y, text, color))
     }
 
     // The proportional font (spec 0015). The metrics are 0 and the drawing
@@ -287,7 +287,7 @@ impl Host for KernelHost {
     }
 
     fn draw_text_prop(&mut self, x: i64, y: i64, text: &[u8], color: u32) -> Status {
-        crate::gfx::draw_text_prop(x, y, text, color)
+        self.drawing(|canvas| crate::gfx::draw_text_prop_on(canvas, x, y, text, color))
     }
 
     fn blit_rgb(
@@ -300,7 +300,7 @@ impl Host for KernelHost {
         pw: i64,
         ph: i64,
     ) -> Status {
-        crate::gfx::blit_rgb(x, y, w, h, pixels, pw, ph)
+        self.drawing(|canvas| crate::gfx::blit_rgb_on(canvas, x, y, w, h, pixels, pw, ph))
     }
 
     fn get_pixel(&mut self, x: i64, y: i64) -> u32 {
@@ -308,11 +308,11 @@ impl Host for KernelHost {
     }
 
     fn present(&mut self, x: i64, y: i64, w: i64, h: i64) -> Status {
-        crate::gfx::present(x, y, w, h)
+        crate::window::recompose(x, y, w, h)
     }
 
     fn clear(&mut self, color: u32) -> Status {
-        crate::gfx::clear(color)
+        self.drawing(|canvas| crate::gfx::clear_on(canvas, color))
     }
 
     // Input (spec 0010). The pointer is one machine-wide value; it lives in the
@@ -389,15 +389,15 @@ impl Host for KernelHost {
         if !crate::window::grab_allows(self.current) {
             return Status::WouldBlock;
         }
-        // Window-addressed delivery (spec 0011, W29; ADR 0047). The queue is
-        // still one FIFO, but a queued event belongs to the task that owns its
-        // target; a non-owner sees the head, does not consume it, and gets
-        // `WouldBlock`. A window-less event with no target keeps the ordinary
-        // competition. The peek releases the queue lock before the window lock
-        // is taken, so the two never nest. The owner's normal routing below
-        // still runs (a down raises/focuses/stamps, moves and keys name the
-        // focus, an addressed record passes through); a press inside a
-        // persistent region claim is delivered unchanged (W27).
+        // Window-addressed delivery (spec 0011, W29; ADR 0047; spec 0026,
+        // C12). The queue is still one FIFO, but a queued event belongs to the
+        // task that owns its target; a non-owner sees the head, does not consume
+        // it, and gets `WouldBlock`. A window-less event with no target keeps
+        // the ordinary competition. The peek releases the queue lock before the
+        // window lock is taken, so the two never nest. The owner's normal
+        // routing below still runs (a down raises/focuses/stamps, moves and keys
+        // name the focus, an addressed record passes through); a press inside a
+        // plane's rectangle is delivered unchanged (C12).
         //
         // The modal grab takes precedence (W26): while it is held its owner
         // receives every queued event unchanged, whatever the focus is, so the
@@ -425,10 +425,10 @@ impl Host for KernelHost {
         if routed.window == 0 && !crate::window::grab_active() {
             match routed.kind {
                 abi::EventKind::PointerDown => {
-                    // A press in a persistent region claim was delivered to
-                    // its owner unchanged (W27): no hit-test, no raise, so the
-                    // app-drawn bar sees `window = 0` and its coordinates.
-                    if crate::window::region_owner_at(routed.x, routed.y).is_none() {
+                    // A press in a plane was delivered to its owner unchanged
+                    // (C12): no hit-test, no raise, so the app-drawn bar and
+                    // its pull-downs see `window = 0` and screen coordinates.
+                    if crate::window::plane_owner_at(routed.x, routed.y).is_none() {
                         if let Some(id) = crate::window::route_click(routed.x, routed.y) {
                             routed.window = id as i64;
                         }
@@ -464,8 +464,8 @@ impl Host for KernelHost {
 
     fn input_ready(&mut self) -> bool {
         // The modal popup grab (W26) hides the shared queue from every
-        // non-owner, and a press in another task's claimed region (W27) is not
-        // a non-owner's to consume; the caller's own expose/close still count.
+        // non-owner, and a press in another task's plane (C12) is not a
+        // non-owner's to consume; the caller's own expose/close still count.
         crate::task::input_queue_ready(self.current)
             || crate::window::has_expose(self.current)
             || crate::window::has_close(self.current)
@@ -480,6 +480,13 @@ impl Host for KernelHost {
     /// its own lock and no graphics lock is held on entry.
     fn window_present(&mut self, id: u64) -> Status {
         crate::window::present(self.current, id)
+    }
+
+    /// Opens the caller's draw scope on one of its windows (spec 0026, C3).
+    /// `0` targets the screen and clears the scope; the host supplies the
+    /// caller as the owner and the window table takes its own lock.
+    fn window_begin(&mut self, id: u64) -> Status {
+        crate::window::begin(self.current, id)
     }
 
     fn window_minimized(&mut self, id: u64) -> bool {
@@ -542,15 +549,27 @@ impl Host for KernelHost {
         crate::window::popup_release(self.current)
     }
 
-    /// The one machine-wide persistent pointer-region claim (spec 0011, W27;
-    /// ADR 0045). The host supplies the caller as the owner; a release wakes
-    /// input waiters after the window unlock.
-    fn region_claim(&mut self, x: i64, y: i64, w: i64, h: i64) -> Status {
-        crate::window::region_claim(self.current, x, y, w, h)
+    /// Plane surfaces and the work area (spec 0026, C11–C13). The host
+    /// supplies the caller as the owner; the kernel plane table takes its own
+    /// lock under the window table lock.
+    fn plane_create(&mut self, x: i64, y: i64, w: i64, h: i64) -> Result<u64, Status> {
+        crate::window::plane_create(self.current, x, y, w, h)
     }
 
-    fn region_release(&mut self) -> Status {
-        crate::window::region_release(self.current)
+    fn plane_destroy(&mut self, id: u64) -> Status {
+        crate::window::plane_destroy(self.current, id)
+    }
+
+    fn plane_begin(&mut self, id: u64) -> Status {
+        crate::window::plane_begin(self.current, id)
+    }
+
+    fn plane_present(&mut self, id: u64) -> Status {
+        crate::window::plane_present(self.current, id)
+    }
+
+    fn work_area_reserve(&mut self, height: i64) -> Status {
+        crate::window::work_area_reserve(height)
     }
 
     // Terminal emulator console sessions (spec 0021, ADR 0053). The owner is
@@ -835,6 +854,19 @@ impl Host for KernelHost {
 }
 
 impl KernelHost {
+    /// Routes one drawing primitive to the caller's surface canvas (a window
+    /// or a plane, spec 0026 C3/C4). With no open scope it is
+    /// `Status::Invalid` and writes nothing: there is no shadow path (C20).
+    fn drawing<F>(&mut self, on_canvas: F) -> Status
+    where
+        F: FnOnce(&crate::gfx::Canvas) -> Status,
+    {
+        if let Some(status) = crate::window::with_canvas(self.current, on_canvas) {
+            return status;
+        }
+        Status::Invalid
+    }
+
     /// The task that owns `event`'s window target (spec 0011, W29; ADR 0047).
     /// `None` means no window target, so the ordinary first-poller rule
     /// applies. One kernel-internal rule serves both `poll_event` and
@@ -976,9 +1008,10 @@ fn loop_body(core: usize) -> ! {
                                     // expose/close marked for this task,
                                     // between the empty read and the block
                                     // above. The queue probe also respects the
-                                    // modal grab (W26) and the claimed region
-                                    // (W27), so a non-owner does not spin on a
-                                    // press that is not its to consume.
+                                    // modal grab (W26) and plane press
+                                    // ownership (C12), so a non-owner does not
+                                    // spin on a press that is not its to
+                                    // consume.
                                     if crate::task::input_queue_ready(id)
                                         || crate::window::has_expose(id)
                                         || crate::window::has_close(id)

@@ -171,7 +171,7 @@ pub fn has_event() -> bool {
 
 /// Copies the oldest event into `dst` **without consuming it**. `dst` is shaped
 /// like the `Event` record ([`layout::event::SIZE`] bytes). Used by poll-time
-/// routing to inspect the head under the region claim (spec 0011, W27): a
+/// routing to inspect the head under plane press ownership (spec 0026, C12): a
 /// non-owner returns `WouldBlock` and must leave the press for the owner.
 ///
 /// The queue lock is released before the caller takes the window lock, so the

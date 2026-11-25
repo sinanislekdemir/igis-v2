@@ -5,7 +5,9 @@ unit windows_demo;
 //
 //   run windows_demo
 //
-//   1. Clear to the 50% dither desktop.
+//   1. The service paints the 50% dither desktop (spec 0026, C14); the demo no
+//      longer clears the shadow itself. Every content pass opens the window's
+//      draw scope first (C3).
 //   2. Open three overlapping windows with distinct titles and content
 //      colours; the service draws the border, title bar, stripes (focused) and
 //      close box itself, and fills the desktop under each new frame.
@@ -18,7 +20,7 @@ unit windows_demo;
 //   5. Check chrome and content pixels and present the whole screen. Printing
 //      a line scrolls the console, which shares the shadow, so the checks are
 //      silent and the final composition is painted *after* the last line:
-//      `windows_demo: ready`, then clear/draw/present once more, then hold for
+//      `windows_demo: ready`, then draw/present once more, then hold for
 //      ~15 s so a screenshot can be taken. `windows_demo: ok` follows the hold.
 //
 // The hold promotes the task to the realtime class (with heartbeats) because a
@@ -81,6 +83,11 @@ end;
 // coordinates come from the service, so the drawing never enters the chrome.
 procedure draw_content(id: int; fill: uint; label: const string[0]);
 begin
+  // Every draw goes through the window's own scope (spec 0026, C3): opening a
+  // later window takes the one per-task scope, so the painter selects its
+  // target explicitly. Coordinates stay absolute screen values, translated by
+  // the service into the canvas.
+  status := syslib.window_begin(id);
   status := syslib.window_content_rect(id, rect);
   if status = Ok then
   begin
@@ -88,6 +95,9 @@ begin
     status := syslib.draw_rect(rect.x + 2, rect.y + 2, rect.w - 4, rect.h - 4, black);
     status := syslib.draw_text(rect.x + 10, rect.y + 12, label, black);
     status := syslib.draw_text(rect.x + 10, rect.y + 28, "M2.3.2 composition", black);
+    // The first present makes the canvas part of the composition (spec 0026,
+    // C15); `syslib.present` alone would only repaint already-valid surfaces.
+    status := syslib.window_present(id);
   end;
 end;
 
@@ -95,8 +105,9 @@ end;
 // final screenshot after the console lines have scrolled the shadow.
 procedure compose();
 begin
-  status := syslib.clear(white);
-  status := syslib.fill_dither(0, 0, int(screen_w), int(screen_h), black);
+  // The service paints the 50% dither desktop (spec 0026, C14); a client can no
+  // longer clear the screen (C20), so the old `clear`/`fill_dither` pair is
+  // gone and this is the same dither it produced.
   status := syslib.window_open(60, 70, 300, 180, "Alpha", a);
   status := syslib.window_open(240, 150, 320, 200, "Beta", b);
   status := syslib.window_open(420, 280, 280, 180, "Gamma", c);
@@ -122,8 +133,6 @@ end;
 // chrome in its visible parts, and finally the whole screen is presented.
 procedure repaint();
 begin
-  status := syslib.clear(white);
-  status := syslib.fill_dither(0, 0, int(screen_w), int(screen_h), black);
   draw_content(b, beta_fill, "beta content");
   draw_content(c, gamma_fill, "gamma content");
   draw_content(a, alpha_fill, "alpha content");

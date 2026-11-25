@@ -50,6 +50,7 @@ var
   exited_ok: bool;
   baseline: int;
   win: int;
+  plane: int;
 
 // One line per step; the first failure names the step and stops the checks.
 procedure check(label: const string[0]; passed: bool);
@@ -134,7 +135,16 @@ begin
   // 2. Pointer transitions are queued by the pointer path itself. The point
   // is (40, 10): the menu-bar row, above every window (kernel windows start
   // at y = 26), so a pointer-down there hits no window and stays unaddressed.
+  //
+  // The known background comes from a full-screen plane: drawing into the
+  // shadow without a surface is gone (spec 0026, C20), so the old screen-wide
+  // `clear` becomes a plane painted the same colour and presented once. A
+  // press inside it is delivered unchanged with `window = 0` (C12), which is
+  // exactly what the pointer-down check below expects.
+  status := syslib.plane_create(0, 0, w, h, plane);
+  status := syslib.plane_begin(plane);
   status := syslib.clear(background);
+  status := syslib.plane_present(plane);
   // Clamp to the origin, then discard the move event the clamp may have
   // produced: a previous app in the same boot may have left the pointer
   // elsewhere, so the next event must deterministically be the move to (40, 10).

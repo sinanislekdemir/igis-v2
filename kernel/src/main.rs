@@ -64,6 +64,10 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
     // paints, while the shadow is still the zeroed image, so the restored
     // pixels are exact and nothing is presented.
     let clip_check = gfx::clip_self_check();
+    // The surface primitive (spec 0026, C4; ADR 0060): a scratch surface with
+    // a non-zero origin proves screen-to-buffer translation and clip/extent
+    // clamping without touching the shadow. The result is printed below.
+    let surface_check = gfx::surface_self_check();
     console::init();
 
     // Console routing (spec 0012): application bytes land in the terminal
@@ -181,9 +185,15 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
         frame::free_frames() * frame::FRAME_SIZE / (1024 * 1024)
     );
 
-    // The window table's policy (spec 0011): geometry, z-order, focus,
-    // ownership and the limits, run on a scratch table with fixed geometry.
-    // A mismatch halts, so a broken rule cannot pass silently.
+    // The surface primitive's translation and clipping, checked on scratch
+    // memory; the window table's policy (spec 0011) then runs on a scratch
+    // table. A mismatch halts, so a broken rule cannot pass silently.
+    if surface_check {
+        println!("graphics: surface ok");
+    } else {
+        println!("graphics: surface FAIL");
+        arch_x86_64::halt();
+    }
     match clip_check {
         Some(true) => println!("graphics: clip ok"),
         Some(false) => {
@@ -264,24 +274,33 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
             arch_x86_64::halt();
         }
     }
-    // The persistent pointer-region claim (spec 0011, W27; ADR 0045): claim,
-    // `Full`, update, invalid extent, owner-only release, rectangle hit,
-    // coexistence with the modal grab and termination release, all on scratch
-    // state.
-    match window::region_self_check() {
-        Ok(()) => println!("window: region ok"),
+    // The plane stack and the work area (spec 0026, C11–C13): the 8-plane
+    // limit, clamping, owner-only begin/present/destroy, the first-present
+    // rule and one-shot destroy damage, all on scratch state.
+    match window::planes_self_check() {
+        Ok(()) => println!("window: planes ok"),
         Err(step) => {
-            println!("window: region FAIL at step {step}");
+            println!("window: planes FAIL at step {step}");
             arch_x86_64::halt();
         }
     }
-    // Window-addressed input delivery (spec 0011, W29; ADR 0047): the hit,
-    // focus, region-precedence, addressed, owner-0, no-target and non-owner
-    // cases on a scratch table.
+    // Window-addressed input delivery (spec 0011, W29; ADR 0047; spec 0026,
+    // C12): the hit, focus, plane-precedence, addressed, owner-0, no-target and
+    // non-owner cases on a scratch table and a scratch plane stack.
     match window::target_self_check() {
         Ok(()) => println!("window: target ok"),
         Err(step) => {
             println!("window: target FAIL at step {step}");
+            arch_x86_64::halt();
+        }
+    }
+    // The surface draw scope (spec 0026, C3): implicit owner scope on open,
+    // owner-only begin, replace, screen target and close cleanup, all on
+    // scratch state.
+    match window::begin_self_check() {
+        Ok(()) => println!("window: begin ok"),
+        Err(step) => {
+            println!("window: begin FAIL at step {step}");
             arch_x86_64::halt();
         }
     }

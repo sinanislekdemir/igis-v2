@@ -174,6 +174,7 @@ var
   right_x: int;
   right_w: int;
 begin
+  st := syslib.window_begin(under);
   st := syslib.window_content_rect(under, c);
   if st = Ok then
   begin
@@ -225,6 +226,7 @@ procedure paint_target();
 var
   st: Status;
 begin
+  st := syslib.window_begin(id);
   st := syslib.window_content_rect(id, content);
   if st = Ok then
   begin

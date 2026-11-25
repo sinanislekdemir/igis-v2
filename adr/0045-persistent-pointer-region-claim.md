@@ -1,6 +1,6 @@
 # 0045: A persistent pointer-region claim protects the menu bar's opening click
 
-- **Status:** Accepted
+- **Status:** Superseded by 0060 (a plane carries the rectangle, its pixels and its input rule)
 - **Date:** 2026-11-18
 - **Deciders:** igis-v2 kernel/UI
 - **Related specs:** 0011 (W27 added), 0010 (routing exception), 0012 (D20), 0003 (`syslib.region_claim`/`region_release`), 0008 (builtins 60/61)

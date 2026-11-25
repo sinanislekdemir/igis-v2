@@ -6,8 +6,8 @@
   `syslib`; M2.2 of the desktop milestone
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0021, 0022, 0023, 0047
-- **Updated:** 2026-11-18
+- **ADRs:** 0021, 0022, 0023, 0045, 0047, 0060 (coordinate spaces: spec 0026 C9)
+- **Updated:** 2026-11-25
 
 ## Context
 
@@ -200,6 +200,11 @@ Buttons are a bit mask: bit 0 left, bit 1 right, bit 2 middle.
     the boot log. Overflow is a bounded failure, never a stall: the handler keeps draining
     the controller, so the level-triggered line still falls;
   - an unexpected or spurious `0x2C` with no aux byte waiting acknowledges and returns.
+- **I35 (DEFERRED to M17, spec 0026 C9):** event coordinates are window-local for a
+  window-addressed event. **M16 keeps screen coordinates for every event** (the pre-M16
+  model): a client converts with the content rectangle it reads on an `Expose`. The
+  `Event` layout is unchanged either way, and the machine-wide pointer state and
+  `inject_pointer` stay in screen coordinates.
 - **I33 (MUST):** Bring-up is fail-safe and visible. The boot log names the route
   (`ioapic: version ..., IRQ12 -> vector 0x2c on apic N (level)` and
   `mouse: aux IRQ12 enabled (config ...)`) or the reason polling remains
@@ -780,3 +785,4 @@ drains the ring (and, only while IRQ12 is inactive, the controller) and decodes 
 | 2026-11-18 | M8.3 routing exception (spec 0011 W26, ADR 0044): while a task holds the modal popup input grab, `next_event`/`poll_event` return queued events only to that task, unchanged (`window = 0`, no hit-test or raise). A non-owner returns `WouldBlock` without consuming the queue, and `input_ready`/the scheduler's post-block re-check/`next_any` source 1 report the queue only for the owner (`window::grab_allows`). The owner's own `Close`/`Expose` are still served first, and a release or the owner's termination wakes every input waiter. No `Event` layout, opcode or builtin change beyond the two `syslib.popup_*` calls. |
 | 2026-11-18 | M8.4 routing exception (spec 0011 W27, ADR 0045): `event::peek` reads the queue head without consuming it, and a head-of-queue `PointerDown` with `window = 0` inside a persistent pointer-region claim is delivered only to the claim owner; every other task gets `WouldBlock` with the queue untouched. The modal grab still takes precedence while active (its owner receives all queued events and the region gate is skipped). Moves, releases, keys and presses outside the rectangle route normally. `task::input_queue_ready` applies the grab and region rules to `input_ready`, the scheduler's post-block `Input` re-check and `next_any` source 1; release and termination wake input waiters. No `Event` layout, opcode or builtin change beyond the two `syslib.region_*` calls. |
 | 2026-11-18 | M8.6 window-addressed delivery (I31 amended, I34 added; spec 0011 W29; ADR 0047): one kernel-internal `window::input_target` rule decides who may dequeue each queued record — an addressed record by its window's owner, a window-less `PointerDown` by the region claimant or the topmost hit window's owner, moves/keys by the focused window's owner, and no target for a kernel window, an empty desktop or an unowned pending kind. `poll_event` peeks and a non-owner gets `WouldBlock` without consuming; the owner takes the ordinary routing path, and a region press stays unchanged (W27). The modal grab still takes precedence (W26) and skips the target gate. `task::input_queue_ready` uses the same target for `input_ready`, the post-block re-check and `next_any` source 1. `window: target ok` is the boot self-check; `scripts/input_routing_qmp.py` proves a desktop-launched Browser's click/Enter, the About close box with the Browser live, and a Calculator button click with the desktop alive. `events`/`multiplex` now own a small window because window-less input belongs to the focus. No opcode, builtin, `Host`, `stdlib` or `Event` layout change. |
+| 2026-11-25 | Window-local event coordinates (I35, ADR 0060/spec 0026 C9): an event addressed to a window carries coordinates relative to its content rectangle, while `window = 0` events and the machine pointer stay in screen coordinates. No record layout change; the pointer primitives and `inject_pointer` are unchanged. |

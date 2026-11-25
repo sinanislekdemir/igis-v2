@@ -140,6 +140,10 @@ begin
   verify("narrow drawn", status = Ok);
   status := syslib.draw_text_prop(cx + 52, gy, "M", black);
   verify("wide drawn", status = Ok);
+  // Read back through the composed shadow: content lives in the window's
+  // canvas until a present (spec 0026, C4/C7), so present before each pixel
+  // check block.
+  status := syslib.window_present(id);
   verify("narrow dot", syslib.get_pixel(cx + 13, gy + 3) = black);
   verify("narrow stem", syslib.get_pixel(cx + 13, gy + 9) = black);
   verify("narrow left cell blank", syslib.get_pixel(cx + 12, gy + 9) = white);
@@ -151,6 +155,7 @@ begin
   // (font8x8 row 0 is 0x0C: columns 2 and 3).
   status := syslib.draw_text(cx + 140, gy, "A", black);
   verify("8x8 draw ok", status = Ok);
+  status := syslib.window_present(id);
   verify("8x8 A column 2", syslib.get_pixel(cx + 142, gy) = black);
   verify("8x8 A column 0 blank", syslib.get_pixel(cx + 140, gy) = white);
 
@@ -164,6 +169,7 @@ begin
   verify("utf8 cell is blank", syslib.get_pixel(cx + 13, fy + 2) = white);
   status := syslib.draw_text_prop(cx + 12, fy + 24, "éA", black);
   verify("utf8 A drawn", status = Ok);
+  status := syslib.window_present(id);
   verify("utf8 A position", syslib.get_pixel(cx + 30, fy + 26) = black);
   verify("utf8 A leading cell blank", syslib.get_pixel(cx + 28, fy + 26) = white);
   verify("utf8 gap blank", syslib.get_pixel(cx + 27, fy + 26) = white);
@@ -176,13 +182,16 @@ begin
   verify("past edge ok", status = Ok);
   status := syslib.draw_text_prop(cx - 1, cy + 160, "i", black);
   verify("partial glyph ok", status = Ok);
+  status := syslib.window_present(id);
   verify("partial glyph stem", syslib.get_pixel(cx, cy + 169) = black);
 
   // The window service's own title bar uses the proportional font: "Font" is
   // centred in the band right of the close box, and the F's top bar starts at
   // the band's left edge on the first cap row (line top + 2).
   title_w := tw("Font");
-  band_x := cx + 20 + (rect.w - 20 - title_w) div 2;
+  // The service centres the title in the band between the close and minimize
+  // boxes: 20 px on the left and 18 px on the right of the content width.
+  band_x := cx + 20 + (rect.w - 38 - title_w) div 2;
   verify("service title uses prop", syslib.get_pixel(band_x, cy - 12) = black);
 
   status := syslib.draw_text_prop(cx + 12, cy + 210, "The quick brown fox jumps over the lazy dog.", black);

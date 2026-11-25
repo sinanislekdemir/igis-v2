@@ -28,6 +28,7 @@ resolved, record the answer in the relevant spec or in a new ADR, then remove it
 | Q43 | Distinct `TaskId` type | `core.run`, `spawn`, `wait` and `kill` are implemented; task ids are still `int` (0 invalid). Introduce a nominal `TaskId` when `stdlib` exposes these primitives, so an id cannot be confused with another integer (spec 0003, "Task ids"). The `stdlib` has started (text helpers only) and still exposes no task primitives | before `stdlib` exposes `run` |
 | Q45 | Staged `syslib` handles | `syslib.port_in8`/`port_out8` are implemented with `Port` as a plain scalar `uint` (low 16 bits used); there are no opaque `Port`/`MmioRegion` types, MMIO mapping, or DMA/block primitives yet. Replace with the handle model when MMIO or DMA lands (specs 0003, 0005) | first MMIO or DMA device |
 | Q48 | Pointer feel: acceleration, wheel, extra buttons | not in M2.2: motion is 1:1 (one count, one pixel) and only three buttons exist. Acceleration needs a tuning curve (and a clock or a count accumulator), a wheel adds a fourth axis, and both want a control to use them. `syslib.inject_pointer` takes only `dx`/`dy`/`buttons`, so a wider device surface would need a new primitive or a field on `Event` (spec 0010, open questions 1–2) | when a desktop application actually uses a real mouse, or a control needs scrolling (M2.4) |
+| Q61 | Cursor composited into the shadow | spec 0010 I7 keeps the cursor framebuffer-only. ADR 0060 makes the shadow an authoritative composed image, so a shadow cursor would allow a cursor-only fast path and a later hardware sprite. Costs `get_pixel` composition (a client would read cursor pixels) and headless self-check determinism | when a cursor fast path or a hardware cursor matters |
 
 ## C. Streams
 
@@ -696,3 +697,16 @@ Specs 0001–0008 are accepted and the boot skeleton runs (done 2026-11-13). Nex
     spec 0012: a global work area (an app can still cover the bar at `y = 0`), kernel
     log history beyond the visible grid, single-instance/menu-bar ownership when
     M2.5.6 boots to the desktop, and per-window clip/ownership for kernel drawing.
+
+## Decided in the 2026-11-25 composition session
+
+1. ~~Canvas memory budget (Q60)~~ — **no budget**. A canvas is rectangle-sized and the
+   frame allocator is the only limit; a failed allocation is `Status.Full` with nothing
+   created (spec 0026 C2, ADR 0060). An arbitrary constant would either refuse legitimate
+   windows at high resolution modes or need raising.
+2. ~~Whether client drawing keeps absolute screen coordinates~~ — **no**. Drawing,
+   `get_pixel` and window-addressed events are surface-local; absolute geometry queries
+   stay only for placing a second window (spec 0026 C8–C10, spec 0010 I35).
+3. ~~Whether the desktop shell may draw the shadow directly~~ — **no**. The compositor is
+   the only writer; the bar and pull-downs are planes, and the persistent region claim is
+   retired (spec 0026 C11/C12/C20).

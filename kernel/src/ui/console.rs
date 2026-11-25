@@ -13,18 +13,18 @@
 //!
 //! # Locking
 //!
-//! One [`CONSOLE`] lock owns both grids. Drawing takes `CONSOLE`, then asks the
-//! window table for the content's visible parts (`WINDOW`), then paints through
-//! `gfx` (`SCREEN`): `CONSOLE → WINDOW → SCREEN`. The window service's repair
-//! takes `WINDOW → SCREEN`; no path takes `WINDOW` and then `CONSOLE`. Pending
-//! `Expose` flags for owner `0` are pulled by [`pump`] at the service
-//! opportunity rather than pushed from the repair, which keeps that order.
+//! One [`CONSOLE`] lock owns both grids. Drawing takes `CONSOLE`, then the
+//! window table lock (`WINDOW`) and paints the window's own canvas: `CONSOLE →
+//! WINDOW → SCREEN`. The window service's composition takes `WINDOW → SCREEN`;
+//! no path takes `WINDOW` and then `CONSOLE`. Pending `Expose` flags for owner
+//! `0` are pulled by [`pump`] at the service opportunity rather than pushed
+//! from the composition, which keeps that order.
 //!
-//! A cell is painted only inside the window's **visible parts** (its content
-//! minus the frames of higher windows). The console passes that clip explicitly
-//! to `gfx` (`draw_cell`/`present_within`) instead of narrowing the shadow's one
-//! global clip: a whole-grid repaint must not clip an application drawing on
-//! another core.
+//! A cell is painted into the console window's canvas (spec 0026, C4; ADR
+//! 0060); a flush or a whole-grid repaint recomposes the window frame once. The
+//! console no longer computes visible parts or uses an explicit shadow clip:
+//! the compositor paints every layer and a higher window simply covers the
+//! canvas.
 //!
 //! # Console input (spec 0005, ADR 0037)
 //!
@@ -68,10 +68,6 @@ const MAX_ROWS: usize = 128;
 const MARGIN: i64 = 8;
 const TOP: i64 = 26;
 
-/// Desktop colours, matching the window service (spec 0011, W11).
-const DESKTOP_BASE: u32 = 0x00FF_FFFF;
-const DESKTOP_DITHER: u32 = 0x0000_0000;
-
 /// System-log ink: black on a light grey.
 const LOG_FG: u32 = 0x0000_0000;
 const LOG_BG: u32 = 0x00F0_F0F0;
@@ -88,18 +84,16 @@ struct Terminal {
     rows: usize,
     col: usize,
     row: usize,
-    /// Content origin in screen pixels.
+    /// Content origin in screen pixels (for `get_pixel` reads; painting uses
+    /// the canvas origin under the table lock).
     x: i64,
     y: i64,
     fg: u32,
     bg: u32,
-    /// The window-service generation the cached geometry was read at, so a
-    /// moved terminal is followed without a table query per byte.
-    generation: u64,
     /// The window is minimized; update the grid but do not paint (M11).
     hidden: bool,
     /// Cells drawn since the last present. One bounded bounding box is enough:
-    /// a write run is a line, and the whole box is presented once per flush
+    /// a write run is a line, and the canvas is recomposed once per flush
     /// (spec 0012, D3; spec 0016).
     dirty: Option<Rect>,
     grid: [[u8; MAX_COLS]; MAX_ROWS],
@@ -117,7 +111,6 @@ const EMPTY_TERMINAL: Terminal = Terminal {
     y: 0,
     fg: 0,
     bg: 0,
-    generation: 0,
     hidden: false,
     dirty: None,
     grid: [[0; MAX_COLS]; MAX_ROWS],
@@ -151,7 +144,6 @@ impl Terminal {
         self.y = 0;
         self.fg = fg;
         self.bg = bg;
-        self.generation = 0;
         self.hidden = false;
         self.dirty = None;
         for line in self.grid.iter_mut() {
@@ -169,9 +161,10 @@ impl Terminal {
         self.rows = rows;
     }
 
-    /// Re-reads the window's content rectangle and follows a move (spec 0014).
-    /// Returns whether the geometry changed; a missing window reports `false`
-    /// and is detached by [`pump`] instead.
+    /// Re-reads the window's content rectangle. Only a content-size change
+    /// needs a repaint: the canvas is window-local, so a move is an origin
+    /// change the compositor follows (spec 0026, C10). The origin is still
+    /// refreshed for the self-check's absolute `get_pixel` reads.
     fn sync(&mut self) -> bool {
         if !self.attached {
             return false;
@@ -179,20 +172,18 @@ impl Terminal {
         let Ok(rect) = window::content_rect(self.id) else {
             return false;
         };
-        self.generation = window::generation();
         let cols = (rect.w / CELL).clamp(0, MAX_COLS as i64) as usize;
         let rows = (rect.h / CELL).clamp(0, MAX_ROWS as i64) as usize;
-        let changed =
-            self.x != rect.x || self.y != rect.y || self.cols != cols || self.rows != rows;
-        if changed {
-            self.x = rect.x;
-            self.y = rect.y;
+        let resized = self.cols != cols || self.rows != rows;
+        self.x = rect.x;
+        self.y = rect.y;
+        if resized {
             self.cols = cols;
             self.rows = rows;
             self.col = self.col.min(self.cols.saturating_sub(1));
             self.row = self.row.min(self.rows.saturating_sub(1));
         }
-        changed
+        resized
     }
 
     /// Clears the character grid and puts the cursor at the home cell, then
@@ -239,132 +230,75 @@ impl Terminal {
         });
     }
 
-    /// Presents the cells drawn since the last flush in one go (spec 0012 D3;
-    /// spec 0016). The visible parts are read now, under the window table lock
-    /// across the present (`WINDOW → SCREEN`), and only the dirty rectangle is
-    /// copied. A window that moved above the terminal in between is already in
-    /// the shadow, so the copy cannot resurrect stale pixels.
+    /// Recomposes the window after the cells drawn since the last flush
+    /// (spec 0026, C14; spec 0012 D3). `paint_window` holds the window table
+    /// lock across the (empty) paint and the recomposition, so a concurrent
+    /// move or raise cannot interleave.
     fn flush(&mut self) {
-        let Some(dirty) = self.dirty.take() else {
+        let Some(_dirty) = self.dirty.take() else {
             return;
         };
-        if !self.attached || self.hidden || dirty.w <= 0 || dirty.h <= 0 {
+        if !self.attached || self.hidden {
             return;
         }
-        let id = self.id;
-        let _ = window::paint_visible_parts(id, &mut |parts| {
-            for part in parts {
-                let x0 = dirty.x.max(part.x);
-                let y0 = dirty.y.max(part.y);
-                let x1 = dirty
-                    .x
-                    .saturating_add(dirty.w)
-                    .min(part.x.saturating_add(part.w));
-                let y1 = dirty
-                    .y
-                    .saturating_add(dirty.h)
-                    .min(part.y.saturating_add(part.h));
-                if x1 <= x0 || y1 <= y0 {
-                    continue;
-                }
-                let clip = gfx::Clip {
-                    x: x0,
-                    y: y0,
-                    w: x1 - x0,
-                    h: y1 - y0,
-                };
-                let _ = gfx::present_within(x0, y0, x1 - x0, y1 - y0, clip);
-            }
-        });
+        let _ = window::paint_window(self.id, |_| {});
     }
 
-    /// Draws the cell background and glyph inside every visible part that the
-    /// cell intersects (spec 0012 D3). The cell is not presented here: its
+    /// Draws the cell background and glyph into the console's own canvas
+    /// (spec 0026, C4; ADR 0060). The cell is not presented here: its
     /// rectangle joins the terminal's dirty box and one [`Terminal::flush`]
-    /// presents the run, so typing a line costs one present, not one per cell.
+    /// recomposes the window, so typing a line costs one composition, not one
+    /// per cell.
     ///
-    /// The window table lock is held for the whole paint, so a window opened,
-    /// raised or moved on another core cannot change the visible parts between
-    /// the geometry read and the pixels.
+    /// The window table lock is held for the whole paint, so a concurrent move
+    /// or close cannot free the canvas between the lookup and the write.
     fn paint_cell(&mut self, col: usize, row: usize) {
         if !self.attached || self.hidden || col >= self.cols || row >= self.rows {
             return;
         }
-        let x0 = self.x + col as i64 * CELL;
-        let y0 = self.y + row as i64 * CELL;
-        let x1 = x0 + CELL;
-        let y1 = y0 + CELL;
         let code = self.grid[row][col];
         let id = self.id;
         let fg = self.fg;
         let bg = self.bg;
-        let _ = window::paint_visible_parts(id, &mut |parts| {
-            for part in parts {
-                if part.x >= x1
-                    || part.y >= y1
-                    || part.x.saturating_add(part.w) <= x0
-                    || part.y.saturating_add(part.h) <= y0
-                {
-                    continue;
-                }
-                let clip = gfx::Clip {
-                    x: part.x,
-                    y: part.y,
-                    w: part.w,
-                    h: part.h,
-                };
-                let _ = gfx::draw_cell(x0, y0, code, fg, bg, clip);
-            }
+        let origin = window::draw_on_window(id, |canvas| {
+            let x = canvas.ox + col as i64 * CELL;
+            let y = canvas.oy + row as i64 * CELL;
+            let _ = gfx::draw_cell_on(canvas, x, y, code, fg, bg);
+            (x, y)
         });
-        self.mark_dirty(Rect {
-            x: x0,
-            y: y0,
-            w: CELL,
-            h: CELL,
-        });
+        if let Some((x, y)) = origin {
+            self.mark_dirty(Rect {
+                x,
+                y,
+                w: CELL,
+                h: CELL,
+            });
+        }
     }
 
-    /// Repaints the whole grid into every visible part of the content
-    /// rectangle, presenting each part once (spec 0012 D3). As in
-    /// [`Terminal::paint_cell`], the window lock is held across the paint.
+    /// Repaints the whole grid into the console's canvas and recomposes the
+    /// window once (spec 0026, C14; spec 0012 D3).
     fn repaint(&mut self) {
         if !self.attached || self.hidden {
             return;
         }
-        // The whole content is drawn and presented below, so any pending
-        // per-cell dirty box is covered.
+        // The whole canvas is redrawn below, so any pending per-cell dirty box
+        // is covered.
         self.dirty = None;
         let id = self.id;
-        let x0 = self.x;
-        let y0 = self.y;
         let cols = self.cols;
         let rows = self.rows;
         let fg = self.fg;
         let bg = self.bg;
         let grid = &self.grid;
-        let _ = window::paint_visible_parts(id, &mut |parts| {
-            for part in parts {
-                let clip = gfx::Clip {
-                    x: part.x,
-                    y: part.y,
-                    w: part.w,
-                    h: part.h,
-                };
-                for row in 0..rows {
-                    let y = y0 + row as i64 * CELL;
-                    if y >= part.y.saturating_add(part.h) || y + CELL <= part.y {
-                        continue;
-                    }
-                    for col in 0..cols {
-                        let x = x0 + col as i64 * CELL;
-                        if x >= part.x.saturating_add(part.w) || x + CELL <= part.x {
-                            continue;
-                        }
-                        let code = grid[row][col];
-                        let _ = gfx::draw_cell(x, y, code, fg, bg, clip);
-                    }
+        let _ = window::paint_window(id, |canvas| {
+            for row in 0..rows {
+                let y = canvas.oy + row as i64 * CELL;
+                for col in 0..cols {
+                    let x = canvas.ox + col as i64 * CELL;
+                    let code = grid[row][col];
+                    let _ = gfx::draw_cell_on(canvas, x, y, code, fg, bg);
                 }
-                let _ = gfx::present_within(part.x, part.y, part.w, part.h, clip);
             }
         });
     }
@@ -374,11 +308,6 @@ impl Terminal {
     fn feed(&mut self, byte: u8) {
         if !self.attached {
             return;
-        }
-        // A window move bumps the service generation; follow the content
-        // rectangle before painting into the old origin.
-        if window::generation() != self.generation {
-            self.sync();
         }
         match byte {
             b'\n' => self.newline(),
@@ -498,19 +427,15 @@ pub fn screen_changed() {
     while window::take_expose(0).is_some() {}
 }
 
-/// Initialises the console: paints the desktop, opens the System Log and paints
-/// its empty grid (spec 0012 D1).
+/// Initialises the console: opens the System Log and paints its empty grid
+/// (spec 0012 D1). The compositor paints the desktop when the first window
+/// opens (spec 0026, C14); the console no longer fills the screen.
 pub fn init() {
     let mut console = CONSOLE.lock();
     console.log.reset(LOG_FG, LOG_BG);
 
     let (width, height) = gfx::size();
     if width > 0 && height > 0 {
-        // The desktop background, before the first window opens; the service
-        // repaints the same pattern under each new frame.
-        let _ = gfx::clear(DESKTOP_BASE);
-        let _ = gfx::fill_dither(0, 0, width as i64, height as i64, DESKTOP_DITHER);
-        let _ = gfx::present(0, 0, width as i64, height as i64);
         console.open_windows(width as i64, height as i64);
         console.log.repaint();
     }
@@ -590,7 +515,7 @@ pub fn pump() {
             console.log.repaint();
         }
     }
-    if window::generation() != console.log.generation && console.log.sync() {
+    if console.log.sync() {
         console.log.repaint();
     }
 }

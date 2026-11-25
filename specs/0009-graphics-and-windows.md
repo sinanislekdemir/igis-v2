@@ -5,8 +5,8 @@
   `arch/x86_64` framebuffer access; M2 of the desktop milestone
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0020, 0024, 0030, 0032
-- **Updated:** 2026-11-17
+- **ADRs:** 0020, 0024, 0030, 0032, 0060 (0026 is the composition spec)
+- **Updated:** 2026-11-25
 
 ## Context
 
@@ -17,10 +17,10 @@ System 7.5 look), and every later piece — a desktop background, windows, menus
 pointer, `expose`-driven repaint — needs one image the kernel owns and can copy from.
 
 The chosen shape (ADR 0020) is a kernel-owned **shadow screen**: a full-screen pixel
-buffer in the frame allocator's memory that is the single source of truth. Applications
-draw into it through `syslib`; `present` blits a rectangle to the real framebuffer; the
-text console draws through it too, so there is exactly one image and no second drawing
-path.
+buffer in the frame allocator's memory that is the single composed image. Since ADR 0060
+and spec 0026 applications draw into their own surface canvases and the service composes
+the shadow from them; the text console draws through its own canvas too, so the
+framebuffer still receives exactly one image from exactly one writer.
 
 This spec defines the drawing layer only. The window service that will sit on top of it
 (mouse, events, windows, z-order, `expose`) is described in "Planned M2 shape" as a
@@ -29,8 +29,9 @@ forward reference; it is not implemented here.
 Non-goals for this slice:
 
 - no mouse, keyboard events, windows, focus, z-order, or `expose`;
-- no per-window canvases, no alpha blending, no scaling; the 8×8 console font is the
-  default and a separate 12-pixel proportional face is specified by 0015;
+- no alpha blending, no scaling, no full-screen buffer per window; each window's canvas
+  is content-sized (G23, spec 0011 W33). The 8×8 console font is the default and a
+  separate 12-pixel proportional face is specified by 0015;
 - no new bytecode opcode: the primitives are host builtins behind `BUILTIN`;
 - no compile-time screen size and no fixed `.bss` shadow.
 
@@ -51,21 +52,26 @@ grows down. Colours are `0x00RRGGBB`.
   in this slice is serial only (the kernel never draws text into an unsupported mode).
 - **G4 (MUST):** The shadow is one full-screen buffer allocated from the frame
   allocator at boot, `pitch * height` bytes of physically contiguous frames. It is not
-  a static `.bss` array and the kernel does not allocate one per window.
-- **G5 (MUST):** The shadow is the single source of truth. Drawing primitives write
-  only the shadow; `present` copies a rectangle to the real framebuffer row by row,
-  using the framebuffer pitch (not `width * 4`), and only within the clipped rectangle.
-  `present` then composites the software cursor on top of the framebuffer copy; the
-  cursor is never stored in the shadow (spec 0010, I7).
-- **G6 (MUST):** `syslib.clear(color)` fills the whole screen in the shadow and presents
-  it. Other drawing primitives do not present.
-- **G7 (MUST):** Clipping is a rectangular region, initially the whole screen, applied
-  to every drawing primitive (`clear` is a whole-screen operation and ignores it). The
+  a static `.bss` array and it is not duplicated per window. Every surface (a window or
+  a plane) additionally owns one canvas sized to its own rectangle, from the same
+  allocator (spec 0026 C1/C2).
+- **G5 (MUST):** The shadow is the single **composed** image and only the compositor
+  writes it (spec 0026 C14). Drawing primitives write the caller's open surface canvas,
+  and nothing else (G23). `present` copies a rectangle of the shadow to the real
+  framebuffer row by row, using the framebuffer pitch (not `width * 4`), and only
+  within the rectangle. `present` then composites the software cursor on top of the
+  framebuffer copy; the cursor is never stored in the shadow (spec 0010, I7).
+- **G6 (MUST):** `syslib.clear(color)` fills the caller's open surface canvas with
+  `color` and is `Status.Invalid` without an open scope (spec 0026 C5). It is no longer
+  a screen-wide operation, and no application can paint the desktop or another surface.
+- **G7 (MUST):** A drawing primitive is clipped to the target surface's canvas, and no
+  other clip exists: the service's one shadow clip is gone (spec 0026 "Retired
+  mechanisms"). The
   region is an internal kernel facility so the window manager can narrow it later; this
   slice does not expose it to applications.
-- **G8 (MUST):** Drawing is clipped, never faulted. Coordinates outside the screen are
-  legal and produce no pixels outside the screen. An application cannot fault the
-  kernel with a coordinate that overflows the screen.
+- **G8 (MUST):** Drawing is clipped, never faulted. Coordinates outside the target
+  canvas are legal and produce no pixels outside it. An application cannot fault the
+  kernel with a coordinate that overflows the canvas.
 - **G9 (MUST):** Out-of-range arguments return `Status.Invalid` and draw nothing:
   `w <= 0` or `h <= 0` on a rectangle primitive, and a colour with any bit above bit 23
   set. `get_pixel` has no error path and returns `0` outside the screen.
@@ -132,57 +138,77 @@ grows down. Colours are `0x00RRGGBB`.
   samples source `((dx * pw) / w, (dy * ph) / h)` with integer arithmetic. `w`, `h`,
   `pw` and `ph` must be positive and `pixels` at least `pw * ph * 3` bytes; otherwise
   the result is `Status.Invalid` and nothing is drawn. The destination is clipped to
-  the screen and the current clip region exactly like `fill_rect` (G8/G9); a fully
-  clipped rectangle is `Ok` with no writes. Disabled graphics return `Status.Invalid`
+  the target canvas exactly like `fill_rect` (G8/G9); a fully clipped rectangle is `Ok`
+  with no writes. Disabled graphics return `Status.Invalid`
   (G15/G16). No opcode is added.
+- **G23 (MUST):** A drawing primitive requires an open **surface draw scope**
+  (`window_begin`/`plane_begin`) and writes that surface's canvas; with no open scope it
+  is `Status.Invalid` and draws nothing (spec 0026 C3/C4). Client coordinates stay
+  **absolute screen** coordinates and the kernel subtracts the surface's current origin
+  (M16; the surface-local model is deferred to M17). A rectangle is clipped to the
+  canvas; an off-surface coordinate is legal and draws nothing (G8). A canvas write never
+  presents; presentation is a recomposition (spec 0026 C14/C16).
+- **G24 (MUST):** `get_pixel` reads the **composed shadow** in screen coordinates and
+  returns the uncomposited pixel (spec 0010 I7). A client's pixels reach the shadow on
+  its `*_present` or a repair, so a pixel self-check runs after the present (spec 0026
+  C6).
 
 ## Design
 
 ### Shadow and presentation
 
 ```
-application ──syslib.fill_rect/...──▶ shadow (pitch × height, frame allocator)
+application ──syslib.fill_rect/...──▶ surface canvas (window or plane, surface-local)
                                           │
-                          syslib.present  │  row-by-row copy, pitch aware
+                          *_present       │  compositor: desktop pattern, then every
+                          or a repair     │  window and plane bottom to top
+                                          ▼
+                                   shadow (pitch × height, frame allocator)
+                                          │
+                          presentation    │  row-by-row copy, pitch aware
                                           ▼
                                    real framebuffer
 ```
 
+- The surface and composition model is ADR 0060 and spec 0026. The compositor is the
+  only writer of the shadow; there is no application path into it.
+
 - The shadow row stride equals the framebuffer pitch, so a row is one contiguous run and
   `present` is a per-row copy of `w * 4` bytes. Padding bytes beyond `width * 4` are
   allocated but never drawn or presented.
-- Every pixel write goes through one helper that bounds-checks against the screen and
-  the current clip rectangle. `get_pixel` reads the same helper's storage, so the
-  demo's self-check sees exactly what `present` will show.
+- Every pixel write goes through one helper that bounds-checks against the target
+  canvas. `get_pixel` reads the same helper's storage inside a draw scope, so a
+  self-check sees exactly what was drawn.
 - `present` ends by compositing the software cursor into the framebuffer (spec 0010,
   I7): black outline and white fill pixels are written straight to the framebuffer
   inside the presented rectangle, never into the shadow. `get_pixel` therefore returns
   uncomposited pixels, which is what keeps the self-check meaningful and headless
   verification deterministic.
-- A full-screen shadow at 1024×768×32 is 3 MiB (768 frames at 4 KiB). Nothing else in
-  the kernel allocates per-pixel storage.
+- A full-screen shadow at 1024×768×32 is 3 MiB (768 frames at 4 KiB). The only other
+  per-pixel storage is one rectangle-sized canvas per live surface, bounded by the frame
+  allocator (spec 0026 C2).
 
 ### Clipping
 
-`clip` is a rectangle `(x, y, w, h)` in screen coordinates, initialised to the full
-screen and intersected with the screen bounds on every set. A primitive first rejects
-`w <= 0`/`h <= 0`, then converts to `i64`, intersects the rectangle with the clip, and
-draws only the result. The window manager will narrow the clip to one window while it
-repaints that window; the drawing code does not change.
+There is no shared clip. A primitive first rejects `w <= 0`/`h <= 0`, then converts to
+`i64`, intersects the rectangle with the **target canvas** and draws only the result
+(spec 0026 C4). A surface's own rectangle is the only clipping authority an application
+sees; the compositor's painter's order decides which surface's pixels are visible
+(spec 0026 C14). The `gfx::set_clip`/`reset_clip` pair of M2.3 is retired.
 
 ### Console
 
 `kernel/src/console.rs` keeps its lock and byte-output paths but loses its direct
-framebuffer access. Each glyph is painted into the shadow with an opaque background and
-its 16×16 cell is presented; scrolling copies the shadow up by 16 rows, clears the
-exposed band and presents the screen once. The console draws through the same helper as
-`syslib`, so a partially drawn rule or a desktop underneath is never in a different
+framebuffer access. Each glyph is painted into the console window's **canvas** with an
+opaque background; scrolling moves the grid and recomposites the frame once. The console
+writes through the same surface helper as `syslib`, and the compositor is the only writer
+of the shadow, so a partially drawn rule or a desktop underneath is never in a different
 image from what an application reads.
 
 **Superseded in part by spec 0012 (M2.3.4):** the console no longer owns the full
-screen. It keeps two character grids and paints only inside two kernel-owned window
-content rectangles (owner `0`), one per stream; scrolling moves a grid and repaints that
-window. The "one shadow, one clip" rules above still hold.
+screen. It keeps two character grids and paints inside two kernel-owned window content
+rectangles (owner `0`), one per stream. **Spec 0026 supersedes the per-cell clip:** the
+console paints into its own canvas and the compositor decides visibility.
 
 Text before `gfx::init` runs is serial-only. `kmain` initialises the frame allocator and
 graphics before the console attaches, so the normal boot log is on screen from the first
@@ -195,9 +221,12 @@ line.
 | M2.2 | PS/2 mouse, a composited cursor, pointer state and the `syslib` pointer surface (spec 0010); the console stays a kernel device | shadow, `present`, clip |
 | M2.3 | Kernel window service (spec 0011): windows with a frame, title bar, content rectangle and z-order, single focus and task ownership (M2.3.1); then frame chrome, damage union and `present` (M2.3.2), and event routing plus `expose` repaint under the service-owned clip (M2.3.3) | shadow, clip, `present` |
 
-The window service repaints on `expose`; it does not keep per-window canvases. An
-application redraws its window's content into the clipped shadow when asked, and the
-service decides when to present. Mouse/event delivery and the exact `expose` protocol
+The window service repaints on `expose`; in this slice it does not keep per-window
+canvases. **Superseded by ADR 0060 and spec 0026:** every surface owns a rectangle-sized
+canvas, the service recomposes the shadow from the surface stack, and a client draws into
+its canvas inside a `window_begin`/`plane_begin` scope. An application redraws its canvas
+when asked, and the service decides when to recompose. Mouse/event delivery and the exact
+`expose` protocol
 belong to M2.2/M2.3 and will be specified there.
 
 ### Visual proof and golden frames (M2.6.3)
@@ -383,3 +412,5 @@ an `Info` (width, height, pitch, bpp, shadow address/size/frames, free-frame del
 | 2026-11-17 | M2.6.3 (ADR 0032): G21 resolves M2.1.2 with a host-side QMP `screendump` of a deterministic full-screen specimen (`samples/apps/visual`) compared exactly against `tests/golden/visual.png` + a SHA-256/tile manifest (`scripts/visual_regression.py`). No kernel serial dump or debug builtin is added. The specimen covers the kernel text windows, has no clock/input, checks its own pixels and holds after `visual: ready`; the same golden matches on `-smp 4` and `-smp 1`, `--tamper` proves the comparator rejects a changed pixel, and only `--update` rewrites the golden. 376 host tests. |
 | 2026-11-21 | Runtime display modes (spec 0022, ADR 0056): G2 now separates the boot mode from a later change; the Bochs VBE dispi changes the real mode, the shadow is reallocated and swapped under the graphics lock, and builtins 80–83 expose the mode list and `set_resolution`. No drawing primitive, opcode or boot-mode assumption is added. |
 | 2026-11-21 | Graphics: G22 adds `blit_rgb` (builtin 91, effect `(7,1)`), a nearest-neighbour scaled blit of a `pw × ph` RGB buffer into a destination rectangle. The interpreter rejects non-positive `w`/`h`/`pw`/`ph` and a buffer shorter than `pw * ph * 3` with `Invalid` before the host call; the kernel clips to the screen and the clip region and writes the shadow through the same path as `fill_rect`, so a fully clipped rectangle is `Ok`. No alpha, no colour conversion and no opcode; ABI v1 stays at 75. |
+| 2026-11-25 | Surface canvases and composition accepted (ADR 0060, spec 0026): G4 admits one rectangle-sized canvas per surface from the same frame allocator, G5 makes the shadow the compositor's **composed** image with no application write path, G6 turns `clear` into a scope-local fill, and G7/G23/G24 replace the global clip with a canvas-bounded draw. `syslib.present` becomes a recomposite request. No drawing primitive signature or opcode changes; ABI v1 stays at 75. |
+| 2026-11-26 | Implemented in M16.2/M16.4 (spec 0026 "Implementation status"): the `Surf` surface view, `Canvas`, per-window canvases, the draw scope (builtin 92), the compositor and recomposition. Client coordinates remain **absolute screen coordinates translated by the surface origin**; the surface-local model is deferred to M17 (G23/G24 amended accordingly). |

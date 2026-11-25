@@ -7429,6 +7429,27 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
                 self.push();
                 Ok(Some(Type::enumeration(STATUS_ENUM)))
             }
+            // `syslib.window_begin(id) -> Status` (spec 0026, C3): open the
+            // caller's draw scope on one of its windows; `0` clears the scope.
+            // The scope is service state, so the compiler only checks the
+            // staged signature.
+            "syslib.window_begin" => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`syslib.window_begin` expects 1 argument, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                self.window_id(target, args[0])?;
+                self.one(opcodes::BUILTIN, builtin::WINDOW_BEGIN)?;
+                self.pop(1)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
             "syslib.window_minimized" => {
                 if args.len() != 1 {
                     return Err(self.err(
@@ -7517,8 +7538,11 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             // helper for the same stack-frame reason as `fs_write_call`.
             "syslib.popup_grab" => self.popup_grab_call(args, line, column),
             "syslib.popup_release" => self.popup_release_call(args, line, column),
-            "syslib.region_claim" => self.region_claim_call(args, line, column),
-            "syslib.region_release" => self.region_release_call(args, line, column),
+            "syslib.plane_create" => self.plane_create_call(args, line, column),
+            "syslib.plane_destroy" => self.plane_id_call(builtin::PLANE_DESTROY, target, args, line, column),
+            "syslib.plane_begin" => self.plane_id_call(builtin::PLANE_BEGIN, target, args, line, column),
+            "syslib.plane_present" => self.plane_id_call(builtin::PLANE_PRESENT, target, args, line, column),
+            "syslib.work_area_reserve" => self.work_area_reserve_call(args, line, column),
             // Ring operations (spec 0003, "Rings") are compiler-recognised
             // built-in procedures, not host builtins: they lower to the
             // ordinary reference/copy/branch instructions over the ring's
@@ -8390,26 +8414,23 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
         Ok(Some(Type::enumeration(STATUS_ENUM)))
     }
 
-    /// `syslib.region_claim(x, y, w, h) -> Status` (spec 0011, W27; ADR 0045).
+    /// `syslib.plane_create(x, y, w, h, var id) -> Status` (spec 0026, C11).
     ///
-    /// The persistent counterpart of `popup_grab`: a UI focus mechanism, not an
-    /// authority boundary. A separate function for the same reason as
-    /// [`Self::popup_grab_call`] (the dispatcher's frame is the deepest one in
-    /// a debug build).
-    fn region_claim_call(
+    /// Follows `window_open`'s out-parameter pattern: the four coordinates are
+    /// `int` scalars and the id is a writable `int` slot below them. A separate
+    /// function for the same stack reason as [`Self::popup_grab_call`].
+    fn plane_create_call(
         &mut self,
         args: &'a [&'a Expr<'a>],
         line: u32,
         column: u32,
     ) -> Result<Option<Type>, Diagnostic> {
-        if args.len() != 4 {
+        const WHAT: &str = "syslib.plane_create";
+        if args.len() != 5 {
             return Err(self.err(
                 line,
                 column,
-                format_args!(
-                    "`syslib.region_claim` expects 4 arguments, got {}",
-                    args.len()
-                ),
+                format_args!("`{WHAT}` expects 5 arguments, got {}", args.len()),
             ));
         }
         for (index, name) in ["x", "y", "w", "h"].iter().enumerate() {
@@ -8417,34 +8438,80 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             if value.kind != Kind::Int {
                 return Err(self.err_at(
                     args[index],
-                    format_args!("`syslib.region_claim` expects an `int` {name}, found `{value}`"),
+                    format_args!("`{WHAT}` expects an `int` {name}, found `{value}`"),
                 ));
             }
         }
-        self.one(opcodes::BUILTIN, builtin::REGION_CLAIM)?;
-        self.pop(4)?;
+        let id = self.emit_scalar_ref(args[4])?;
+        if id.kind != Kind::Int {
+            let found = self.type_name(id);
+            return Err(self.err_at(
+                args[4],
+                format_args!("`{WHAT}` expects `var id: int`, found `{found}`"),
+            ));
+        }
+        self.one(opcodes::BUILTIN, builtin::PLANE_CREATE)?;
+        self.pop(5)?;
         self.push();
         Ok(Some(Type::enumeration(STATUS_ENUM)))
     }
 
-    /// `syslib.region_release() -> Status` (spec 0011, W27; ADR 0045).
-    fn region_release_call(
+    /// `syslib.plane_destroy/begin/present(id) -> Status` (spec 0026,
+    /// C3/C11/C14): the plane analogue of `window_close`/`window_begin`/
+    /// `window_present`.
+    fn plane_id_call(
+        &mut self,
+        opcode: u32,
+        what: &str,
+        args: &'a [&'a Expr<'a>],
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if args.len() != 1 {
+            return Err(self.err(
+                line,
+                column,
+                format_args!("`{what}` expects 1 argument, got {}", args.len()),
+            ));
+        }
+        let found = self.expr_scalar(args[0])?;
+        if found.kind != Kind::Int {
+            let found = self.type_name(found);
+            return Err(self.err_at(
+                args[0],
+                format_args!("`{what}` expects an `int` plane id, found `{found}`"),
+            ));
+        }
+        self.one(opcodes::BUILTIN, opcode)?;
+        self.pop(1)?;
+        self.push();
+        Ok(Some(Type::enumeration(STATUS_ENUM)))
+    }
+
+    /// `syslib.work_area_reserve(height) -> Status` (spec 0026, C13).
+    fn work_area_reserve_call(
         &mut self,
         args: &'a [&'a Expr<'a>],
         line: u32,
         column: u32,
     ) -> Result<Option<Type>, Diagnostic> {
-        if !args.is_empty() {
+        const WHAT: &str = "syslib.work_area_reserve";
+        if args.len() != 1 {
             return Err(self.err(
                 line,
                 column,
-                format_args!(
-                    "`syslib.region_release` expects 0 arguments, got {}",
-                    args.len()
-                ),
+                format_args!("`{WHAT}` expects 1 argument, got {}", args.len()),
             ));
         }
-        self.one(opcodes::BUILTIN, builtin::REGION_RELEASE)?;
+        let value = self.expr_scalar(args[0])?;
+        if value.kind != Kind::Int {
+            return Err(self.err_at(
+                args[0],
+                format_args!("`{WHAT}` expects an `int` height, found `{value}`"),
+            ));
+        }
+        self.one(opcodes::BUILTIN, builtin::WORK_AREA_RESERVE)?;
+        self.pop(1)?;
         self.push();
         Ok(Some(Type::enumeration(STATUS_ENUM)))
     }

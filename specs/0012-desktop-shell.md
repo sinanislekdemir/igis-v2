@@ -5,8 +5,8 @@
   `interpreter`, `abi`; `samples/apps`; M2.3.4 of the desktop milestone
 - **Supersedes:** the full-screen console of spec 0009 G14 (superseded in part)
 - **Superseded by:** none
-- **ADRs:** 0020, 0024, 0025, 0029, 0030, 0046, 0047
-- **Updated:** 2026-11-18
+- **ADRs:** 0020, 0024, 0025, 0029, 0030, 0046, 0047, 0060
+- **Updated:** 2026-11-25
 
 ## Context
 
@@ -45,25 +45,18 @@ resize. Those are M2.4/M2.5.
   scale 1. A full column wraps and a newline at the last row scrolls that window's grid
   one row; it never scrolls the shadow or touches another window. Cells of a grid that
   are not printable are blank.
-- **D3 (MUST):** A cell is painted only inside the intersection of its own rectangle,
-  the window's content rectangle and the window's **visible parts** (content minus the
-  frames of higher windows). The console passes that clip **explicitly** to the drawing
-  helpers (`gfx::draw_cell`/`gfx::present_within`) and never narrows the shadow's one
-  global clip: a whole-grid repaint must not clip an application drawing on another
-  core. A cell that is partly or wholly covered leaves the covering window untouched. A
-  painted cell joins the log's bounded dirty rectangle instead of being presented
-  immediately (M2.6.2, spec 0016): `_print` presents once after
-  their byte run, one flush at the end of `poll_input` presents anything still
-  pending, and a whole-window repaint presents each visible part once. The flush
-  reads the visible parts under the window lock and copies only the dirty rectangle from
-  the current shadow, so a window that moved above the console in between cannot be
-  overwritten. Because a window on another core can open, raise or move above the
-  console between the visible-parts query and the paint, the console holds the window
-  table lock across the whole cell/part paint (`window::paint_visible_parts`); this is
-  the same `WINDOW → SCREEN` order as the service's repair, and the paint callback never
-  calls the console. A window opened or moved afterwards runs its own repair, which
-  paints above the console; the console follows a moved window through the
-  visible-geometry generation on the next pump.
+- **D3 (MUST):** A cell is painted inside the intersection of its own rectangle and the
+  window's **content rectangle**, into the window's **canvas** and in **content-local**
+  coordinates (spec 0026 C1/C4/C8): a whole-grid repaint cannot touch another window,
+  because the canvas is private to the console window. A painted cell joins the console's
+  bounded dirty rectangle instead of being recomposited immediately (M2.6.2, spec 0016):
+  `_print` recomposites once after its byte run, one flush at the end of `poll_input`
+  shows anything still pending, and a whole-window repaint recomposites the frame once.
+  Because the canvas is private, the console no longer needs visible-part subtraction, an
+  explicit clip or the visible-geometry generation; the compositor's painter's order
+  (spec 0026 C14) decides what is visible. The console holds the window table lock across
+  the cell paint and the recomposition (`window::paint_canvas`), the same `WINDOW → CANVAS
+  → SCREEN` order as the service's repair; the paint callback never calls the console.
 - **D4 (MUST):** On a pending `Expose` for owner `0`, the console repaints the system log's
   grid. The repaint is **pulled**, not called from the window service: `console::pump`
   takes an exposed owner-0 window at the service opportunity (and the idle loop, through
@@ -84,11 +77,10 @@ resize. Those are M2.4/M2.5.
   frame clear of the 22-pixel menu bar of D8. If the derived content is below the 8×8
   window minimum, no window is opened (serial only). The title is an ordinary window
   title (at most 64 bytes).
-- **D8 (MUST):** A full-screen `syslib.clear` by an application erases the log
-  window's pixels in the shared shadow, because the service has no per-window canvas.
-  Its record and grid survive; the next `Expose` or kernel log output paints the cells
-  again. This is a documented consequence of the one-shadow model, not a service bug.
-  The desktop shell itself does not clear the screen.
+- **D8 (MUST):** An application can no longer erase the log's pixels: `syslib.clear`
+  fills the caller's own surface canvas and is `Invalid` without a scope (spec 0026 C5),
+  and no application writes the shadow (C4/C20). The log's canvas and grid are its own
+  retained state and are recomposited with every repair.
 
 ### Desktop shell
 
@@ -104,8 +96,10 @@ resize. Those are M2.4/M2.5.
 - **D10 (MUST):** The shell draws a System 7.5-style menu bar at the top of the screen:
   a white bar 22 pixels high, a black 8×8 Apple square, the labels `File`, `Apps`,
   `Windows` and `System`, a black baseline on row 21, and the `core.clock()` `HH:MM`
-  right-aligned. The bar is application-drawn and is presented after it is drawn and
-  redrawn after every event. `File` is a direct item; `Apps` (M8.3, D20), `Windows`
+  right-aligned. The bar is application-drawn as a **plane** (spec 0026 C11): a retained
+  screen rectangle above all windows, resized on a mode change, declared to the service
+  with `work_area_reserve(bar_height)` so no window frame is placed under it (spec 0026
+  C13). The plane replaces the M8.4 pointer-region claim. `File` is a direct item; `Apps` (M8.3, D20), `Windows`
   (M11) and `System` (M2.6.4) are pull-down menus. A pull-down's label is
   inverted while its menu is open. Both pull-downs are app-drawn and have no window, so
   opening one takes the machine-wide modal popup input grab (spec 0011, W26; ADR 0044)
@@ -139,7 +133,8 @@ resize. Those are M2.4/M2.5.
   presents without redrawing, so a client with no per-task clip (M2) cannot overwrite the
   window above. It never draws in another window's content rectangle.
 - **D13 (MUST):** `check` mode is deterministic and headless: draw the bar and window,
-  check menu-bar/chrome/content pixels with `get_pixel`, call each menu item's handler
+  check menu-bar and plane pixels with `get_pixel` inside their draw blocks (scope-local,
+  spec 0026 C6), call each menu item's handler
   directly (the boot desktop is itself an event consumer from M2.5.6, so an injected
   click from a second instance could be taken by it; the real pointer path is proved by
   the boot harness and the routing proofs), verify the listing (System Log title present
@@ -151,10 +146,11 @@ resize. Those are M2.4/M2.5.
   same image, prints `desktop_shell: ready`, promotes itself to the realtime class with
   heartbeats (falling back to a normal loop when admission is full), and pumps
   `next_event` until it is killed.
-- **D14 (MUST):** There is no global work-area rule in M2.3.4. The shell places its own
-  window below the bar, and kernel windows start at `y = 26`. An application that opens
-  a window at `y = 0` covers the menu bar; the shell repaints the bar on its next event
-  and the overlap is accepted until a documented work area lands with a later slice.
+- **D14 (MUST):** **Rewritten by spec 0026 C13:** there is a work area. The shell
+  reserves the bar strip with `work_area_reserve(bar_height)`, and every window frame —
+  `open`, `move`, drag clamping and the mode-change reflow — is clamped below it, so a
+  window can never cover the bar or hide its own title bar under it. (M2.3.4 had no work
+  area and accepted the overlap; the reserved strip is the documented rule now.)
 - **D15 (MUST):** Window enumeration is read-only and adds no bytecode opcode:
 
   ```text
@@ -173,9 +169,10 @@ resize. Those are M2.4/M2.5.
   exits without spawning. The kernel windows do not exist and the console is
   serial-only. `window_info` is `NotFound` for every index.
 - **D17 (MUST):** Lock order stays acyclic: console drawing and `console::pump` take
-  `CONSOLE`, then `WINDOW` (to read visible parts **and hold through the paint**), then
-  `SCREEN`; the window service's repair takes `WINDOW`, then `SCREEN`; no path takes
-  `WINDOW` and then `CONSOLE`. Producers never take the window lock.
+  `CONSOLE`, then `WINDOW` **and hold it through the paint**, then `CANVAS` (the console
+  window's canvas) and `SCREEN`; the window service's repair takes `WINDOW`, then `CANVAS`
+  and `SCREEN`; no path takes `WINDOW` and then `CONSOLE`. Producers never take the window
+  lock.
 - **D18 (MUST):** M11 supersedes the M2.5.5 terminal attachment (spec 0021, ADR 0053):
   the kernel keeps only the owner-`0` System Log. Application output goes to the
   caller's console session, and a terminal is an application emulator. There is no
@@ -270,13 +267,15 @@ printable byte updates the grid, paints its cell and advances; at `cols` it wrap
 newline at the last row scrolls the grid (`copy_within` one row up, clear the last row,
 repaint the visible parts).
 
-Painting one cell asks the window service for the content's visible parts
-(`window::visible_content_parts`, kernel-internal, no application binding) and, for each
-part the cell intersects, calls `gfx::draw_cell` (opaque background plus one glyph,
-clipped to the part) and `gfx::present_within` (that intersection). The clip is a
-parameter, not the shadow's global one, so no other task's drawing is affected while a
-grid repaints. A full repaint draws every visible cell of every part and presents each
-part once. The cursor is composited by `present_within` as usual.
+Painting one cell writes the window's **canvas** with `gfx::draw_cell` (opaque
+background plus one glyph, content-local coordinates) and marks the log's dirty
+rectangle; a flush recomposites the frame (spec 0026 C14). Because the canvas is private
+to the console window, no other task's drawing is affected and neither visible-part
+subtraction nor an explicit clip is needed; the compositor's painter's order decides what
+is visible. A full repaint draws every cell of the grid and recomposites once. The cursor
+is composited by the final presentation as usual. **Spec 0026 supersedes the M2.3.4
+visible-parts path** (`window::visible_content_parts`, the explicit clip and the
+generation retry); the paragraph above describes the target and is implemented in M16.4.
 
 `console::pump` drains `window::take_expose(0)`; for each id it finds the matching
 terminal and repaints it. It runs at the end of `console::poll_input`, so every service
@@ -402,7 +401,7 @@ while that id is its own; otherwise it presents what the service last left.
 | Keep one full-screen console and have the desktop use a "console area" | Scrolling would still move a fixed region over the desktop, and applications would still share one cursor |
 | Give the console one window for both kinds of text | Loses the separation between application output and kernel diagnostics, and mixes two clock-rate producers into one scroll |
 | Let `window::repair` call the console repaint synchronously | The repair holds `WINDOW`; a console callback would take `CONSOLE` and then `WINDOW` again (self-deadlock) or reverse the lock order (`WINDOW → CONSOLE`), which ADR 0025 rejects |
-| Keep a per-window canvas for the text windows | Contradicts ADR 0020's one-shadow model; the grid is already the retained state, so repainting is cheap |
+| ~~Keep a per-window canvas for the text windows~~ | Chosen by ADR 0060: every window, including owner-0 text windows, has a content-sized canvas; the grid stays the retained text state and the canvas is its pixel copy |
 | Block the shell on launched apps (`core.run`) | A launched application would freeze the shell and therefore the menu bar/event loop |
 | Dropdown menus now | They need pull-down tracking, overlay save/restore and keyboard equivalents; M2.4.3 owns them. Direct items keep M2.3.4 small and testable |
 | A global menu-bar work area in the window service | A policy primitive the service does not need yet; the overlap is documented instead |
@@ -438,3 +437,4 @@ while that id is its own; otherwise it presents what the service last left.
 | 2026-11-20 | M11 amends D1–D5, D7, D9–D13, D18 and D20 (spec 0021, ADR 0053): the kernel opens only the System Log; application output is a console session; terminals are `apps/utilities/terminal` emulators and every Apps activation starts a new one. The bar is `File / Apps / Windows / System`; the Apps menu has `Accessories`, `Games`, `Productivity` and `Utilities` section headers; `File` lists windows in a desktop-owned window. |
 | 2026-11-21 | Runtime display modes (spec 0022): `Utilities` gains `Settings`, the Apps frame grows to 12 rows, and the shell re-reads the screen size and re-claims the menu-bar region before a draw after a mode change. The item-table check includes the new row. |
 | 2026-11-21 | The PNG image viewer (spec 0023) adds `Accessories` → `Image Viewer` at row 4. The Apps menu is now 13 rows (210 pixels): rows 5/7/10 are the `#Games`, `#Productivity` and `#Utilities` headers, Minesweeper is 6, Text Editor 8, File Browser 9, Terminal 11 and Settings 12; the check mode's Terminal walk ends at index 11 and the item-table check confirms row 4 is `Image Viewer` and selectable (it is not launched, because its file dialog would block). `scripts/apps_menu_qmp.py` moves the File Browser row to y = 175 and the Terminal row to y = 207; the Clock row stays y = 63. No opcode, builtin or `stdlib` helper changes. |
+| 2026-11-25 | Surfaces and composition (ADR 0060, spec 0026): D3 paints each cell into the console window's own canvas in content-local coordinates and recomposites the frame, so the visible-parts/generation machinery is retired; D8 is rewritten because an application can no longer clear the screen at all (`syslib.clear` is scope-local, spec 0026 C5) and the log's canvas is its retained state; D10 puts the menu bar and pull-downs in planes with a reserved work area (C11–C13), which replaces the M8.4 region claim; D14 changes from "no work area" to the reserved strip; D17 adds the `CANVAS` lock between `WINDOW` and `SCREEN`; D13's pixel checks move inside their draw scopes. |

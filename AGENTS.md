@@ -3,7 +3,7 @@
 Operational guide for humans and coding agents working in this repository.
 Keep this file short and current. It points at documents; it does not duplicate them.
 
-**Last updated:** 2026-11-21
+**Last updated:** 2026-11-26
 
 ## What this is
 
@@ -27,13 +27,23 @@ decisions in `adr/`, and work items in `PLAN.md`.
 
 ## Current state
 
-- Specs 0001–0025 are accepted; **M2–M15 are complete** (desktop, language,
+- Specs 0001–0026 are accepted; **M2–M16 are complete** (desktop, language,
   filesystems, networking, terminal emulator, runtime display modes, PNG/PPM image
-  viewer, kernel-only boot with the application volume on disk). Current milestone work
-  is tracked in `PLAN.md`.
-- **635 host tests** (556 language + 56 `net` + 23 `ext2w`); ABI v1 has **75 opcodes**
-  (runtime display modes add builtins 80–83; the machine-level bit and bulk buffer
-  primitives are builtins 84–90 and `syslib.blit_rgb` is 91, no opcode).
+  viewer, kernel-only boot with the application volume on disk, and the composition
+  model). Current milestone work is tracked in `PLAN.md`. **M16 (composition and
+  surfaces)** is implemented: every window owns a content-sized canvas, drawing requires
+  a `window_begin`/`plane_begin` scope (`Status.Invalid` without one), the compositor is
+  the only writer of the shadow and recomposes damaged rectangles (desktop pattern →
+  windows bottom-to-top → planes → cursor), planes (builtins 93–96) carry the shell's
+  menu bar, pull-downs and halt screen above windows, `work_area_reserve` (97) keeps
+  frames below the bar strip, and the erase/`covers_from`/snapshot/visible-parts
+  machinery and the persistent region claim (60/61) are deleted. Client coordinates are
+  still absolute screen coordinates translated by the surface origin; **M17 (local
+  coordinates and window-local events)** is the deferred remainder.
+- **637 host tests** (556 language + 56 `net` + 23 `ext2w` + 2 builtin tests); ABI v1 has
+  **75 opcodes** (runtime display modes add builtins 80–83; the machine-level bit and
+  bulk buffer primitives are builtins 84–90, `syslib.blit_rgb` is 91, the surface model
+  adds 92–97, no opcode).
 - Boot: GRUB/multiboot2 → `system/entrypoint` (the desktop shell), falling back to
   `base/shell`; a graphics-less boot keeps a serial REPL.
 - Filesystems: a read-only 128 MiB ext2 application volume (`lib`, `base`, `apps`,
@@ -55,11 +65,11 @@ decisions in `adr/`, and work items in `PLAN.md`.
   sampling), both through `syslib.blit_rgb`, with no full-image buffer and a
   decode progress strip. Every terminal
   instance has its own session, shell and cwd; the `Windows` pull-down lists every
-  window (minimized rows marked `min`) and `File` opens a clickable window list. A
-  window switch or a completed move runs a full-stack repaint (desktop, chrome
-  bottom-to-top, every window's whole-content `Expose`) and presents only the pixels the
-  service painted, so a moved window cannot leave stale content on the windows below
-  (ADR 0055).
+  window (minimized rows marked `min`) and `File` opens a clickable window list. A move or
+  a switch is an origin change in the service: the compositor repaints the damaged
+  rectangles from the retained canvases, so a moved window cannot leave stale content on
+  the windows below and the cursor's restore source is always valid (spec 0026, ADR 0060;
+  it replaces ADR 0055).
 
 ## Ground rules
 

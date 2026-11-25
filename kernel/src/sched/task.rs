@@ -612,11 +612,11 @@ fn waits_on_source(wait: WaitFor, source: u64) -> bool {
 }
 
 /// True when the machine-wide event queue has an event `task` may consume
-/// (spec 0010 I19/I31; spec 0011 W26/W27/W29).
+/// (spec 0010 I19/I31; spec 0011 W26/W29; spec 0026 C12).
 ///
 /// The modal grab (W26) hides the whole queue from non-owners. Without one,
-/// the head's window target decides (W29): a targeted event is ready only for
-/// its owner, while an untargeted event keeps the ordinary competition. A
+/// the head's window target decides (W29/C12): a targeted event is ready only
+/// for its owner, while an untargeted event keeps the ordinary competition. A
 /// non-owner's poll returns `WouldBlock` without consuming it. Reporting it as
 /// "not ready" keeps a non-owner from spinning while leaving the event queued
 /// for the owner. Readiness remains a snapshot; the following `next_event` is
@@ -652,8 +652,8 @@ fn source_ready(task: u64, session: u64, source: u64) -> bool {
         // `syslib.next_event` also returns a pending `Expose` and a `Close`
         // (spec 0011, W16/W25), so the input source means "next_event would
         // not block". The modal popup grab (W26) hides the queued events from
-        // every task but its owner, and a claimed-region press (W27) belongs
-        // only to the claim owner.
+        // every task but its owner, and a plane press (spec 0026, C12) belongs
+        // only to the plane's owner.
         input_queue_ready(task)
             || crate::window::has_expose(task)
             || crate::window::has_close(task)

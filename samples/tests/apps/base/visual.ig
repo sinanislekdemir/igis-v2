@@ -9,9 +9,11 @@ unit visual;
 // (`scripts/visual_regression.py`) can compare a QMP `screendump` against a
 // committed golden. Everything that could vary is excluded on purpose:
 //
-//   - the window is full-screen: the frame is exactly the service chrome plus
-//     this application's content, so the two kernel text windows (boot log and
-//     terminal) and any earlier output are covered and never sampled;
+//   - the window frame is exactly the work area: content is the screen minus
+//     the 1-px border, the 16-px title bar and the 22-row reserved strip, so
+//     the two kernel text windows (boot log and terminal) and any earlier
+//     output are covered and never sampled; the reserved rows themselves show
+//     only the deterministic service desktop pattern on the shell image;
 //   - no clock, no animation, no events and no `syslib.clear` (the window
 //     service owns the desktop underneath);
 //   - drawing order and every coordinate are fixed; the dither is the
@@ -33,6 +35,11 @@ const
   HoldNs = 5000000000;
   MinW = 640;
   MinH = 480;
+  // The desktop work area: the product shell's persistent menu-bar plane
+  // occupies this many top rows, so the specimen's frame starts below it
+  // (spec 0026, C13). The shell image used by the golden has no bar, so those
+  // rows show the service desktop pattern.
+  WorkAreaTop = 22;
 
 var
   failed: bool;
@@ -80,7 +87,8 @@ begin
 end;
 
 // The whole fixed composition, drawn relative to the window's content
-// rectangle. At 1024x768 the content is (1, 16, 1022, 751).
+// rectangle. At 1024x768 the content is (1, 38, 1022, 729), below the 22-row
+// work area.
 procedure compose();
 begin
   x := rect.x;
@@ -154,19 +162,19 @@ end;
 
 procedure check();
 begin
-  // The window is exactly the screen: content is the frame minus the 1-px
-  // border and the 16-px title bar.
+  // The window is exactly the work area: content is the frame minus the 1-px
+  // border and the 16-px title bar, starting at the reserved strip.
   verify("content x", rect.x = 1);
-  verify("content y", rect.y = 16);
+  verify("content y", rect.y = WorkAreaTop + 16);
   verify("content width", rect.w = int(screen_w) - 2);
-  verify("content height", rect.h = int(screen_h) - 17);
+  verify("content height", rect.h = int(screen_h) - WorkAreaTop - 17);
 
   // Service chrome, read from the shadow (the cursor is composited into the
   // framebuffer only, so get_pixel sees the uncomposited shadow).
-  verify("left border", syslib.get_pixel(0, 100) = black);
-  verify("title fill", syslib.get_pixel(1, 1) = white);
-  verify("title stripe", syslib.get_pixel(1, 2) = black);
-  verify("title stripe gap", syslib.get_pixel(1, 3) = white);
+  verify("left border", syslib.get_pixel(0, 200) = black);
+  verify("title fill", syslib.get_pixel(1, WorkAreaTop + 1) = white);
+  verify("title stripe", syslib.get_pixel(1, WorkAreaTop + 2) = black);
+  verify("title stripe gap", syslib.get_pixel(1, WorkAreaTop + 3) = white);
 
   // Content background, header band and text.
   verify("content white", syslib.get_pixel(x + rect.w - 4, y + rect.h - 4) = white);
@@ -228,7 +236,9 @@ begin
   step := 0;
   fail_step := 0;
 
-  status := syslib.window_open(0, 0, int(screen_w) - 2, int(screen_h) - 17, "Visual Regression", id);
+  status := syslib.window_open(
+    0, WorkAreaTop, int(screen_w) - 2, int(screen_h) - WorkAreaTop - 17,
+    "Visual Regression", id);
   if status <> Ok then
   begin
     out.say("visual: no window\n");
@@ -243,8 +253,11 @@ begin
   end;
 
   compose();
-  check();
+  // Present before checking: `get_pixel` reads the composed shadow, and a
+  // window's content now lives in its canvas until a present (spec 0026, C4/C7;
+  // ADR 0060). This is the M16.4 cutover's only sample change.
   status := syslib.window_present(id);
+  check();
 
   if failed then
   begin

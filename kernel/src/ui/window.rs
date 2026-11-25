@@ -1,8 +1,9 @@
-//! The window service: records, lifecycle, composition and repair (spec 0011).
+//! The window service: records, lifecycle and composition (spec 0011, 0026).
 //!
-//! There is no per-window canvas (ADR 0020): a window is a small record in a
-//! fixed table, and the application draws into the one shadow through `syslib`.
-//! This module owns the table, its policy and the service-drawn chrome:
+//! Every window owns a retained **canvas** (spec 0026, C1; ADR 0060). The
+//! application draws into it through its draw scope; the service owns the
+//! screen. This module owns the table, its policy, the service-drawn chrome and
+//! the one compositor:
 //!
 //! - a window has a frame origin, a **content** size, a title and an owner task;
 //! - the frame is derived: content plus a 1-pixel border and a 16-pixel title
@@ -10,22 +11,17 @@
 //! - one bottom-to-top z-order, one focus (an id, or 0), and monotonic ids that
 //!   are never reused;
 //! - `close`/`move` are owner-only, `raise` is any task's, and
-//!   [`close_task`] removes a terminating task's windows;
-//! - every mutation records damage and runs one synchronous repair pass under
-//!   the table lock: the desktop is restored where a window was removed or
-//!   moved, the chrome of every damaged window is redrawn bottom-to-top (only
-//!   in its visible parts), and only the pixels the service painted are
-//!   presented;
-//! - a **switch** (raise, open, close, minimize) and a **completed move**
-//!   request a full-stack repaint: the whole desktop, every window's chrome
-//!   bottom-to-top and an `Expose` for every live window, so stale pixels left
-//!   under a moved or lowered window are rebuilt instead of lingering (W31).
+//!   [`close_task`] removes a terminating task's windows and planes;
+//! - a **plane** is a screen rectangle above every window with its own canvas,
+//!   created by `plane_create` and composed after the windows (spec 0026, C11);
+//! - every mutation records damage (bounded erase/chrome lists and a `full`
+//!   flag) and runs one synchronous recomposition under the table lock. The
+//!   compositor paints the desktop pattern, then every live window's chrome and
+//!   canvas bottom to top, then every presented plane, and presents the
+//!   rectangles it was given.
 //!
-//! Client content is not kept by the service: a repair redraws chrome and the
-//! desktop, never another window's content. A **topmost** move copies a
-//! one-shot content snapshot to the new origin before the repair (spec 0011,
-//! W28), so the content follows the frame immediately; the owner still
-//! repaints from its refreshed `Expose`, and the snapshot is not a canvas.
+//! Client content is retained: a lower window repainting cannot reach a higher
+//! window, and a move is an origin change, not a pixel copy (spec 0026, C10).
 //!
 //! Owner `0` is reserved for the kernel (spec 0012, D6): task ids start at `1`,
 //! and the kernel's terminal and system-log windows use the same public
@@ -33,26 +29,30 @@
 //!
 //! # Locking
 //!
-//! The table is one machine-wide [`SpinLock`]. The wrappers read the screen size
-//! (the graphics lock) before taking the table lock; a repair takes the table
-//! lock first and then calls `gfx` (window → graphics). No path takes the
-//! graphics lock and then the table lock, so there is no cycle, and the repair
-//! is deliberately synchronous under the table lock so no snapshot is needed.
-//! `Task::reclaim` calls [`close_task`] with no scheduler lock held.
+//! The window table is one machine-wide [`SpinLock`]; the plane stack is a
+//! second one, always taken after it. The wrappers read the screen size (the
+//! graphics lock) before taking the table lock; a composition takes the table
+//! lock, then the plane lock, then calls `gfx` (`WINDOW → PLANES → SCREEN`).
+//! No path takes the graphics lock and then the window lock, so there is no
+//! cycle. `Task::reclaim` calls [`close_task`] with no scheduler lock held.
 //!
 //! # Self-checks
 //!
 //! [`self_check`] runs the table policy on a scratch table, and
-//! [`paint_self_check`] runs the damage arithmetic and visibility subtraction on
-//! scratch state; neither touches the screen. `kmain` halts on a mismatch.
+//! [`paint_self_check`] runs the damage arithmetic on scratch state; neither
+//! touches the screen. `kmain` halts on a mismatch.
 
 use abi::{Rect, Status};
 
+use crate::frame;
 use crate::gfx;
 use crate::sync::SpinLock;
 
 /// Maximum live windows machine-wide (spec 0011, W9).
 pub const MAX_WINDOWS: usize = 16;
+
+/// Maximum live planes machine-wide (spec 0026, C11).
+pub const MAX_PLANES: usize = 8;
 
 /// Title capacity in bytes; longer titles are truncated (W9).
 pub const TITLE_CAP: usize = abi::layout::window::TITLE_CAP as usize;
@@ -123,6 +123,17 @@ struct Window {
     /// enumerated at the bottom of the z-order so the window list can restore
     /// it (M11 minimize).
     minimized: bool,
+    /// The task that holds this window's draw scope, or `0` (spec 0026, C3).
+    /// There is at most one scope per task, so setting a scope clears the
+    /// caller's previous window. `0` is also the kernel's owner id, which has
+    /// no scope.
+    drawer: u64,
+    /// Retained content pixels (spec 0026, C1; ADR 0060). `None` only in the
+    /// boot self-checks' scratch tables, which never draw.
+    canvas: Option<gfx::Canvas>,
+    /// At least one present has happened; the compositor leaves the pixels
+    /// beneath untouched until then (spec 0026, C15).
+    canvas_valid: bool,
     used: bool,
 }
 
@@ -139,8 +150,25 @@ impl Window {
         expose_pending: false,
         close_pending: false,
         minimized: false,
+        drawer: 0,
+        canvas: None,
+        canvas_valid: false,
         used: false,
     };
+
+    /// The canvas positioned at the window's current content origin. A move is
+    /// an origin change here; the retained pixels do not move (spec 0026,
+    /// C10).
+    fn canvas_at(&self) -> Option<gfx::Canvas> {
+        self.canvas.map(|canvas| {
+            let content = self.content();
+            gfx::Canvas {
+                ox: content.x,
+                oy: content.y,
+                ..canvas
+            }
+        })
+    }
 
     /// The whole window outline (spec 0011, W3).
     fn frame(&self) -> Rect {
@@ -161,6 +189,299 @@ impl Window {
             h: self.h,
         }
     }
+}
+
+/// Allocates a zeroed canvas of `w × h` pixels from the frame allocator
+/// (spec 0026, C1/C2). There is no budget constant: a failed allocation is the
+/// only failure and the caller reports `Status::Full`.
+fn alloc_canvas(w: i64, h: i64) -> Option<gfx::Canvas> {
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    let bytes = (w as usize)
+        .checked_mul(h as usize)?
+        .checked_mul(4)?;
+    let frames = bytes.div_ceil(frame::FRAME_SIZE as usize);
+    let base = frame::alloc_contiguous(frames)?;
+    // SAFETY: `alloc_contiguous` reserved exactly these contiguous,
+    // identity-mapped frames for this canvas; zeroing them is the only write
+    // before the window record owns them.
+    unsafe { core::ptr::write_bytes(base as *mut u8, 0, bytes) };
+    Some(gfx::Canvas {
+        base: base as *mut u8,
+        bytes,
+        pitch: (w as usize) * 4,
+        w,
+        h,
+        ox: 0,
+        oy: 0,
+    })
+}
+
+/// Returns a canvas's frames to the allocator. A canvas with no bytes (a boot
+/// self-check's placeholder) frees nothing.
+fn free_canvas(canvas: gfx::Canvas) {
+    if canvas.bytes == 0 {
+        return;
+    }
+    let frames = canvas.bytes.div_ceil(frame::FRAME_SIZE as usize);
+    frame::free_contiguous(canvas.base as u64, frames);
+}
+
+/// One plane record (spec 0026, C11): a screen rectangle above every window
+/// with its own retained canvas. Only the boot self-check's scratch tables use
+/// `canvas: None`.
+#[derive(Clone, Copy)]
+struct Plane {
+    id: u64,
+    owner: u64,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+    /// The task that holds this plane's draw scope, or `0` (spec 0026, C3).
+    drawer: u64,
+    canvas: Option<gfx::Canvas>,
+    /// At least one present has happened; the compositor skips the plane until
+    /// then (spec 0026, C15).
+    canvas_valid: bool,
+}
+
+impl Plane {
+    const EMPTY: Plane = Plane {
+        id: 0,
+        owner: 0,
+        x: 0,
+        y: 0,
+        w: 0,
+        h: 0,
+        drawer: 0,
+        canvas: None,
+        canvas_valid: false,
+    };
+
+    fn rect(&self) -> Rect {
+        Rect {
+            x: self.x,
+            y: self.y,
+            w: self.w,
+            h: self.h,
+        }
+    }
+
+    /// The canvas positioned at the plane's current screen origin.
+    fn canvas_at(&self) -> Option<gfx::Canvas> {
+        self.canvas.map(|canvas| gfx::Canvas {
+            ox: self.x,
+            oy: self.y,
+            ..canvas
+        })
+    }
+
+    fn contains(&self, x: i64, y: i64) -> bool {
+        x >= self.x
+            && y >= self.y
+            && x < self.x.saturating_add(self.w)
+            && y < self.y.saturating_add(self.h)
+    }
+}
+
+/// The machine-wide plane stack behind its own lock (spec 0026, C11; ADR
+/// 0060). The array is compact and in creation order, so index order is
+/// composite order: a later plane is above an earlier one. The window table
+/// lock is always taken first (`WINDOW → PLANES → SCREEN`); the compositor and
+/// every plane wrapper follow that order.
+struct PlaneTable {
+    planes: [Plane; MAX_PLANES],
+    count: usize,
+    /// Next id to assign; starts at 1 and skips 0 on wrap.
+    next_id: u64,
+}
+
+impl PlaneTable {
+    const fn new() -> Self {
+        PlaneTable {
+            planes: [Plane::EMPTY; MAX_PLANES],
+            count: 0,
+            next_id: 1,
+        }
+    }
+
+    fn position(&self, id: u64) -> Option<usize> {
+        if id == 0 {
+            return None;
+        }
+        (0..self.count).find(|&pos| self.planes[pos].id == id)
+    }
+
+    /// Appends a plane above the existing ones. The caller has already
+    /// validated the rectangle and allocated the canvas; the limit is checked
+    /// before a canvas is allocated in [`plane_create`].
+    fn create(
+        &mut self,
+        owner: u64,
+        rect: Rect,
+        canvas: Option<gfx::Canvas>,
+    ) -> Result<u64, Status> {
+        if self.count == MAX_PLANES {
+            return Err(Status::Full);
+        }
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        if self.next_id == 0 {
+            self.next_id = 1;
+        }
+        self.planes[self.count] = Plane {
+            id,
+            owner,
+            x: rect.x,
+            y: rect.y,
+            w: rect.w,
+            h: rect.h,
+            canvas,
+            ..Plane::EMPTY
+        };
+        self.count += 1;
+        Ok(id)
+    }
+
+    /// Removes the caller's plane, frees its canvas and returns the vacated
+    /// rectangle for recomposition. Owner-only: `NotFound` for an unknown id
+    /// and `Invalid` for another task's plane.
+    fn destroy(&mut self, owner: u64, id: u64) -> Result<Rect, Status> {
+        let Some(pos) = self.position(id) else {
+            return Err(Status::NotFound);
+        };
+        if self.planes[pos].owner != owner {
+            return Err(Status::Invalid);
+        }
+        let plane = self.planes[pos];
+        if let Some(canvas) = plane.canvas {
+            free_canvas(canvas);
+        }
+        for index in pos..self.count - 1 {
+            self.planes[index] = self.planes[index + 1];
+        }
+        self.count -= 1;
+        self.planes[self.count] = Plane::EMPTY;
+        Ok(plane.rect())
+    }
+
+    /// Sets `owner`'s one draw scope to a plane. The caller still owns the
+    /// window scope clearing (the table handles its own records).
+    fn begin(&mut self, owner: u64, id: u64) -> Status {
+        let Some(pos) = self.position(id) else {
+            return Status::NotFound;
+        };
+        if self.planes[pos].owner != owner {
+            return Status::Invalid;
+        }
+        self.clear_drawer(owner);
+        self.planes[pos].drawer = owner;
+        Status::Ok
+    }
+
+    /// Marks the plane's first/next present and returns its rectangle.
+    fn present(&mut self, owner: u64, id: u64) -> Result<Rect, Status> {
+        let Some(pos) = self.position(id) else {
+            return Err(Status::NotFound);
+        };
+        if self.planes[pos].owner != owner {
+            return Err(Status::Invalid);
+        }
+        self.planes[pos].canvas_valid = true;
+        Ok(self.planes[pos].rect())
+    }
+
+    fn clear_drawer(&mut self, owner: u64) {
+        if owner == 0 {
+            return;
+        }
+        for index in 0..self.count {
+            if self.planes[index].drawer == owner {
+                self.planes[index].drawer = 0;
+            }
+        }
+    }
+
+    /// Removes every plane owned by `owner`, freeing its canvas and recording
+    /// the vacated rectangles into `out`. Returns how many were removed.
+    fn close_owner(&mut self, owner: u64, out: &mut [Rect; MAX_PLANES]) -> usize {
+        let mut count = 0;
+        let mut pos = 0;
+        while pos < self.count {
+            if self.planes[pos].owner == owner {
+                if let Some(canvas) = self.planes[pos].canvas {
+                    free_canvas(canvas);
+                }
+                out[count] = self.planes[pos].rect();
+                count += 1;
+                for index in pos..self.count - 1 {
+                    self.planes[index] = self.planes[index + 1];
+                }
+                self.count -= 1;
+                self.planes[self.count] = Plane::EMPTY;
+            } else {
+                pos += 1;
+            }
+        }
+        count
+    }
+
+    /// Above every window: the topmost (latest) plane containing the point
+    /// owns a press there (spec 0026, C12).
+    fn owner_at(&self, x: i64, y: i64) -> Option<u64> {
+        for index in (0..self.count).rev() {
+            if self.planes[index].contains(x, y) {
+                return Some(self.planes[index].owner);
+            }
+        }
+        None
+    }
+
+    /// Clamps every plane origin into the screen after a mode change, keeping
+    /// the retained canvas unchanged (spec 0026, C17). A plane larger than the
+    /// new screen starts at 0 and is clipped by the compositor.
+    fn clamp_to(&mut self, screen_w: i64, screen_h: i64) {
+        for index in 0..self.count {
+            let plane = &mut self.planes[index];
+            plane.x = plane.x.clamp(0, (screen_w - plane.w).max(0));
+            plane.y = plane.y.clamp(0, (screen_h - plane.h).max(0));
+        }
+    }
+
+    /// The number of planes that would be painted (presented at least once),
+    /// bottom to top. Used by the boot self-check; the compositor applies the
+    /// same `canvas_valid` rule.
+    fn composited(&self) -> usize {
+        (0..self.count)
+            .filter(|&index| self.planes[index].canvas_valid)
+            .count()
+    }
+}
+
+/// The one machine-wide plane stack (spec 0026, C11).
+static PLANES: SpinLock<PlaneTable> = SpinLock::new(PlaneTable::new());
+
+/// Clamps a requested plane rectangle to the screen. `None` when the rectangle
+/// is non-positive or entirely off screen (spec 0026, C11).
+fn clamp_plane(screen_w: i64, screen_h: i64, x: i64, y: i64, w: i64, h: i64) -> Option<Rect> {
+    if screen_w <= 0 || screen_h <= 0 || w <= 0 || h <= 0 {
+        return None;
+    }
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = x.saturating_add(w).min(screen_w);
+    let y1 = y.saturating_add(h).min(screen_h);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some(Rect {
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
+    })
 }
 
 /// An in-progress pointer drag (spec 0011, W22): the window and the grab
@@ -187,21 +508,6 @@ struct Drag {
 /// is modal.
 #[derive(Clone, Copy)]
 struct Grab {
-    owner: u64,
-    rect: Rect,
-}
-
-/// The one machine-wide persistent pointer-region claim (spec 0011, W27;
-/// ADR 0045).
-///
-/// The menu bar is app-drawn like a pull-down but persistent, and the press
-/// that opens a menu arrives before any modal grab exists. A region claim
-/// outlives menus: a queued `PointerDown` inside the rectangle belongs to the
-/// owner even while every other task is blocked in `next_event`, and the
-/// window service refuses to start a drag or post a close request for a new
-/// press inside it.
-#[derive(Clone, Copy)]
-struct Region {
     owner: u64,
     rect: Rect,
 }
@@ -686,27 +992,16 @@ struct Table {
     drag: Option<Drag>,
     /// The modal popup grab, if any (W26).
     grab: Option<Grab>,
-    /// The persistent pointer-region claim, if any (W27).
-    region: Option<Region>,
+    /// The machine-wide reserved top strip; no window frame origin starts above
+    /// it (spec 0026, C13). `0` clears it.
+    work_area: i64,
     /// Pending desktop restore and chrome damage for the next repair pass.
     erases: EraseList,
     chrome: ChromeList,
-    /// A full-stack repaint is pending: the repair ignores the accumulated
-    /// damage, restores the whole desktop, redraws every live window's chrome
-    /// bottom-to-top and marks every live window for an `Expose` (W31). Set on
-    /// a focus/raise switch and when a move completes, so stale content under a
-    /// moved or lowered window is repainted instead of lingering.
+    /// A full-stack recomposition is pending: the repair ignores the
+    /// accumulated damage and composes the whole screen (W31). Set on a
+    /// focus/raise switch and when a move completes.
     full: bool,
-    /// The destination content rectangle of the last topmost move snapshot.
-    /// The service copied those pixels itself, so the repair may present them
-    /// (W28); it is never used to present another window's content.
-    snapshot: Option<Rect>,
-    /// Geometry/focus generation (spec 0012 D3): bumped by every mutation that
-    /// can change what is visible. The console's cell/part paints read it
-    /// before computing visible parts and compare it after painting, so a
-    /// window that moves above the console during a repaint is not overwritten
-    /// by stale geometry.
-    generation: u64,
 }
 
 impl Table {
@@ -719,25 +1014,17 @@ impl Table {
             next_id: 1,
             drag: None,
             grab: None,
-            region: None,
+            work_area: 0,
             erases: EraseList::new(),
             chrome: ChromeList::new(),
             full: false,
-            snapshot: None,
-            generation: 0,
         }
-    }
-
-    /// Records a visible-geometry change for the console's stale-parts retry.
-    fn bump(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
     }
 
     fn clear_damage(&mut self) {
         self.erases.clear();
         self.chrome.clear();
         self.full = false;
-        self.snapshot = None;
     }
 
     /// Position of `id` in the z-order, or `None`.
@@ -748,10 +1035,49 @@ impl Table {
         (0..self.count).find(|&pos| self.windows[self.order[pos]].id == id)
     }
 
-    /// Removes the window at `pos` and updates the focus fallback (W6).
-    fn remove_at(&mut self, pos: usize) {
+    /// Clears every window scope held by `owner` (spec 0026, C3). Owner `0` is
+    /// the kernel and records no scope, so it never clears one. The caller
+    /// clears the owner's plane scope separately (`WINDOW → PLANES`).
+    fn clear_drawer(&mut self, owner: u64) {
+        if owner == 0 {
+            return;
+        }
+        for slot in 0..MAX_WINDOWS {
+            if self.windows[slot].used && self.windows[slot].drawer == owner {
+                self.windows[slot].drawer = 0;
+            }
+        }
+    }
+
+    /// Sets the caller's window draw scope (spec 0026, C3/C20): `0` clears the
+    /// scope and draws nothing (there is no screen surface), another id must be
+    /// one of the caller's live windows. There is at most one scope per task,
+    /// so the caller's previous window or plane scope is lost.
+    fn begin(&mut self, owner: u64, id: u64) -> Status {
+        if id == 0 {
+            self.clear_drawer(owner);
+            return Status::Ok;
+        }
+        let Some(pos) = self.position(id) else {
+            return Status::NotFound;
+        };
+        let slot = self.order[pos];
+        if self.windows[slot].owner != owner {
+            return Status::Invalid;
+        }
+        self.clear_drawer(owner);
+        self.windows[slot].drawer = owner;
+        Status::Ok
+    }
+
+    /// Removes the window at `pos` and updates the focus fallback (W6). Returns
+    /// the freed canvas for the caller to release outside the record.
+    fn remove_at(&mut self, pos: usize) -> Option<gfx::Canvas> {
         let slot = self.order[pos];
         let removed = self.windows[slot].id;
+        let canvas = self.windows[slot].canvas.take();
+        // Replacing the whole record also clears its draw scope (spec 0026,
+        // C3): a closed window can no longer be drawn into.
         self.windows[slot] = Window::EMPTY;
         // A dragged window that disappears cancels the drag (W22).
         if self.drag.is_some_and(|drag| drag.id == removed) {
@@ -768,20 +1094,13 @@ impl Table {
                 self.windows[self.order[self.count - 1]].id
             };
         }
+        canvas
     }
 
-    fn open(
-        &mut self,
-        screen_w: i64,
-        screen_h: i64,
-        owner: u64,
-        x: i64,
-        y: i64,
-        w: i64,
-        h: i64,
-        title: &[u8],
-        bottom: bool,
-    ) -> Result<u64, Status> {
+    /// Validates an `open` request without touching the table. The public
+    /// wrappers run it before allocating so an invalid rectangle is `Invalid`,
+    /// never `Full`.
+    fn can_open(&self, screen_w: i64, screen_h: i64, w: i64, h: i64) -> Result<(), Status> {
         if screen_w <= 0 || screen_h <= 0 {
             return Err(Status::Invalid);
         }
@@ -793,10 +1112,51 @@ impl Table {
         if frame_w > screen_w || frame_h > screen_h {
             return Err(Status::Invalid);
         }
+        // A frame taller than the screen minus the reserved strip can never
+        // start below it (spec 0026, C13).
+        let work_area = self.work_area.min(screen_h);
+        if frame_h > screen_h - work_area {
+            return Err(Status::Invalid);
+        }
         if self.count == MAX_WINDOWS {
             return Err(Status::Full);
         }
+        if !(0..MAX_WINDOWS).any(|index| !self.windows[index].used) {
+            return Err(Status::Full);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open(
+        &mut self,
+        screen_w: i64,
+        screen_h: i64,
+        owner: u64,
+        x: i64,
+        y: i64,
+        w: i64,
+        h: i64,
+        title: &[u8],
+        bottom: bool,
+        canvas: Option<gfx::Canvas>,
+    ) -> Result<u64, Status> {
+        if let Err(status) = self.can_open(screen_w, screen_h, w, h) {
+            if let Some(canvas) = canvas {
+                free_canvas(canvas);
+            }
+            return Err(status);
+        }
+        if let Some(canvas) = canvas {
+            if canvas.bytes == 0 || canvas.w != w || canvas.h != h {
+                free_canvas(canvas);
+                return Err(Status::Invalid);
+            }
+        }
         let Some(slot) = (0..MAX_WINDOWS).find(|&index| !self.windows[index].used) else {
+            if let Some(canvas) = canvas {
+                free_canvas(canvas);
+            }
             return Err(Status::Full);
         };
 
@@ -806,9 +1166,13 @@ impl Table {
             self.next_id = 1;
         }
 
-        // The origin is clamped so the whole frame stays on screen (W4).
+        // The origin is clamped so the whole frame stays on screen and below
+        // the machine-wide work area (W4; spec 0026, C13).
+        let frame_w = w.saturating_add(BORDER_WIDTH * 2);
+        let frame_h = h.saturating_add(TITLE_BAR_HEIGHT + BORDER_WIDTH);
+        let work_area = self.work_area.min(screen_h);
         let x = x.clamp(0, screen_w - frame_w);
-        let y = y.clamp(0, screen_h - frame_h);
+        let y = y.clamp(work_area, screen_h - frame_h);
 
         let mut window = Window {
             id,
@@ -817,8 +1181,15 @@ impl Table {
             y,
             w,
             h,
+            canvas,
             ..Window::EMPTY
         };
+        // A new window becomes its owner's draw scope (spec 0026, C3): a
+        // single-window app need not call `window_begin` before drawing. There
+        // is at most one scope per task, so an earlier window loses it. Owner
+        // `0` is the kernel and records no scope.
+        self.clear_drawer(owner);
+        window.drawer = owner;
         window.used = true;
         let mut length = title.len().min(TITLE_CAP);
         // Truncate on a code-point boundary: `title` is a `string`, so a byte
@@ -847,14 +1218,12 @@ impl Table {
             if self.focus == 0 {
                 self.focus = id;
             }
-            self.bump();
             self.full = true;
             return Ok(id);
         }
         self.order[self.count] = slot;
         self.count += 1;
         self.focus = id;
-        self.bump();
         // A new topmost, focused window is a switch: rebuild the whole stack so
         // no window keeps stale pixels from before it appeared (W31).
         self.full = true;
@@ -881,8 +1250,10 @@ impl Table {
         }
         let frame = self.windows[self.order[pos]].frame();
         let was_focused = self.focus == id;
-        self.remove_at(pos);
-        self.bump();
+        let canvas = self.remove_at(pos);
+        if let Some(canvas) = canvas {
+            free_canvas(canvas);
+        }
         // Closing changes the visible stack (and may move the focus): rebuild
         // every window so the newly exposed pixels are not left stale (W31).
         self.full = true;
@@ -914,7 +1285,6 @@ impl Table {
         }
         self.order[self.count - 1] = slot;
         self.focus = id;
-        self.bump();
         // A raise that changes the z-order, the focus or a minimized state is a
         // window switch: rebuild the whole stack so every newly uncovered
         // pixel is repainted by its owner (W31). A press on the already-topmost
@@ -950,7 +1320,7 @@ impl Table {
         id: u64,
         x: i64,
         y: i64,
-        copy_content: bool,
+        _copy_content: bool,
     ) -> Status {
         let Some(pos) = self.position(id) else {
             return Status::NotFound;
@@ -959,7 +1329,7 @@ impl Table {
             return Status::Invalid;
         }
         let before = self.windows[self.order[pos]];
-        let status = self.relocate(screen_w, screen_h, pos, x, y, copy_content);
+        let status = self.relocate(screen_w, screen_h, pos, x, y);
         // A completed programmatic move rebuilds the stack (W31); the pointer
         // drag defers the same work to its release.
         let moved = self.windows[self.order[pos]];
@@ -972,12 +1342,10 @@ impl Table {
     /// Moves the window at z-order position `pos`, clamping the origin on
     /// screen and recording the same damage as `window_move` (W4/W11).
     ///
-    /// A **topmost** move with `copy_content` copies the visible content
-    /// snapshot from the old to the new origin before the repair and omits the
-    /// new-frame erase, so the content follows the frame immediately (W28).
-    /// The copy is a presentation snapshot, not a canvas: the client is still
-    /// asked to repaint at the new origin. `copy_content` is `false` only for
-    /// the pure boot self-checks, which must never touch the screen.
+    /// The content canvas is window-local, so a move is an origin change and
+    /// nothing is copied (spec 0026, C10; ADR 0060): the compositor paints the
+    /// same canvas at the new origin and the owner's `Expose` repaints only if
+    /// its content needs recomputing.
     fn relocate(
         &mut self,
         screen_w: i64,
@@ -985,53 +1353,30 @@ impl Table {
         pos: usize,
         x: i64,
         y: i64,
-        copy_content: bool,
     ) -> Status {
         let window = &mut self.windows[self.order[pos]];
         let frame = window.frame();
         if screen_w <= 0 || screen_h <= 0 || frame.w > screen_w || frame.h > screen_h {
             return Status::Invalid;
         }
+        let work_area = self.work_area.min(screen_h);
+        if frame.h > screen_h - work_area {
+            return Status::Invalid;
+        }
         let new_x = x.clamp(0, screen_w - frame.w);
-        let new_y = y.clamp(0, screen_h - frame.h);
+        let new_y = y.clamp(work_area, screen_h - frame.h);
         if window.x == new_x && window.y == new_y {
             return Status::Ok;
         }
         let topmost = pos + 1 == self.count;
-        // Copy before the geometry and the repair: the source pixels are still
-        // the old content, and nothing has been painted over them yet. A
-        // non-topmost window may be covered at the source, so it keeps the old
-        // damage and relies on its refreshed repaint.
-        let mut copied = false;
-        if copy_content && topmost {
-            copied = gfx::copy_rect(
-                window.content().x,
-                window.content().y,
-                new_x.saturating_add(BORDER_WIDTH),
-                new_y.saturating_add(TITLE_BAR_HEIGHT),
-                window.w,
-                window.h,
-            ) == Status::Ok;
-        }
         window.x = new_x;
         window.y = new_y;
         let moved = window.frame();
-        let snapshot = window.content();
-        self.bump();
-        if copied {
-            // The service painted the destination content itself, so the
-            // repair may present exactly this rectangle after the chrome pass.
-            self.snapshot = Some(snapshot);
-        }
 
-        // The old frame becomes desktop where no live window covers it. The
-        // moved window's new frame is a live window, so the subtraction
-        // protects the copied overlap. A topmost move adds no new-frame erase:
-        // a `covers_from = count` erase would paint the desktop across the
-        // whole new content and wipe the snapshot. Chrome (the new border and
-        // title bar) is painted separately and never touches the content
-        // rectangle. Non-topmost moves keep the old damage (underlay until the
-        // client's refreshed repaint).
+        // Record both frames as recomposition rectangles: the old frame shows
+        // the desktop or whatever window is now underneath, and the new frame
+        // shows the retained canvas at its new origin. The owner is still
+        // exposed, but only because content may need recomputing (W31).
         self.erases.add(frame, 0);
         if !topmost {
             self.erases.add(moved, pos + 1);
@@ -1071,7 +1416,6 @@ impl Table {
         if let Some(pos) = self.position(self.focus) {
             self.chrome.add(title_rect(&self.windows[self.order[pos]]));
         }
-        self.bump();
         // Hiding a window changes the visible stack; rebuild it so the pixels
         // it uncovered are repainted, not left stale (W31).
         self.full = true;
@@ -1154,7 +1498,6 @@ impl Table {
             pos,
             x.saturating_sub(drag.offset_x),
             y.saturating_sub(drag.offset_y),
-            true,
         );
         let moved = self.windows[self.order[pos]];
         if status == Status::Ok && (moved.x != before.x || moved.y != before.y) {
@@ -1221,59 +1564,6 @@ impl Table {
         self.grab.is_some()
     }
 
-    /// Takes or updates the one machine-wide persistent pointer-region claim
-    /// for `owner` (W27). `Full` when another task holds it, `Invalid` for a
-    /// non-positive extent. A repeat by the owner updates the rectangle. The
-    /// modal grab (W26) is independent: taking or updating a claim neither
-    /// takes nor releases it, and an existing pointer drag is left alone so a
-    /// drag that crosses the bar still follows the pointer.
-    fn claim_region(&mut self, owner: u64, x: i64, y: i64, w: i64, h: i64) -> Status {
-        if w <= 0 || h <= 0 {
-            return Status::Invalid;
-        }
-        if self.region.is_some_and(|region| region.owner != owner) {
-            return Status::Full;
-        }
-        self.region = Some(Region {
-            owner,
-            rect: Rect { x, y, w, h },
-        });
-        Status::Ok
-    }
-
-    /// Releases the caller's region claim (W27): `Ok` for the owner,
-    /// `NotFound` when none is held, `Invalid` for another task's claim.
-    fn release_region(&mut self, owner: u64) -> Status {
-        match self.region {
-            None => Status::NotFound,
-            Some(region) if region.owner != owner => Status::Invalid,
-            Some(_) => {
-                self.region = None;
-                Status::Ok
-            }
-        }
-    }
-
-    /// The owner of the region claim covering `(x, y)`, if any (W27). Used by
-    /// poll-time routing (only that task may dequeue a press there) and by the
-    /// pointer service (a new press there starts no drag and posts no close
-    /// request).
-    fn region_owner_at(&self, x: i64, y: i64) -> Option<u64> {
-        self.region.and_then(|region| {
-            let rect = region.rect;
-            (x >= rect.x
-                && y >= rect.y
-                && x < rect.x.saturating_add(rect.w)
-                && y < rect.y.saturating_add(rect.h))
-            .then_some(region.owner)
-        })
-    }
-
-    /// Whether `(x, y)` lies inside the region claim, regardless of owner.
-    fn region_contains(&self, x: i64, y: i64) -> bool {
-        self.region_owner_at(x, y).is_some()
-    }
-
     fn frame_rect(&self, id: u64) -> Result<Rect, Status> {
         self.position(id)
             .map(|pos| self.windows[self.order[pos]].frame())
@@ -1309,24 +1599,23 @@ impl Table {
     /// each removal (W8). The damage accumulates and one repair pass covers all
     /// removed frames, so a terminated task's windows disappear together.
     ///
-    /// A terminating task's modal popup grab (W26) and persistent
-    /// pointer-region claim (W27) are released here too; the caller wakes input
-    /// waiters because queued events flow again.
+    /// A terminating task's modal popup grab (W26) is released here; its
+    /// planes are removed by the public wrapper (they live behind the plane
+    /// lock). The caller wakes input waiters when either happened.
     fn close_task(&mut self, owner: u64) -> bool {
         let released_grab = self.grab.is_some_and(|grab| grab.owner == owner);
         if released_grab {
             self.grab = None;
-        }
-        let released_region = self.region.is_some_and(|region| region.owner == owner);
-        if released_region {
-            self.region = None;
         }
         let mut removed = false;
         let mut pos = 0;
         while pos < self.count {
             if self.windows[self.order[pos]].owner == owner {
                 let frame = self.windows[self.order[pos]].frame();
-                self.remove_at(pos);
+                let canvas = self.remove_at(pos);
+                if let Some(canvas) = canvas {
+                    free_canvas(canvas);
+                }
                 self.erases.add(frame, 0);
                 self.chrome.add(frame);
                 removed = true;
@@ -1337,13 +1626,12 @@ impl Table {
         // Only an actual removal can move the focus, so a task that owned no
         // window records no damage (and wakes nobody with a spurious expose).
         if removed {
-            self.bump();
             self.full = true;
             if let Some(pos) = self.position(self.focus) {
                 self.chrome.add(title_rect(&self.windows[self.order[pos]]));
             }
         }
-        released_grab || released_region
+        released_grab
     }
 
     /// The parts of `rect` not covered by live windows at z-order indices
@@ -1555,28 +1843,29 @@ impl Table {
     }
 
     /// The task that may dequeue `event` from the machine-wide queue
-    /// (spec 0011, W29; ADR 0047). `None` keeps the ordinary window-less
-    /// competition.
+    /// (spec 0011, W29; ADR 0047; spec 0026, C12). `None` keeps the ordinary
+    /// window-less competition.
     ///
     /// The rule is one value for routing and readiness:
     ///
     /// - an event that already names a window (`window != 0`) belongs to that
     ///   window's owner; a vanished window or a kernel window has no task
     ///   target;
-    /// - otherwise a `PointerDown` belongs to the persistent region claimant
-    ///   at the point (the menu bar, W27), else to the topmost window's owner;
+    /// - otherwise a `PointerDown` belongs to the topmost plane at the point
+    ///   (the menu bar and its pull-downs, C12), else to the topmost window's
+    ///   owner;
     /// - every other pointer and key event belongs to the focused window's
     ///   owner;
     /// - a window-less `Expose`/`Close` is a malformed injection and has no
     ///   target (the real ones are pending flags served before the queue).
-    fn input_target(&self, event: &abi::Event) -> Option<u64> {
+    fn input_target(&self, planes: &PlaneTable, event: &abi::Event) -> Option<u64> {
         if event.window != 0 {
             let owner = self.owner_of(event.window as u64)?;
             return (owner != 0).then_some(owner);
         }
         match event.kind {
-            abi::EventKind::PointerDown => self
-                .region_owner_at(event.x, event.y)
+            abi::EventKind::PointerDown => planes
+                .owner_at(event.x, event.y)
                 .or_else(|| self.hit_test_owner(event.x, event.y)),
             abi::EventKind::PointerMove
             | abi::EventKind::PointerUp
@@ -1586,54 +1875,83 @@ impl Table {
         }
     }
 
-    /// Presents a window's content rectangle, clipped to its visible parts
-    /// (spec 0011, W17). The caller must own the window.
-    fn present(&self, owner: u64, id: u64) -> Status {
+    /// Recomposes and presents a window after its owner draws (spec 0026, C7;
+    /// C14/C15; ADR 0060). The first present makes the canvas part of the
+    /// composition; before it the pixels beneath are left untouched. The caller
+    /// must own the window.
+    fn present(&mut self, owner: u64, id: u64) -> Status {
         let Some(pos) = self.position(id) else {
             return Status::NotFound;
         };
-        let window = &self.windows[self.order[pos]];
-        if window.owner != owner {
+        let slot = self.order[pos];
+        if self.windows[slot].owner != owner {
             return Status::Invalid;
         }
         // A minimized window is hidden: a late present from its owner (a timer,
         // a stale expose handler) must not put its content back over the
         // desktop (W30).
-        if window.minimized {
+        if self.windows[slot].minimized {
             return Status::Ok;
         }
-        let content = window.content();
-        let parts = self.visible_parts(content, pos + 1);
-        for part in parts.rects[..parts.count].iter() {
-            if gfx::set_clip(part.x, part.y, part.w, part.h) {
-                let _ = gfx::present(part.x, part.y, part.w, part.h);
-                gfx::reset_clip();
-            }
-        }
+        self.windows[slot].canvas_valid = true;
+        let frame = self.windows[slot].frame();
+        self.compose(frame);
         Status::Ok
     }
 
-    /// Runs one synchronous repair pass (spec 0011, W11/W31).
+    /// The one compositor: paints `rect` from the surface stack and presents it
+    /// (spec 0026, C14; ADR 0060). Bottom to top: the desktop pattern, every
+    /// live non-minimized window's chrome and valid canvas, every plane that
+    /// has been presented, then a present.
+    fn compose(&self, rect: Rect) {
+        if rect.w <= 0 || rect.h <= 0 {
+            return;
+        }
+        if !gfx::set_clip(rect.x, rect.y, rect.w, rect.h) {
+            return;
+        }
+        let _ = gfx::fill_rect(rect.x, rect.y, rect.w, rect.h, DESKTOP_BASE);
+        let _ = gfx::fill_dither(rect.x, rect.y, rect.w, rect.h, DESKTOP_DITHER);
+        for pos in 0..self.count {
+            let slot = self.order[pos];
+            if self.windows[slot].minimized {
+                continue;
+            }
+            self.draw_chrome(slot);
+            if self.windows[slot].canvas_valid {
+                if let Some(canvas) = self.windows[slot].canvas_at() {
+                    gfx::composite_canvas(&canvas);
+                }
+            }
+        }
+        // Planes are above every window, in creation order (spec 0026, C11/C14).
+        // A plane is painted only after its first present (C15).
+        {
+            let planes = PLANES.lock();
+            for index in 0..planes.count {
+                let plane = &planes.planes[index];
+                if plane.canvas_valid {
+                    if let Some(canvas) = plane.canvas_at() {
+                        gfx::composite_canvas(&canvas);
+                    }
+                }
+            }
+        }
+        gfx::reset_clip();
+        let _ = gfx::present(rect.x, rect.y, rect.w, rect.h);
+    }
+
+    /// Runs one synchronous recomposition pass (spec 0026, C14/C16).
     ///
-    /// 1. The desktop is restored in the erased parts no live window covers.
-    /// 2. Every window whose frame intersects the chrome damage redraws its
-    ///    chrome, bottom-to-top, clipped to its visible parts inside the
-    ///    damaged area. Higher windows are never overwritten.
-    /// 3. Only the pixels the service itself painted are presented: restored
-    ///    desktop parts, the chrome band and border, and a topmost move's
-    ///    content snapshot. Client content is presented by its owner through
-    ///    `window_present` (W17), so the service never copies a stale or
-    ///    another window's shadow content to the screen.
+    /// Damage is still recorded as before (the bounded erase/chrome lists and
+    /// the `full` flag); this ticket only changes what the repair does with it.
+    /// Exposes are marked exactly as before (after the damage is recorded), the
+    /// lists are coalesced, then every damaged rectangle is recomposed and
+    /// presented. A `full` request recomposes the whole screen once. There is no
+    /// visible-parts subtraction, per-piece present or snapshot.
     ///
-    /// A `full` request (W31: a switch, a close/minimize or a completed move)
-    /// replaces the accumulated damage with the whole screen, restores the
-    /// desktop, redraws every live window's chrome bottom-to-top and marks
-    /// every live window for an `Expose`, so the whole stack is rebuilt from
-    /// the desktop up.
-    ///
-    /// Runs under the table lock (window → graphics), so the z-order it walks
-    /// is the one the caller just produced. The repair is synchronous: no table
-    /// snapshot and no client call.
+    /// Runs under the table lock (window → screen), so the z-order it walks is
+    /// the one the caller just produced.
     fn repair(&mut self) -> bool {
         if !self.full && self.erases.count == 0 && self.chrome.count == 0 {
             return false;
@@ -1643,109 +1961,37 @@ impl Table {
             self.clear_damage();
             return false;
         }
+        let screen = Rect {
+            x: 0,
+            y: 0,
+            w: i64::from(screen_w),
+            h: i64::from(screen_h),
+        };
         if self.full {
-            // A switch or completed move rebuilds the whole stack: incidental
-            // damage is subsumed by the full-screen pass.
+            // A switch or completed move recomposes the whole screen:
+            // incidental damage is subsumed by it.
             self.erases.clear();
             self.chrome.clear();
-            let screen = Rect {
-                x: 0,
-                y: 0,
-                w: i64::from(screen_w),
-                h: i64::from(screen_h),
-            };
             self.erases.add(screen, 0);
             self.chrome.add(screen);
         }
         let marked = self.mark_exposes();
         // Coalesce after expose marking so the exact original damage decides
-        // which clients repaint; the paint pass then works on the smaller
-        // merged set (spec 0011, W11).
+        // which clients repaint; the compose pass then works on the merged set.
         self.erases.coalesce();
         self.chrome.coalesce();
-        gfx::reset_clip();
 
-        // A persistent pointer-region claim also reserves its pixels: the
-        // service never paints the desktop over the claimant's rectangle (the
-        // desktop shell's menu bar has no window). Windows drawn over it still
-        // cover it normally.
-        let claim = self.region.map(|region| region.rect);
-        for index in 0..self.erases.count {
-            let erase = self.erases.entries[index];
-            let parts = self.visible_parts(erase.rect, erase.covers_from);
-            for part in parts.rects[..parts.count].iter() {
-                let mut pieces = Parts::new();
-                match claim {
-                    Some(rect) => subtract_into(*part, rect, &mut pieces),
-                    None => pieces.push(*part),
-                }
-                for piece in pieces.rects[..pieces.count].iter() {
-                    if gfx::set_clip(piece.x, piece.y, piece.w, piece.h) {
-                        let _ = gfx::fill_rect(piece.x, piece.y, piece.w, piece.h, DESKTOP_BASE);
-                        let _ =
-                            gfx::fill_dither(piece.x, piece.y, piece.w, piece.h, DESKTOP_DITHER);
-                        gfx::reset_clip();
-                        // The piece is exactly what the service just painted.
-                        let _ = gfx::present(piece.x, piece.y, piece.w, piece.h);
-                    }
-                }
+        if self.full {
+            self.compose(screen);
+        } else {
+            for index in 0..self.erases.count {
+                let rect = self.erases.entries[index].rect;
+                self.compose(rect);
             }
-        }
-
-        if self.chrome.count > 0 {
-            for pos in 0..self.count {
-                let slot = self.order[pos];
-                if self.windows[slot].minimized {
-                    continue;
-                }
-                let frame = self.windows[slot].frame();
-                let content = self.windows[slot].content();
-                if !self.chrome.intersects(frame) {
-                    continue;
-                }
-                let visible = self.visible_parts(frame, pos + 1);
-                for part in visible.rects[..visible.count].iter() {
-                    for index in 0..self.chrome.count {
-                        let damage = self.chrome.rects[index];
-                        let x0 = part.x.max(damage.x);
-                        let y0 = part.y.max(damage.y);
-                        let x1 = part
-                            .x
-                            .saturating_add(part.w)
-                            .min(damage.x.saturating_add(damage.w));
-                        let y1 = part
-                            .y
-                            .saturating_add(part.h)
-                            .min(damage.y.saturating_add(damage.h));
-                        if x1 <= x0 || y1 <= y0 {
-                            continue;
-                        }
-                        if gfx::set_clip(x0, y0, x1 - x0, y1 - y0) {
-                            self.draw_chrome(slot);
-                            // Present the chrome band and border only; the
-                            // content rectangle belongs to the client.
-                            let clip = Rect {
-                                x: x0,
-                                y: y0,
-                                w: x1 - x0,
-                                h: y1 - y0,
-                            };
-                            let mut pieces = Parts::new();
-                            subtract_into(clip, content, &mut pieces);
-                            for piece in pieces.rects[..pieces.count].iter() {
-                                let _ = gfx::present(piece.x, piece.y, piece.w, piece.h);
-                            }
-                            gfx::reset_clip();
-                        }
-                    }
-                }
+            for index in 0..self.chrome.count {
+                let rect = self.chrome.rects[index];
+                self.compose(rect);
             }
-        }
-
-        // The topmost move snapshot is service-painted content (W28), so it is
-        // presented before the owner's refreshed repaint arrives.
-        if let Some(rect) = self.snapshot.take() {
-            let _ = gfx::present(rect.x, rect.y, rect.w, rect.h);
         }
 
         self.clear_damage();
@@ -1764,7 +2010,29 @@ static TABLE: SpinLock<Table> = SpinLock::new(Table::new());
 pub fn open(owner: u64, x: i64, y: i64, w: i64, h: i64, title: &[u8]) -> Result<u64, Status> {
     let (screen_w, screen_h) = gfx::size();
     let mut table = TABLE.lock();
-    let result = table.open(screen_w as i64, screen_h as i64, owner, x, y, w, h, title, false);
+    // Validate before allocating so an invalid rectangle is `Invalid`, not
+    // `Full`; a failed canvas allocation then opens nothing (spec 0026, C2).
+    table.can_open(screen_w as i64, screen_h as i64, w, h)?;
+    let Some(canvas) = alloc_canvas(w, h) else {
+        return Err(Status::Full);
+    };
+    let result = table.open(
+        screen_w as i64,
+        screen_h as i64,
+        owner,
+        x,
+        y,
+        w,
+        h,
+        title,
+        false,
+        Some(canvas),
+    );
+    // A new window becomes its owner's scope, so the caller's plane scope (if
+    // any) is replaced (spec 0026, C3).
+    if result.is_ok() {
+        PLANES.lock().clear_drawer(owner);
+    }
     let wake = if result.is_ok() {
         table.repair()
     } else {
@@ -1790,6 +2058,10 @@ pub(crate) fn open_bottom(
 ) -> Result<u64, Status> {
     let (screen_w, screen_h) = gfx::size();
     let mut table = TABLE.lock();
+    table.can_open(screen_w as i64, screen_h as i64, w, h)?;
+    let Some(canvas) = alloc_canvas(w, h) else {
+        return Err(Status::Full);
+    };
     let result = table.open(
         screen_w as i64,
         screen_h as i64,
@@ -1800,7 +2072,11 @@ pub(crate) fn open_bottom(
         h,
         title,
         true,
+        Some(canvas),
     );
+    if result.is_ok() {
+        PLANES.lock().clear_drawer(owner);
+    }
     let wake = if result.is_ok() {
         table.repair()
     } else {
@@ -1829,14 +2105,15 @@ pub fn close(owner: u64, id: u64) -> Status {
     status
 }
 
-/// Rebuilds the window stack after a display mode change (spec 0022).
+/// Rebuilds the window stack after a display mode change (spec 0022; spec
+/// 0026, C17).
 ///
 /// Window content sizes are kept: only the frame origins are scaled with the
-/// screen and clamped so each frame starts on-screen. The service then runs
-/// the full-stack repair (W31), which restores the desktop, redraws every
-/// chrome and marks every live window for an `Expose`, so each owner repaints
-/// at its refreshed content rectangle. A stale modal grab or drag is dropped;
-/// the desktop shell re-claims its menu-bar region when it next draws.
+/// screen and clamped below the reserved work area. The service then runs the
+/// full-stack repair, which restores the desktop, redraws every chrome and
+/// marks every live window for an `Expose`, so each owner repaints at its
+/// refreshed content rectangle. Plane canvases are unchanged; their origins
+/// are clamped to the new screen. A stale modal grab or drag is dropped.
 pub fn screen_changed(old_width: u32, old_height: u32) {
     let (new_width, new_height) = gfx::size();
     if new_width == 0 {
@@ -1848,6 +2125,7 @@ pub fn screen_changed(old_width: u32, old_height: u32) {
     let old_h = i64::from(old_height.max(1));
 
     let mut table = TABLE.lock();
+    let work_area = table.work_area.min(new_h);
     for slot in 0..MAX_WINDOWS {
         let window = &mut table.windows[slot];
         if !window.used {
@@ -1867,24 +2145,15 @@ pub fn screen_changed(old_width: u32, old_height: u32) {
         } else {
             window.y.saturating_mul(new_h) / old_h
         };
-        window.x = x.clamp(0, (new_w - frame_w).max(0));
-        window.y = y.clamp(0, (new_h - frame_h).max(0));
+        let max_x = (new_w - frame_w).max(0);
+        let max_y = (new_h - frame_h).max(0);
+        window.x = x.clamp(0, max_x);
+        window.y = y.clamp(work_area.min(max_y), max_y);
     }
     table.drag = None;
     table.grab = None;
-    if let Some(mut region) = table.region {
-        if region.rect.x >= new_w {
-            region.rect.x = 0;
-        }
-        if region.rect.y >= new_h {
-            region.rect.y = 0;
-        }
-        region.rect.w = region.rect.w.min(new_w);
-        region.rect.h = region.rect.h.min(new_h);
-        table.region = Some(region);
-    }
+    PLANES.lock().clamp_to(new_w, new_h);
     table.full = true;
-    table.bump();
     let wake = table.repair();
     drop(table);
     if wake {
@@ -1965,12 +2234,12 @@ pub fn pointer_event(
         return false;
     }
 
-    // A persistent region claim owns a *new* press inside its rectangle
-    // (W27): the menu bar wins over a window moved under it, so no drag starts
-    // and no close request posts. The press is not consumed; the claim owner
+    // A plane owns a *new* press inside its rectangle (spec 0026, C12): the
+    // menu bar wins over a window moved under it, so no drag starts and no
+    // close request posts. The press is not consumed; the plane's owner
     // receives it unchanged. Moves and releases are deliberately not filtered:
-    // a drag that started before the pointer crossed the bar still follows it.
-    if pressed && !table.region_contains(x, y) {
+    // a drag that started before the pointer crossed a plane still follows it.
+    if pressed && PLANES.lock().owner_at(x, y).is_none() {
         match table.press(x, y) {
             PressAction::Consumed => {
                 consumed = true;
@@ -2030,34 +2299,6 @@ pub fn info(index: u64) -> Option<Info> {
     TABLE.lock().info(index)
 }
 
-/// The visible-geometry generation (spec 0012 D3). Kernel-internal: the
-/// console reads it around a cell or grid paint so a window that moves above
-/// it during the paint is not overwritten by parts computed for the old
-/// z-order. There is no application binding.
-pub fn generation() -> u64 {
-    TABLE.lock().generation
-}
-
-/// Runs `paint` with a window's visible content parts while the window table
-/// lock is held (spec 0012 D3).
-///
-/// The console uses this to paint its terminal grid: a window opened, raised
-/// or moved on another core between a separate geometry read and the paint
-/// could otherwise be overwritten by the console's older parts. Holding
-/// `WINDOW` across the paint is the same order as the service's repair
-/// (`WINDOW → SCREEN`), and `paint` must not call the console. Returns
-/// `false` for an unknown id.
-pub fn paint_visible_parts(id: u64, paint: &mut dyn FnMut(&[Rect])) -> bool {
-    let table = TABLE.lock();
-    let Some(pos) = table.position(id) else {
-        return false;
-    };
-    let content = table.windows[table.order[pos]].content();
-    let parts = table.visible_parts(content, pos + 1);
-    paint(&parts.rects[..parts.count]);
-    true
-}
-
 /// The focused window id, or 0 (W6).
 pub fn focus() -> u64 {
     TABLE.lock().focus
@@ -2089,17 +2330,27 @@ pub fn is_minimized(id: u64) -> bool {
     table.windows[table.order[pos]].minimized
 }
 
-/// Closes every window owned by a terminating task and repairs the screen once.
-/// Called from `Task::reclaim`, so it covers normal exit, kill, fault, a failed
-/// spawn and a stale-slot eviction (W8). A terminating task's modal popup grab
-/// (W26) and pointer-region claim (W27) are released here too, and input
+/// Closes every window and plane owned by a terminating task and repairs the
+/// screen once. Called from `Task::reclaim`, so it covers normal exit, kill,
+/// fault, a failed spawn and a stale-slot eviction (W8; spec 0026, C1). A
+/// terminating task's modal popup grab (W26) is released here too, and input
 /// waiters are woken so queued events flow again.
 pub fn close_task(owner: u64) {
     let mut table = TABLE.lock();
     let released_input = table.close_task(owner);
+    let mut removed = [Rect {
+        x: 0,
+        y: 0,
+        w: 0,
+        h: 0,
+    }; MAX_PLANES];
+    let plane_count = PLANES.lock().close_owner(owner, &mut removed);
+    for rect in removed[..plane_count].iter() {
+        table.erases.add(*rect, 0);
+    }
     let wake = table.repair();
     drop(table);
-    if wake || released_input {
+    if wake || released_input || plane_count > 0 {
         crate::task::wake_input();
     }
 }
@@ -2139,46 +2390,25 @@ pub fn grab_active() -> bool {
     TABLE.lock().grab_active()
 }
 
-/// Takes or updates the persistent pointer-region claim for `owner` (spec
-/// 0011, W27; ADR 0045). `Full` for another owner, `Invalid` for a
-/// non-positive extent or disabled graphics; a repeat by the owner updates the
-/// rectangle and is `Ok`. The modal grab is independent.
-pub fn region_claim(owner: u64, x: i64, y: i64, w: i64, h: i64) -> Status {
-    if gfx::size().0 == 0 {
-        return Status::Invalid;
-    }
-    TABLE.lock().claim_region(owner, x, y, w, h)
-}
-
-/// Releases the caller's region claim (W27). `Ok` for the owner (`NotFound`
-/// when none is held, `Invalid` for another task); a release wakes every input
-/// waiter after the table unlock so a press that was gated for the owner is
-/// deliverable again.
-pub fn region_release(owner: u64) -> Status {
-    let status = TABLE.lock().release_region(owner);
-    if status == Status::Ok {
-        crate::task::wake_input();
-    }
-    status
-}
-
-/// The owner of the region claim covering `(x, y)`, if any (W27). The
-/// poll-time router consults this for a queued `PointerDown`; the pointer
-/// service uses the same geometry to suppress a new press.
-pub fn region_owner_at(x: i64, y: i64) -> Option<u64> {
-    TABLE.lock().region_owner_at(x, y)
-}
-
 /// The task that may dequeue `event` from the machine-wide queue (spec 0011,
-/// W29; ADR 0047). `None` means the event has no window target and keeps the
-/// ordinary window-less competition.
+/// W29; ADR 0047; spec 0026, C12). `None` means the event has no window target
+/// and keeps the ordinary window-less competition.
 ///
 /// Kernel-internal: `KernelHost::poll_event` gates on it and
 /// `task::input_queue_ready` uses it for readiness, so the block/wake rule and
 /// the consume rule cannot drift. The window lock is taken after the queue
-/// lock is released (the callers peek first), so the two never nest.
+/// lock is released (the callers peek first), so the two never nest; the plane
+/// lock follows the window lock.
 pub fn input_target(event: &abi::Event) -> Option<u64> {
-    TABLE.lock().input_target(event)
+    let table = TABLE.lock();
+    let planes = PLANES.lock();
+    table.input_target(&planes, event)
+}
+
+/// The owner of the topmost plane containing `(x, y)`, if any (spec 0026,
+/// C12). The poll-time router and the pointer service use the same geometry.
+pub fn plane_owner_at(x: i64, y: i64) -> Option<u64> {
+    PLANES.lock().owner_at(x, y)
 }
 
 /// Takes the topmost pending whole-content `Expose` owned by `owner`, if any
@@ -2225,14 +2455,208 @@ pub fn route_click(x: i64, y: i64) -> Option<u64> {
     Some(id)
 }
 
-/// Presents a window's content, clipped to its visible parts (spec 0011, W17).
-/// `Invalid` when graphics are disabled, `NotFound` for an unknown id, and
-/// `Invalid` for a window owned by another task.
+/// Recomposes and presents a window after its owner draws (spec 0026, C7/C15;
+/// ADR 0060). `Invalid` when graphics are disabled, `NotFound` for an unknown
+/// id, and `Invalid` for a window owned by another task.
 pub fn present(owner: u64, id: u64) -> Status {
     if gfx::size().0 == 0 {
         return Status::Invalid;
     }
-    TABLE.lock().present(owner, id)
+    let mut table = TABLE.lock();
+    table.present(owner, id)
+}
+
+/// Opens the caller's draw scope on one of its windows (`syslib.window_begin`,
+/// spec 0026, C3). `id == 0` clears the caller's scope; there is no screen
+/// surface to draw into (C20). `Invalid` when graphics are disabled,
+/// `NotFound` for an unknown id, and `Invalid` for a window owned by another
+/// task.
+pub fn begin(owner: u64, id: u64) -> Status {
+    if gfx::size().0 == 0 {
+        return Status::Invalid;
+    }
+    let mut table = TABLE.lock();
+    let status = table.begin(owner, id);
+    if status == Status::Ok {
+        PLANES.lock().clear_drawer(owner);
+    }
+    status
+}
+
+/// Creates a plane owned by `owner` (spec 0026, C11): a screen rectangle above
+/// every window with a zeroed canvas, clamped to the screen. The limit is
+/// checked before a canvas is allocated, so a full table never allocates.
+pub fn plane_create(owner: u64, x: i64, y: i64, w: i64, h: i64) -> Result<u64, Status> {
+    let (screen_w, screen_h) = gfx::size();
+    if screen_w == 0 || screen_h == 0 {
+        return Err(Status::Invalid);
+    }
+    let Some(rect) = clamp_plane(
+        i64::from(screen_w),
+        i64::from(screen_h),
+        x,
+        y,
+        w,
+        h,
+    ) else {
+        return Err(Status::Invalid);
+    };
+    let table = TABLE.lock();
+    let mut planes = PLANES.lock();
+    if planes.count == MAX_PLANES {
+        return Err(Status::Full);
+    }
+    let Some(canvas) = alloc_canvas(rect.w, rect.h) else {
+        return Err(Status::Full);
+    };
+    let id = planes.create(owner, rect, Some(canvas))?;
+    drop(planes);
+    drop(table);
+    Ok(id)
+}
+
+/// Recomposes and presents a screen rectangle on request (`syslib.present`,
+/// spec 0026, C7). The service repaints the rectangle from the surface stack
+/// and presents it, so the request needs no scope and is idempotent.
+pub fn recompose(x: i64, y: i64, w: i64, h: i64) -> Status {
+    if gfx::size().0 == 0 {
+        return Status::Invalid;
+    }
+    if w <= 0 || h <= 0 {
+        return Status::Invalid;
+    }
+    TABLE.lock().compose(Rect { x, y, w, h });
+    Status::Ok
+}
+
+/// Destroys the caller's plane and recomposites the vacated rectangle so the
+/// windows underneath reappear (spec 0026, C11). Owner-only.
+pub fn plane_destroy(owner: u64, id: u64) -> Status {
+    if gfx::size().0 == 0 {
+        return Status::Invalid;
+    }
+    let mut table = TABLE.lock();
+    let rect = {
+        let mut planes = PLANES.lock();
+        planes.destroy(owner, id)
+    };
+    let rect = match rect {
+        Ok(rect) => rect,
+        Err(status) => return status,
+    };
+    // The vacated pixels are recomposed from the retained surfaces below; no
+    // client round trip and no erase list (C16).
+    table.erases.add(rect, 0);
+    table.repair();
+    Status::Ok
+}
+
+/// Opens the caller's draw scope on one of its planes (`syslib.plane_begin`,
+/// spec 0026, C3/C11). Owner-only; replaces the caller's previous window or
+/// plane scope.
+pub fn plane_begin(owner: u64, id: u64) -> Status {
+    if gfx::size().0 == 0 {
+        return Status::Invalid;
+    }
+    let mut table = TABLE.lock();
+    let mut planes = PLANES.lock();
+    let status = planes.begin(owner, id);
+    if status == Status::Ok {
+        table.clear_drawer(owner);
+    }
+    status
+}
+
+/// Closes the caller's plane scope and recomposites the plane's rectangle
+/// (`syslib.plane_present`, spec 0026, C11/C14). The first present makes the
+/// plane visible; owner-only.
+pub fn plane_present(owner: u64, id: u64) -> Status {
+    if gfx::size().0 == 0 {
+        return Status::Invalid;
+    }
+    let table = TABLE.lock();
+    let rect = {
+        let mut planes = PLANES.lock();
+        planes.present(owner, id)
+    };
+    let rect = match rect {
+        Ok(rect) => rect,
+        Err(status) => return status,
+    };
+    table.compose(rect);
+    Status::Ok
+}
+
+/// Reserves a machine-wide top strip into which window frames are not placed
+/// (`syslib.work_area_reserve`, spec 0026, C13). `0` clears it; a negative
+/// height or disabled graphics is `Invalid`. Last caller wins.
+pub fn work_area_reserve(height: i64) -> Status {
+    let (screen_w, screen_h) = gfx::size();
+    if screen_w == 0 || screen_h == 0 {
+        return Status::Invalid;
+    }
+    if height < 0 {
+        return Status::Invalid;
+    }
+    TABLE.lock().work_area = height.min(i64::from(screen_h));
+    Status::Ok
+}
+
+/// Runs `f` with the canvas of the surface `task` has a draw scope on, while
+/// the window table lock is held (spec 0026, C3/C4; ADR 0060). A window scope
+/// wins; otherwise the caller's plane scope is used. `None` when `task` has no
+/// scope; `task == 0` (the kernel) never has one. Holding `WINDOW` across the
+/// closure is what keeps a concurrent close from freeing the canvas mid-write.
+pub(crate) fn with_canvas<T>(task: u64, f: impl FnOnce(&gfx::Canvas) -> T) -> Option<T> {
+    if task == 0 {
+        return None;
+    }
+    let table = TABLE.lock();
+    for pos in 0..table.count {
+        let slot = table.order[pos];
+        if table.windows[slot].drawer == task {
+            if let Some(canvas) = table.windows[slot].canvas_at() {
+                return Some(f(&canvas));
+            }
+        }
+    }
+    let planes = PLANES.lock();
+    for index in 0..planes.count {
+        if planes.planes[index].drawer == task {
+            if let Some(canvas) = planes.planes[index].canvas_at() {
+                return Some(f(&canvas));
+            }
+        }
+    }
+    None
+}
+
+/// Paints into the canvas of `id` under the table lock without composing
+/// (spec 0026, C4). The kernel console uses it for one cell; `None` when the
+/// window is missing or has no canvas.
+pub(crate) fn draw_on_window<T>(id: u64, f: impl FnOnce(&gfx::Canvas) -> T) -> Option<T> {
+    let table = TABLE.lock();
+    let pos = table.position(id)?;
+    let canvas = table.windows[table.order[pos]].canvas_at()?;
+    Some(f(&canvas))
+}
+
+/// Paints into the canvas of `id` under the table lock, marks the canvas valid
+/// and recomposes the window frame (spec 0026, C14; ADR 0060). The kernel
+/// console uses it for one flushed run and for a whole-grid repaint.
+pub(crate) fn paint_window<T>(id: u64, f: impl FnOnce(&gfx::Canvas) -> T) -> Option<T> {
+    let mut table = TABLE.lock();
+    let pos = table.position(id)?;
+    let slot = table.order[pos];
+    let canvas = table.windows[slot].canvas_at()?;
+    let value = f(&canvas);
+    let frame = {
+        let window = &mut table.windows[slot];
+        window.canvas_valid = true;
+        window.frame()
+    };
+    table.compose(frame);
+    Some(value)
 }
 
 /// Boot self-check: runs the policy on a scratch table with fixed 1024 × 768
@@ -2246,7 +2670,7 @@ pub fn self_check() -> Result<(), u32> {
     let mut table = Table::new();
 
     // 1. First open: id 1, focused, geometry derives from the content size.
-    let one = table.open(SCREEN_W, SCREEN_H, 7, 10, 20, 100, 50, b"one", false);
+    let one = table.open(SCREEN_W, SCREEN_H, 7, 10, 20, 100, 50, b"one", false, None);
     if one != Ok(1) || table.focus != 1 {
         return Err(1);
     }
@@ -2271,7 +2695,7 @@ pub fn self_check() -> Result<(), u32> {
     }
 
     // 2. Second open is on top and focused; the first window is unchanged.
-    let two = table.open(SCREEN_W, SCREEN_H, 8, 300, 200, 160, 90, b"two", false);
+    let two = table.open(SCREEN_W, SCREEN_H, 8, 300, 200, 160, 90, b"two", false, None);
     if two != Ok(2) || table.focus != 2 {
         return Err(5);
     }
@@ -2340,7 +2764,7 @@ pub fn self_check() -> Result<(), u32> {
     }
 
     // 7. Origins are clamped; a negative origin lands at (0, 0).
-    let clamped = table.open(SCREEN_W, SCREEN_H, 7, -50, -50, 100, 50, b"c", false);
+    let clamped = table.open(SCREEN_W, SCREEN_H, 7, -50, -50, 100, 50, b"c", false, None);
     if clamped != Ok(3) {
         return Err(14);
     }
@@ -2359,8 +2783,8 @@ pub fn self_check() -> Result<(), u32> {
     }
 
     // 8. Minimum content and an oversized frame are refused.
-    if table.open(SCREEN_W, SCREEN_H, 7, 0, 0, 7, 50, b"", false) != Err(Status::Invalid)
-        || table.open(SCREEN_W, SCREEN_H, 7, 0, 0, 100, 752, b"", false) != Err(Status::Invalid)
+    if table.open(SCREEN_W, SCREEN_H, 7, 0, 0, 7, 50, b"", false, None) != Err(Status::Invalid)
+        || table.open(SCREEN_W, SCREEN_H, 7, 0, 0, 100, 752, b"", false, None) != Err(Status::Invalid)
     {
         return Err(17);
     }
@@ -2369,14 +2793,14 @@ pub fn self_check() -> Result<(), u32> {
     if table.close(7, 0) != Status::NotFound
         || table.raise(99) != Status::NotFound
         || table.frame_rect(99) != Err(Status::NotFound)
-        || table.open(0, 0, 7, 0, 0, 100, 50, b"", false) != Err(Status::Invalid)
+        || table.open(0, 0, 7, 0, 0, 100, 50, b"", false, None) != Err(Status::Invalid)
     {
         return Err(18);
     }
 
     // 10. Task termination closes every window the task owns.
-    if table.open(SCREEN_W, SCREEN_H, 9, 0, 0, 100, 50, b"a", false) != Ok(4)
-        || table.open(SCREEN_W, SCREEN_H, 9, 200, 100, 100, 50, b"b", false) != Ok(5)
+    if table.open(SCREEN_W, SCREEN_H, 9, 0, 0, 100, 50, b"a", false, None) != Ok(4)
+        || table.open(SCREEN_W, SCREEN_H, 9, 200, 100, 100, 50, b"b", false, None) != Ok(5)
         || table.focus != 5
     {
         return Err(19);
@@ -2388,7 +2812,7 @@ pub fn self_check() -> Result<(), u32> {
 
     // 11. A long title is truncated at 64 bytes (all ASCII).
     let long = [b'x'; 100];
-    let truncated = table.open(SCREEN_W, SCREEN_H, 7, 0, 0, 100, 50, &long, false);
+    let truncated = table.open(SCREEN_W, SCREEN_H, 7, 0, 0, 100, 50, &long, false, None);
     if truncated != Ok(6) {
         return Err(21);
     }
@@ -2401,12 +2825,12 @@ pub fn self_check() -> Result<(), u32> {
     // 12. The table is full at 16 and frees on close.
     let mut index = 0;
     while index < MAX_WINDOWS {
-        if table.open(SCREEN_W, SCREEN_H, 12, 0, 0, 100, 50, b"f", false) != Ok(7 + index as u64) {
+        if table.open(SCREEN_W, SCREEN_H, 12, 0, 0, 100, 50, b"f", false, None) != Ok(7 + index as u64) {
             return Err(24);
         }
         index += 1;
     }
-    if table.open(SCREEN_W, SCREEN_H, 12, 0, 0, 100, 50, b"full", false) != Err(Status::Full) {
+    if table.open(SCREEN_W, SCREEN_H, 12, 0, 0, 100, 50, b"full", false, None) != Err(Status::Full) {
         return Err(25);
     }
     table.close_task(12);
@@ -2417,7 +2841,7 @@ pub fn self_check() -> Result<(), u32> {
     // 13. Owner 0 is the kernel (spec 0012, D6): it opens, focuses and is
     //     enumerated topmost-first like any other window, and its own close
     //     works. The previous steps leave `next_id` at 23.
-    let kernel = table.open(SCREEN_W, SCREEN_H, 0, 10, 10, 100, 50, b"kernel", false);
+    let kernel = table.open(SCREEN_W, SCREEN_H, 0, 10, 10, 100, 50, b"kernel", false, None);
     if kernel != Ok(23) || table.focus != 23 {
         return Err(27);
     }
@@ -2530,7 +2954,7 @@ pub fn paint_self_check() -> Result<(), u32> {
     //    bands that do not touch the frame and preserve the exact area.
     let mut table = Table::new();
     let id = table
-        .open(SCREEN_W, SCREEN_H, 5, 100, 100, 80, 60, b"vis", false)
+        .open(SCREEN_W, SCREEN_H, 5, 100, 100, 80, 60, b"vis", false, None)
         .map_err(|_| 5u32)?;
     let frame = table.frame_rect(id).map_err(|_| 6u32)?;
     let outer = Rect {
@@ -2563,7 +2987,7 @@ pub fn paint_self_check() -> Result<(), u32> {
     //    focus title bar.
     let mut table = Table::new();
     let a = table
-        .open(SCREEN_W, SCREEN_H, 1, 100, 100, 200, 120, b"Alpha", false)
+        .open(SCREEN_W, SCREEN_H, 1, 100, 100, 200, 120, b"Alpha", false, None)
         .map_err(|_| 11u32)?;
     let fa = table.frame_rect(a).map_err(|_| 12u32)?;
     if !table.chrome.covers(fa) || !table.erases.covers(fa, table.count) {
@@ -2572,7 +2996,7 @@ pub fn paint_self_check() -> Result<(), u32> {
 
     table.clear_damage();
     let b = table
-        .open(SCREEN_W, SCREEN_H, 1, 200, 160, 200, 120, b"Beta", false)
+        .open(SCREEN_W, SCREEN_H, 1, 200, 160, 200, 120, b"Beta", false, None)
         .map_err(|_| 14u32)?;
     let fb = table.frame_rect(b).map_err(|_| 15u32)?;
     let ta = title_of(&table, a).ok_or(16u32)?;
@@ -2591,10 +3015,9 @@ pub fn paint_self_check() -> Result<(), u32> {
         return Err(20);
     }
 
-    // Moving the top window records the old frame for the desktop restore and
-    // both frames for the chrome, but not the new frame for the desktop
-    // restore: the topmost content copy must survive (W28). The self-check
-    // passes `copy_content = false` so it never touches the screen.
+    // Moving the top window records the old frame for recomposition and both
+    // frames for the chrome. The damage lists are unchanged by the M16.4
+    // cutover; only `relocate`'s pixel copy is gone (the canvas is window-local).
     table.clear_damage();
     let old = table.frame_rect(a).map_err(|_| 21u32)?;
     if table.move_to(SCREEN_W, SCREEN_H, 1, a, 300, 220, false) != Status::Ok {
@@ -2644,7 +3067,7 @@ pub fn paint_self_check() -> Result<(), u32> {
     //    topmost, focused window and an in-progress drag step do not.
     let mut table = Table::new();
     let a = table
-        .open(SCREEN_W, SCREEN_H, 1, 100, 100, 200, 100, b"full", false)
+        .open(SCREEN_W, SCREEN_H, 1, 100, 100, 200, 100, b"full", false, None)
         .map_err(|_| 31u32)?;
     table.clear_damage();
     if table.full {
@@ -2858,10 +3281,10 @@ pub fn damage_self_check() -> Result<DamageStats, u32> {
     //    new positions; the coalesced present covers only the two frames.
     let mut table = Table::new();
     let alpha = table
-        .open(SCREEN_W, SCREEN_H, 1, 100, 100, 200, 120, b"Alpha", false)
+        .open(SCREEN_W, SCREEN_H, 1, 100, 100, 200, 120, b"Alpha", false, None)
         .map_err(|_| 6u32)?;
     let _beta = table
-        .open(SCREEN_W, SCREEN_H, 2, 600, 400, 200, 120, b"Beta", false)
+        .open(SCREEN_W, SCREEN_H, 2, 600, 400, 200, 120, b"Beta", false, None)
         .map_err(|_| 7u32)?;
     table.clear_damage();
     if table.move_to(SCREEN_W, SCREEN_H, 1, alpha, 700, 600, false) != Status::Ok {
@@ -2942,10 +3365,10 @@ pub fn route_self_check() -> Result<(), u32> {
     // Two windows of different owners, not overlapping.
     let mut table = Table::new();
     let a = table
-        .open(SCREEN_W, SCREEN_H, 1, 10, 10, 100, 50, b"A", false)
+        .open(SCREEN_W, SCREEN_H, 1, 10, 10, 100, 50, b"A", false, None)
         .map_err(|_| 1u32)?;
     let b = table
-        .open(SCREEN_W, SCREEN_H, 2, 400, 400, 100, 50, b"B", false)
+        .open(SCREEN_W, SCREEN_H, 2, 400, 400, 100, 50, b"B", false, None)
         .map_err(|_| 2u32)?;
     if a != 1 || b != 2 {
         return Err(3);
@@ -3022,7 +3445,7 @@ pub fn route_self_check() -> Result<(), u32> {
 
     // A closed window loses its pending expose.
     let c = table
-        .open(SCREEN_W, SCREEN_H, 3, 600, 100, 100, 50, b"C", false)
+        .open(SCREEN_W, SCREEN_H, 3, 600, 100, 100, 50, b"C", false, None)
         .map_err(|_| 21u32)?;
     table.clear_damage();
     if table.raise(c) != Status::Ok {
@@ -3057,7 +3480,7 @@ pub fn drag_self_check() -> Result<(), u32> {
 
     let mut table = Table::new();
     let id = table
-        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"drag", false)
+        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"drag", false, None)
         .map_err(|_| 1u32)?;
     let frame = table.frame_rect(id).map_err(|_| 2u32)?;
 
@@ -3083,7 +3506,7 @@ pub fn drag_self_check() -> Result<(), u32> {
     //    cannot reach a client): the drag is unchanged and no new grab replaces
     //    it.
     let other = table
-        .open(SCREEN_W, SCREEN_H, 8, 600, 500, 100, 50, b"other", false)
+        .open(SCREEN_W, SCREEN_H, 8, 600, 500, 100, 50, b"other", false, None)
         .map_err(|_| 7u32)?;
     let other_frame = table.frame_rect(other).map_err(|_| 8u32)?;
     match table.press(other_frame.x + 40, other_frame.y + 8) {
@@ -3165,7 +3588,7 @@ pub fn drag_self_check() -> Result<(), u32> {
     // 7. The close box posts an owner request: owner 0 is consumed but inert,
     //    a task window yields `Close` and a pending flag the owner can take.
     let kernel = table
-        .open(SCREEN_W, SCREEN_H, 0, 300, 100, 100, 50, b"kernel", false)
+        .open(SCREEN_W, SCREEN_H, 0, 300, 100, 100, 50, b"kernel", false, None)
         .map_err(|_| 22u32)?;
     let kernel_frame = table.frame_rect(kernel).map_err(|_| 23u32)?;
     match table.press(kernel_frame.x + 5, kernel_frame.y + 5) {
@@ -3176,7 +3599,7 @@ pub fn drag_self_check() -> Result<(), u32> {
         return Err(25);
     }
     let victim = table
-        .open(SCREEN_W, SCREEN_H, 9, 500, 100, 100, 50, b"victim", false)
+        .open(SCREEN_W, SCREEN_H, 9, 500, 100, 100, 50, b"victim", false, None)
         .map_err(|_| 26u32)?;
     let victim_frame = table.frame_rect(victim).map_err(|_| 27u32)?;
     match table.press(victim_frame.x + 5, victim_frame.y + 5) {
@@ -3189,7 +3612,7 @@ pub fn drag_self_check() -> Result<(), u32> {
 
     // 8. Closing the dragged window cancels the drag.
     let doomed = table
-        .open(SCREEN_W, SCREEN_H, 7, 600, 300, 100, 50, b"doomed", false)
+        .open(SCREEN_W, SCREEN_H, 7, 600, 300, 100, 50, b"doomed", false, None)
         .map_err(|_| 30u32)?;
     let doomed_frame = table.frame_rect(doomed).map_err(|_| 31u32)?;
     match table.press(doomed_frame.x + 40, doomed_frame.y + 8) {
@@ -3221,13 +3644,13 @@ pub fn close_self_check() -> Result<(), u32> {
 
     let mut table = Table::new();
     let a = table
-        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"A", false)
+        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"A", false, None)
         .map_err(|_| 1u32)?;
     let b = table
-        .open(SCREEN_W, SCREEN_H, 7, 400, 100, 200, 100, b"B", false)
+        .open(SCREEN_W, SCREEN_H, 7, 400, 100, 200, 100, b"B", false, None)
         .map_err(|_| 2u32)?;
     let other = table
-        .open(SCREEN_W, SCREEN_H, 8, 700, 100, 100, 50, b"other", false)
+        .open(SCREEN_W, SCREEN_H, 8, 700, 100, 100, 50, b"other", false, None)
         .map_err(|_| 3u32)?;
 
     // 1. A close-box press on A posts a request for its owner and is consumed;
@@ -3291,7 +3714,7 @@ pub fn close_self_check() -> Result<(), u32> {
 
     // 5. An owner-0 close box is consumed but posts nothing.
     let kernel = table
-        .open(SCREEN_W, SCREEN_H, 0, 300, 400, 100, 50, b"kernel", false)
+        .open(SCREEN_W, SCREEN_H, 0, 300, 400, 100, 50, b"kernel", false, None)
         .map_err(|_| 20u32)?;
     let kernel_frame = table.frame_rect(kernel).map_err(|_| 21u32)?;
     match table.press(kernel_frame.x + 5, kernel_frame.y + 5) {
@@ -3326,7 +3749,7 @@ pub fn grab_self_check() -> Result<(), u32> {
     const SCREEN_H: i64 = 768;
     let mut table = Table::new();
     let id = table
-        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"menu", false)
+        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"menu", false, None)
         .map_err(|_| 1u32)?;
     if table.frame_rect(id).is_err() {
         return Err(2);
@@ -3420,108 +3843,266 @@ pub fn grab_self_check() -> Result<(), u32> {
     Ok(())
 }
 
-/// Boot self-check: the persistent pointer-region claim on a scratch table
-/// (spec 0011, W27; ADR 0045). Pure: no allocation, no global table, no screen.
-pub fn region_self_check() -> Result<(), u32> {
+/// Boot self-check: the plane stack and the work area on scratch state (spec
+/// 0026, C11–C13). Proves the 8-plane limit, owner-only begin/present/destroy,
+/// clamped geometry, that a plane is not composited before its first present,
+/// and that destroying a plane yields exactly one damage rectangle (a second
+/// destroy is `NotFound` and records nothing). Pure: no allocation, no global
+/// table, no screen.
+pub fn planes_self_check() -> Result<(), u32> {
     const SCREEN_W: i64 = 1024;
     const SCREEN_H: i64 = 768;
-    let mut table = Table::new();
-    let id = table
-        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"window", false)
+
+    let mut planes = PlaneTable::new();
+
+    // 1. The stack is creation-ordered, ids start at 1 and a rectangle partly
+    //    off screen is clamped to it.
+    let bar = planes
+        .create(
+            7,
+            clamp_plane(SCREEN_W, SCREEN_H, 0, 0, SCREEN_W, 22).ok_or(1u32)?,
+            None,
+        )
         .map_err(|_| 1u32)?;
-    if table.frame_rect(id).is_err() {
+    if bar != 1 || planes.count != 1 || planes.planes[0].rect().h != 22 {
+        return Err(1);
+    }
+    let menu = planes
+        .create(
+            7,
+            clamp_plane(SCREEN_W, SCREEN_H, -10, 100, 50, 40).ok_or(2u32)?,
+            None,
+        )
+        .map_err(|_| 2u32)?;
+    if menu != 2
+        || planes.planes[1].rect()
+            != (Rect {
+                x: 0,
+                y: 100,
+                w: 40,
+                h: 40,
+            })
+    {
         return Err(2);
     }
 
-    // 0. No claim: nothing is covered and a release finds nothing.
-    if table.region_owner_at(0, 0).is_some()
-        || table.region_contains(10, 10)
-        || table.release_region(7) != Status::NotFound
+    // 2. A non-positive or entirely off-screen rectangle is refused.
+    if clamp_plane(SCREEN_W, SCREEN_H, 0, 0, 0, 10).is_some()
+        || clamp_plane(SCREEN_W, SCREEN_H, 0, 0, 10, -1).is_some()
+        || clamp_plane(SCREEN_W, SCREEN_H, SCREEN_W, 0, 10, 10).is_some()
+        || clamp_plane(SCREEN_W, SCREEN_H, 0, SCREEN_H + 4, 10, 10).is_some()
     {
         return Err(3);
     }
 
-    // 1. Task 7 claims the bar strip; the rectangle hit-test is half-open.
-    if table.claim_region(7, 0, 0, SCREEN_W, 22) != Status::Ok {
+    // 3. A plane is not composited before its first present (C15); the first
+    //    present marks it and a second does not duplicate it.
+    if planes.composited() != 0 {
         return Err(4);
     }
-    if table.region_owner_at(0, 0) != Some(7)
-        || table.region_owner_at(1023, 21) != Some(7)
-        || table.region_owner_at(1024, 0).is_some()
-        || table.region_owner_at(0, 22).is_some()
-        || !table.region_contains(170, 10)
-    {
+    let rect = planes.present(7, bar).map_err(|_| 5u32)?;
+    if rect.h != 22 || planes.composited() != 1 {
         return Err(5);
     }
-
-    // 2. Another task is `Full` and changes nothing.
-    if table.claim_region(8, 50, 50, 100, 100) != Status::Full {
+    planes.present(7, bar).map_err(|_| 6u32)?;
+    if planes.composited() != 1 {
         return Err(6);
     }
-    if table.region_owner_at(50, 50).is_some() || table.region_owner_at(170, 10) != Some(7) {
+
+    // 4. The topmost plane at a point owns a press there (C12).
+    if planes.owner_at(10, 10) != Some(7) {
         return Err(7);
     }
-
-    // 3. The owner's repeat updates the rectangle and stays `Ok`.
-    if table.claim_region(7, 0, 0, 40, 22) != Status::Ok {
+    if planes.owner_at(0, 99).is_some() {
         return Err(8);
     }
-    if table.region_owner_at(39, 21) != Some(7) || table.region_owner_at(40, 0).is_some() {
+    if planes.owner_at(5, 100) != Some(7) {
         return Err(9);
     }
-
-    // 4. A non-positive extent is `Invalid` and leaves the claim unchanged.
-    if table.claim_region(7, 0, 0, 0, 22) != Status::Invalid
-        || table.claim_region(7, 0, 0, 40, -1) != Status::Invalid
-        || table.region_owner_at(39, 21) != Some(7)
-    {
+    if planes.owner_at(900, 700).is_some() {
         return Err(10);
     }
 
-    // 5. Coexistence with the modal grab: taking one changes neither, and the
-    //    grab remains the routing precedence rule (W26/W27).
-    if table.claim_region(7, 0, 0, SCREEN_W, 22) != Status::Ok
-        || table.grab(7, 50, 22, 176, 98) != Status::Ok
-        || table.region_owner_at(170, 10) != Some(7)
-        || !table.grab_allows(7)
-        || table.grab_allows(8)
-        || table.release_region(7) != Status::Ok
-        || !table.grab_active()
-        || table.release_grab(7) != Status::Ok
+    // 5. Owner checks: another task cannot begin, present or destroy; an
+    //    unknown id is `NotFound` and changes nothing.
+    if planes.begin(8, bar) != Status::Invalid
+        || planes.present(8, bar) != Err(Status::Invalid)
+        || planes.destroy(8, bar) != Err(Status::Invalid)
+        || planes.begin(7, 99) != Status::NotFound
+        || planes.present(7, 99) != Err(Status::NotFound)
+        || planes.destroy(7, 99) != Err(Status::NotFound)
     {
         return Err(11);
     }
 
-    // 6. Only the owner releases; another task is `Invalid` and the claim stays.
-    if table.claim_region(7, 0, 0, SCREEN_W, 22) != Status::Ok {
+    // 6. The scope is one per task: beginning a second plane clears the first.
+    if planes.begin(7, bar) != Status::Ok
+        || planes.planes[0].drawer != 7
+        || planes.begin(7, menu) != Status::Ok
+        || planes.planes[0].drawer != 0
+        || planes.planes[1].drawer != 7
+    {
         return Err(12);
     }
-    if table.release_region(8) != Status::Invalid || table.region_owner_at(170, 10) != Some(7) {
+    planes.clear_drawer(7);
+    if planes.planes[1].drawer != 0 {
         return Err(13);
     }
-    if table.release_region(7) != Status::Ok || table.region_owner_at(170, 10).is_some() {
+
+    // 7. Destroy is owner-only, frees the slot and reports the vacated
+    //    rectangle exactly once: a second destroy is `NotFound` and there is no
+    //    damage to record.
+    let vacated = planes.destroy(7, bar).map_err(|_| 14u32)?;
+    if vacated
+        != (Rect {
+            x: 0,
+            y: 0,
+            w: SCREEN_W,
+            h: 22,
+        })
+        || planes.count != 1
+        || planes.destroy(7, bar) != Err(Status::NotFound)
+    {
         return Err(14);
     }
-    if table.release_region(7) != Status::NotFound {
+
+    // 8. The limit is 8 and frees on destroy.
+    while planes.count < MAX_PLANES {
+        planes
+            .create(
+                7,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: 10,
+                    h: 10,
+                },
+                None,
+            )
+            .map_err(|_| 15u32)?;
+    }
+    if planes.count != MAX_PLANES {
         return Err(15);
     }
-
-    // 7. Task termination releases its claim and reports it, so its caller can
-    //    wake the waiters. Another task's claim is untouched, and a grab is
-    //    still released by the same path.
-    if table.claim_region(7, 0, 0, SCREEN_W, 22) != Status::Ok
-        || table.grab(7, 0, 0, 10, 10) != Status::Ok
+    if planes
+        .create(
+            7,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 10,
+            },
+            None,
+        )
+        != Err(Status::Full)
     {
         return Err(16);
     }
-    if !table.close_task(7) || table.region_owner_at(170, 10).is_some() || table.grab_active() {
+    let spare = planes.planes[0].id;
+    planes.destroy(7, spare).map_err(|_| 17u32)?;
+    if planes
+        .create(
+            7,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 10,
+            },
+            None,
+        )
+        .is_err()
+    {
         return Err(17);
     }
-    if table.claim_region(8, 0, 0, SCREEN_W, 22) != Status::Ok {
+
+    // 9. Task termination removes its planes and reports their rectangles.
+    let mut removed = [Rect {
+        x: 0,
+        y: 0,
+        w: 0,
+        h: 0,
+    }; MAX_PLANES];
+    let count = planes.close_owner(7, &mut removed);
+    if count == 0 || planes.count != 0 {
         return Err(18);
     }
-    if table.close_task(7) || table.region_owner_at(170, 10) != Some(8) {
-        return Err(19);
+    for rect in removed[..count].iter() {
+        if rect.w <= 0 || rect.h <= 0 {
+            return Err(19);
+        }
+    }
+
+    Ok(())
+}
+
+/// Boot self-check: the window draw scope on a scratch table (spec 0026, C3).
+/// Pure: no allocation, no global table, no screen.
+pub fn begin_self_check() -> Result<(), u32> {
+    const SCREEN_W: i64 = 1024;
+    const SCREEN_H: i64 = 768;
+    let mut table = Table::new();
+    let one = table
+        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"one", false, None)
+        .map_err(|_| 1u32)?;
+    let two = table
+        .open(SCREEN_W, SCREEN_H, 8, 320, 200, 160, 90, b"two", false, None)
+        .map_err(|_| 1u32)?;
+    let one_slot = table.position(one).ok_or(2u32)?;
+    let two_slot = table.position(two).ok_or(2u32)?;
+
+    // 1. `open` makes the new window its owner's scope, so a single-window app
+    //    can draw without an explicit begin.
+    if table.windows[table.order[one_slot]].drawer != 7
+        || table.windows[table.order[two_slot]].drawer != 8
+    {
+        return Err(3);
+    }
+
+    // 2. Owner-only: another task's window and an unknown id change nothing.
+    if table.begin(7, two) != Status::Invalid
+        || table.begin(8, one) != Status::Invalid
+        || table.begin(7, 999) != Status::NotFound
+        || table.windows[table.order[one_slot]].drawer != 7
+        || table.windows[table.order[two_slot]].drawer != 8
+    {
+        return Err(4);
+    }
+
+    // 3. A second window for the same task takes over its one scope.
+    let three = table
+        .open(SCREEN_W, SCREEN_H, 7, 500, 300, 120, 80, b"three", false, None)
+        .map_err(|_| 5u32)?;
+    let three_slot = table.position(three).ok_or(6u32)?;
+    if table.windows[table.order[one_slot]].drawer != 0
+        || table.windows[table.order[three_slot]].drawer != 7
+    {
+        return Err(7);
+    }
+
+    // 4. A second `begin` replaces the previous scope.
+    if table.begin(7, one) != Status::Ok
+        || table.windows[table.order[one_slot]].drawer != 7
+        || table.windows[table.order[three_slot]].drawer != 0
+    {
+        return Err(8);
+    }
+
+    // 5. `0` clears the caller's scope; there is no screen surface (C20).
+    if table.begin(7, 0) != Status::Ok || table.windows[table.order[one_slot]].drawer != 0 {
+        return Err(9);
+    }
+
+    // 6. Closing the window clears its scope with the record.
+    if table.begin(7, one) != Status::Ok || table.close(7, one) != Status::Ok {
+        return Err(10);
+    }
+    if (0..table.count).any(|pos| table.windows[table.order[pos]].drawer == 7) {
+        return Err(11);
+    }
+    if table.begin(7, one) != Status::NotFound {
+        return Err(12);
     }
 
     Ok(())
@@ -3534,11 +4115,12 @@ pub fn target_self_check() -> Result<(), u32> {
     const SCREEN_H: i64 = 768;
     let mut table = Table::new();
     let one = table
-        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"one", false)
+        .open(SCREEN_W, SCREEN_H, 7, 100, 100, 200, 100, b"one", false, None)
         .map_err(|_| 1u32)?;
     let two = table
-        .open(SCREEN_W, SCREEN_H, 8, 150, 150, 100, 50, b"two", false)
+        .open(SCREEN_W, SCREEN_H, 8, 150, 150, 100, 50, b"two", false, None)
         .map_err(|_| 2u32)?;
+    let mut planes = PlaneTable::new();
 
     // A helper event with the fields the target rule reads.
     let event = |kind: abi::EventKind, x: i64, y: i64, window: i64| abi::Event {
@@ -3565,13 +4147,13 @@ pub fn target_self_check() -> Result<(), u32> {
 
     // 2. The pointer-down target is the topmost hit owner; moves, releases and
     //    keys target the focused owner. A desktop press has no target.
-    if table.input_target(&event(abi::EventKind::PointerDown, 160, 160, 0)) != Some(8)
-        || table.input_target(&event(abi::EventKind::PointerDown, 110, 110, 0)) != Some(7)
-        || table.input_target(&event(abi::EventKind::PointerDown, 900, 700, 0)).is_some()
-        || table.input_target(&event(abi::EventKind::PointerMove, 10, 10, 0)) != Some(8)
-        || table.input_target(&event(abi::EventKind::PointerUp, 10, 10, 0)) != Some(8)
-        || table.input_target(&event(abi::EventKind::KeyDown, 0, 0, 0)) != Some(8)
-        || table.input_target(&event(abi::EventKind::KeyUp, 0, 0, 0)) != Some(8)
+    if table.input_target(&planes, &event(abi::EventKind::PointerDown, 160, 160, 0)) != Some(8)
+        || table.input_target(&planes, &event(abi::EventKind::PointerDown, 110, 110, 0)) != Some(7)
+        || table.input_target(&planes, &event(abi::EventKind::PointerDown, 900, 700, 0)).is_some()
+        || table.input_target(&planes, &event(abi::EventKind::PointerMove, 10, 10, 0)) != Some(8)
+        || table.input_target(&planes, &event(abi::EventKind::PointerUp, 10, 10, 0)) != Some(8)
+        || table.input_target(&planes, &event(abi::EventKind::KeyDown, 0, 0, 0)) != Some(8)
+        || table.input_target(&planes, &event(abi::EventKind::KeyUp, 0, 0, 0)) != Some(8)
     {
         return Err(4);
     }
@@ -3579,11 +4161,11 @@ pub fn target_self_check() -> Result<(), u32> {
     // 3. An addressed event belongs to its window's owner, whatever its kind
     //    and coordinates; an unknown address has no target, and a window-less
     //    Expose/Close is malformed and has none either.
-    if table.input_target(&event(abi::EventKind::KeyDown, 900, 700, one as i64)) != Some(7)
-        || table.input_target(&event(abi::EventKind::PointerDown, 10, 10, two as i64)) != Some(8)
-        || table.input_target(&event(abi::EventKind::Close, 0, 0, 99)) != None
-        || table.input_target(&event(abi::EventKind::Expose, 0, 0, 0)).is_some()
-        || table.input_target(&event(abi::EventKind::Close, 0, 0, 0)).is_some()
+    if table.input_target(&planes, &event(abi::EventKind::KeyDown, 900, 700, one as i64)) != Some(7)
+        || table.input_target(&planes, &event(abi::EventKind::PointerDown, 10, 10, two as i64)) != Some(8)
+        || table.input_target(&planes, &event(abi::EventKind::Close, 0, 0, 99)) != None
+        || table.input_target(&planes, &event(abi::EventKind::Expose, 0, 0, 0)).is_some()
+        || table.input_target(&planes, &event(abi::EventKind::Close, 0, 0, 0)).is_some()
     {
         return Err(5);
     }
@@ -3591,9 +4173,9 @@ pub fn target_self_check() -> Result<(), u32> {
     // 4. A non-owner is denied the target: only the owner may dequeue. An
     //    untargeted event keeps the ordinary competition.
     let addressed = event(abi::EventKind::KeyDown, 0, 0, one as i64);
-    if table.input_target(&addressed) == Some(8)
-        || table.input_target(&addressed) != Some(7)
-        || table.input_target(&event(abi::EventKind::KeyDown, 0, 0, 0)) != Some(8)
+    if table.input_target(&planes, &addressed) == Some(8)
+        || table.input_target(&planes, &addressed) != Some(7)
+        || table.input_target(&planes, &event(abi::EventKind::KeyDown, 0, 0, 0)) != Some(8)
     {
         return Err(6);
     }
@@ -3602,14 +4184,14 @@ pub fn target_self_check() -> Result<(), u32> {
     //    while it is focused, are free-for-all. An addressed event to it is
     //    likewise untargeted, because no task owns the window.
     let kernel = table
-        .open(SCREEN_W, SCREEN_H, 0, 400, 400, 100, 50, b"kernel", false)
+        .open(SCREEN_W, SCREEN_H, 0, 400, 400, 100, 50, b"kernel", false, None)
         .map_err(|_| 7u32)?;
     if table.owner_of(kernel) != Some(0)
         || table.focus_owner().is_some()
         || table.hit_test_owner(410, 410).is_some()
-        || table.input_target(&event(abi::EventKind::PointerDown, 410, 410, 0)).is_some()
-        || table.input_target(&event(abi::EventKind::KeyDown, 0, 0, 0)).is_some()
-        || table.input_target(&event(abi::EventKind::KeyDown, 0, 0, kernel as i64)).is_some()
+        || table.input_target(&planes, &event(abi::EventKind::PointerDown, 410, 410, 0)).is_some()
+        || table.input_target(&planes, &event(abi::EventKind::KeyDown, 0, 0, 0)).is_some()
+        || table.input_target(&planes, &event(abi::EventKind::KeyDown, 0, 0, kernel as i64)).is_some()
     {
         return Err(8);
     }
@@ -3619,33 +4201,55 @@ pub fn target_self_check() -> Result<(), u32> {
         return Err(9);
     }
 
-    // 7. The persistent region claim (W27) owns a window-less press inside its
-    //    rectangle even when a window lies underneath, and takes precedence
-    //    over the hit test; moves and keys still target the focus, and an
-    //    addressed event keeps its own window's owner.
-    if table.claim_region(9, 0, 0, SCREEN_W, 22) != Status::Ok {
-        return Err(10);
-    }
-    if table.input_target(&event(abi::EventKind::PointerDown, 10, 10, 0)) != Some(9)
-        || table.input_target(&event(abi::EventKind::PointerDown, 160, 160, 0)) != Some(8)
-        || table.input_target(&event(abi::EventKind::PointerDown, 900, 700, 0)).is_some()
-        || table.input_target(&event(abi::EventKind::PointerMove, 10, 10, 0)) != Some(8)
-        || table.input_target(&event(abi::EventKind::KeyDown, 0, 0, 0)) != Some(8)
-        || table.input_target(&event(abi::EventKind::PointerDown, 10, 10, one as i64)) != Some(7)
+    // 7. A plane owns a window-less press inside its rectangle even when a
+    //    window lies underneath (spec 0026, C12), and takes precedence over the
+    //    hit test; moves and keys still target the focus, and an addressed
+    //    event keeps its own window's owner.
+    let bar = planes
+        .create(
+            9,
+            clamp_plane(SCREEN_W, SCREEN_H, 0, 0, SCREEN_W, 22).ok_or(10u32)?,
+            None,
+        )
+        .map_err(|_| 10u32)?;
+    if table.input_target(&planes, &event(abi::EventKind::PointerDown, 10, 10, 0)) != Some(9)
+        || table.input_target(&planes, &event(abi::EventKind::PointerDown, 160, 160, 0)) != Some(8)
+        || table.input_target(&planes, &event(abi::EventKind::PointerDown, 900, 700, 0)).is_some()
+        || table.input_target(&planes, &event(abi::EventKind::PointerMove, 10, 10, 0)) != Some(8)
+        || table.input_target(&planes, &event(abi::EventKind::KeyDown, 0, 0, 0)) != Some(8)
+        || table.input_target(&planes, &event(abi::EventKind::PointerDown, 10, 10, one as i64))
+            != Some(7)
     {
         return Err(11);
     }
 
-    // 8. Removing the claimant returns the press to the hit test; releasing
-    //    the claim leaves no trace.
-    if table.claim_region(7, 0, 0, SCREEN_W, 22) != Status::Full {
+    // 8. A later plane is above an earlier one at the same point; removing it
+    //    returns the press to the hit test.
+    let overlay = planes
+        .create(
+            7,
+            clamp_plane(SCREEN_W, SCREEN_H, 0, 0, SCREEN_W, 22).ok_or(12u32)?,
+            None,
+        )
+        .map_err(|_| 12u32)?;
+    if table.input_target(&planes, &event(abi::EventKind::PointerDown, 10, 10, 0)) != Some(7) {
         return Err(12);
     }
-    if !table.close_task(9) || table.region_owner_at(10, 10).is_some() {
+    let mut removed = [Rect {
+        x: 0,
+        y: 0,
+        w: 0,
+        h: 0,
+    }; MAX_PLANES];
+    if planes.close_owner(7, &mut removed) != 1 {
         return Err(13);
     }
-    if table.input_target(&event(abi::EventKind::PointerDown, 10, 10, 0)).is_some() {
+    planes.destroy(9, bar).map_err(|_| 13u32)?;
+    if table.input_target(&planes, &event(abi::EventKind::PointerDown, 10, 10, 0)).is_some() {
         return Err(14);
+    }
+    if planes.count != 0 || overlay == bar {
+        return Err(15);
     }
 
     Ok(())

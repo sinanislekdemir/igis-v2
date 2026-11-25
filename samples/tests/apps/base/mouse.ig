@@ -24,6 +24,7 @@ var
   h: int;
   buttons: uint;
   background: uint;
+  plane: int;
 
 // One line per step; the first failure names the step and stops the checks.
 procedure check(label: const string[0]; passed: bool);
@@ -62,7 +63,16 @@ begin
   out.say("\n");
   w := int(syslib.screen_width());
   h := int(syslib.screen_height());
+  // The proof paints a full-screen plane. Drawing into the shadow without a
+  // surface is gone (spec 0026, C20) and the desktop pattern is service-owned,
+  // so a plane is the closest replacement for the old screen-wide `clear`: it
+  // covers the screen, stays above every window, and is retained until the task
+  // exits. Present before the `get_pixel` checks, which read the composed
+  // shadow (C7).
+  status := syslib.plane_create(0, 0, w, h, plane);
+  status := syslib.plane_begin(plane);
   status := syslib.clear(background);
+  status := syslib.plane_present(plane);
 
   // 1. A large negative move clamps at the top-left edge.
   status := syslib.inject_pointer(-100000, -100000, uint(0));

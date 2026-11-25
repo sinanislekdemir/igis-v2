@@ -91,12 +91,16 @@ struct WindowHost {
     closed: Vec<u64>,
     raised: Vec<u64>,
     presented: Vec<u64>,
+    begun: Vec<u64>,
     grab: Option<(i64, i64, i64, i64)>,
     last_grab: Option<(i64, i64, i64, i64)>,
     released: u32,
-    region: Option<(i64, i64, i64, i64)>,
-    last_region: Option<(i64, i64, i64, i64)>,
-    region_released: u32,
+    plane: Option<(i64, i64, i64, i64)>,
+    last_plane: Option<(i64, i64, i64, i64)>,
+    plane_begun: Vec<u64>,
+    plane_presented: Vec<u64>,
+    plane_destroyed: Vec<u64>,
+    work_area: Option<i64>,
 }
 
 impl WindowHost {
@@ -116,12 +120,16 @@ impl WindowHost {
             closed: Vec::new(),
             raised: Vec::new(),
             presented: Vec::new(),
+            begun: Vec::new(),
             grab: None,
             last_grab: None,
             released: 0,
-            region: None,
-            last_region: None,
-            region_released: 0,
+            plane: None,
+            last_plane: None,
+            plane_begun: Vec::new(),
+            plane_presented: Vec::new(),
+            plane_destroyed: Vec::new(),
+            work_area: None,
         }
     }
 }
@@ -174,6 +182,15 @@ impl Host for WindowHost {
         }
     }
 
+    fn window_begin(&mut self, id: u64) -> Status {
+        self.begun.push(id);
+        if id == 0 || id == 7 {
+            Status::Ok
+        } else {
+            Status::NotFound
+        }
+    }
+
     fn window_info(&mut self, index: u64) -> Option<WindowInfo> {
         if index == 0 {
             self.info
@@ -197,19 +214,38 @@ impl Host for WindowHost {
         }
     }
 
-    fn region_claim(&mut self, x: i64, y: i64, w: i64, h: i64) -> Status {
-        self.region = Some((x, y, w, h));
-        self.last_region = Some((x, y, w, h));
+    fn plane_create(&mut self, x: i64, y: i64, w: i64, h: i64) -> Result<u64, Status> {
+        self.plane = Some((x, y, w, h));
+        self.last_plane = Some((x, y, w, h));
+        Ok(42)
+    }
+
+    fn plane_destroy(&mut self, id: u64) -> Status {
+        self.plane_destroyed.push(id);
         Status::Ok
     }
 
-    fn region_release(&mut self) -> Status {
-        self.region_released += 1;
-        if self.region.take().is_some() {
+    fn plane_begin(&mut self, id: u64) -> Status {
+        self.plane_begun.push(id);
+        if id == 42 {
             Status::Ok
         } else {
             Status::NotFound
         }
+    }
+
+    fn plane_present(&mut self, id: u64) -> Status {
+        self.plane_presented.push(id);
+        if id == 42 {
+            Status::Ok
+        } else {
+            Status::NotFound
+        }
+    }
+
+    fn work_area_reserve(&mut self, height: i64) -> Status {
+        self.work_area = Some(height);
+        Status::Ok
     }
 }
 
@@ -470,6 +506,28 @@ fn the_trait_defaults_are_a_disabled_window_service() {
         Status::Invalid as u64,
         "the default window_present is the disabled service"
     );
+
+    let mut instructions = Vec::new();
+    op_const(&mut instructions, 0);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::WINDOW_BEGIN,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op(&mut instructions, opcodes::RET);
+    let code = build(&instructions, &[], 64);
+    let mut state = vec![0u8; 64];
+    let mut host = DisabledHost;
+    assert_eq!(
+        run(&code, &mut state, &mut host),
+        Outcome::Exited(interpreter::ExitReason::Ok)
+    );
+    assert_eq!(
+        state_word(&state, 0),
+        Status::Invalid as u64,
+        "the default window_begin is the disabled service"
+    );
 }
 
 #[test]
@@ -501,6 +559,45 @@ fn window_present_pops_the_id_and_pushes_the_status() {
     assert_eq!(host.presented, vec![5, 0]);
     assert_eq!(state_word(&state, 0), Status::Ok as u64);
     assert_eq!(state_word(&state, 8), Status::NotFound as u64);
+}
+
+#[test]
+fn window_begin_pops_the_id_and_pushes_the_status() {
+    let mut instructions = Vec::new();
+    op_const(&mut instructions, 7);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::WINDOW_BEGIN,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op_const(&mut instructions, 0);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::WINDOW_BEGIN,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 8);
+    op_const(&mut instructions, 9);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::WINDOW_BEGIN,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 16);
+    op(&mut instructions, opcodes::RET);
+
+    let code = build(&instructions, &[], 64);
+    let mut state = vec![0u8; 64];
+    let mut host = WindowHost::new();
+    assert_eq!(
+        run(&code, &mut state, &mut host),
+        Outcome::Exited(interpreter::ExitReason::Ok)
+    );
+    assert_eq!(host.begun, vec![7, 0, 9]);
+    assert_eq!(state_word(&state, 0), Status::Ok as u64);
+    assert_eq!(state_word(&state, 8), Status::Ok as u64);
+    assert_eq!(state_word(&state, 16), Status::NotFound as u64);
 }
 
 #[test]
@@ -706,23 +803,40 @@ fn the_default_popup_grab_and_release_are_the_disabled_service() {
 }
 
 #[test]
-fn region_claim_passes_the_rect_and_release_returns_the_host_status() {
+fn plane_builtins_pass_the_rect_and_write_the_id_on_ok() {
     let mut instructions = Vec::new();
-    for value in [0, 0, 1024, 22] {
+    for value in [10, 20, 100, 50] {
         op_const(&mut instructions, value);
     }
+    op_imm(&mut instructions, opcodes::REF_STATE, 16);
     op_imm(
         &mut instructions,
         opcodes::BUILTIN,
-        opcodes::builtin::REGION_CLAIM,
+        opcodes::builtin::PLANE_CREATE,
     );
     op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    // Begin, present and destroy the returned id.
+    op_imm(&mut instructions, opcodes::LOAD_STATE, 16);
     op_imm(
         &mut instructions,
         opcodes::BUILTIN,
-        opcodes::builtin::REGION_RELEASE,
+        opcodes::builtin::PLANE_BEGIN,
     );
     op_imm(&mut instructions, opcodes::STORE_STATE, 8);
+    op_imm(&mut instructions, opcodes::LOAD_STATE, 16);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::PLANE_PRESENT,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 24);
+    op_imm(&mut instructions, opcodes::LOAD_STATE, 16);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::PLANE_DESTROY,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 32);
     op(&mut instructions, opcodes::RET);
 
     let code = build(&instructions, &[], 64);
@@ -733,25 +847,35 @@ fn region_claim_passes_the_rect_and_release_returns_the_host_status() {
         Outcome::Exited(interpreter::ExitReason::Ok)
     );
     assert_eq!(
-        host.last_region,
-        Some((0, 0, 1024, 22)),
+        host.last_plane,
+        Some((10, 20, 100, 50)),
         "the four coordinates arrive in declaration order"
     );
-    assert_eq!(host.region_released, 1);
+    assert_eq!(
+        state_word(&state, 16),
+        42,
+        "the host id is written only on Ok"
+    );
+    assert_eq!(host.plane_begun, vec![42]);
+    assert_eq!(host.plane_presented, vec![42]);
+    assert_eq!(host.plane_destroyed, vec![42]);
     assert_eq!(state_word(&state, 0), Status::Ok as u64);
     assert_eq!(state_word(&state, 8), Status::Ok as u64);
+    assert_eq!(state_word(&state, 24), Status::Ok as u64);
+    assert_eq!(state_word(&state, 32), Status::Ok as u64);
 }
 
 #[test]
-fn region_claim_rejects_a_non_positive_extent_before_the_host_call() {
+fn plane_create_rejects_a_non_positive_extent_before_the_host_call() {
     let mut instructions = Vec::new();
     for value in [0, 0, 1024, 0] {
         op_const(&mut instructions, value);
     }
+    op_imm(&mut instructions, opcodes::REF_STATE, 8);
     op_imm(
         &mut instructions,
         opcodes::BUILTIN,
-        opcodes::builtin::REGION_CLAIM,
+        opcodes::builtin::PLANE_CREATE,
     );
     op_imm(&mut instructions, opcodes::STORE_STATE, 0);
     op(&mut instructions, opcodes::RET);
@@ -763,28 +887,51 @@ fn region_claim_rejects_a_non_positive_extent_before_the_host_call() {
         run(&code, &mut state, &mut host),
         Outcome::Exited(interpreter::ExitReason::Ok)
     );
-    assert_eq!(host.region, None, "the host is never called");
+    assert_eq!(host.plane, None, "the host is never called");
     assert_eq!(state_word(&state, 0), Status::Invalid as u64);
 }
 
 #[test]
-fn the_default_region_claim_and_release_are_the_disabled_service() {
+fn the_default_plane_calls_and_work_area_are_the_disabled_service() {
     let mut instructions = Vec::new();
     for value in [0, 0, 10, 10] {
         op_const(&mut instructions, value);
     }
+    op_imm(&mut instructions, opcodes::REF_STATE, 8);
     op_imm(
         &mut instructions,
         opcodes::BUILTIN,
-        opcodes::builtin::REGION_CLAIM,
+        opcodes::builtin::PLANE_CREATE,
     );
     op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op_const(&mut instructions, 1);
     op_imm(
         &mut instructions,
         opcodes::BUILTIN,
-        opcodes::builtin::REGION_RELEASE,
+        opcodes::builtin::PLANE_BEGIN,
     );
-    op_imm(&mut instructions, opcodes::STORE_STATE, 8);
+    op_imm(&mut instructions, opcodes::STORE_STATE, 16);
+    op_const(&mut instructions, 1);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::PLANE_PRESENT,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 24);
+    op_const(&mut instructions, 1);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::PLANE_DESTROY,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 32);
+    op_const(&mut instructions, 22);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::WORK_AREA_RESERVE,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 40);
     op(&mut instructions, opcodes::RET);
 
     let code = build(&instructions, &[], 64);
@@ -795,6 +942,44 @@ fn the_default_region_claim_and_release_are_the_disabled_service() {
         Outcome::Exited(interpreter::ExitReason::Ok)
     );
     assert_eq!(state_word(&state, 0), Status::Invalid as u64);
+    assert_eq!(state_word(&state, 16), Status::Invalid as u64);
+    assert_eq!(state_word(&state, 24), Status::Invalid as u64);
+    assert_eq!(
+        state_word(&state, 32),
+        Status::NotFound as u64,
+        "an unknown plane destroy is NotFound"
+    );
+    assert_eq!(state_word(&state, 40), Status::Invalid as u64);
+}
+
+#[test]
+fn work_area_reserve_passes_the_height_and_rejects_a_negative_one() {
+    let mut instructions = Vec::new();
+    op_const(&mut instructions, 22);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::WORK_AREA_RESERVE,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 0);
+    op_const(&mut instructions, -1);
+    op_imm(
+        &mut instructions,
+        opcodes::BUILTIN,
+        opcodes::builtin::WORK_AREA_RESERVE,
+    );
+    op_imm(&mut instructions, opcodes::STORE_STATE, 8);
+    op(&mut instructions, opcodes::RET);
+
+    let code = build(&instructions, &[], 64);
+    let mut state = vec![0u8; 64];
+    let mut host = WindowHost::new();
+    assert_eq!(
+        run(&code, &mut state, &mut host),
+        Outcome::Exited(interpreter::ExitReason::Ok)
+    );
+    assert_eq!(host.work_area, Some(22), "the negative height is not passed");
+    assert_eq!(state_word(&state, 0), Status::Ok as u64);
     assert_eq!(state_word(&state, 8), Status::Invalid as u64);
 }
 

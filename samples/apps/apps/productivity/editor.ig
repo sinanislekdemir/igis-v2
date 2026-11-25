@@ -2218,6 +2218,10 @@ end;
 // once afterwards.
 procedure draw_all();
 begin
+  // The file dialog is a second window of this task, and opening it takes the
+  // one per-task draw scope (spec 0026, C3/C20). Re-opening our own window at
+  // the start of every frame keeps the editor drawable after the dialog closes.
+  st := syslib.window_begin(id);
   st := syslib.fill_rect(rect.x, rect.y, ContentW, ContentH, white);
   st := stdlib.ui_menu_bar(rect.x, rect.y, ContentW, titles, 1, open_menu);
   draw_path_line();

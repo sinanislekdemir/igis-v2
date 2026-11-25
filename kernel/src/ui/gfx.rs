@@ -1,7 +1,14 @@
-//! The shadow screen and presentation (spec 0009, ADR 0020).
+//! The shadow screen, retained canvases and presentation (spec 0009, 0026;
+//! ADR 0020, ADR 0060).
 //!
-//! One full-screen pixel buffer is the source of truth. Every `syslib` drawing
-//! primitive, the text console and the future window service write here;
+//! One full-screen pixel buffer is the shadow the service composes and
+//! presents. A window's content lives in its own [`Canvas`] (owned by the
+//! window record); the [`composite_canvas`] step copies it into the shadow
+//! under the current shadow clip. The window service is the only writer of the
+//! shadow: applications draw into their canvas, the kernel console draws into
+//! its canvas, and only service paint (chrome, desktop pattern, composition)
+//! and the transitional screen scope use the shadow primitives here.
+//!
 //! [`present`] copies a rectangle to the linear framebuffer row by row, using
 //! the framebuffer pitch.
 //!
@@ -13,8 +20,9 @@
 //!
 //! Colours are `0x00RRGGBB`; coordinates are pixels with the origin at the
 //! top-left. Drawing is clipped to a rectangular region (initially the whole
-//! screen) and then to the screen, and never faults: out-of-range extents and
-//! over-wide colours are rejected by the interpreter before they reach here.
+//! screen) and then to the screen or canvas, and never faults: out-of-range
+//! extents and over-wide colours are rejected by the interpreter before they
+//! reach here.
 //!
 //! # Pointer and cursor (spec 0010, ADR 0021)
 //!
@@ -148,23 +156,299 @@ struct Rect {
     h: i32,
 }
 
-/// An explicit clip rectangle for kernel-internal drawing (spec 0012, D3).
+/// Intersects `(x, y, w, h)` with `clip` and the surface extent
+/// `[origin, origin + limit)` and returns half-open **screen** bounds
+/// `(x0, y0, x1, y1)`, or `None` when nothing is visible.
 ///
-/// The window service's repairs save, narrow and restore the shadow's one
-/// global clip (spec 0011, W10). The kernel text windows cannot use that for a
-/// whole-grid repaint: the clip is global, so a long repaint would clip another
-/// task's drawing on another core. These helpers therefore take the clip as an
-/// argument and never touch [`Screen::clip`].
+/// Kept free-standing so [`Screen::present`], which copies straight to the
+/// framebuffer and never forms a surface, uses the same arithmetic.
+fn clip_bounds(
+    clip: Rect,
+    origin: (i64, i64),
+    limit: (i64, i64),
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+) -> Option<(i64, i64, i64, i64)> {
+    let clip_x1 = i64::from(clip.x) + i64::from(clip.w);
+    let clip_y1 = i64::from(clip.y) + i64::from(clip.h);
+    let limit_x1 = origin.0.saturating_add(limit.0);
+    let limit_y1 = origin.1.saturating_add(limit.1);
+    let x0 = x.max(i64::from(clip.x)).max(origin.0);
+    let y0 = y.max(i64::from(clip.y)).max(origin.1);
+    let x1 = x.saturating_add(w).min(clip_x1).min(limit_x1);
+    let y1 = y.saturating_add(h).min(clip_y1).min(limit_y1);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some((x0, y0, x1, y1))
+}
+
+/// A rectangle of pixels and the mapping from screen coordinates onto it
+/// (spec 0026, C1/C4; ADR 0060).
+///
+/// `clip` stays in **screen** coordinates. `ox`/`oy` translate a screen
+/// coordinate to a buffer coordinate (`buffer = screen - origin`) and `limit`
+/// is the buffer's extent in pixels, so a surface can cover a window canvas at
+/// some screen origin. The shadow is one surface with a zero origin and the
+/// whole screen as its limit; the public primitives run through
+/// [`Screen::surf`]. Pixel stores still bounds-check their slice, so a bad
+/// range is ignored rather than panicking.
+struct Surf<'a> {
+    pixels: &'a mut [u8],
+    pitch: usize,
+    clip: Rect,
+    ox: i64,
+    oy: i64,
+    limit: (i64, i64),
+}
+
+impl Surf<'_> {
+    /// Intersects a rectangle with the clip region and the surface extent.
+    /// Returns half-open **surface (buffer)** bounds or `None` when nothing is
+    /// visible.
+    fn clipped(&self, x: i64, y: i64, w: i64, h: i64) -> Option<(usize, usize, usize, usize)> {
+        let (x0, y0, x1, y1) = clip_bounds(self.clip, (self.ox, self.oy), self.limit, x, y, w, h)?;
+        Some((
+            (x0 - self.ox) as usize,
+            (y0 - self.oy) as usize,
+            (x1 - self.ox) as usize,
+            (y1 - self.oy) as usize,
+        ))
+    }
+
+    /// Writes one pixel. Bounds are the caller's responsibility; a bad range is
+    /// ignored rather than panicking.
+    fn store(&mut self, x: usize, y: usize, color: u32) {
+        let offset = y * self.pitch + x * 4;
+        if let Some(slot) = self.pixels.get_mut(offset..offset + 4) {
+            slot.copy_from_slice(&(color & MAX_COLOR).to_le_bytes());
+        }
+    }
+
+    fn load(&self, x: usize, y: usize) -> u32 {
+        let offset = y * self.pitch + x * 4;
+        match self.pixels.get(offset..offset + 4) {
+            Some(bytes) => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            None => 0,
+        }
+    }
+
+    /// Writes a pixel through the clip region. Used by the text and dither
+    /// paths, where a whole-glyph rectangle would need per-pixel masking.
+    fn put(&mut self, x: i64, y: i64, color: u32) {
+        let clip_x1 = i64::from(self.clip.x) + i64::from(self.clip.w);
+        let clip_y1 = i64::from(self.clip.y) + i64::from(self.clip.h);
+        let limit_x1 = self.ox.saturating_add(self.limit.0);
+        let limit_y1 = self.oy.saturating_add(self.limit.1);
+        if x < i64::from(self.clip.x)
+            || y < i64::from(self.clip.y)
+            || x >= clip_x1
+            || y >= clip_y1
+            || x < self.ox
+            || y < self.oy
+            || x >= limit_x1
+            || y >= limit_y1
+        {
+            return;
+        }
+        self.store((x - self.ox) as usize, (y - self.oy) as usize, color);
+    }
+
+    fn fill(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) {
+        let Some((x0, y0, x1, y1)) = self.clipped(x, y, w, h) else {
+            return;
+        };
+        let bytes = (color & MAX_COLOR).to_le_bytes();
+        for row in y0..y1 {
+            let start = row * self.pitch + x0 * 4;
+            let end = row * self.pitch + x1 * 4;
+            if let Some(slice) = self.pixels.get_mut(start..end) {
+                for pixel in slice.chunks_exact_mut(4) {
+                    pixel.copy_from_slice(&bytes);
+                }
+            }
+        }
+    }
+
+    fn dither(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) {
+        let Some((x0, y0, x1, y1)) = self.clipped(x, y, w, h) else {
+            return;
+        };
+        for row in y0..y1 {
+            for col in x0..x1 {
+                if ((col as i64 + self.ox) + (row as i64 + self.oy)) & 1 == 0 {
+                    self.store(col, row, color);
+                }
+            }
+        }
+    }
+
+    /// Scales a `pw × ph` RGB buffer into a destination rectangle with
+    /// nearest-neighbour sampling (spec 0009, G22). The destination rectangle
+    /// is clipped exactly like [`Surf::fill`]; the source sample for
+    /// destination pixel `(dx, dy)` is `((dx * pw) / w, (dy * ph) / h)`. The
+    /// caller has checked the dimensions and the buffer length.
+    fn blit(&mut self, x: i64, y: i64, w: i64, h: i64, pixels: &[u8], pw: i64, ph: i64) {
+        let Some((x0, y0, x1, y1)) = self.clipped(x, y, w, h) else {
+            return;
+        };
+        for row in y0..y1 {
+            let dy = i128::from(row as i64 + self.oy - y);
+            let sy = (dy * i128::from(ph) / i128::from(h)) as usize;
+            for col in x0..x1 {
+                let dx = i128::from(col as i64 + self.ox - x);
+                let sx = (dx * i128::from(pw) / i128::from(w)) as usize;
+                let index = (sy * pw as usize + sx) * 3;
+                let Some(rgb) = pixels.get(index..index + 3) else {
+                    continue;
+                };
+                let color =
+                    (u32::from(rgb[0]) << 16) | (u32::from(rgb[1]) << 8) | u32::from(rgb[2]);
+                self.store(col, row, color);
+            }
+        }
+    }
+
+    fn outline(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) {
+        // Four one-pixel strips inside the same extent. They are drawn through
+        // `fill` so the clip applies once per strip; overlapping corners are
+        // idempotent.
+        self.fill(x, y, w, 1, color);
+        self.fill(x, y + h - 1, w, 1, color);
+        self.fill(x, y + 1, 1, h - 2, color);
+        self.fill(x + w - 1, y + 1, 1, h - 2, color);
+    }
+
+    fn text(&mut self, x: i64, y: i64, text: &[u8], color: u32) {
+        for (index, byte) in text.iter().enumerate() {
+            let cell_x = x + index as i64 * 8;
+            if *byte >= 0x80 {
+                continue;
+            }
+            let glyph = &FONT8X8_BASIC[*byte as usize];
+            for (row, bits) in glyph.iter().enumerate() {
+                for col in 0..8 {
+                    if bits & (1 << col) != 0 {
+                        self.put(cell_x + col as i64, y + row as i64, color);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Paints one 8×8 glyph cell with an opaque background through this
+    /// surface's clip (spec 0026, C1/C4). The console uses it for its canvas.
+    fn glyph(&mut self, x: i64, y: i64, code: u8, fg: u32, bg: u32) {
+        self.fill(x, y, 8, 8, bg);
+        if code < 0x80 {
+            let glyph = &FONT8X8_BASIC[code as usize];
+            for (row, bits) in glyph.iter().enumerate() {
+                for col in 0..8 {
+                    if bits & (1 << col) != 0 {
+                        self.put(x + col as i64, y + row as i64, fg);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Draws proportional text with a transparent background (spec 0015).
+    ///
+    /// Printable ASCII uses the variable-width font; every other byte keeps an
+    /// 8×8 cell with an eight-pixel advance, drawn two rows down so its ink
+    /// sits on the proportional baseline. Bytes at or above `0x80` have no 8×8
+    /// glyph and draw nothing. `y` is the top of the 12-pixel line box.
+    ///
+    /// The font cache is taken on a miss while the caller holds [`SCREEN`]; the
+    /// documented order is `SCREEN → FONT` (nothing takes the font lock and
+    /// then the screen).
+    fn text_prop(&mut self, x: i64, y: i64, text: &[u8], color: u32) {
+        let mut pen = x;
+        for byte in text {
+            match font::glyph(*byte) {
+                Some(glyph) => {
+                    for (row, bits) in glyph.rows.iter().enumerate() {
+                        for col in 0..glyph.width {
+                            let bit = glyph.left + col;
+                            if bits & (1u16 << bit) != 0 {
+                                self.put(pen + i64::from(bit), y + row as i64, color);
+                            }
+                        }
+                    }
+                    pen += i64::from(glyph.advance);
+                }
+                None => {
+                    if *byte < 0x80 {
+                        let glyph = &FONT8X8_BASIC[*byte as usize];
+                        for (row, bits) in glyph.iter().enumerate() {
+                            for col in 0..8 {
+                                if bits & (1 << col) != 0 {
+                                    self.put(pen + col as i64, y + 2 + row as i64, color);
+                                }
+                            }
+                        }
+                    }
+                    pen += i64::from(font::FALLBACK_ADVANCE);
+                }
+            }
+        }
+    }
+}
+
+/// A retained rectangle of pixels owned by one window (spec 0026, C1; ADR
+/// 0060). `base` is a frame-allocator allocation of `bytes` (no row padding:
+/// `pitch == w * 4`); `ox`/`oy` are the surface's current screen origin.
+///
+/// The owner task writes it under the window table lock and the compositor
+/// reads it under the same lock, so one writer and one reader are serialised.
 #[derive(Clone, Copy)]
-pub struct Clip {
-    /// Left edge in screen pixels.
-    pub x: i64,
-    /// Top edge in screen pixels.
-    pub y: i64,
+pub struct Canvas {
+    /// First byte of the canvas allocation (identity-mapped physical memory).
+    pub base: *mut u8,
+    /// Bytes owned by the canvas.
+    pub bytes: usize,
+    /// Bytes per row (`w * 4`, no padding).
+    pub pitch: usize,
     /// Width in pixels.
     pub w: i64,
     /// Height in pixels.
     pub h: i64,
+    /// Screen origin of the canvas top-left.
+    pub ox: i64,
+    /// Screen origin of the canvas top-left.
+    pub oy: i64,
+}
+
+// SAFETY: the canvas has exactly one writer (the owning task, serialised by the
+// window table lock) and one reader (the compositor, under the same lock); the
+// raw pointer is only dereferenced while that lock is held (spec 0026, C1;
+// ADR 0060 "Lock order").
+unsafe impl Send for Canvas {}
+unsafe impl Sync for Canvas {}
+
+/// Builds a [`Surf`] over a canvas. The clip and the extent are in screen
+/// coordinates at the canvas origin, so the existing translated primitives
+/// apply the M16.3 scaffolding unchanged (spec 0026, C4).
+fn canvas_surf<'a>(c: &'a Canvas) -> Surf<'a> {
+    // SAFETY: `base`/`bytes` are the canvas allocation, kept alive by the
+    // window record and only accessed under the window table lock. `pitch`,
+    // `limit` and the clip keep every store inside `w * h * 4` bytes.
+    let pixels = unsafe { core::slice::from_raw_parts_mut(c.base, c.bytes) };
+    Surf {
+        pixels,
+        pitch: c.pitch,
+        clip: Rect {
+            x: c.ox as i32,
+            y: c.oy as i32,
+            w: c.w as i32,
+            h: c.h as i32,
+        },
+        ox: c.ox,
+        oy: c.oy,
+        limit: (c.w, c.h),
+    }
 }
 
 /// Pointer state, machine-wide (spec 0010, I4/I5).
@@ -202,57 +486,17 @@ struct Screen {
 static SCREEN: SpinLock<Option<Screen>> = SpinLock::new(None);
 
 impl Screen {
-    /// Intersects a rectangle with the clip region and the screen. Returns
-    /// half-open bounds `(x0, y0, x1, y1)` or `None` when nothing is visible.
-    fn clipped(&self, x: i64, y: i64, w: i64, h: i64) -> Option<(usize, usize, usize, usize)> {
-        let clip_x1 = self.clip.x as i64 + self.clip.w as i64;
-        let clip_y1 = self.clip.y as i64 + self.clip.h as i64;
-        let x0 = x.max(self.clip.x as i64).max(0);
-        let y0 = y.max(self.clip.y as i64).max(0);
-        let x1 = x.saturating_add(w).min(clip_x1).min(self.width as i64);
-        let y1 = y.saturating_add(h).min(clip_y1).min(self.height as i64);
-        if x1 <= x0 || y1 <= y0 {
-            return None;
-        }
-        Some((x0 as usize, y0 as usize, x1 as usize, y1 as usize))
-    }
-
-    /// Intersects a rectangle with an explicit clip and the screen (spec 0012,
-    /// D3). Unlike [`Screen::clipped`], the global `clip` is ignored.
-    fn clipped_by(
-        &self,
-        x: i64,
-        y: i64,
-        w: i64,
-        h: i64,
-        clip: Clip,
-    ) -> Option<(usize, usize, usize, usize)> {
-        let clip_x1 = clip.x.saturating_add(clip.w);
-        let clip_y1 = clip.y.saturating_add(clip.h);
-        let x0 = x.max(clip.x).max(0);
-        let y0 = y.max(clip.y).max(0);
-        let x1 = x.saturating_add(w).min(clip_x1).min(self.width as i64);
-        let y1 = y.saturating_add(h).min(clip_y1).min(self.height as i64);
-        if x1 <= x0 || y1 <= y0 {
-            return None;
-        }
-        Some((x0 as usize, y0 as usize, x1 as usize, y1 as usize))
-    }
-
-    /// Writes one pixel. Bounds are the caller's responsibility; a bad range is
-    /// ignored rather than panicking.
-    fn store(&mut self, x: usize, y: usize, color: u32) {
-        let offset = y * self.pitch + x * 4;
-        if let Some(slot) = self.shadow.get_mut(offset..offset + 4) {
-            slot.copy_from_slice(&(color & MAX_COLOR).to_le_bytes());
-        }
-    }
-
-    fn load(&self, x: usize, y: usize) -> u32 {
-        let offset = y * self.pitch + x * 4;
-        match self.shadow.get(offset..offset + 4) {
-            Some(bytes) => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-            None => 0,
+    /// The whole screen as a drawing surface. The shadow's origin is `(0, 0)`,
+    /// its extent is the screen and its clip is the shadow's clip, so screen
+    /// and buffer coordinates agree (spec 0026, C1; ADR 0060).
+    fn surf(&mut self) -> Surf<'_> {
+        Surf {
+            pixels: &mut *self.shadow,
+            pitch: self.pitch,
+            clip: self.clip,
+            ox: 0,
+            oy: 0,
+            limit: (self.width as i64, self.height as i64),
         }
     }
 
@@ -317,210 +561,20 @@ impl Screen {
         }
     }
 
-    /// Writes a pixel through the clip region. Used by the text and dither
-    /// paths, where a whole-glyph rectangle would need per-pixel masking.
-    fn put(&mut self, x: i64, y: i64, color: u32) {
-        let clip_x1 = self.clip.x as i64 + self.clip.w as i64;
-        let clip_y1 = self.clip.y as i64 + self.clip.h as i64;
-        if x < self.clip.x as i64
-            || y < self.clip.y as i64
-            || x >= clip_x1
-            || y >= clip_y1
-            || x < 0
-            || y < 0
-            || x >= self.width as i64
-            || y >= self.height as i64
-        {
-            return;
-        }
-        self.store(x as usize, y as usize, color);
-    }
-
-    /// Writes one pixel through an explicit clip (spec 0012, D3).
-    fn put_in(&mut self, x: i64, y: i64, color: u32, clip: Clip) {
-        if x < clip.x
-            || y < clip.y
-            || x >= clip.x.saturating_add(clip.w)
-            || y >= clip.y.saturating_add(clip.h)
-            || x < 0
-            || y < 0
-            || x >= self.width as i64
-            || y >= self.height as i64
-        {
-            return;
-        }
-        self.store(x as usize, y as usize, color);
-    }
-
-    fn fill(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) {
-        let Some((x0, y0, x1, y1)) = self.clipped(x, y, w, h) else {
-            return;
-        };
-        let bytes = (color & MAX_COLOR).to_le_bytes();
-        for row in y0..y1 {
-            let start = row * self.pitch + x0 * 4;
-            let end = row * self.pitch + x1 * 4;
-            if let Some(slice) = self.shadow.get_mut(start..end) {
-                for pixel in slice.chunks_exact_mut(4) {
-                    pixel.copy_from_slice(&bytes);
-                }
-            }
-        }
-    }
-
-    /// Fills a rectangle through an explicit clip (spec 0012, D3).
-    fn fill_in(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32, clip: Clip) {
-        let Some((x0, y0, x1, y1)) = self.clipped_by(x, y, w, h, clip) else {
-            return;
-        };
-        let bytes = (color & MAX_COLOR).to_le_bytes();
-        for row in y0..y1 {
-            let start = row * self.pitch + x0 * 4;
-            let end = row * self.pitch + x1 * 4;
-            if let Some(slice) = self.shadow.get_mut(start..end) {
-                for pixel in slice.chunks_exact_mut(4) {
-                    pixel.copy_from_slice(&bytes);
-                }
-            }
-        }
-    }
-
-    /// Paints one 8×8 glyph cell with an opaque background through an explicit
-    /// clip, without presenting (spec 0012, D3).
-    fn glyph_in(&mut self, x: i64, y: i64, code: u8, fg: u32, bg: u32, clip: Clip) {
-        self.fill_in(x, y, 8, 8, bg, clip);
-        if code < 0x80 {
-            let glyph = &FONT8X8_BASIC[code as usize];
-            for (row, bits) in glyph.iter().enumerate() {
-                for col in 0..8 {
-                    if bits & (1 << col) != 0 {
-                        self.put_in(x + col as i64, y + row as i64, fg, clip);
-                    }
-                }
-            }
-        }
-    }
-
-    fn dither(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) {
-        let Some((x0, y0, x1, y1)) = self.clipped(x, y, w, h) else {
-            return;
-        };
-        for row in y0..y1 {
-            for col in x0..x1 {
-                if (row + col) & 1 == 0 {
-                    self.store(col, row, color);
-                }
-            }
-        }
-    }
-
-    /// Scales a `pw × ph` RGB buffer into a destination rectangle with
-    /// nearest-neighbour sampling (spec 0009, G22). The destination rectangle
-    /// is clipped exactly like [`Screen::fill`]; the source sample for
-    /// destination pixel `(dx, dy)` is `((dx * pw) / w, (dy * ph) / h)`. The
-    /// caller has checked the dimensions and the buffer length.
-    fn blit(&mut self, x: i64, y: i64, w: i64, h: i64, pixels: &[u8], pw: i64, ph: i64) {
-        let Some((x0, y0, x1, y1)) = self.clipped(x, y, w, h) else {
-            return;
-        };
-        for row in y0..y1 {
-            let dy = i128::from(row as i64 - y);
-            let sy = (dy * i128::from(ph) / i128::from(h)) as usize;
-            for col in x0..x1 {
-                let dx = i128::from(col as i64 - x);
-                let sx = (dx * i128::from(pw) / i128::from(w)) as usize;
-                let index = (sy * pw as usize + sx) * 3;
-                let Some(rgb) = pixels.get(index..index + 3) else {
-                    continue;
-                };
-                let color =
-                    (u32::from(rgb[0]) << 16) | (u32::from(rgb[1]) << 8) | u32::from(rgb[2]);
-                self.store(col, row, color);
-            }
-        }
-    }
-
-    fn outline(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) {
-        // Four one-pixel strips inside the same extent. They are drawn through
-        // `fill` so the clip applies once per strip; overlapping corners are
-        // idempotent.
-        self.fill(x, y, w, 1, color);
-        self.fill(x, y + h - 1, w, 1, color);
-        self.fill(x, y + 1, 1, h - 2, color);
-        self.fill(x + w - 1, y + 1, 1, h - 2, color);
-    }
-
-    fn text(&mut self, x: i64, y: i64, text: &[u8], color: u32) {
-        for (index, byte) in text.iter().enumerate() {
-            let cell_x = x + index as i64 * 8;
-            if *byte >= 0x80 {
-                continue;
-            }
-            let glyph = &FONT8X8_BASIC[*byte as usize];
-            for (row, bits) in glyph.iter().enumerate() {
-                for col in 0..8 {
-                    if bits & (1 << col) != 0 {
-                        self.put(cell_x + col as i64, y + row as i64, color);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Draws proportional text with a transparent background (spec 0015).
-    ///
-    /// Printable ASCII uses the variable-width font; every other byte keeps an
-    /// 8×8 cell with an eight-pixel advance, drawn two rows down so its ink
-    /// sits on the proportional baseline. Bytes at or above `0x80` have no 8×8
-    /// glyph and draw nothing. `y` is the top of the 12-pixel line box.
-    ///
-    /// The font cache is taken under `SCREEN` on a miss; the documented order
-    /// is `SCREEN → FONT` (nothing takes the font lock and then the screen).
-    fn text_prop(&mut self, x: i64, y: i64, text: &[u8], color: u32) {
-        let mut pen = x;
-        for byte in text {
-            match font::glyph(*byte) {
-                Some(glyph) => {
-                    for (row, bits) in glyph.rows.iter().enumerate() {
-                        for col in 0..glyph.width {
-                            let bit = glyph.left + col;
-                            if bits & (1u16 << bit) != 0 {
-                                self.put(pen + i64::from(bit), y + row as i64, color);
-                            }
-                        }
-                    }
-                    pen += i64::from(glyph.advance);
-                }
-                None => {
-                    if *byte < 0x80 {
-                        let glyph = &FONT8X8_BASIC[*byte as usize];
-                        for (row, bits) in glyph.iter().enumerate() {
-                            for col in 0..8 {
-                                if bits & (1 << col) != 0 {
-                                    self.put(pen + col as i64, y + 2 + row as i64, color);
-                                }
-                            }
-                        }
-                    }
-                    pen += i64::from(font::FALLBACK_ADVANCE);
-                }
-            }
-        }
-    }
-
     /// Copies a clipped rectangle from the shadow to the framebuffer, one row
     /// at a time, using the pitch (spec 0009, G5), then composites the cursor
     /// on top of it (spec 0010, I7).
     fn present(&mut self, x: i64, y: i64, w: i64, h: i64) {
-        let Some((x0, y0, x1, y1)) = self.clipped(x, y, w, h) else {
+        let limit = (self.width as i64, self.height as i64);
+        let Some((x0, y0, x1, y1)) = clip_bounds(self.clip, (0, 0), limit, x, y, w, h) else {
             return;
         };
-        let row_bytes = (x1 - x0) * 4;
+        let row_bytes = (x1 - x0) as usize * 4;
         if row_bytes == 0 {
             return;
         }
         for row in y0..y1 {
-            let source = row * self.pitch + x0 * 4;
+            let source = row as usize * self.pitch + x0 as usize * 4;
             let destination = self.fb as usize + source;
             // SAFETY: both ranges are inside the shadow and the framebuffer
             // for this row; `x0..x1` is clipped to the screen and the pitch is
@@ -533,35 +587,9 @@ impl Screen {
                 );
             }
         }
-        self.overlay_cursor(x0, y0, x1, y1);
+        self.overlay_cursor(x0 as usize, y0 as usize, x1 as usize, y1 as usize);
     }
 
-    /// Copies a rectangle to the framebuffer through an explicit clip
-    /// (spec 0012, D3), then composites the cursor inside the copied region.
-    fn present_in(&mut self, x: i64, y: i64, w: i64, h: i64, clip: Clip) {
-        let Some((x0, y0, x1, y1)) = self.clipped_by(x, y, w, h, clip) else {
-            return;
-        };
-        let row_bytes = (x1 - x0) * 4;
-        if row_bytes == 0 {
-            return;
-        }
-        for row in y0..y1 {
-            let source = row * self.pitch + x0 * 4;
-            let destination = self.fb as usize + source;
-            // SAFETY: both ranges are inside the shadow and the framebuffer
-            // for this row; the bounds are clipped to the screen and the
-            // framebuffer pitch is the shadow's row stride.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    self.shadow.as_ptr().add(source),
-                    destination as *mut u8,
-                    row_bytes,
-                );
-            }
-        }
-        self.overlay_cursor(x0, y0, x1, y1);
-    }
 }
 
 /// Initialises the shadow from the bootloader's framebuffer.
@@ -746,102 +774,6 @@ pub fn set_clip(x: i64, y: i64, w: i64, h: i64) -> bool {
     true
 }
 
-/// Copies a rectangle inside the shadow (spec 0011, W28).
-///
-/// Kernel-internal: the window service uses it to move a topmost window's
-/// content snapshot to the new origin before a repair. There is no `syslib`
-/// binding, so an application cannot copy screen pixels. The copy is clipped to
-/// the screen and the current shadow clip; a fully clipped request is a no-op
-/// `Ok`. Rows are copied with an overlap-safe `copy_within`, and the row order
-/// follows the vertical direction (`bottom-to-top` when the destination is
-/// lower) so a vertically overlapping source is not clobbered. The cursor is
-/// never touched: it lives in the framebuffer, composited by [`present`].
-///
-/// Returns `Invalid` for a non-positive extent or disabled graphics.
-pub fn copy_rect(
-    src_x: i64,
-    src_y: i64,
-    dst_x: i64,
-    dst_y: i64,
-    w: i64,
-    h: i64,
-) -> Status {
-    if w <= 0 || h <= 0 {
-        return Status::Invalid;
-    }
-    let mut guard = SCREEN.lock();
-    let Some(screen) = guard.as_mut() else {
-        return Status::Invalid;
-    };
-    let screen_w = screen.width as i64;
-    let screen_h = screen.height as i64;
-    let clip_x0 = i64::from(screen.clip.x).max(0);
-    let clip_y0 = i64::from(screen.clip.y).max(0);
-    let clip_x1 = i64::from(screen.clip.x) + i64::from(screen.clip.w);
-    let clip_y1 = i64::from(screen.clip.y) + i64::from(screen.clip.h);
-
-    // Start with the destination rectangle clipped to the screen and clip.
-    let mut left = dst_x.max(clip_x0);
-    let mut top = dst_y.max(clip_y0);
-    let mut right = dst_x.saturating_add(w).min(clip_x1).min(screen_w);
-    let mut bottom = dst_y.saturating_add(h).min(clip_y1).min(screen_h);
-    if right <= left || bottom <= top {
-        return Status::Ok;
-    }
-
-    // The source keeps the same crop. Clip it to the screen by shrinking the
-    // destination by the same amount, so source and destination stay aligned.
-    let src_left = src_x.saturating_add(left - dst_x);
-    if src_left < 0 {
-        left -= src_left;
-    }
-    let src_top = src_y.saturating_add(top - dst_y);
-    if src_top < 0 {
-        top -= src_top;
-    }
-    let src_right = src_x.saturating_add(right - dst_x);
-    if src_right > screen_w {
-        right -= src_right - screen_w;
-    }
-    let src_bottom = src_y.saturating_add(bottom - dst_y);
-    if src_bottom > screen_h {
-        bottom -= src_bottom - screen_h;
-    }
-    if right <= left || bottom <= top {
-        return Status::Ok;
-    }
-
-    let columns = (right - left) as usize;
-    let rows = (bottom - top) as usize;
-    let row_bytes = columns * 4;
-    let src_column = (src_x + (left - dst_x)) as usize;
-    let src_row = (src_y + (top - dst_y)) as usize;
-    let dst_column = left as usize;
-    let dst_row = top as usize;
-
-    // Vertical overlap is the row-iteration order: moving down (destination
-    // below the source) must start at the last row. Horizontal overlap is
-    // handled by the slice's own `copy_within`.
-    if dst_y >= src_y {
-        for step in (0..rows).rev() {
-            let source = (src_row + step) * screen.pitch + src_column * 4;
-            let destination = (dst_row + step) * screen.pitch + dst_column * 4;
-            screen
-                .shadow
-                .copy_within(source..source + row_bytes, destination);
-        }
-    } else {
-        for step in 0..rows {
-            let source = (src_row + step) * screen.pitch + src_column * 4;
-            let destination = (dst_row + step) * screen.pitch + dst_column * 4;
-            screen
-                .shadow
-                .copy_within(source..source + row_bytes, destination);
-        }
-    }
-    Status::Ok
-}
-
 /// Restores the full-screen clip (spec 0011, W10).
 pub fn reset_clip() {
     let mut guard = SCREEN.lock();
@@ -898,6 +830,108 @@ pub fn clip_self_check() -> Option<bool> {
     let restored = get_pixel(X, Y) == saved[0][0];
 
     Some(status == Status::Ok && inside && outside && restored)
+}
+
+/// Boot self-check for the surface primitive (spec 0026, C4; ADR 0060): draws
+/// through a scratch surface with a non-zero origin and a small clip, reads the
+/// buffer back and verifies that translated coordinates land where they should
+/// and that nothing outside the clip or the surface extent was written. It uses
+/// a fixed stack buffer and never touches [`SCREEN`], so it runs with graphics
+/// enabled or disabled.
+pub fn surface_self_check() -> bool {
+    const W: usize = 16;
+    const H: usize = 12;
+    const OX: i64 = 10;
+    const OY: i64 = 6;
+    const LIMIT_W: i64 = 10;
+    const LIMIT_H: i64 = 8;
+    const CLIP_X: i64 = 12;
+    const CLIP_Y: i64 = 8;
+    const CLIP_W: i64 = 4;
+    const CLIP_H: i64 = 3;
+    const PAINT: u32 = 0x0012_3456;
+    const PUT: u32 = 0x00AB_CDEF;
+    const OFF_CLIP: u32 = 0x00FF_FFFF;
+
+    let mut scratch = [0u8; W * H * 4];
+    let mut ok = true;
+
+    // Screen (12, 8) is buffer (2, 2), so the clip covers buffer columns 2..6
+    // and rows 2..5. A fill that starts above-left and extends past every edge
+    // must leave exactly that rectangle.
+    {
+        let mut surf = Surf {
+            pixels: &mut scratch,
+            pitch: W * 4,
+            clip: Rect {
+                x: CLIP_X as i32,
+                y: CLIP_Y as i32,
+                w: CLIP_W as i32,
+                h: CLIP_H as i32,
+            },
+            ox: OX,
+            oy: OY,
+            limit: (LIMIT_W, LIMIT_H),
+        };
+        surf.fill(CLIP_X - 2, CLIP_Y - 2, CLIP_W + 4, CLIP_H + 4, PAINT);
+        // One pixel inside the clip (buffer 3,3) and one just outside each of
+        // the four clip edges.
+        surf.put(CLIP_X + 1, CLIP_Y + 1, PUT);
+        surf.put(CLIP_X + CLIP_W, CLIP_Y, OFF_CLIP);
+        surf.put(CLIP_X - 1, CLIP_Y, OFF_CLIP);
+        surf.put(CLIP_X, CLIP_Y + CLIP_H, OFF_CLIP);
+        surf.put(CLIP_X + CLIP_W - 1, CLIP_Y + CLIP_H, OFF_CLIP);
+
+        for row in 0..H {
+            for col in 0..W {
+                let expected = if (col, row) == (3, 3) {
+                    PUT
+                } else if (2..6).contains(&col) && (2..5).contains(&row) {
+                    PAINT
+                } else {
+                    0
+                };
+                if surf.load(col, row) != expected {
+                    ok = false;
+                }
+            }
+        }
+    }
+
+    // A clip larger than the surface still stops at the extent: the clip and
+    // fill reach screen x 24 and y 20, but the limit is x 20 and y 14, so the
+    // result is buffer columns 2..10 and rows 2..8.
+    scratch.fill(0);
+    {
+        let mut surf = Surf {
+            pixels: &mut scratch,
+            pitch: W * 4,
+            clip: Rect {
+                x: CLIP_X as i32,
+                y: CLIP_Y as i32,
+                w: (LIMIT_W + 2) as i32,
+                h: (LIMIT_H + 2) as i32,
+            },
+            ox: OX,
+            oy: OY,
+            limit: (LIMIT_W, LIMIT_H),
+        };
+        surf.fill(0, 0, W as i64 + 8, H as i64 + 8, PAINT);
+        for row in 0..H {
+            for col in 0..W {
+                let expected = if (2..10).contains(&col) && (2..8).contains(&row) {
+                    PAINT
+                } else {
+                    0
+                };
+                if surf.load(col, row) != expected {
+                    ok = false;
+                }
+            }
+        }
+    }
+
+    ok
 }
 
 /// Applies a pointer delta with clamping to the screen (spec 0010, I4).
@@ -1102,82 +1136,38 @@ fn valid_rect(w: i64, h: i64, color: u32) -> bool {
     w > 0 && h > 0 && color <= MAX_COLOR
 }
 
+/// Runs one primitive on the shadow under [`SCREEN`]. The surface is the whole
+/// shadow with a zero origin, so screen and buffer coordinates agree; the
+/// shadow's clip still bounds the write (spec 0026, C1; ADR 0060). Returns
+/// `Invalid` and draws nothing when graphics are disabled.
+fn with_surf(op: impl FnOnce(&mut Surf<'_>)) -> Status {
+    let mut guard = SCREEN.lock();
+    let Some(screen) = guard.as_mut() else {
+        return Status::Invalid;
+    };
+    op(&mut screen.surf());
+    Status::Ok
+}
+
 pub fn fill_rect(x: i64, y: i64, w: i64, h: i64, color: u32) -> Status {
     if !valid_rect(w, h, color) {
         return Status::Invalid;
     }
-    match SCREEN.lock().as_mut() {
-        Some(screen) => {
-            screen.fill(x, y, w, h, color);
-            Status::Ok
-        }
-        None => Status::Invalid,
-    }
-}
-
-/// Draws a `pw × ph` RGB (three bytes per pixel, `0xRRGGBB`) buffer scaled into
-/// the destination rectangle with nearest-neighbour sampling (spec 0009, G22).
-/// The destination is clipped to the screen and the clip region like
-/// [`fill_rect`]; a fully clipped rectangle is `Ok` with no writes. A
-/// non-positive dimension, a buffer shorter than `pw * ph * 3` or disabled
-/// graphics is `Invalid` and draws nothing.
-pub fn blit_rgb(x: i64, y: i64, w: i64, h: i64, pixels: &[u8], pw: i64, ph: i64) -> Status {
-    if w <= 0 || h <= 0 || pw <= 0 || ph <= 0 {
-        return Status::Invalid;
-    }
-    let needed = (pw as u64)
-        .checked_mul(ph as u64)
-        .and_then(|count| count.checked_mul(3));
-    match needed {
-        Some(needed) if pixels.len() as u64 >= needed => {}
-        _ => return Status::Invalid,
-    }
-    match SCREEN.lock().as_mut() {
-        Some(screen) => {
-            screen.blit(x, y, w, h, pixels, pw, ph);
-            Status::Ok
-        }
-        None => Status::Invalid,
-    }
+    with_surf(|surf| surf.fill(x, y, w, h, color))
 }
 
 pub fn fill_dither(x: i64, y: i64, w: i64, h: i64, color: u32) -> Status {
     if !valid_rect(w, h, color) {
         return Status::Invalid;
     }
-    match SCREEN.lock().as_mut() {
-        Some(screen) => {
-            screen.dither(x, y, w, h, color);
-            Status::Ok
-        }
-        None => Status::Invalid,
-    }
+    with_surf(|surf| surf.dither(x, y, w, h, color))
 }
 
 pub fn draw_rect(x: i64, y: i64, w: i64, h: i64, color: u32) -> Status {
     if !valid_rect(w, h, color) {
         return Status::Invalid;
     }
-    match SCREEN.lock().as_mut() {
-        Some(screen) => {
-            screen.outline(x, y, w, h, color);
-            Status::Ok
-        }
-        None => Status::Invalid,
-    }
-}
-
-pub fn draw_text(x: i64, y: i64, text: &[u8], color: u32) -> Status {
-    if color > MAX_COLOR {
-        return Status::Invalid;
-    }
-    match SCREEN.lock().as_mut() {
-        Some(screen) => {
-            screen.text(x, y, text, color);
-            Status::Ok
-        }
-        None => Status::Invalid,
-    }
+    with_surf(|surf| surf.outline(x, y, w, h, color))
 }
 
 // ---- proportional text (spec 0015) ---------------------------------------
@@ -1218,13 +1208,7 @@ pub fn draw_text_prop(x: i64, y: i64, text: &[u8], color: u32) -> Status {
     if color > MAX_COLOR {
         return Status::Invalid;
     }
-    match SCREEN.lock().as_mut() {
-        Some(screen) => {
-            screen.text_prop(x, y, text, color);
-            Status::Ok
-        }
-        None => Status::Invalid,
-    }
+    with_surf(|surf| surf.text_prop(x, y, text, color))
 }
 
 pub fn get_pixel(x: i64, y: i64) -> u32 {
@@ -1235,7 +1219,7 @@ pub fn get_pixel(x: i64, y: i64) -> u32 {
     if x < 0 || y < 0 || x >= screen.width as i64 || y >= screen.height as i64 {
         return 0;
     }
-    screen.load(x as usize, y as usize)
+    screen.surf().load(x as usize, y as usize)
 }
 
 pub fn present(x: i64, y: i64, w: i64, h: i64) -> Status {
@@ -1251,46 +1235,151 @@ pub fn present(x: i64, y: i64, w: i64, h: i64) -> Status {
     }
 }
 
-/// Fills the whole screen and presents it (spec 0009, G6). This is a screen
-/// operation, not a clipped primitive: it ignores the clip region.
-pub fn clear(color: u32) -> Status {
-    if color > MAX_COLOR {
+// ---- canvas primitives (spec 0026, C4; ADR 0060) ------------------------
+
+/// `syslib.fill_rect` into a window canvas. The argument checks are exactly
+/// the shadow primitive's; coordinates are screen coordinates translated by the
+/// canvas origin (M16.3 scaffolding). Never presents.
+pub fn fill_rect_on(c: &Canvas, x: i64, y: i64, w: i64, h: i64, color: u32) -> Status {
+    if !valid_rect(w, h, color) {
         return Status::Invalid;
     }
-    let mut guard = SCREEN.lock();
-    let Some(screen) = guard.as_mut() else {
-        return Status::Invalid;
-    };
-    screen.fill(0, 0, screen.width as i64, screen.height as i64, color);
-    screen.present(0, 0, screen.width as i64, screen.height as i64);
+    canvas_surf(c).fill(x, y, w, h, color);
     Status::Ok
 }
 
-// ---- explicit-clip text drawing (kernel text windows, spec 0012) ---------
-
-/// Paints one 8×8 glyph cell with an opaque background through an explicit
-/// clip, without presenting and without touching the shadow's global clip
-/// (spec 0012, D3). Kernel text windows use this so a long repaint cannot clip
-/// an application drawing on another core.
-pub fn draw_cell(x: i64, y: i64, code: u8, fg: u32, bg: u32, clip: Clip) -> bool {
-    let mut guard = SCREEN.lock();
-    let Some(screen) = guard.as_mut() else {
-        return false;
-    };
-    screen.glyph_in(x, y, code, fg, bg, clip);
-    true
+/// `syslib.fill_dither` into a window canvas (spec 0026, C4).
+pub fn fill_dither_on(c: &Canvas, x: i64, y: i64, w: i64, h: i64, color: u32) -> Status {
+    if !valid_rect(w, h, color) {
+        return Status::Invalid;
+    }
+    canvas_surf(c).dither(x, y, w, h, color);
+    Status::Ok
 }
 
-/// Presents a rectangle through an explicit clip, ignoring the global clip
-/// (spec 0012, D3). `present` composites the cursor as usual.
-pub fn present_within(x: i64, y: i64, w: i64, h: i64, clip: Clip) -> bool {
-    if w <= 0 || h <= 0 {
-        return false;
+/// `syslib.draw_rect` into a window canvas (spec 0026, C4).
+pub fn draw_rect_on(c: &Canvas, x: i64, y: i64, w: i64, h: i64, color: u32) -> Status {
+    if !valid_rect(w, h, color) {
+        return Status::Invalid;
+    }
+    canvas_surf(c).outline(x, y, w, h, color);
+    Status::Ok
+}
+
+/// `syslib.draw_text` into a window canvas (spec 0026, C4).
+pub fn draw_text_on(c: &Canvas, x: i64, y: i64, text: &[u8], color: u32) -> Status {
+    if color > MAX_COLOR {
+        return Status::Invalid;
+    }
+    canvas_surf(c).text(x, y, text, color);
+    Status::Ok
+}
+
+/// `syslib.draw_text_prop` into a window canvas (spec 0026, C4).
+pub fn draw_text_prop_on(c: &Canvas, x: i64, y: i64, text: &[u8], color: u32) -> Status {
+    if color > MAX_COLOR {
+        return Status::Invalid;
+    }
+    canvas_surf(c).text_prop(x, y, text, color);
+    Status::Ok
+}
+
+/// `syslib.blit_rgb` into a window canvas (spec 0026, C4). The buffer checks
+/// are the shadow primitive's.
+pub fn blit_rgb_on(
+    c: &Canvas,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+    pixels: &[u8],
+    pw: i64,
+    ph: i64,
+) -> Status {
+    if w <= 0 || h <= 0 || pw <= 0 || ph <= 0 {
+        return Status::Invalid;
+    }
+    let needed = (pw as u64)
+        .checked_mul(ph as u64)
+        .and_then(|count| count.checked_mul(3));
+    match needed {
+        Some(needed) if pixels.len() as u64 >= needed => {}
+        _ => return Status::Invalid,
+    }
+    canvas_surf(c).blit(x, y, w, h, pixels, pw, ph);
+    Status::Ok
+}
+
+/// `syslib.clear` into a window canvas: fills the whole surface (spec 0026,
+/// C5). It is scope-local, never screen-wide.
+pub fn clear_on(c: &Canvas, color: u32) -> Status {
+    if color > MAX_COLOR {
+        return Status::Invalid;
+    }
+    canvas_surf(c).fill(c.ox, c.oy, c.w, c.h, color);
+    Status::Ok
+}
+
+/// Paints one opaque 8×8 glyph cell into a window canvas (spec 0026, C4). The
+/// kernel console uses it for its text grid.
+pub fn draw_cell_on(c: &Canvas, x: i64, y: i64, code: u8, fg: u32, bg: u32) -> Status {
+    if fg > MAX_COLOR || bg > MAX_COLOR {
+        return Status::Invalid;
+    }
+    canvas_surf(c).glyph(x, y, code, fg, bg);
+    Status::Ok
+}
+
+/// Copies a canvas into the shadow under the current shadow clip, row by row
+/// with the canvas pitch (spec 0026, C14; ADR 0060). It neither touches the
+/// clip nor presents: the compositor presents the rectangle once after every
+/// layer is painted.
+pub fn composite_canvas(c: &Canvas) {
+    if c.w <= 0 || c.h <= 0 || c.pitch == 0 {
+        return;
     }
     let mut guard = SCREEN.lock();
     let Some(screen) = guard.as_mut() else {
-        return false;
+        return;
     };
-    screen.present_in(x, y, w, h, clip);
-    true
+    let clip = screen.clip;
+    let clip_x1 = i64::from(clip.x) + i64::from(clip.w);
+    let clip_y1 = i64::from(clip.y) + i64::from(clip.h);
+    let x0 = c.ox.max(i64::from(clip.x)).max(0);
+    let y0 = c.oy.max(i64::from(clip.y)).max(0);
+    let x1 = c
+        .ox
+        .saturating_add(c.w)
+        .min(clip_x1)
+        .min(screen.width as i64);
+    let y1 = c
+        .oy
+        .saturating_add(c.h)
+        .min(clip_y1)
+        .min(screen.height as i64);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let row_bytes = (x1 - x0) as usize * 4;
+    let source_x = (x0 - c.ox) as usize;
+    let source_y = (y0 - c.oy) as usize;
+    let dest_x = x0 as usize;
+    let shadow = screen.shadow.as_mut_ptr();
+    let shadow_len = screen.shadow.len();
+    for row in 0..(y1 - y0) as usize {
+        let source = (source_y + row) * c.pitch + source_x * 4;
+        let destination = (y0 as usize + row) * screen.pitch + dest_x * 4;
+        if source + row_bytes > c.bytes || destination + row_bytes > shadow_len {
+            continue;
+        }
+        // SAFETY: `source`/`destination` are inside the canvas and shadow
+        // allocations for exactly `row_bytes`; all bounds are checked above.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                c.base.add(source),
+                shadow.add(destination),
+                row_bytes,
+            );
+        }
+    }
 }

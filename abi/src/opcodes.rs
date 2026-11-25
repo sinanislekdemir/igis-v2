@@ -824,33 +824,6 @@ pub mod builtin {
     /// another task's grab. No operands.
     pub const POPUP_RELEASE: u32 = 59;
 
-    // ---- persistent pointer-region claim (spec 0011, W27; ADR 0045) -----
-    //
-    // A menu bar is app-drawn and has no window either, but it is persistent:
-    // the press that opens a pull-down arrives *before* any grab is taken, so
-    // the modal grab cannot protect it. One task claims a rectangle that
-    // outlives individual menus; a queued press inside it belongs to the
-    // claimant even while every other task is blocked in `next_event`.
-
-    /// `syslib.region_claim(x, y, w, h) -> Status`: take the one machine-wide
-    /// persistent pointer-region claim for the calling task (spec 0011, W27).
-    /// While held, a queued `PointerDown` with `window = 0` inside the
-    /// rectangle is delivered only to the owner; a non-owner's poll returns
-    /// `WouldBlock` without consuming it. The modal popup grab (W26) takes
-    /// precedence while it is active. The rectangle also suppresses a new
-    /// service press inside it, so the claimant wins over a window under it.
-    /// `Ok` when the claim is free or already the caller's (the rectangle is
-    /// then updated); `Full` when another task holds it; `Invalid` for a
-    /// non-positive `w`/`h` or disabled graphics. Operands: `[x][y][w][h]`.
-    pub const REGION_CLAIM: u32 = 60;
-
-    /// `syslib.region_release() -> Status`: release the caller's persistent
-    /// pointer-region claim, waking every input waiter so a press that was
-    /// gated for another owner is deliverable (spec 0011, W27). `Ok` for the
-    /// owner; `NotFound` when no claim is held; `Invalid` for another task's
-    /// claim. No operands.
-    pub const REGION_RELEASE: u32 = 61;
-
     // ---- networking (spec 0020, N12–N17; ADR 0048–0050) ----------------
     //
     // The wire stack (Ethernet, ARP, IPv4, ICMP, UDP, minimal TCP) lives in the
@@ -1075,6 +1048,61 @@ pub mod builtin {
     /// `[x][y][w][h][pixels reference][pw][ph]`.
     pub const BLIT_RGB: u32 = 91;
 
+    // ---- surface draw scopes (spec 0026; ADR 0060) ----------------------
+    //
+    // A task draws into a surface only inside an open draw scope, and there
+    // is at most one scope per task. The scope lives in the surface record,
+    // so preemption or a blocking call cannot redirect a later draw. M16.5
+    // adds the plane surfaces and the work area; every drawing primitive
+    // targets the caller's window or plane canvas, never the shadow.
+
+    /// `syslib.window_begin(id) -> Status`: open the caller's draw scope on
+    /// one of its windows (spec 0026, C3). `id == 0` clears the caller's scope
+    /// (there is no screen surface; drawing with no scope is `Invalid`, C20);
+    /// otherwise `Ok` records the caller as the window's draw scope, `NotFound`
+    /// is an unknown id and `Invalid` is another task's window or disabled
+    /// graphics. Setting a scope replaces the caller's previous one, including
+    /// a plane scope, and closing the window (or the task) clears it.
+    pub const WINDOW_BEGIN: u32 = 92;
+
+    /// `syslib.plane_create(x, y, w, h, var id) -> Status`: create a **plane**,
+    /// a screen rectangle above every window with its own zeroed canvas
+    /// (spec 0026, C11). The rectangle is clamped to the screen; `Ok` writes
+    /// the new id through `id`. Owner-only by construction (the caller owns
+    /// it). `Full` at 8 live planes or when the canvas cannot be allocated,
+    /// `Invalid` for a non-positive or entirely off-screen rectangle or when
+    /// graphics are disabled. Operands: `[x][y][w][h][id reference]`.
+    pub const PLANE_CREATE: u32 = 93;
+
+    /// `syslib.plane_destroy(id) -> Status`: destroy the caller's plane,
+    /// free its canvas and recomposite the vacated rectangle so the windows
+    /// underneath reappear (spec 0026, C11). `Ok` for the owner, `NotFound`
+    /// for an unknown id, `Invalid` for another task's plane or disabled
+    /// graphics. Operands: `[id]`.
+    pub const PLANE_DESTROY: u32 = 94;
+
+    /// `syslib.plane_begin(id) -> Status`: open the caller's draw scope on one
+    /// of its planes (spec 0026, C3/C11). There is at most one scope per task,
+    /// so setting it clears the caller's previous window or plane scope.
+    /// `NotFound` for an unknown id, `Invalid` for another task's plane or
+    /// disabled graphics. Operands: `[id]`.
+    pub const PLANE_BEGIN: u32 = 95;
+
+    /// `syslib.plane_present(id) -> Status`: close the draw scope and
+    /// recomposite the plane's rectangle (spec 0026, C11/C14). The first
+    /// present makes the plane part of the composition; before it the pixels
+    /// beneath are untouched. Owner-only; same errors as [`PLANE_BEGIN`].
+    /// Operands: `[id]`.
+    pub const PLANE_PRESENT: u32 = 96;
+
+    /// `syslib.work_area_reserve(height) -> Status`: reserve a top strip of the
+    /// screen into which window frames are not placed (spec 0026, C13).
+    /// `height == 0` clears it; a negative height or disabled graphics is
+    /// `Invalid`. Machine-wide; the last caller wins. `window_open`,
+    /// `window_move`, drag clamping and the mode-change reflow keep every frame
+    /// below the strip. Operands: `[height]`.
+    pub const WORK_AREA_RESERVE: u32 = 97;
+
     /// `core.sleep(ms)`: block the caller until at least `ms` milliseconds of
     /// wall time have passed, then push `Ok`. The wait is the scheduler's
     /// generic deadline (`WaitFor::Deadline`), so blocked time does not count
@@ -1144,8 +1172,6 @@ pub mod builtin {
             NEXT_ANY => Some((3, 1)),
             POPUP_GRAB => Some((4, 1)),
             POPUP_RELEASE => Some((0, 1)),
-            REGION_CLAIM => Some((4, 1)),
-            REGION_RELEASE => Some((0, 1)),
             NET_CONFIG => Some((4, 1)),
             NET_INFO => Some((4, 1)),
             NET_MAC => Some((0, 1)),
@@ -1174,6 +1200,12 @@ pub mod builtin {
             COPY_BYTES => Some((6, 1)),
             FILL_BYTES => Some((5, 1)),
             BLIT_RGB => Some((7, 1)),
+            WINDOW_BEGIN => Some((1, 1)),
+            PLANE_CREATE => Some((5, 1)),
+            PLANE_DESTROY => Some((1, 1)),
+            PLANE_BEGIN => Some((1, 1)),
+            PLANE_PRESENT => Some((1, 1)),
+            WORK_AREA_RESERVE => Some((1, 1)),
             _ => None,
         }
     }

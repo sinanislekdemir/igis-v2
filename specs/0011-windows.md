@@ -5,8 +5,8 @@
   `syslib`; M2.3 of the desktop milestone
 - **Supersedes:** none
 - **Superseded by:** none
-- **ADRs:** 0020, 0024, 0042, 0043, 0044, 0045, 0046, 0047
-- **Updated:** 2026-11-18
+- **ADRs:** 0020, 0024, 0042, 0043, 0044, 0045, 0046, 0047, 0060
+- **Updated:** 2026-11-25
 
 ## Context
 
@@ -15,7 +15,10 @@ primitives. M2.2 (spec 0010) delivered the pointer, the composited cursor and th
 machine-wide event queue. What is missing is the thing those were built for: **windows** —
 records the kernel owns, with geometry, a z-order, one focus and an owner, drawn onto the
 same shadow. ADR 0020 already fixes the architecture: the window server is a kernel
-`syslib` service over the one shadow, not an application and not a per-window canvas.
+`syslib` service over the one shadow. ADR 0060 amends ADR 0020/0024 in one respect: every
+window also owns a content-sized **canvas** (W33–W35), and the service composites it into
+the shadow; the service is still a kernel service, not an application, and there is still
+exactly one framebuffer-bound image.
 
 This spec fixes the window model. It is implemented in slices so each lands with a proof:
 
@@ -29,7 +32,8 @@ This spec fixes the window model. It is implemented in slices so each lands with
 
 Non-goals for M2.3:
 
-- no per-window canvas, double buffering, alpha blending or scaling (ADR 0020);
+- no alpha blending or scaling, and no full-screen buffer per window; a canvas is
+  content-sized (W33, ADR 0060);
 - no interactive resizing, no window menus, no icons — those arrive with M2.4;
 - no pointer-driven continuous drag loop: M2.3.5 proves a **scripted** owner drag
   (a sequence of `window_move` calls); following the pointer while a button is held is
@@ -55,7 +59,9 @@ an `int`; `0` is never a valid id.
   **content size** `(w, h)`. The frame is the content plus a 1-pixel border on the left,
   right and bottom and a 16-pixel title bar on top:
   `frame = (x, y, w + 2, h + 17)`, `content = (x + 1, y + 16, w, h)`.
-- **W4 (MUST):** The frame origin is clamped so the whole frame stays on screen. A content
+- **W4 (MUST):** The frame origin is clamped so the whole frame stays on screen and below
+  the reserved work area (spec 0026 C13: `work_area_reserve`); a frame larger than the
+  work area is refused at `open` (`Invalid`) and clamped to its edges on a mode change. A content
   size below the minimum (8 × 8) or a frame larger than the screen is `Status.Invalid` and
   opens nothing. No window is ever partly off screen.
 - **W5 (MUST):** Windows are ordered bottom-to-top in one total z-order. `open` and
@@ -82,20 +88,19 @@ an `int`; `0` is never a valid id.
   truncated at a UTF-8 code-point boundary), title bar **16** pixels, border **1** pixel,
   and a minimum content size of **8 × 8**. Limits are compile-time constants, not runtime
   configuration.
-- **W10 (MUST):** The shadow keeps exactly one clip rectangle, owned by the service. The
-  service may save it, narrow it to the rectangle it is about to paint and restore it.
-  The drawing primitives do not change and applications get no clip primitive. Client
-  content drawing is not automatically clipped (one global clip, several cores; see
-  "Clip discipline"); a client's presentation is limited to its content rectangle by
-  `window_present` (W17).
-- **W11 (MUST):** The service tracks damage and repairs it synchronously (M2.3.2):
-  `open`, `move`, `raise`, `close` and a focus change damage the affected frame
-  rectangles, the overlapped windows and the desktop below them. One repair pass restores
-  the desktop where a window was removed or moved, redraws the chrome of every damaged
-  window bottom-to-top in its visible parts, and presents exactly the pixels it painted.
-  Client content is the client's: the service never keeps or repaints another window's
-  content; it asks the owner to repaint with a whole-content `Expose` (W12). A switch or
-  a completed move upgrades the pass to a full-stack repaint (W31).
+- **W10 (MUST):** There is no shared clip. A client's drawing is bounded by its own
+  **surface canvas** (W33): inside an open draw scope every primitive is clipped to the
+  canvas and uses surface-local coordinates (spec 0009 G23, spec 0026 C4), so a lower
+  window cannot write over a higher one. With no open scope a drawing primitive is
+  `Status.Invalid` (spec 0026 C4); the shadow has no application write path.
+- **W11 (MUST):** The service tracks **damage rectangles** and repairs them
+  synchronously (M2.3.2, rewritten by spec 0026 C16): `open`, `close`, `move`, `raise`,
+  `minimize` and a focus change damage the affected frame rectangles; a repair
+  **recomposites** each coalesced rectangle from the surface stack — desktop pattern, then
+  every live window bottom to top, then every plane — and presents it. Client content is
+  retained in the window's canvas (W33), so a covered window becomes visible again without
+  a client round trip; a whole-content `Expose` (W12) is still delivered so the owner can
+  recompute its content.
 - **W12 (MUST):** `Expose` is delivered to the owning task as a machine event with
   `kind = Expose`, `window = id`, `x = 0`, `y = 0`, `code = 0`, and it always asks for the
   **whole content rectangle**; M2 has no partial-damage rectangles. `EventKind.Expose` has
@@ -105,9 +110,10 @@ an `int`; `0` is never a valid id.
   leaves its previous pixels (stale content), and the repair pass still presents the union.
   A client that ignores an expose is not closed in M2 (see W18).
   The content rectangle is **dynamic**: after a move the owner MUST re-read
-  `window_content_rect` on the `Expose` before drawing or hit-testing, and recompute any
-  geometry cached from it (W28, ADR 0046). The `Expose` record deliberately carries no
-  geometry (`x = y = code = 0`); the service call is authoritative.
+  `window_content_rect` on the `Expose` before drawing or hit-testing (W28), because the
+  kernel translates its absolute client coordinates by the current content origin. M17's
+  local-coordinate model (spec 0026 C8–C10, W36) retires this. The `Expose` record carries
+  no geometry (`x = y = code = 0`); the service call is authoritative.
 - **W13 (MUST):** With graphics disabled (`screen_width() == 0`), `window_open` is
   `Status.Invalid`, `close`/`raise`/`move` are `Status.NotFound` (no window can exist),
   `window_frame_rect`/`window_content_rect`/`window_present` are `Status.Invalid`,
@@ -133,17 +139,17 @@ an `int`; `0` is never a valid id.
     `Expose`, or any injected addressed event) is passed through unchanged.
   A click that raises a window may mark an expose; the routing path wakes input waiters
   after dropping the window lock.
-- **W17 (MUST):** `syslib.window_present(id)` presents exactly the window's content
-  rectangle from the shadow, clipped to its **visible parts** (content minus the frames of
-  higher windows), and leaves the chrome and higher windows' pixels untouched. It is
-  owner-only like `close`/`move`: `Ok`, `NotFound` for an unknown id, `Invalid` for
-  another task's window or disabled graphics. It does not repair, raise or mark anything.
-  Only the owner presents content; a service repair presents desktop and chrome pixels
-  only (W31).
-  `syslib.present` remains a legal generic primitive (spec 0009, G10), but
-  `window_present` is the sanctioned path for a window client: it bounds what the client's
-  presentation can cover. It reads the content rectangle at call time, so a client that
-  draws after a move MUST use the refreshed rectangle from an owner `Expose` (W12/W28).
+- **W17 (MUST):** `syslib.window_present(id)` closes an open draw scope for `id` (W34),
+  marks the canvas valid and **recomposites the window's frame rectangle** from the surface
+  stack (spec 0026 C14/C16), presenting it. Because the compositor paints layers in order,
+  the result always shows the window in its correct place in the stack; a canvas is never
+  copied over a higher window. It is owner-only like `close`/`move`: `Ok`, `NotFound` for
+  an unknown id, `Invalid` for another task's window or disabled graphics. It does not
+  raise or mark anything; a `window_present` with no preceding `window_begin` is legal and
+  composites what the canvas already holds. A minimized window keeps the existing `Ok`
+  no-op.
+  `syslib.present(x, y, w, h)` is the generic **recomposite** primitive (spec 0026 C7): it
+  repaints that screen rectangle from the surface stack and needs no scope.
 - **W18 (MUST):** Client liveness policy for M2: a task that never reads its events and
   never repaints leaves stale content on screen; the service does **not** close it, kill
   it, or reclaim its window for missing an expose. Window lifetime remains exactly task
@@ -163,20 +169,18 @@ an `int`; `0` is never a valid id.
   an ordinary window: it has geometry, z-order, focus, `Expose`, hit-testing and
   `window_present`, and the kernel calls the same public functions with owner `0`
   (spec 0012 D6).
-- **W21 (MUST):** A repair coalesces its damage before painting and presenting (M2.6.2).
-  Empty and contained rectangles are dropped, overlapping or edge-touching rectangles are
-  merged into their bounding box by a bounded greedy pass, and the result stays within
-  the static list size. Erase requests with different coverage limits are never merged; a
-  request contained in one whose coverage limit is at least as high is redundant and is
-  dropped. The coalesced set MUST cover the union of the original damage: a merge may
-  grow the repainted area (the bounding box of diagonal neighbours), but no damaged pixel
-  may be lost. The coalesced set drives the paint passes, but the presentation is **not**
-  the coalesced damage union: every presented rectangle is exactly a pixel region the
-  repair painted (a restored desktop piece or a chrome band/border piece, W31), copied
-  from the current shadow, so a merge can never copy a client's stale content over a
-  higher window. Coalescing happens after the per-window `Expose` flags are marked, so the
-  exact original damage —
-  not a grown bounding box — decides which clients repaint.
+- **W21 (MUST):** A repair coalesces its damage before recompositing (M2.6.2, simplified
+  by spec 0026 C16). Empty and contained rectangles are dropped, overlapping or
+  edge-touching rectangles are merged into their bounding box by a bounded greedy pass,
+  and the result stays within the static list size. The coalesced set MUST cover the union
+  of the original damage: a merge may grow the recomposited area (the bounding box of
+  diagonal neighbours), but no damaged pixel may be lost. The coverage limit
+  (`covers_from`) no longer exists, so all damage rectangles coalesce by the same rule.
+  Because a recomposition repaints every layer inside the rectangle from retained state,
+  a merge can never copy a client's stale content anywhere: there is no stored "old
+  screen" to copy from. The coalesced set drives the recomposition and the presentation
+  one to one. Coalescing happens after the per-window `Expose` flags are marked, so the
+  exact original damage — not a grown bounding box — decides which clients repaint.
 - **W22 (MUST):** A left-button press inside a window's 16-pixel title bar but not inside
   its close box raises and focuses that window (any task, like `raise`) and starts a
   **service-owned drag**. The service records the grab offset `(pointer - frame origin)`;
@@ -245,7 +249,12 @@ an `int`; `0` is never a valid id.
   every input waiter after the table lock is dropped, so queued events are deliverable
   again. The rectangle is advisory only: the service never filters by it. A grab is a UI
   focus mechanism, not an authority boundary; there is no timeout.
-- **W27 (MUST):** One machine-wide **persistent pointer-region claim** reserves a
+- **W27 (MUST):** **Removed in M16.5 (spec 0026 C12, ADR 0060):** a persistent
+  app-drawn region is a **plane**, and the plane rule replaces this claim one to one
+  (press ownership inside the rectangle, no drag, no close request). Builtins 60/61 and
+  the table field are deleted. The paragraph below records the claim as it was implemented
+  in M8.4 and is kept for the historical proof.
+  A machine-wide **persistent pointer-region claim** reserves a
   rectangle of the screen for one task, so an app-drawn menu bar receives the press that
   opens a menu even while other tasks are blocked in `next_event` (M8.4, ADR 0045).
   `syslib.region_claim(x, y, w, h) -> Status` (builtin 60) makes the calling task the
@@ -283,20 +292,13 @@ an `int`; `0` is never a valid id.
   the claimed rectangle (W31), so an app-drawn persistent region such as the menu bar
   survives a window switch or move. Windows drawn over the claim still cover it; the
   claimant is responsible for repainting its own rectangle.
-- **W28 (MUST):** A move of a **topmost** window copies its content rectangle from the old
-  to the new origin **before** the repair, so the content follows the frame immediately
-  (M8.5, ADR 0046). The copy is an exact shadow-to-shadow snapshot of the content
-  rectangle (never the service chrome), clipped to the screen and the shadow clip,
-  overlap-safe in both axes, and performed only when the source is the visible top window.
-  The move records the old-frame desktop erase (whose `covers_from = 0` subtraction
-  protects the moved window's new frame) and MUST NOT record a new-frame desktop erase:
-  that erase would paint the desktop across the new content and wipe the snapshot. The
-  new border and title bar are drawn by the ordinary chrome pass, and the copy is included
-  in the damage union that the repair presents. A **non-topmost** move keeps both erases
-  and does not copy: its source may be covered, so it relies on the client's refreshed
-  repaint. The snapshot is not a canvas — the service retains no content, and the owner
-  MUST still re-read `window_content_rect` and redraw at the new origin (W12/W17). A client
-  that never processes the `Expose` keeps the copied snapshot (W18).
+- **W28 (MUST):** A move copies no pixels: the canvas is window-local (W33), so a move —
+  in progress or completed, topmost or not — is a pure origin change and the content
+  follows the frame immediately. There is no shadow-to-shadow snapshot and no "topmost
+  only" rule; `gfx::copy_rect` and ADR 0046 are retired (ADR 0060). Because client
+  coordinates are absolute, the owner MUST still re-read `window_content_rect` on its
+  `Expose` (W12) and redraw at the new origin; a client that never processes the `Expose`
+  keeps its canvas content but draws with a stale origin afterwards. M17 removes this.
 - **W29 (MUST):** Queued input is delivered to the task that owns its **window target**
   (M8.6; ADR 0047; spec 0010 I34). One kernel-internal rule,
   `window::input_target(event) -> Option<u64>`, is used by both consumption and
@@ -336,7 +338,7 @@ an `int`; `0` is never a valid id.
   to repaint the menu; with no visible window under the menu the shell
   repaints the service desktop pattern itself); it is moved to the bottom of
   the z-order so `window_info` lists it last. If it had focus, focus moves to the
-  topmost non-minimized window. The frame is erased as desktop damage; no
+  topmost non-minimized window. The frame's rectangle is queued for recomposition; no
   `Close` request is posted and the owner task is untouched. `window_raise`
   restores it: the flag clears, the window moves to the top, focus returns, its
   chrome is redrawn and its content gets an `Expose`. Minimized windows remain
@@ -347,45 +349,64 @@ an `int`; `0` is never a valid id.
   for a missing window. The Windows pull-down and the File window list mark a
   minimized row with `min`/`*` respectively.
 
-- **W31 (MUST):** A **window switch** and a **completed move** request a
-  **full-stack repaint** (M11 follow-up, ADR 0055). A switch is a raise that
-  changes the z-order, the focus or a minimized state, plus `open`, `close`,
-  `minimize` and `close_task` when they change the live stack. A completed move
-  is a programmatic `window_move` whose origin changed, or the release that
-  ends a pointer drag that actually moved; individual drag steps do not request
-  it. A raise of the already-topmost, focused, non-minimized window does not
-  request it.
-  The repair then ignores the accumulated damage and, in one synchronous pass
-  under the table lock: restores the whole desktop (in the parts no live window
-  covers), redraws every live window's chrome bottom-to-top in its visible
-  parts, marks one whole-content `Expose` on **every** live non-minimized
-  window (owner-only and coalesced as in W12), and presents only the pixels it
-  painted. This is the service-side "redraw from the desktop up"; client
-  content is still the client's and arrives through the ordinary `Expose`
-  path, so the service never blocks on a client (W18 still applies).
-  The service presents **exactly the pixels it painted**: the restored desktop
-  pieces, the chrome band and border of a damaged window, and a topmost move's
-  content snapshot (W28). It never presents a window's content rectangle and
-  never a merged bounding box that could include client pixels, because a
-  lower window's shadow content may be stale. A client presents its own
-  content with `window_present` (W17), whose visible-parts clip keeps a
-  lower-window repaint safe.
-  The rectangle of a persistent pointer-region claim (W27) is excluded from the
-  desktop restore: the claimant owns those pixels. This keeps the
-  application-drawn desktop menu bar intact across switches and moves; a window
-  drawn over the bar still covers it normally. A windowed application that
-  previously refused to repaint while not topmost (the terminal emulator and
-  the desktop shell's own windows) MUST now repaint on its owner `Expose`
-  unconditionally; `window_present`'s visible-parts clip is the safety bound.
+- **W31 (MUST):** **Retired by spec 0026 C16 and ADR 0060:** every repair
+  recomposites from the surface stack, so a switch or a completed move no longer needs a
+  special "full-stack" pass, a repaint flag or a coverage exception. A switch still marks
+  one whole-content `Expose` on every live non-minimized window (W12) because focus and
+  visibility changes may change what a client wants to draw; the pixels themselves do not
+  depend on the client answering. (The M11 machinery this requirement described — full
+  repaint flag, desktop erase exceptions, the claim rectangle excluded from the restore,
+  "presents only the pixels it painted" — is removed with the erase lists.)
 
-- **W32 (MUST):** A successful runtime display mode change (spec 0022) rebuilds
-  the window stack. Every live window keeps its content size; its frame origin
-  is scaled by the new/old screen ratio and clamped so the frame starts
-  on-screen. The service drops a stale drag and modal grab, clamps a persistent
-  region claim to the new screen, sets the full-repaint flag (W31) and marks
-  every live window for an `Expose`. The desktop shell is responsible for its
-  own no-window drawing: it re-reads the screen size and re-claims the menu bar
-  before its next draw.
+- **W32 (MUST):** A successful runtime display mode change (spec 0022) keeps every
+  canvas (content and plane rectangles are unchanged), reallocates the shadow, scales and
+  clamps window origins below the work area, clamps planes to the new screen, and
+  recomposites the whole screen (spec 0026 C17). Every live window is marked for an
+  `Expose`; the desktop pattern is repainted by the compositor, not by a client.
+
+- **W33 (MUST):** Every live window owns exactly one **canvas**: `w * h * 4` bytes
+  (content size, no row padding) of physically contiguous frames from the frame
+  allocator, allocated by `window_open`, zeroed before use, and freed by `close`,
+  `close_task` and task termination with the window record (spec 0026 C1/C2). Kernel-owned
+  (owner `0`) text windows own canvases too; their character grid stays the retained text
+  state and the canvas is its pixel copy. There is **no canvas budget constant**: the
+  frame allocator is the only limit, a failed allocation is `Status.Full`, and nothing is
+  opened. A window is **not composited** until its first `window_present`
+  (`canvas_valid`), so a freshly opened window shows the desktop where its content will
+  be.
+- **W34 (MUST):** A window draw scope is opened with `syslib.window_begin(id)` (builtin
+  **92**, no opcode): owner-only, `Ok` for a live window of the caller, `NotFound` for an
+  unknown id, `Invalid` for another task's window or disabled graphics. While the scope is
+  open the caller's drawing primitives write that window's canvas in **window-local**
+  coordinates (spec 0009 G23, spec 0026 C3/C4); with no scope they are `Status.Invalid`.
+  There is at most one scope per task, recorded in the window record (not in per-quantum
+  host state), so preemption, a blocking `next_event` or a long frame cannot redirect a
+  later draw: a second `window_begin` of any owned window replaces the previous scope,
+  `window_present` closes the scope of its argument, and `close`/`close_task` clear it with
+  the window. A scope grants no presentation; only `window_present` composites. Drawing
+  into the canvas of a minimized window is legal and invisible until it is restored (W30).
+- **W35 (MUST):** Window content reaches the screen only through the compositor's
+  painter's-order pass (spec 0026 C14): for the rectangle being repaired it paints the
+  desktop pattern, every live non-minimized window bottom to top (chrome, then its canvas
+  when `canvas_valid`), then the planes. A window never paints another window's canvas and
+  never needs visible-part subtraction; a higher window simply overwrites a lower one. A
+  client's content change needs no damage bookkeeping of its own: it appears at the next
+  `window_present` or repair.
+- **W36 (DEFERRED to M17, spec 0026 C8–C10):** client coordinates become window-local
+  (`(0,0)` at the content top-left) for drawing, reading back and window-addressed events.
+  **M16 keeps absolute screen coordinates**, translated by the current content origin, so
+  the W12/W28 re-read discipline still applies. No behaviour depends on the deferred
+  clause.
+
+### Implementation note (M16, 2026-11-26)
+
+The compositor, canvases, planes and the work area are implemented (spec 0026
+"Implementation status"). Where this document still describes the region claim as live
+behaviour (W27's body, W29's region clause, the language/Host/kernel surface tables and
+the failure-mode rows), read the **plane** rule of spec 0026 C12: builtins 60/61 and the
+claim field are deleted. The erase/`covers_from` language survives only as the damage
+rectangle source; painting is recomposition. Client coordinates are absolute until M17
+(W36).
 
 ## Design
 
@@ -449,128 +470,58 @@ windows with a reserved owner rather than a parallel table.
 
 There is no capability model (spec 0003, H4; vision R14): the check exists so a bug or a
 mistake in one application cannot silently destroy another's window, not to isolate a
-hostile client. Every application can still draw anywhere on the shadow when it is not
-clipped (ADR 0020, accepted).
+hostile client. A task with no open draw scope can still draw anywhere on the shadow
+(ADR 0020, accepted); inside a scope its drawing is bounded by its canvas (W33/W34).
 
-### Clip discipline
-
-`gfx` owns one clip rectangle, initialised to the full screen. The service adds two
-internal operations that go through the same clipped drawing helpers:
+### Surfaces and composition (ADR 0060, spec 0026)
 
 ```text
-gfx::set_clip(x, y, w, h) -> bool   // intersect with the screen; false when disabled
-gfx::reset_clip()                   // restore the full-screen clip
+task draw scope            window record                    shadow
+───────────────            ─────────────                    ──────
+window_begin(id) ─────────▶ scope = task
+syslib.fill_rect(...) ────▶ window-local write ──▶ canvas (w × h × 4)
+window_present(id) ───────▶ scope = none
+                           recomposite the frame rect ─────▶ shadow ──▶ framebuffer
 ```
 
-They are kernel-internal; there is no `syslib` binding. A repair pass resets the clip, and
-for each rectangle it is about to paint it narrows the clip to that rectangle, draws, and
-restores it. The clip is a property of the **shadow**, not of a task, so a global clip
-cannot be held across an asynchronous `Expose` to another task: after the expose is
-queued the client runs on its own core and its drawing calls would race with any other
-client. M2 therefore narrows for service-owned paint only (chrome and desktop restore)
-and limits the client's visible result at `window_present`, which presents only the
-content rectangle's visible parts. Drawing outside those parts is a client bug and stays
-possible in the shadow; the service draws the chrome over the content rectangle's border
-and title row at every repair, and a later client present does not cover a higher window.
+- A canvas is the window's retained content: allocated at `open`, freed at `close`, sized
+  to the content and never to the screen.
+- Drawing is **window-local**: `(0, 0)` is the content top-left. The service places the
+  canvas at the window's origin when it composites, so a move changes only the service's
+  origin and nothing a client computes (W36).
+- The compositor is the only writer of the shadow (spec 0026 C14). For a rectangle it
+  paints the desktop pattern, every live non-minimized window bottom to top (chrome, then
+  its canvas when valid), every plane, then the cursor. Painter's order replaces
+  visible-part subtraction: a higher layer simply overwrites a lower one, so there is no
+  visible-parts arithmetic in the repair path.
+- A **plane** (spec 0026 C11) is the app-drawn layer above windows: the desktop shell's
+  menu bar and pull-downs are planes. Destroying a menu plane recomposites what it covered,
+  so the window underneath reappears with no client round trip. `work_area_reserve`
+  (spec 0026 C13) keeps window frames out of the reserved bar strip so a title bar can
+  never be hidden by a permanently visible plane.
+- There is no shared clip any more: the `gfx::set_clip`/`reset_clip` pair and the
+  `graphics: clip ok` self-check are retired with the shared drawing surface. The per-client
+  bound is the canvas itself; the per-surface bound is the recomposition rectangle.
 
-Because the clip is global, a client drawing on another core during the short synchronous
-narrowed interval is clipped to the same rectangle. That is a bounded visual race with no
-state corruption (the next repair or client draw repaints the area); it is accepted for
-M2. `window_present` bounds the presentation, not the drawing, and the client is expected
-to draw only in its visible content until a per-task clip exists (M2.4).
+### Damage and repair (rewritten by spec 0026 C16)
 
-The boot self-check narrows the clip, paints across its edge, verifies the pixels outside
-were not written, restores the clip and the pixels, and prints `graphics: clip ok`
-(M2.3.1 proof).
+Damage is now a bounded list of **screen rectangles to recomposite**. `open`, `close`,
+`move`, `raise`, `minimize`, a focus change, a plane's creation or destruction, a client
+present, console output and a mode change append the rectangles they affect; one repair
+pass coalesces them (W21) and recomposites each one from the surface stack.
 
-### Composition and repair (implemented in M2.3.2)
+`Erase { rect, covers_from }`, the per-window coverage limits, the desktop-restore
+exceptions, the topmost move snapshot, the `full` repaint flag, the `snapshot` field and
+the "presents only the pixels it painted" invariant are removed: the compositor owns every
+pixel it paints, so there is nothing to protect from itself.
 
-The service is the only writer of chrome and the desktop; applications write only their
-content rectangles. A repair always paints in this order, all while holding the window
-lock:
-
-1. **Desktop restore.** Each `Erase { rect, covers_from }` paints the base white and the
-   `(X + Y)` black dither in the parts of `rect` not covered by live windows at z-order
-   index `covers_from..`. The coverage limit is what makes the cases differ:
-   - `open`: `covers_from = count` (the new window is topmost) — its whole frame starts
-     as desktop, including the content the client is about to draw;
-   - `move`, new frame: `covers_from = moved index + 1` — windows above the moved one
-     keep their pixels; windows below are covered and correctly erased. A **topmost**
-     move records no new-frame erase (W28): the moved window covers its own new frame and
-     a desktop erase there would wipe the copied content snapshot;
-   - `move`, old frame and `close`: `covers_from = 0` — any live window overlapping the
-     area keeps its pixels and has its chrome redrawn.
-2. **Chrome, bottom-to-top.** Every window whose frame intersects the chrome damage
-   redraws its chrome, clipped to each visible part of its frame (its frame minus the
-   frames of every higher window) intersected with the damage. Drawing in z-order and
-   clipping to visible parts means a lower window can never corrupt a higher window's
-   content or chrome.
-3. **Present.** The damage is coalesced (W21) to bound the paint work, but only the exact
-   pixels just painted are presented with `gfx::present`, which composites the cursor as
-   before (spec 0010, I7): each restored desktop piece and each chrome band/border piece.
-   Client content is never presented by the service (W17/W31), so a stale shadow pixel in
-   a lower window cannot be copied over a higher one. Undamaged windows are not painted.
-
-A **full-stack repaint** (W31) replaces the accumulated damage with the whole screen: the
-desktop is restored everywhere except live windows and the persistent claim rectangle,
-every live window's chrome is redrawn bottom-to-top in its visible parts, every live
-non-minimized window gets an `Expose`, and only those service-painted pixels are
-presented. Switches and completed moves use it so a window that was moved or lowered does
-not leave the pixels it uncovered stale until their owner happens to be raised.
-
-`move` to the same origin records nothing. A refused operation (`NotFound`, `Invalid`)
-records nothing. `close_task` accumulates every removed frame and repairs once, so a
-terminated task's windows disappear together.
-
-#### Moving content (implemented in M8.5)
-
-A relocation of the topmost window first copies its content rectangle to the new origin
-(W28). The source pixels are still the old content because the copy runs before the
-geometry changes and before any painting; the copy is clipped like every other `gfx`
-operation and never touches the cursor. The repair then restores the old frame (the
-moved window's new frame is subtracted automatically, so an overlap is safe), paints the
-new chrome, asks every intersected window to repaint with its whole-content `Expose`, and
-presents the copied destination content rectangle explicitly; it does not present the
-coalesced damage union (W31). The content area is never painted by the service; if the
-snapshot is missing (a client drew outside its content, or a non-topmost move), the
-owner's refreshed repaint fills it.
-
-The client half is a normal `Expose` handler: read `window_content_rect` again, recompute
-cached origins and draw at the new absolute coordinates. Calculator, Minesweeper, Editor,
-Browser, Clock Window, Widgets and the desktop shell do this; the proof apps that read the
-rectangle on every paint (`windows_drag`, `windows_events`, `windows_proof_*`) were
-already correct, and the pure drawing/timer demos (`visual`, `font`, `perf`, `windows_demo`)
-never take input after a move and are allowed to keep their startup snapshot (W18).
-
-#### Damage coalescing and present batching (implemented in M2.6.2)
-
-The damage lists are bounded (32 rectangles each) and a repair pass may collect the old
-and new frame of a move, several chrome frames and a focus change. Before painting, two
-coalescing passes reduce that work:
-
-- **Erase damage.** Requests with the same coverage limit that overlap or touch merge
-  into their bounding box. A request fully contained in another whose limit is at least
-  as high is dropped: the container subtracts no more windows, so it paints the desktop
-  across every pixel the contained request would. Different limits stay separate, because
-  their subtraction sets differ. This is exact with respect to the coverage semantics;
-  no live window is painted over beyond what the container already did.
-- **Chrome damage.** Chrome carries no coverage limit, so the generic pass applies: empty
-  and contained rectangles disappear and touching or overlapping pieces merge. Chrome is
-  redrawn per window in its visible parts, so a grown rectangle can only re-draw chrome
-  from the window records (never content), and a higher window is never touched.
-
-Coalescing is a paint-work bound, not a presentation policy: the repair presents exactly
-the pieces it painted, never the coalesced union (W31). `Expose` marking runs before
-coalescing, so a window in the hole of a merged bounding box is not woken for damage that
-never existed.
-
-`damage_self_check` (boot line `window: damage ok (present ...)`, kept as the coalescing
-model) proves the merge rules, the erase coverage rule and the coverage invariant on
-scratch state, then measures a realistic diagonal move of a 200 × 120 window across a
-1024 × 768 screen: four damage rectangles as one bounding box of 510 874 pixels become two
-coalesced rectangles of 55 348 pixels, an 89 % reduction in paint area (2 rects instead of
-4). It never touches the screen. The same pass is what makes a drag/scroll repair charge
-the client for its own frame, not for the span between the old and new origin.
+The coalescing rules keep their meaning without a coverage coordinate: empty and contained
+rectangles are dropped, overlapping or touching rectangles merge into their bounding box.
+The invariant is still **coverage, not equality** — the union must cover every damaged
+pixel — and `window::damage_self_check` keeps proving it on scratch state (boot line
+`window: damage ok (present ...)`). The recorded measurement (a diagonal move of a
+200 × 120 window across 1024 × 768: 510 874 pixels as one bounding box become 55 348 in
+two rectangles) remains valid for the coalescer.
 
 #### Chrome
 
@@ -589,22 +540,25 @@ can spill onto it. The content rectangle is never written by chrome.
 
 #### Desktop
 
-The desktop is white (`0x00FFFFFF`) with the black 50% dither on every `(X + Y)` even
-pixel — the same pattern `samples/apps/desktop` draws. The service owns this background;
-an application that wants a different desktop clears the screen itself before opening
-windows, and a later restore returns to the service's pattern.
+The desktop pattern is white (`0x00FFFFFF`) with the black 50% dither on every `(X + Y)`
+even pixel. It is service-owned and painted procedurally by the compositor for whatever a
+window or plane does not cover; no application can draw it (spec 0026 C14/C20). A
+wallpaper or icon layer would be a plane layer below windows, which is a spec 0026 open
+question, not an escape hatch.
 
 #### Lock order and self-checks
 
-A repair takes the window lock and then calls `gfx` (window → graphics). The wrappers
-read the screen size (graphics) *before* taking the window lock, and no path takes the
-graphics lock and then the window lock, so there is no cycle. The repair is synchronous
-under the window lock: the z-order it walks is exactly the state the caller produced, so
-no snapshot is needed.
+A repair takes the window lock and then the canvas and graphics locks
+(`WINDOW → CANVAS → SCREEN`); wrappers read the screen size (graphics) *before* taking the
+window lock, and no path takes the graphics lock and then the window lock, so there is no
+cycle. The repair is synchronous under the window lock: the z-order it walks is exactly the
+state the caller produced, so no snapshot is needed.
 
-`window: rules ok` checks the table policy; `window: paint ok` runs the damage lists,
-their merge rules, the visible-part subtraction and the damage each lifecycle operation
-records, all on scratch state without touching the screen.
+`window: rules ok` checks the table policy. `window: paint ok` checks the damage rectangle
+lists, their merge rules and the rectangles each lifecycle operation records, on scratch
+state. `window: compose ok` (new) proves painter's order on scratch surfaces: a lower
+window repainting its whole canvas cannot change a higher window's pixels, a plane covers a
+window, and destroying the plane restores the window.
 
 ### Routing, expose and `window_present` (implemented in M2.3.3)
 
@@ -682,14 +636,12 @@ expose (W25); it is not coalesced with damage and stays pending until its owner 
 #### `window_present`
 
 `window_present(id)` is owner-only (`NotFound` unknown, `Invalid` foreign or graphics
-disabled). It computes the content rectangle minus the frames of every higher window and
-presents each exact visible part with a narrowed clip (`set_clip` + `present` +
-`reset_clip`), so the client's presentation cannot cover a higher window or the chrome.
-It records no damage, takes no part in routing, and does not raise. `syslib.present`
-remains a legal generic primitive (spec 0009, G10) for an application that owns the whole
-screen; a window client uses `window_present`. The service still cannot undo a client that
-draws outside its visible content (no canvas, no per-task clip); that is the accepted M2
-limitation, and `Expose`/chrome repair covers the frame at the next damage.
+disabled). It closes the caller's draw scope for `id`, marks the canvas valid and asks the
+compositor to repaint the window's frame rectangle (spec 0026 C14/C16). The compositor
+paints layers in order, so the window lands in its correct place in the stack and a canvas
+can never cover a higher window. It records no damage of its own, takes no part in routing
+and does not raise. `syslib.present` is the generic recomposite primitive (spec 0026 C7)
+and needs no scope.
 
 `window: route ok` checks pending-expose marking, owner isolation, topmost-first take
 order, hit-testing and the loss of an expose when its window closes, all on scratch state.
@@ -728,10 +680,10 @@ Phases (all headless):
    parent waits for the final frame rectangle and the content pixels, then checks
    that the old frame area is restored to the live terminal window below (a blank
    cell is white) and the new frame's border and content are painted.
-4. **Expose and repaint.** Stage 2 makes B move over A. B is topmost, so its whole
-   content draw is legal. The service marks A's whole-content `Expose`; A takes it
-   (owner-only) and repaints only the part left of B's frame, because M2 has no
-   per-task clip: a whole-content draw would overwrite B. The proof checks that the
+4. **Expose and repaint.** Stage 2 makes B move over A. B is topmost. The service marks
+   A's whole-content `Expose`; A takes it (owner-only) and repaints only the part left of
+   B's frame, a discipline the sample keeps from before the canvas model (a whole-content
+   redraw would now be harmless: it lands in A's canvas). The proof checks that the
    overlap shows B's content, A's visible strip is still A's, and A's visible border
    remains. Stage 3 makes B move back; A takes the new expose and repaints the
    uncovered content, which the proof checks at a pixel that was B's content before
@@ -805,14 +757,10 @@ press. The close box is application-visible only through the predeclared
   `POINTER_ORDER → SCREEN` and `POINTER_ORDER → WINDOW → SCREEN`; only the two pointer
   paths take it.
 - **Damage and expose.** `drag_move` uses the same `relocate` path as `window_move`: the
-  old frame is erased to the desktop in the parts no live window covers, chrome is
-  redrawn, and every intersecting window gets its whole-content `Expose` (W12). Because a
-  title-bar press raises the window first, a drag is always a topmost move, so the service
-  copies the content snapshot to the new origin before the repair (W28) and records no
-  new-frame erase; the new content is visible without waiting for the owner. The owner's
-  refreshed repaint still lands at the new origin (W12/W17), and a lower window must not
-  paint over the dragged one (no per-task clip). A programmatic `window_move` of a
-  topmost window takes the same path.
+  old and new frame rectangles are queued for recomposition, every intersecting window
+  gets its whole-content `Expose` (W12), and the moved window's canvas is composited at
+  its new origin without waiting for its owner (W28). The canvas is window-local, so a
+  drag needs no snapshot and a step costs one recomposition of the two frames.
 
 `window::drag_self_check` proves the pure rules on a scratch table: title-bar vs close-box
 vs content classification, the grab offset, moves and clamps at all four edges, release,
@@ -945,7 +893,13 @@ launches the terminal and types `terminal`; it fails on the idle-summary/halt li
 Apps item table, one real launch, the outside-click dismissal, the F9/F10 and Left/Right
 switching, and the pixel checks on `-smp 4` and `-smp 1`.
 
-### Persistent pointer-region claim (implemented in M8.4)
+### Persistent pointer-region claim (implemented in M8.4; retired by spec 0026)
+
+**Retired.** Spec 0026 C11/C12 and ADR 0060 replace the claim with a **plane**: the same
+rectangle, retained content and a real layer above windows, with the same press-ownership
+rule, and plane destruction recomposites what it covered. The record below documents what
+M8.4 built and what the plane rule must preserve; builtins 60/61 and the table field are
+deleted in the ticket that lands planes.
 
 W27 adds a second, non-modal reservation beside the popup grab. The menu bar is
 app-drawn and permanent; the press that opens a pull-down is queued before any grab
@@ -1010,13 +964,19 @@ syslib.window_frame_rect(id: int, var rect: Rect) -> Status
 syslib.window_content_rect(id: int, var rect: Rect) -> Status
 syslib.window_focus() -> int
 syslib.window_present(id: int) -> Status
+syslib.window_begin(id: int) -> Status
 syslib.window_info(index: uint, var id: int, var rect: Rect,
                    var title: string[64]) -> Status
 syslib.popup_grab(x: int, y: int, w: int, h: int) -> Status
 syslib.popup_release() -> Status
-syslib.region_claim(x: int, y: int, w: int, h: int) -> Status
-syslib.region_release() -> Status
+syslib.region_claim(x: int, y: int, w: int, h: int) -> Status   // retired, spec 0026
+syslib.region_release() -> Status                               // retired, spec 0026
 ```
+
+The plane and work-area surface (`plane_create`, `plane_destroy`, `plane_begin`,
+`plane_present`, `work_area_reserve`, builtins 93–97) is specified in spec 0026 C11–C13
+and C19; it belongs to the display model, not to the window table, and is listed here only
+so the whole `syslib` window family is visible in one place.
 
 `(x, y)` in `window_open` and `window_move` is the **frame origin**; `(w, h)` in
 `window_open` is the **content size**. `Rect` is a new predeclared record, laid out like
@@ -1038,14 +998,15 @@ Error values:
 
 | Call | `Ok` | `NotFound` | `Invalid` | `Full` |
 |------|------|------------|-----------|--------|
-| `window_open` | window created, `id` written | — | graphics disabled, `w < 8`, `h < 8`, frame larger than the screen | 16 live windows |
+| `window_open` | window created, `id` written | — | graphics disabled, `w < 8`, `h < 8`, frame larger than the work area | 16 live windows, or the canvas cannot be allocated |
 | `window_close` | closed | unknown id | live window owned by another task | — |
 | `window_raise` | raised and focused | unknown id | — | — |
 | `window_move` | moved (origin clamped) | unknown id | live window owned by another task | — |
 | `window_frame_rect` | rect written | unknown id | graphics disabled | — |
 | `window_content_rect` | rect written | unknown id | graphics disabled | — |
 | `window_focus` | id of the focused window or `0` | — | — | — |
-| `window_present` | content presented (visible parts only) | unknown id | live window owned by another task, graphics disabled | — |
+| `window_present` | frame recomposited, canvas marked valid | unknown id | live window owned by another task, graphics disabled | — |
+| `window_begin` | draw scope opened | unknown id | live window owned by another task, graphics disabled | — |
 | `window_info` | id, frame and title written | index past the end, graphics disabled | title destination below capacity 64 (compile error) | — |
 | `region_claim` | claim taken or rectangle updated | — | non-positive `w`/`h`, graphics disabled | another task holds the claim |
 | `region_release` | released | no claim is held | another task holds the claim | — |
@@ -1135,14 +1096,14 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | Title longer than 64 bytes | Truncated at a UTF-8 code-point boundary; `Ok` |
 | Empty title | Legal; a 2-pixel content offset is unaffected |
 | Two cores call the service at once | One table lock serialises them; no partial state is visible |
-| Client ignores an `Expose` (M2.3.3) | Its previous pixels remain; the repair pass still presents |
+| Client ignores an `Expose` (M2.3.3) | Its canvas keeps its content; every recomposition shows it |
 | `window_info` index past the end (M2.3.4) | `NotFound`; id, rect and title are untouched |
 | Kernel window clicked (M2.3.4) | Ordinary hit-test/raise/focus; `Expose` asks the console to repaint |
-| Application draws outside its content rectangle | Possible (no clip primitive, no capability model); the service repairs the damage on the next pass |
+| Application draws outside its content rectangle inside a scope | Clipped to the canvas; nothing outside the window is written (W34, spec 0009 G23) |
+| Application draws without a scope | `Status.Invalid`; there is no application path into the shadow (spec 0026 C4) |
 | `move` to the same origin | `Ok`, no change |
-| A **topmost** move (including every drag) | The content snapshot is copied to the new origin before the repair, the new frame is not desktop-erased, chrome is painted, and the owner still gets its `Expose` (W28) |
-| A **non-topmost** move | Both frames are desktop-erased and no copy is made; the new content shows the underlay until the owner's refreshed repaint |
-| A client with a stale content rectangle | It draws and hit-tests at the old origin until it processes the `Expose`; the copied snapshot remains visible (W18/W28) |
+| **Any** move, including a drag step | The canvas is recomposited at the new origin; the old frame is recomposited from the layers beneath, and the owner still gets its `Expose` (W28) |
+| A client mid-frame while the window moves | The canvas does not move and its coordinates do not change, so the frame finishes correctly at the new origin (W36) |
 | `raise` on the top window | `Ok`, focus set, order unchanged |
 | Title-bar press while a drag is active | Ignored by the service; the existing drag continues |
 | Drag beyond a screen edge | Clamped so the frame stays fully on screen, like `move_to` |
@@ -1192,12 +1153,12 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | Owner-only `raise` | A pointer click (M2.3.3) must raise any window; raising changes no client data |
 | A per-window canvas | More copies, several images to keep consistent, and no shared memory to make it cheap (ADR 0020) |
 | Expose with partial damage rectangles | One whole-content repaint per pass is simpler and matches "the client redraws its content"; partial rectangles are an M2.6 optimisation |
-| A global clip held across the expose | One shadow and several cores: the client runs asynchronously, so there is nothing to hold the clip against |
+| A global clip held across the expose | ~~Rejected~~: there is no shared clip any more; a client draws its own canvas (spec 0026 C4) |
 | Resize in M2.3 | Needs a drag loop, minimum-size policy and client reflow; deferred to M2.4/M2.3.5 |
-| Let a client draw into the shadow with its own clip | No clip primitive, no capability model, and a second clip would need per-task state the drawing primitives do not have |
-| Block the drag until the client repaints synchronously | The service never blocks on a client; a slow client would freeze input, and there is no per-task clip to repaint into |
-| Give clients relative drawing origins instead of absolute coordinates | Every drawing primitive and UI helper would need per-task origin state; absolute screen coordinates are the language model |
-| Let the service own and redraw the content | That is the per-window canvas in disguise, and clients would still hit-test the stale origin (ADR 0046) |
+| ~~Let a client draw into the shadow with its own clip~~ | Chosen differently by ADR 0060: a client's drawing is bounded by its own canvas, not by a per-task clip over the shadow |
+| Block the drag until the client repaints synchronously | The service never blocks on a client; a slow client would freeze input, and a canvas makes the wait unnecessary |
+| ~~Keep absolute screen coordinates for client drawing~~ | Rejected by ADR 0060: local coordinates are the model. An origin is a cacheable value again, a stale cache paints offset inside the canvas, and the kernel pays a translation per primitive. The corpus is rewritten once instead |
+| ~~Let the service own and redraw the content~~ | Chosen by ADR 0060: a content-sized canvas per window, composited by the service |
 | A lifetime-long modal grab for the desktop | It would hide the queue from every other task; the desktop would be the only event consumer and no client could read input (ADR 0045) |
 | Make the menu bar a window | It would gain service chrome, a z-order record and a second drawing surface for something the shell already draws; the opening click would be treated as an ordinary window hit-test |
 | Keep first-poller delivery and rely only on the grab/claim | Ordinary content and key input has no reservation, so the boot desktop steals application input; the user-reported Browser failure is exactly this race |
@@ -1236,3 +1197,4 @@ runs the same code on a scratch table with fixed geometry (`window: rules ok`).
 | 2026-11-20 | M11 follow-up (W11/W17/W21/W27 clarified, W31 added; ADR 0055): a window switch (raise/open/close/minimize/`close_task`) and a completed move (programmatic move or a drag release that moved) run a full-stack repaint. The repair replaces the accumulated damage with the whole screen, restores the desktop outside live windows and the persistent claim rectangle, redraws every window's chrome bottom-to-top and marks every live non-minimized window for a whole-content `Expose`. It presents exactly the pixels it painted — restored desktop pieces, chrome bands/borders and a topmost move snapshot — never a window's content or a merged bounding box, so stale lower-window shadow pixels cannot be copied to the screen. The claim rectangle is excluded from the desktop restore so the app-drawn menu bar survives a switch. The terminal emulator and the desktop shell windows stop refusing to repaint while not topmost; `window_present`'s visible-parts clip is the safety bound. `window: paint ok` now asserts the full-request flag for moves and drag releases and its absence for an already-topmost raise and a drag step; `windows_events` drains the full expose set. Verified with `scripts/drag_content_qmp.py`, `browser_drag_qmp.py`, `multi_terminal_qmp.py`, `desktop_shell check`, `minimize_qmp.py`, the visual golden, and `scripts/window_repaint_qmp.py` (a covered desktop-window marker is repainted after Calculator moves away, and a drag that stays over the shell keeps the calculator's display/border/panel intact) on `-smp 4` and `-smp 1`. |
 | 2026-11-20 | Minimized windows stay minimized across an app-drawn menu close (W30; user report "I minimize system log but running anything like calculator brings it back"). The desktop shell's `repair_menu_area` scanned the topmost-first `window_info` list and raised the first frame intersecting the menu, which was the minimized System Log; `window_raise` clears `minimized`, so opening Apps and launching Calculator restored the log. It now skips minimized windows and, when no visible window is under the menu, repaints the service desktop pattern (white + dither) in the menu rectangle and presents it. `window_present` on a minimized window is an `Ok` no-op, and the shell skips drawing/presenting its own minimized windows and does not raise a minimized Desktop window after a menu, so a stale timer or close-path repaint cannot resurrect hidden pixels either. `scripts/minimize_qmp.py` opens and closes Apps with the log minimized and asserts the log pixel stays gone and the menu area returns to the dither. |
 | 2026-11-21 | Runtime display modes (spec 0022, ADR 0056): W32 makes a mode change a window-stack rebuild — scaled/clamped origins, unchanged content sizes, dropped drag/grab, clamped region claim, W31 full repaint and an `Expose` for every live window. |
+| 2026-11-25 | Surfaces and composition (ADR 0060, spec 0026; W4/W10/W11/W12/W17/W27/W28/W31 rewritten, W33–W36 added; spec 0009 G5–G7/G23/G24). Every window owns a content-sized canvas from the frame allocator with no budget constant (`Full` only on real exhaustion); `window_begin` (builtin 92, no opcode) opens a draw scope recorded in the window record; drawing, `get_pixel` and window-addressed pointer events are window-local, and with no scope a drawing primitive is `Invalid`. `window_present` marks the canvas valid and recomposites the frame from the surface stack; `syslib.present` becomes a recomposite request. Moves are pure origin changes (`gfx::copy_rect`, W28's snapshot and ADR 0046 retired), and the erase/`covers_from` repair, the full-repaint flag and the pixel region claim are replaced by recomposition and planes (spec 0026 C14–C16). Window frames clamp below a reserved work area (C13). No opcode and no drawing-primitive signature changes; ABI v1 stays at 75. |

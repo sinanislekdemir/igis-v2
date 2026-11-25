@@ -48,7 +48,7 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0021 | [Input is one machine-wide pointer and event queue owned by the kernel, with a composited cursor](0021-input-event-model.md) | Accepted | 2026-11-16 |
 | 0022 | [Use an absolute USB HID tablet for the pointer, not a scaled relative mouse](0022-absolute-pointer-usb-tablet.md) | Accepted | 2026-11-16 |
 | 0023 | [Drain PS/2 auxiliary data on IRQ12 through the I/O APIC, into a lock-free ring](0023-ps2-aux-irq12.md) | Accepted | 2026-11-16 |
-| 0024 | [Windows are kernel table records with monotonic ids, content-size geometry and owner-checked lifecycle](0024-window-identity-ownership-focus.md) | Accepted | 2026-11-16 |
+| 0024 | [Windows are kernel table records with monotonic ids, content-size geometry and owner-checked lifecycle](0024-window-identity-ownership-focus.md) | Accepted (canvas clause superseded by 0060) | 2026-11-16 |
 | 0025 | [Kernel text windows and an application-owned desktop shell](0025-kernel-text-windows-desktop-shell.md) | Accepted | 2026-11-16 |
 | 0026 | [The standard library may import `syslib` for the UI layout layer](0026-stdlib-may-use-syslib.md) | Accepted | 2026-11-17 |
 | 0027 | [File access for applications is stateless, root-only host builtins](0027-stateless-root-only-file-api.md) | Accepted | 2026-11-17 |
@@ -69,8 +69,8 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0042 | [Window drag and close are service-owned pointer interactions](0042-service-owned-window-drag-and-close.md) | Accepted (close semantics amended by 0043) | 2026-11-18 |
 | 0043 | [A close-box press is a close request, never a task kill](0043-close-is-a-request.md) | Accepted | 2026-11-18 |
 | 0044 | [A modal popup input grab makes an app-drawn menu reachable over windows](0044-modal-popup-input-grab.md) | Accepted | 2026-11-18 |
-| 0045 | [A persistent pointer-region claim protects the menu bar's opening click](0045-persistent-pointer-region-claim.md) | Accepted | 2026-11-18 |
-| 0046 | [A topmost move copies a content snapshot; the client re-reads the content rectangle](0046-move-content-snapshot-and-client-rect-refresh.md) | Accepted | 2026-11-18 |
+| 0045 | [A persistent pointer-region claim protects the menu bar's opening click](0045-persistent-pointer-region-claim.md) | Superseded by 0060 | 2026-11-18 |
+| 0046 | [A topmost move copies a content snapshot; the client re-reads the content rectangle](0046-move-content-snapshot-and-client-rect-refresh.md) | Superseded by 0060 | 2026-11-18 |
 | 0047 | [Deliver queued input to the owner of its window target](0047-window-addressed-input.md) | Accepted | 2026-11-18 |
 | 0048 | [Keep the IPv4 wire stack in the kernel and expose a `/lib/socket` unit](0048-kernel-net-stack-and-lib-socket.md) | Accepted | 2026-11-19 |
 | 0049 | [Start with virtio-net behind a device seam, not a virtio-specific stack](0049-virtio-net-first-device-seam.md) | Accepted | 2026-11-19 |
@@ -79,8 +79,9 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0052 | [Group the kernel by subject and put PC devices behind a platform seam](0052-kernel-module-layout-and-platform-seam.md) | Accepted | 2026-11-20 |
 | 0053 | [A terminal emulator over kernel console sessions](0053-terminal-emulator-console-sessions.md) | Accepted | 2026-11-20 |
 | 0054 | [Minimize is a service-owned window state restored through the window list](0054-service-owned-minimize.md) | Accepted | 2026-11-20 |
-| 0055 | [A switch or a completed move rebuilds the window stack in the service](0055-service-full-repaint-on-switch-and-move.md) | Accepted | 2026-11-20 |
+| 0055 | [A switch or a completed move rebuilds the window stack in the service](0055-service-full-repaint-on-switch-and-move.md) | Superseded by 0060 | 2026-11-20 |
 | 0056 | [Runtime display modes use the Bochs VBE dispi, not a real-mode BIOS trampoline](0056-runtime-display-mode-bochs-vbe.md) | Accepted | 2026-11-21 |
 | 0057 | [PNG row streaming with an Adam7 pass-1 preview](0057-png-row-streaming-preview.md) | Accepted (amended 2026-11-22) | 2026-11-21 |
 | 0058 | [Ship the image corpus as uncompressed PPM P6 and keep PNG support](0058-ppm-raw-corpus.md) | Accepted | 2026-11-22 |
 | 0059 | [Boot only the kernel and mount the application image from an ATA disk](0059-boot-only-the-kernel.md) | Accepted | 2026-11-22 |
+| 0060 | [Retain every window's content and compose the screen from surfaces](0060-per-window-canvas-and-service-compositor.md) | Accepted (implemented M16; local coordinates deferred) | 2026-11-25 |

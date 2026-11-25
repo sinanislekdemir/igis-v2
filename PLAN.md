@@ -14,7 +14,7 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Current state (M15):** **635 host tests**; specs 0001–0025 (0025 Implemented);
+- **Current state (M16):** **637 host tests**; specs 0001–0026 (0025 and 0026 implemented);
   ABI v1 at 75 opcodes with builtins 80–91; **M2–M15 complete**. Boot loads only
   `kernel.elf`: the ISO carries no application image, and the 128 MiB read-only ext2
   volume on `ide0` unit 1 is mounted on demand through `ext2w` (229 MiB free in a
@@ -33,7 +33,13 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   image has top-level `apps/<category>/`, and the Apps pull-down is sectioned.
   `/home` is a separate 8 MiB ext2 image on the primary master, read-write through
   `ext2w`. `scripts/multi_terminal_qmp.py` proves two independent terminals.
-- **Next:** no milestone is in progress. The deferred table below and
+- **Next:** **M16 is implemented**: surface canvases, the `Surf` view, the draw scope
+  (`window_begin`, builtin 92), the compositor (recomposition replaced the erase/
+  `covers_from`/snapshot/visible-parts machinery), planes (93–96), `work_area_reserve`
+  (97), the region claim deleted, the desktop shell on planes, and the corpus inside
+  scopes. 637 host tests; golden `c9546f45…79fbc65e` (one intended re-baseline for the
+  22-pixel work area). Remaining: M16.7's `perf` re-take, then **M17 (local client
+  coordinates)**. The deferred table below and
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) hold the parked work.
 - **Historical context (M8–M10; counts below are from those slices):** **505 host
   tests**; specs 0001–0019 (0018 and 0019 Implemented); ABI v1 at 75 opcodes; M5,
@@ -2365,7 +2371,128 @@ application volume is a read-only ATA disk the kernel mounts on demand through `
   question 1 is closed: a bad staging tree or `mke2fs` run now stops the build instead
   of surfacing as `apps: mount FAIL` at boot.
 
-## Deferred (not UI; pick up when they matter)
+## M16: composition and surfaces
+
+Normative: spec 0026 and ADR 0060, with the 2026-11-25 rows of specs
+0009/0010/0011/0012. Goal: the composed screen becomes a pure function of retained
+surface state — one canvas per window and plane, one compositor as the only writer of the
+shadow, local coordinates, recomposition instead of erase lists. This is what removes the
+reported overlap artifacts and pointer trails *by construction* rather than by asking
+clients to be careful. Reported symptoms: a lower window corrupting a higher one, and the
+cursor leaving trails.
+
+The end state deletes more machinery than it adds: `Erase { rect, covers_from }`, the
+visible-parts subtraction, the global clip, the topmost move snapshot, the full-repaint
+flag, the persistent region claim, the console's explicit-clip paint path and the shell's
+`repair_menu_area` workaround all go away.
+
+- [x] **M16.1 Decision and specs.** ADR 0060 accepted; spec 0026 written and accepted
+  (surfaces, draw scopes, coordinate spaces, planes, work area, compositor, damage);
+  specs 0009/0010/0011/0012 rows and their design sections revised; `specs/README.md`,
+  `adr/README.md`, `AGENTS.md`, `OPEN-QUESTIONS.md` updated (Q60 closed: there is no
+  canvas budget constant). Docs only, no code. **Gate for M16.2:** owner review of spec
+  0026's C-requirements.
+- [x] **M16.2 A surface-generic `gfx` (no behaviour change).** Extract the pixel
+  operations from `impl Screen` into an internal `Surface` (base pointer, pitch, width,
+  height, clip, origin) and re-express `fill`/`dither`/`outline`/`text`/`text_prop`/
+  `blit`/`glyph_in`/`load` on it; the shadow is one `Surface` with a zero origin. No
+  caller, primitive, opcode or pixel changes. `gfx::surface_self_check` draws through a
+  translated surface on scratch memory and reads it back (`graphics: surface ok`).
+  Acceptance: host tests, the visual golden and every window screenshot byte-identical,
+  `-smp 4`/`-smp 1` transcripts unchanged.
+- [x] **M16.3 Window canvases, draw scope and present.** `Window` carries the canvas
+  base/frames/length and `canvas_valid`; `open` allocates and zeroes it from
+  `frame::alloc_contiguous`, `close`/`close_task`/`Task::reclaim` free it, and a failed
+  allocation is `Status.Full` (no budget constant). Builtin **92** `window_begin(id)` with
+  its compiler capacity row, `Host` defaults and `syslib.window_begin`; the scope lives in
+  the window record. Every drawing builtin resolves its target through the caller's scope.
+  **Temporary scaffolding:** client coordinates stay absolute, translated by the current
+  content origin at write time, so the application corpus and the goldens are unchanged;
+  M16.6 removes the translation and converts the corpus to local coordinates. Lock order
+  `WINDOW → CANVAS → SCREEN`; `window: canvas_self_check` (alloc/free/reuse, `Full`,
+  scope lifetime) and `window: canvas ok`. Acceptance: goldens byte-identical, calculator
+  check mode green, `-smp 4`/`-smp 1`.
+- [x] **M16.4 The compositor (the cutover).** `window::composite(rect)` paints the desktop
+  pattern, every live non-minimized window bottom to top (chrome, then its canvas when
+  valid), every plane, and presents; `window_present` and every damage repair call it.
+  Until planes land, skip the desktop pattern inside the persistent claim's rectangle so
+  the shell's shadow-drawn bar survives (spec 0011 transition note). Delete
+  `Erase`/`covers_from`, the desktop restore, `Table::full`, the `snapshot` field,
+  `gfx::copy_rect`, the visible-parts machinery and the repair's clip use;
+  `gfx::set_clip`/`reset_clip` and `graphics: clip ok` go; `syslib.present` becomes a
+  recomposite request. Convert the kernel text windows: the console paints its grid into
+  its own canvas and recomposites, and `paint_visible_parts`/the visible-geometry
+  generation are deleted (spec 0012 D3). Acceptance: the new
+  `scripts/canvas_overlap_qmp.py` makes a lower window repaint its whole content under a
+  higher window and asserts the higher window's pixels are untouched; a pointer sweep
+  across a window boundary shows no trail; `window_repaint_qmp.py`,
+  `drag_content_qmp.py`, `browser_drag_qmp.py`, `multi_terminal_qmp.py`,
+  `minimize_qmp.py`, `apps_menu_qmp.py`, `desktop_shell check`, `terminal: ok` and the
+  visual golden pass on `-smp 4` and `-smp 1`.
+- [x] **M16.5 Planes, the work area, and the claim's retirement.** Builtins **93–97**
+  (`plane_create`, `plane_destroy`, `plane_begin`, `plane_present`, `work_area_reserve`),
+  the plane stack above windows in the compositor, plane hit-testing and press ownership,
+  and window-frame clamping below the reserved strip (open/move/drag/mode change). Delete
+  the persistent region claim (builtins 60/61, the table field, `window: region ok`) and
+  the shell's `repair_menu_area`; the desktop shell draws its bar and pull-downs as
+  planes. Acceptance: `scripts/plane_menu_qmp.py` opens a pull-down over a window, closes
+  it by destroying the plane and asserts the window underneath is restored without a
+  client repaint; the bar cannot be covered and a window dragged to the top stops below
+  it; `apps_menu_qmp.py`, `minimize_qmp.py`, `desktop_shell check`. The visual golden is
+  re-baselined once, deliberately, because a full-screen window no longer starts at
+  `y = 0`.
+- [x] **M16.6 Local coordinates and the corpus conversion.** Delete the origin
+  translation; drawing, `get_pixel` and window-addressed events use window-local
+  coordinates (spec 0026 C4/C6/C8/C9, spec 0010 I35); `get_pixel` answers from the scope
+  surface inside a draw block. Convert every windowed application and library to local
+  layout and local hit-testing (calculator, minesweeper, editor, browser, terminal,
+  image viewer, settings, clock, widgets, `lib/file_dialog`, the desktop shell's own
+  windows, the proof apps), move each `verify` block inside its draw scope, and delete the
+  "draw only the visible strip" discipline. The test corpus needs the same treatment:
+  `samples/tests/apps/base/font.ig`, `mouse.ig` and `windows_demo.ig` draw the whole
+  screen today, so each gets a plane (or a window) instead of the removed free drawing. Acceptance: the whole QMP batch, goldens,
+  `desktop_shell check`, `terminal: ok`, `editor: ready`, `image_viewer: PASS` on
+  `-smp 4`/`-smp 1`, and a new `scripts/local_coords_qmp.py` that moves a window while
+  its owner is mid-frame and asserts the completed frame lands correctly.
+- [ ] **M16.7 Re-measure and document.** Re-take the `perf` frame-time and event-latency
+  baselines (one extra canvas→shadow copy plus painter's-order overdraw), capture the
+  desktop screenshot, update `AGENTS.md` (current state, builtins), `docs/HISTORY.md`,
+  the spec statuses and this file's resume point.**Docs are done** (2026-11-26); the
+  `perf` re-take stays open because the sample is a `--shell` test app and the number is
+  a documentation datum, not a gate. Landed so far: 637 host tests, builtins 92–97,
+  region claim 60/61 deleted, golden `c9546f45…79fbc65e`.
+
+### M17: local client coordinates
+
+Normative: spec 0026 C4/C8–C10, spec 0011 W36, spec 0010 I35 (all marked DEFERRED).
+Goal: remove the absolute-coordinate translation and the origin cache from clients:
+drawing, `get_pixel` and window-addressed events become surface-local, so a move changes
+nothing a client computes and the W12/W28 "re-read the rectangle" discipline disappears.
+
+- [ ] **M17.1 Local drawing and reading.** Drop the origin translation in `gfx::Surf`
+  (canvas coordinates become the client's), and make `get_pixel` answer from the open
+  scope canvas. Convert the corpus: every windowed app's layout drops its `rect.x`/
+  `rect.y` offsets, and every pixel self-check moves inside its draw block.
+- [ ] **M17.2 Local events.** A window-addressed event carries `x`/`y` relative to the
+  content rectangle (`window != 0` is the discriminator); unaddressed and plane events
+  stay in screen coordinates. Convert every pointer handler (it drops the subtraction).
+- [ ] **M17.3 Retire W12/W28's re-read discipline** in the specs and delete the last
+  origin caches in `samples/apps/lib/file_dialog.ig` and the shell.
+  Acceptance: the visual golden is unchanged (layout does not move), the full QMP batch
+  passes, and a new `scripts/local_coords_qmp.py` moves a window while its owner is
+  mid-frame and asserts the completed frame lands correctly.
+
+### M16 deferred
+
+| Item | Trigger |
+|---|---|
+| A wallpaper/icon layer below windows (a plane layer or a service image) | the desktop gets a background image (spec 0026 open question 1) |
+| Per-surface damage and a partial-canvas composite | `perf` shows recomposition cost (open question 2) |
+| Cursor composited into the shadow | a cursor-only fast path or a hardware cursor (open question 3) |
+| Window resize on a canvas (reallocate, reflow, scale) | a resize ticket (open question 4) |
+| Per-task scope slots instead of a scan of the surface tables | the resolution cost shows in `perf` |
+
+## Deferred (not UI; pick up when they matter)## Deferred (not UI; pick up when they matter)
 
 | Item | Where | Trigger |
 |---|---|---|

@@ -15,10 +15,10 @@ revised as understanding improves, and their history lives in git.
 | 0006 | [Streams and inter-application IPC](0006-streams.md) | Accepted | mm, sched, core/stdlib, loader | 2026-11-13 |
 | 0007 | [Scheduler](0007-scheduler.md) | Accepted | sched, arch timer/IPI, interpreter | 2026-11-13 |
 | 0008 | [Bytecode format and the compiler/runtime split](0008-bytecode.md) | Accepted | abi, compiler, interpreter, repl | 2026-11-13 |
-| 0009 | [Graphics, the shadow screen and the window service](0009-graphics-and-windows.md) | Accepted | syslib, kernel gfx/console, compiler, interpreter | 2026-11-16 |
-| 0010 | [Input, the pointer and events](0010-input-and-events.md) | Accepted | syslib, kernel mouse/usb/pci/gfx/console/sched, arch i8042/ports, compiler, interpreter | 2026-11-16 |
-| 0011 | [Windows](0011-windows.md) | Accepted | abi, compiler, interpreter, kernel window/gfx/task/sched, syslib | 2026-11-17 |
-| 0012 | [The desktop shell and kernel text windows](0012-desktop-shell.md) | Accepted | kernel console/gfx/window/sched, compiler, interpreter, abi, samples/apps | 2026-11-17 |
+| 0009 | [Graphics, the shadow screen and the window service](0009-graphics-and-windows.md) | Accepted | syslib, kernel gfx/console, compiler, interpreter | 2026-11-26 |
+| 0010 | [Input, the pointer and events](0010-input-and-events.md) | Accepted | syslib, kernel mouse/usb/pci/gfx/console/sched, arch i8042/ports, compiler, interpreter | 2026-11-26 |
+| 0011 | [Windows](0011-windows.md) | Accepted | abi, compiler, interpreter, kernel window/gfx/task/sched, syslib | 2026-11-26 |
+| 0012 | [The desktop shell and kernel text windows](0012-desktop-shell.md) | Accepted | kernel console/gfx/window/sched, compiler, interpreter, abi, samples/apps | 2026-11-26 |
 | 0013 | [The application file API](0013-application-files.md) | Accepted | abi, compiler, interpreter, kernel ext2/sched/repl, langhost, samples/apps | 2026-11-17 |
 | 0014 | [The terminal window](0014-terminal-window.md) | Superseded by 0021 | abi, compiler, interpreter, kernel console/window/sched, langhost, samples/apps | 2026-11-17 |
 | 0015 | [The proportional font](0015-proportional-font.md) | Implemented | abi, compiler, interpreter, kernel font/gfx/window/console, langhost, samples/apps | 2026-11-17 |
@@ -32,6 +32,7 @@ revised as understanding improves, and their history lives in git.
 | 0023 | [The PNG corpus and the image viewer](0023-png-and-image-viewer.md) | Implemented | samples/apps/lib, samples/apps/apps, compiler, interpreter, abi, kernel VFS, langhost, xtask, scripts | 2026-11-22 |
 | 0024 | [Raw PPM images](0024-ppm-raw-images.md) | Implemented | samples/apps/lib, samples/apps/apps, samples/image, samples/tests/apps, langhost, xtask | 2026-11-22 |
 | 0025 | [The application image on a block device](0025-application-image-on-a-block-device.md) | Accepted | xtask, kernel ata/fs/ext2/main, ext2w, scripts | 2026-11-22 |
+| 0026 | [Composition, surfaces and coordinate spaces](0026-composition-and-surfaces.md) | Accepted | abi, compiler, interpreter, kernel gfx/window/console/sched, syslib, samples/apps | 2026-11-26 |
 
 ## Lifecycle
 
