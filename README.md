@@ -6,7 +6,7 @@ general personal system built on the same thesis: the kernel is a language runti
 owns the machine, applications are source text compiled in the kernel, and everything runs
 at ring 0 in one address space.
 
-![igis-v2 desktop: dark terminal, calculator and clock](docs/screenshots/desktop.png)
+![igis-v2 desktop: terminal, calculator and desktop panel](docs/screenshots/desktop.png)
 
 *Real QEMU framebuffer. The terminal is running `ifconfig dhcp`, `nslookup example.com`
 and `net_probe dns`; Calculator is an ordinary source application, and the Desktop panel
@@ -40,10 +40,11 @@ is pinned ([ADR 0011](adr/0011-work-stealing-interpreters.md)). The shell is its
 application: a kernel REPL service compiles it at boot and starts it, and applications
 start others through a `run`/`spawn` request queue ([ADR 0017](adr/0017-repl-spawn-service.md)).
 
-**Status: implementation.** Specs 0001–0024 are accepted; milestones M2–M14 are complete
+**Status: implementation.** Specs 0001–0026 are accepted; milestones M2–M16 are complete
 (desktop, language, filesystems, networking, terminal emulator, runtime display modes,
-PNG/PPM image viewer), 634 host tests pass, and ABI v1 has 75 opcodes. The read-only
-128 MiB image tree carries a full-resolution PPM P6 corpus generated from the tracked
+PNG/PPM image viewer, and the retained-surface composition model), 637 host tests pass, and
+ABI v1 has 75 opcodes. The read-only 128 MiB image tree carries a full-resolution PPM P6
+corpus generated from the tracked
 `samples/image-src` JPEGs (the generated PPMs are not committed; the PNG decoder is
 retained), and `apps/accessories/image_viewer` opens both PNG (Adam7 pass-1) and PPM
 (fixed-stride 1/8 sampling) without a full-image buffer. A Settings application changes the real display

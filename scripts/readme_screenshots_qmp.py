@@ -2,9 +2,22 @@
 """Compose the README screenshots on the boot desktop, top bar included.
 
 Every image is a full 1024x768 QEMU framebuffer capture with the desktop
-shell's menu bar visible; nothing is cropped.
+shell's menu bar visible; nothing is cropped and nothing is drawn by the
+harness. Window geometry comes from the sample sources, not from constants
+guessed at capture time:
 
-    docs/screenshots/desktop.png   terminal + Desktop panel + Calculator
+    content = window_open(x, y, w, h) + (1, 16)
+    frame   = content - (1, 16) and content + (2, 17)
+    close   = (frame.x + 9, frame.y + 8)          (11x11 box at frame + (4, 3))
+    hide    = (frame.x + frame.w - 10, frame.y + 8) (11x11 box at the right end)
+
+The Apps pull-down opens at `y = 22` (the bar height) with 16-pixel rows, so
+row `i` is clicked at `y = 31 + 16 * i`; the `#` section headers are not
+selectable. The System Log is a full-screen kernel window under everything, so
+the harness minimizes it first (its hide box is free at boot); the uncovered
+area is then the service desktop pattern.
+
+    docs/screenshots/desktop.png   terminal + Calculator + Desktop panel
     docs/screenshots/apps.png      Apps pull-down over that composition
     docs/screenshots/network.png   the terminal network commands
     docs/screenshots/widgets.png   the composed Widgets gallery
@@ -14,8 +27,8 @@ shell's menu bar visible; nothing is cropped.
 
 The terminal runs `ifconfig dhcp`, `nslookup example.com` and `net_probe dns`.
 Widgets needs its `shot` gallery, so it is started from the terminal and the
-terminal is arranged fully behind its 760x560 frame; the terminal is then
-minimized before the single-app captures.
+terminal is arranged fully behind its 762x577 frame; the terminal is then
+closed before the single-app captures, which all launch from Apps.
 
 Usage:
     cargo xtask image
@@ -38,14 +51,37 @@ from tablet_qmp import Qmp, Serial, apps_drive  # noqa: E402
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = os.path.join(ROOT, "docs", "screenshots")
 
+# The bar is 22 px tall and every pull-down row is 16 px with a 1 px border.
 APPS_LABEL = (64, 10)
-CALCULATOR_ROW = (140, 47)
-CLOCK_ROW = (140, 63)
-EDITOR_ROW = (140, 143)
-BROWSER_ROW = (140, 159)
-TERMINAL_ROW = (140, 191)
+MENU_X = 140
 OUTSIDE = (500, 700)
 PROMPT = r"(?:shell> |igis:/[^>]*> )"
+
+
+def menu_row(index):
+    return (MENU_X, 31 + 16 * index)
+
+
+# Apps item order (`samples/apps/base/desktop_shell.ig`, spec 0012 D20):
+#  0 #Accessories  1 Calculator   2 Clock        3 Widgets   4 Image Viewer
+#  5 #Games        6 Minesweeper  7 #Productivity 8 Editor   9 File Browser
+# 10 #Utilities   11 Terminal    12 Settings
+ROW_CALCULATOR = 1
+ROW_CLOCK = 2
+ROW_WIDGETS = 3
+ROW_EDITOR = 8
+ROW_BROWSER = 9
+ROW_TERMINAL = 11
+
+# `window_open` arguments (frame origin and content size), from each sample.
+LOG = (8, 26, 1002, 729)          # kernel System Log, content + chrome, opened bottom
+PANEL = (600, 72, 362, 181)
+TERMINAL = (24, 64, 642, 417)
+CALCULATOR = (180, 100, 302, 377)
+WIDGETS = (64, 64, 762, 577)
+CLOCK = (340, 130, 262, 297)
+BROWSER = (160, 90, 682, 497)
+EDITOR = (180, 90, 642, 497)
 
 
 def hid_axis(pixel, extent):
@@ -53,6 +89,18 @@ def hid_axis(pixel, extent):
         return 0
     pixel = min(max(pixel, 0), extent - 1)
     return (pixel * 0x7FFF + (extent - 1) // 2) // (extent - 1)
+
+
+def close_point(frame):
+    return (frame[0] + 9, frame[1] + 8)
+
+
+def hide_point(frame):
+    return (frame[0] + frame[2] - 10, frame[1] + 8)
+
+
+def title_point(frame):
+    return (frame[0] + frame[2] // 2, frame[1] + 8)
 
 
 def click(qmp, x, y, width, height):
@@ -86,6 +134,12 @@ def drag(qmp, start, end, width, height):
     time.sleep(1.0)
 
 
+def park(qmp, width, height):
+    """Move the pointer to the empty desktop corner before a capture."""
+    qmp.send_absolute(hid_axis(OUTSIDE[0], width), hid_axis(OUTSIDE[1], height), left=False)
+    time.sleep(0.25)
+
+
 def type_text(process, text):
     for byte in text.encode():
         process.stdin.write(bytes([byte]))
@@ -117,14 +171,17 @@ def capture(qmp, path):
 
 def launch(qmp, serial, width, height, row, spawn, cursor):
     click(qmp, *APPS_LABEL, width, height)
-    _, cursor = serial.wait_for(r"desktop_shell: apps menu open", timeout=30, start=cursor)
-    click(qmp, *row, width, height)
-    _, cursor = serial.wait_for(spawn, timeout=60, start=cursor)
+    _, cursor = serial.wait_for(
+        r"desktop_shell: apps menu open", timeout=30, start=cursor
+    )
+    click(qmp, *menu_row(row), width, height)
+    _, cursor = serial.wait_for(spawn, timeout=90, start=cursor)
     time.sleep(1.0)
     return cursor
 
 
-def shot(qmp, path):
+def shot(qmp, path, width, height):
+    park(qmp, width, height)
     capture(qmp, path)
     print(f"[readme] {path}")
 
@@ -184,104 +241,145 @@ def run(args):
         serial.wait_for(r"desktop_shell: ready", timeout=args.timeout)
         graphics, _ = serial.wait_for(r"graphics: (\d+)x(\d+)", timeout=10)
         width, height = int(graphics.group(1)), int(graphics.group(2))
+        if (width, height) != (1024, 768):
+            sys.exit(f"[readme] unexpected mode {width}x{height}, want 1024x768")
         print(f"[readme] screen {width}x{height}, cores {args.cores}")
         time.sleep(0.6)
+        cursor = 0
 
-        # Move the shell's Desktop panel to the right edge.
-        drag(qmp, (750, 80), (812, 80), width, height)
+        # The System Log is the bottom full-screen kernel window; minimize it so
+        # the uncovered pixels are the desktop pattern rather than log text.
+        click(qmp, *hide_point(LOG), width, height)
+        time.sleep(0.4)
+
+        # Desktop panel to the right edge; the service clamps the frame to the
+        # screen, so it ends at x = 662 and leaves the left side to the terminal.
+        drag(qmp, title_point(PANEL), (843, 80), width, height)
+        panel = (662, 72, PANEL[2], PANEL[3])
 
         # Terminal at the left edge, running the network commands.
         cursor = launch(
-            qmp, serial, width, height, TERMINAL_ROW,
-            r"repl: apps/utilities/terminal: spawned as task", 0,
+            qmp,
+            serial,
+            width,
+            height,
+            ROW_TERMINAL,
+            r"repl: apps/utilities/terminal: spawned as task",
+            cursor,
         )
         _, cursor = serial.wait_for(
             r"repl: base/shell: spawned as task", timeout=30, start=cursor
         )
         _, cursor = serial.wait_for(PROMPT, timeout=30, start=cursor)
-        drag(qmp, (174, 72), (150, 72), width, height)
+        drag(qmp, title_point(TERMINAL), (title_point(TERMINAL)[0] - 24, 72), width, height)
+        terminal = (0, 64, TERMINAL[2], TERMINAL[3])
 
         print("[readme] terminal: ifconfig dhcp, nslookup, net_probe dns")
         type_text(process, "ifconfig dhcp\n")
         _, cursor = serial.wait_for(
-            r"ifconfig: dhcp 10\.0\.2\.15/24", timeout=60, start=cursor
+            r"ifconfig: dhcp 10\.0\.2\.15/24", timeout=90, start=cursor
         )
         type_text(process, "nslookup example.com\n")
-        _, cursor = serial.wait_for(r"Address:", timeout=60, start=cursor)
+        _, cursor = serial.wait_for(r"Address:", timeout=90, start=cursor)
         type_text(process, "net_probe dns\n")
-        _, cursor = serial.wait_for(r"net_probe: ok", timeout=60, start=cursor)
+        _, cursor = serial.wait_for(r"net_probe: ok", timeout=90, start=cursor)
         _, cursor = serial.wait_for(PROMPT, timeout=30, start=cursor)
         time.sleep(0.5)
 
         # Calculator under the Desktop panel.
         cursor = launch(
-            qmp, serial, width, height, CALCULATOR_ROW,
-            r"repl: apps/accessories/calculator: spawned as task", cursor,
+            qmp,
+            serial,
+            width,
+            height,
+            ROW_CALCULATOR,
+            r"repl: apps/accessories/calculator: spawned as task",
+            cursor,
         )
-        drag(qmp, (330, 108), (850, 288), width, height)
+        drag(qmp, title_point(CALCULATOR), (850, 278), width, height)
+        calculator = (699, 270, CALCULATOR[2], CALCULATOR[3])
         time.sleep(0.8)
-        shot(qmp, os.path.join(OUT_DIR, "desktop.png"))
+        shot(qmp, os.path.join(OUT_DIR, "desktop.png"), width, height)
 
         # Apps pull-down over that composition.
         click(qmp, *APPS_LABEL, width, height)
-        _, cursor = serial.wait_for(r"desktop_shell: apps menu open", timeout=30, start=cursor)
+        _, cursor = serial.wait_for(
+            r"desktop_shell: apps menu open", timeout=30, start=cursor
+        )
         time.sleep(0.3)
-        shot(qmp, os.path.join(OUT_DIR, "apps.png"))
+        shot(qmp, os.path.join(OUT_DIR, "apps.png"), width, height)
         click(qmp, *OUTSIDE, width, height)
         _, cursor = serial.wait_for(
             r"desktop_shell: apps menu closed", timeout=30, start=cursor
         )
 
-        # Close Calculator and the Desktop panel; keep the terminal and log.
-        click(qmp, 709, 288, width, height)
-        click(qmp, 671, 80, width, height)
+        # Close Calculator and the Desktop panel; keep the terminal alone.
+        click(qmp, *close_point(calculator), width, height)
+        time.sleep(0.5)
+        click(qmp, *close_point(panel), width, height)
         _, cursor = serial.wait_for(
             r"desktop_shell: desktop window closed", timeout=30, start=cursor
         )
         time.sleep(0.6)
-        shot(qmp, os.path.join(OUT_DIR, "network.png"))
+        shot(qmp, os.path.join(OUT_DIR, "network.png"), width, height)
 
-        # Widgets: arrange the terminal fully behind the 760x560 gallery.
-        drag(qmp, (150, 72), (230, 88), width, height)
+        # Widgets: put the terminal fully behind the 762x577 gallery, run the
+        # `shot` mode from the terminal's shell, then close the terminal.
+        drag(qmp, title_point(terminal), (421, 108), width, height)
+        terminal = (100, 100, TERMINAL[2], TERMINAL[3])
         type_text(process, "run apps/accessories/widgets shot\n")
-        _, cursor = serial.wait_for(r"widgets: ready", timeout=60, start=cursor)
+        _, cursor = serial.wait_for(r"widgets: ready", timeout=90, start=cursor)
         time.sleep(0.3)
-        shot(qmp, os.path.join(OUT_DIR, "widgets.png"))
+        shot(qmp, os.path.join(OUT_DIR, "widgets.png"), width, height)
         _, cursor = serial.wait_for(r"widgets: done", timeout=30, start=cursor)
         _, cursor = serial.wait_for(PROMPT, timeout=30, start=cursor)
-
-        # Hide the terminal; its hide box is now on top and in the clear.
-        click(qmp, 712, 88, width, height)
-        time.sleep(0.5)
+        click(qmp, *close_point(terminal), width, height)
+        time.sleep(0.6)
 
         # Clock.
         cursor = launch(
-            qmp, serial, width, height, CLOCK_ROW,
-            r"repl: apps/accessories/clock_window: spawned as task", cursor,
+            qmp,
+            serial,
+            width,
+            height,
+            ROW_CLOCK,
+            r"repl: apps/accessories/clock_window: spawned as task",
+            cursor,
         )
         time.sleep(1.2)
-        shot(qmp, os.path.join(OUT_DIR, "clock.png"))
-        click(qmp, 350, 138, width, height)
-        time.sleep(0.5)
+        shot(qmp, os.path.join(OUT_DIR, "clock.png"), width, height)
+        click(qmp, *close_point(CLOCK), width, height)
+        time.sleep(0.6)
 
         # File Browser.
         cursor = launch(
-            qmp, serial, width, height, BROWSER_ROW,
-            r"repl: apps/productivity/browser: spawned as task", cursor,
+            qmp,
+            serial,
+            width,
+            height,
+            ROW_BROWSER,
+            r"repl: apps/productivity/browser: spawned as task",
+            cursor,
         )
-        time.sleep(1.8)
-        shot(qmp, os.path.join(OUT_DIR, "browser.png"))
-        click(qmp, 170, 99, width, height)
-        time.sleep(0.5)
+        time.sleep(2.0)
+        shot(qmp, os.path.join(OUT_DIR, "browser.png"), width, height)
+        click(qmp, *close_point(BROWSER), width, height)
+        time.sleep(0.6)
 
         # Editor.
         cursor = launch(
-            qmp, serial, width, height, EDITOR_ROW,
-            r"repl: apps/productivity/editor: spawned as task", cursor,
+            qmp,
+            serial,
+            width,
+            height,
+            ROW_EDITOR,
+            r"repl: apps/productivity/editor: spawned as task",
+            cursor,
         )
-        time.sleep(1.8)
-        shot(qmp, os.path.join(OUT_DIR, "editor.png"))
-        click(qmp, 190, 99, width, height)
+        time.sleep(2.0)
+        shot(qmp, os.path.join(OUT_DIR, "editor.png"), width, height)
+        click(qmp, *close_point(EDITOR), width, height)
+        time.sleep(0.5)
         print("[readme] done")
         return 0
     finally:
@@ -301,7 +399,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("iso", help="path to build/igis.iso")
     parser.add_argument("--cores", default="4")
-    parser.add_argument("--timeout", type=float, default=90.0)
+    parser.add_argument("--timeout", type=float, default=120.0)
     args = parser.parse_args()
     return run(args)
 
