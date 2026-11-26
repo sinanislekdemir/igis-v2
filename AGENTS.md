@@ -60,7 +60,9 @@ decisions in `adr/`, and work items in `PLAN.md`.
   (`apps/utilities/terminal`) over kernel console sessions, a Settings app
   (`apps/utilities/settings`) that changes the real mode through the Bochs VBE dispi
   (spec 0022, ADR 0056), and source apps (`editor`, `browser`, `calculator`,
-  `minesweeper`, `clock_window`, `widgets`, `image_viewer`). The image viewer
+  `minesweeper`, `clock_window`, `widgets`, `image_viewer`). The editor's File >
+  Dark row (`Ctrl+D`) switches the whole client content to a dark palette
+  (spec 0013); light mode is unchanged. The image viewer
   opens PNG (Adam7 pass-1 stream) and PPM (fixed-stride row seek and 1/8
   sampling), both through `syslib.blit_rgb`, with no full-image buffer and a
   decode progress strip. Every terminal

@@ -6,7 +6,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0015 (read-only ext2 delivery), 0019 (source-only delivery), 0027
-- **Updated:** 2026-11-18
+- **Updated:** 2026-11-26
 
 ## Context
 
@@ -242,7 +242,7 @@ tree view:
   status line and is not opened;
 - no browser action writes a file or adds a handle.
 
-### The text editor (M2.5.3; lexical highlighting M9.1; pointer/scroll M9.2; file dialog M9.3; 128 KiB buffer M9.4; deferred drag M16.8)
+### The text editor (M2.5.3; lexical highlighting M9.1; pointer/scroll M9.2; file dialog M9.3; 128 KiB buffer M9.4; deferred drag M16.8; dark theme M16.9)
 
 `samples/apps/base/editor.ig` records the application-level contract over the file
 API. The document, editing and save rules are in spec 0003 ("Application
@@ -266,10 +266,33 @@ drawing/drag rule, M9.3 the file-open dialog and M9.4 the document capacity:
   plain; the File menu's **Highlight** row toggles colouring for the current
   document either way and carries a check mark while it is on. Opening a file
   resets the toggle from the path rule;
-- the File menu is five rows — `Open`, `Save`, `-`, `Highlight`, `Quit` — so the
-  quit row is index 4. `Ctrl+O`/`Ctrl+S`/`Ctrl+Q` keep their meanings; Highlight
-  has no shortcut. The dropdown's checked mask carries the Highlight bit and is
-  redrawn with the menu;
+- the File menu is six rows — `Open`, `Save`, `-`, `Highlight`, `Dark`,
+  `Quit` — so the Dark row is index 4 and the quit row is index 5.
+  `Ctrl+O`/`Ctrl+S`/`Ctrl+Q` keep their meanings, `Ctrl+D` toggles Dark and
+  Highlight still has no shortcut. The dropdown's checked mask carries both
+  check bits (Highlight and Dark) and is redrawn with the menu;
+- **Dark theme.** The `Dark` row toggles a dark palette for the whole client
+  content rectangle: the menu bar and its pull-down, the path line, the text
+  view (default text, every syntax class, the selection band and the caret),
+  the scrollbar and the status line. The service-owned frame and title bar are
+  not client content and keep the desktop palette. The check mark follows the
+  theme; the theme starts light on every launch and is independent of the
+  document, so opening a file does not reset it (unlike Highlight, which
+  follows the path rule). The dark palette is background `0x1E1E1E`, default
+  text and caret `0xD4D4D4`, secondary text and scrollbar thumb `0x808080`,
+  rules and the scrollbar outline `0x484848`, selection band and the active
+  menu cell `0x264F78` with white text, keyword `0x569CD6`, type `0x4EC9B0`,
+  string `0xCE9178`, comment `0x6A9955` and number `0xB5CEA8`. Light mode keeps
+  the existing System 7.5 palette and pixel-for-pixel drawing exactly;
+- the menu bar, pull-down and scrollbar are drawn **app-locally** in dark mode
+  because `stdlib.ui_menu_bar`, `stdlib.ui_menu_dropdown` and
+  `stdlib.ui_scrollbar` hard-code the light System 7.5 palette. The local
+  drawing uses the same geometry as those helpers (bar height 22, label at
+  `x + 8`, 16-pixel pull-down rows with the check column at `x + 8` and the
+  label at `x + 22`, scrollbar track `h - 4` with the shared 8-pixel thumb
+  floor), so `stdlib.ui_menu_bar_hit`, `stdlib.ui_menu_hit` and
+  `stdlib.ui_scrollbar_hit` keep answering for it unchanged. Light mode still
+  calls the `stdlib` helpers. No `stdlib` function is added or changed;
 - **File > Open and `Ctrl+O` (M9.3)** run the `/lib` modal file-open dialog
   (`lib.file_dialog.open_file`, spec 0018 "The `/lib` file-open dialog") with
   the current path as its start. The dialog begins in the current document's
@@ -296,11 +319,12 @@ drawing/drag rule, M9.3 the file-open dialog and M9.4 the document capacity:
   `true`, `false`), predeclared type names (`int`, `uint`, `byte`, `bool`,
   `f64`, `string`, `bytes`, `Status`, `FaultCode`, `Diagnostic`, `ExitReason`,
   `Rect`, `Event`, `EventKind`), strings, comments, numbers and default text;
-- the palette is keyword `0x000080`, type `0x800000`, string `0x008000`,
+- the light palette is keyword `0x000080`, type `0x800000`, string `0x008000`,
   comment `0x808080`, number `0x804000`; punctuation, whitespace and other
   identifiers stay black. Selected cells remain white on the accent band, and
   the caret, scrolling, line/column readout, editing and save behaviour are
-  unchanged;
+  unchanged. Dark mode swaps the whole palette as described above; the same
+  token classes and selection geometry are used, so only colour changes;
 - `//` runs to the end of its line. `{ ... }` is a block comment that ends at
   the first `}`, does not nest, and may span lines. A `//` or `{` inside a
   string is string content. A string runs to its closing quote (`\"` is skipped)
@@ -314,7 +338,8 @@ drawing/drag rule, M9.3 the file-open dialog and M9.4 the document capacity:
   visible rows, so a scrolled frame scans only the visible lines, never the
   document from byte 0. The line-by-line scan still makes a `//` end at its own
   newline, so it never swallows a later line's `{`. With highlighting off the
-  old all-black/all-white drawing path is used exactly;
+  plain drawing path uses the theme's `ink` and `sel_ink` exactly as the light
+  path used black and white;
 - a pointer event repaints only when it changes visible state (M9.2). A
   no-button move over the text does nothing; a move with the File menu open
   repaints only when the highlighted row changes; a press or release only when
@@ -359,8 +384,13 @@ drawing/drag rule, M9.3 the file-open dialog and M9.4 the document capacity:
   position, ends the drag and redraws the document at the bottom, and (M9.4)
   `open_path("base/calculator")` returning `Ok` with the whole 32,516-byte
   document (`core.fs_size` agrees), the `base/calculator` path and valid UTF-8,
-  followed by a restore of `base/child`; the host path has no screen and reports
-  the same logical verdict.
+  followed by a restore of `base/child`. The dark-theme proof toggles the row
+  (and the `Ctrl+D` path through an injected key event), checks the checked
+  mask and the dark `Dark` row, then draws a source document and asserts the
+  dark background, default ink, caret, selection band, rules, scrollbar border
+  and thumb, and all five dark syntax colours by exact pixel, and finally
+  toggles back and re-asserts the light background and ink. The host path has
+  no screen and reports the same logical verdict.
   `scripts/editor_scroll_qmp.py` proves the budget rule on the real pointer
   path: a burst of no-button moves plus a held-button drag ends `exit Ok` with
   no `BudgetExceeded`, while the pre-M9.2 editor faults on the same burst. It
@@ -428,3 +458,4 @@ drawing/drag rule, M9.3 the file-open dialog and M9.4 the document capacity:
 | 2026-11-19 | M9.3: File > Open and `Ctrl+O` run the `/lib` modal file-open dialog (`lib.file_dialog.open_file`) and load its result through the existing `open_path`; a cancel (`Invalid`) leaves every editor state untouched. The dialog starts in the current directory with the current name selected, lists up to 96 entries (directories/files selectable, kind-2 gray and refused), navigates with keys, row click/double-click, `Up`/`Open`/`Cancel`, scrollbar paging and thumb dragging, and returns a regular-file path or a cancel. The editor's `PathCapacity` becomes 256 (`PATH_MAX`) and `TempCapacity` 260; the destination is published only on `Ok`. No file API, opcode, builtin, `Host` or `stdlib` change. |
 | 2026-11-19 | M9.4: the editor's document buffer is 131072 bytes (128 KiB, the spec 0008 per-unit source cap), raised from the M2.5.3 8 KiB. The file-open dialog was already correct: it returned `base/calculator` (32,516 B), but `open_path` refused it with a `too large (8192 max)` status line, while the tiny `beat` (554 B) and `deep` (874 B) samples opened. Every current sample now fits (the largest is `editor` at 81,509 B); a file over 131072 bytes is still refused by size before it is read with `too large (131072 max)`, and an over-capacity edit still returns `CapacityExceeded`. The state grows to 530,392 B and the task stack to 174,328 B (the `ed_replace` staging buffer is now 128 KiB), both under the 1 MiB region caps; `editor check` proves `base/calculator` opens with the full size and valid UTF-8 and restores `base/child`, while `scripts/file_dialog_qmp.py` opens it through the dialog. No file API, opcode, builtin, `Host`, `stdlib` or kernel change. |
 | 2026-11-26 | M16.8 (user request "scrollbar önce çekilsin ... release ettiğinde ... uygulama oraya gitsin. aktif scroll çünkü ağır içerikte crashe yol açıyor"): a scrollbar-thumb drag is **deferred** in the browser, the editor and the `/lib` file dialog. Held primary-button moves move a preview thumb (`scroll_preview`) and redraw/recomposite only the scrollbar strip (`window_begin` + the retained canvas + `syslib.present` of that rectangle); the list/document view, selection/caret and `top`/`top_line` do not change while the button is down. Release (or a move that lost the button) applies the dropped position once, clamps the selection/caret visible and repaints one frame. Track clicks and keys still act immediately. The editor caches the line count at the press so no drag step rescans a 128 KiB document, and the thumb arithmetic is factored into `thumb_metrics` (the same `stdlib.ui_scrollbar` geometry). Proven by `editor check` and `browser check` mid-drag pixel assertions, and by `scripts/editor_scroll_qmp.py` (held text region 0 px changed, thumb strip moved, release 12,575 px, `exit Ok` on `-smp 4`/`-smp 1`) and the dialog drag in `scripts/file_dialog_qmp.py` (held rows 0 px, strip 240 px, release 3,844 px). No file API, opcode, builtin, `Host`, `stdlib` or kernel change. |
+| 2026-11-26 | Dark theme (user request "text editöründe dark tema desteği"): the editor gains a checked `Dark` row (index 4) in the File menu, `Ctrl+D`, and a dark palette for the whole client content. Dark mode repaints the menu bar, pull-down, path line, text view, selection band, caret, scrollbar and status line over `0x1E1E1E` with `0xD4D4D4` ink, `0x264F78` selection and brightened syntax colours; the light path still calls the `stdlib` helpers and is pixel-identical. The local dark chrome reproduces the `ui_menu_bar`/`ui_menu_dropdown`/`ui_scrollbar` geometry so the existing hit tests keep working. `editor check` covers the toggle, both check bits, `Ctrl+D`, dark pixel probes and the light restore; `scripts/editor_screenshot_qmp.py --dark` captures the dark frame. No file API, opcode, builtin, `Host`, `stdlib` or kernel change. |

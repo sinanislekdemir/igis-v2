@@ -12,6 +12,11 @@ Usage:
     python3 scripts/editor_screenshot_qmp.py build/igis-shell.iso
     python3 scripts/editor_screenshot_qmp.py build/igis-shell.iso \
         --output /tmp/igis-editor.png
+    python3 scripts/editor_screenshot_qmp.py build/igis-shell.iso --dark
+
+`--dark` sends Ctrl+D through QEMU's keyboard path after `editor: ready` and
+captures the dark palette instead of the light one, so the two runs can be
+compared pixel-for-pixel in the client content.
 
 The script never opens the image for viewing: it only reads its size and
 dimensions so the path can be reported. The proof holds the live frame for
@@ -175,6 +180,11 @@ def main():
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
     parser.add_argument("--cores", default="4")
     parser.add_argument("--timeout", type=float, default=90.0)
+    parser.add_argument(
+        "--dark",
+        action="store_true",
+        help="send Ctrl+D after `editor: ready` and capture the dark palette",
+    )
     args = parser.parse_args()
 
     iso = os.path.abspath(args.iso)
@@ -233,6 +243,20 @@ def main():
         serial.wait_for(r"editor: ready", timeout=args.timeout)
         # Give the first full present time to reach the framebuffer.
         time.sleep(0.4)
+        if args.dark:
+            # Ctrl+D through QEMU's keyboard path (the editor accepts D or d).
+            qmp.command(
+                "send-key",
+                {
+                    "keys": [
+                        {"type": "qcode", "data": "ctrl"},
+                        {"type": "qcode", "data": "d"},
+                    ],
+                    "hold-time": 100,
+                },
+            )
+            # Let the toggle redraw and present the whole content.
+            time.sleep(0.8)
 
         path = capture(qmp, output)
         size = os.path.getsize(path)

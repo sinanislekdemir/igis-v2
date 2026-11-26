@@ -74,6 +74,18 @@ unit editor;
 // 128 KiB document is therefore never re-rendered per drag step. The line count
 // is cached at the press for the same reason: no move rescans the document.
 //
+// Dark theme: the File menu's `Dark` row (index 4) and Ctrl+D swap the palette
+// for the whole client content — menu bar and pull-down, path line, text view
+// with brightened syntax colours, selection band, caret, scrollbar and status
+// line. `apply_theme` fills the role fields (`bg`, `ink`, `dim`, `sel_bg`,
+// `sel_ink`, `rule`) and the five syntax colours; every drawing site reads
+// those roles, so a toggle only changes colours. The menu bar, pull-down and
+// scrollbar are painted app-locally in dark mode because the `stdlib` helpers
+// hard-code the light System 7.5 palette; the geometry matches
+// `ui_menu_bar`/`ui_menu_dropdown`/`ui_scrollbar`, so their hit tests keep
+// working. Light mode still calls the helpers and is pixel-identical. The
+// theme starts light, is independent of the document and is not saved.
+//
 // Drawing is client content only: the window service owns the frame, this app
 // paints inside its content rectangle and never calls `syslib.clear`. Every
 // frame is complete before one `window_present`; an owner `Expose` repaints the
@@ -118,10 +130,11 @@ const
   ScrollH = 416;
   StatusTop = 456;
 
-  // File menu rows: Open, Save, separator, Highlight, Quit.
-  FileItemCount = 5;
+  // File menu rows: Open, Save, separator, Highlight, Dark, Quit.
+  FileItemCount = 6;
   FileHighlightItem = 3;
-  FileQuitItem = 4;
+  FileDarkItem = 4;
+  FileQuitItem = 5;
 
   // Lexical token classes and the longest word the highlighter compares
   // (`in_stream`/`out_stream` are 10 bytes; 16 leaves headroom).
@@ -196,11 +209,19 @@ var
   scroll_y: int;
   status_y: int;
 
-  // Palette.
-  black: uint;
-  white: uint;
-  gray: uint;
-  accent: uint;
+  // Theme. The four light/dark roles are the same names in both palettes, so
+  // every drawing site and pixel probe is theme-neutral: `bg` is the content
+  // and glyph-hole background, `ink` the default text and caret, `dim` the
+  // secondary text and scrollbar thumb, `sel_bg` the selection band and the
+  // active menu cell, `sel_ink` the text on it, and `rule` every separator,
+  // border and thumb outline. `dark` selects the palette in `apply_theme`.
+  dark: bool;
+  bg: uint;
+  ink: uint;
+  dim: uint;
+  sel_bg: uint;
+  sel_ink: uint;
+  rule: uint;
   kw_color: uint;
   type_color: uint;
   string_color: uint;
@@ -722,7 +743,7 @@ begin
     return comment_color;
   if cls = ClassNumber then
     return number_color;
-  return black;
+  return ink;
 end;
 
 // A source path is highlighted by default: `base/`, `lib/` and `system/` hold
@@ -1449,6 +1470,43 @@ end;
 
 // ---- menu model ----------------------------------------------------------
 
+// The two palettes. Light is the System 7.5 set the editor always used; dark
+// keeps the same role names with a near-black content base and brightened
+// syntax inks, so every caller and pixel probe reads the current theme through
+// `bg`/`ink`/`dim`/`sel_bg`/`sel_ink`/`rule` and the five `*_color` fields.
+// Switching only changes these fields; no layout or text state is touched.
+procedure apply_theme();
+begin
+  if dark then
+  begin
+    bg := uint(0x001E1E1E);
+    ink := uint(0x00D4D4D4);
+    dim := uint(0x00808080);
+    sel_bg := uint(0x00264F78);
+    sel_ink := uint(0x00FFFFFF);
+    rule := uint(0x00484848);
+    kw_color := uint(0x00569CD6);
+    type_color := uint(0x004EC9B0);
+    string_color := uint(0x00CE9178);
+    comment_color := uint(0x006A9955);
+    number_color := uint(0x00B5CEA8);
+  end
+  else
+  begin
+    bg := stdlib.ui_white();
+    ink := stdlib.ui_black();
+    dim := stdlib.ui_gray();
+    sel_bg := stdlib.ui_accent();
+    sel_ink := stdlib.ui_white();
+    rule := stdlib.ui_black();
+    kw_color := uint(0x000080);
+    type_color := uint(0x800000);
+    string_color := uint(0x008000);
+    comment_color := uint(0x808080);
+    number_color := uint(0x804000);
+  end;
+end;
+
 procedure setup_menu();
 begin
   titles[0] := "File";
@@ -1456,12 +1514,14 @@ begin
   file_items[1] := "Save";
   file_items[2] := "-";
   file_items[3] := "Highlight";
-  file_items[4] := "Quit";
+  file_items[4] := "Dark";
+  file_items[5] := "Quit";
   file_keys[0] := "Ctrl+O";
   file_keys[1] := "Ctrl+S";
   file_keys[2] := "";
   file_keys[3] := "";
-  file_keys[4] := "Ctrl+Q";
+  file_keys[4] := "Ctrl+D";
+  file_keys[5] := "Ctrl+Q";
   // Every row is enabled now that the home filesystem is writable; the
   // separator is never selectable regardless of the mask.
   file_disabled := uint(0);
@@ -1490,6 +1550,21 @@ begin
     status_line := "syntax on"
   else
     status_line := "syntax off";
+end;
+
+// File > Dark and Ctrl+D: swap the palette, keep the menu check mark in step
+// and leave the document, caret, selection, scroll and highlighting alone.
+// The caller redraws the whole frame (menu bar, pull-down and scrollbar
+// included) from the new palette.
+procedure toggle_dark();
+begin
+  dark := not dark;
+  apply_theme();
+  file_checked := stdlib.ui_menu_set(file_checked, FileDarkItem, dark);
+  if dark then
+    status_line := "dark on"
+  else
+    status_line := "dark off";
 end;
 
 // File > Open and Ctrl+O (M9.3): run the `/lib` modal file-open dialog with
@@ -1529,6 +1604,11 @@ begin
   begin
     close_menu();
     toggle_highlight();
+  end
+  else if index = FileDarkItem then
+  begin
+    close_menu();
+    toggle_dark();
   end
   else if index = FileQuitItem then
   begin
@@ -1588,6 +1668,11 @@ begin
     if key = 0x6F or key = 0x4F then
     begin
       browse_open();
+      return;
+    end;
+    if key = 0x64 or key = 0x44 then
+    begin
+      toggle_dark();
       return;
     end;
     if key = 0x61 or key = 0x41 then
@@ -1970,9 +2055,9 @@ begin
     st := syslib.draw_text(text_x + (from - left) * 8, y + 4, slice_buf, color);
 end;
 
-// One document line with its selection band. The accent is painted behind the
-// glyphs and the selected cells are redrawn white, so the band and its text
-// stay readable; the unselected parts are black.
+// One document line with its selection band. The selection background is
+// painted behind the glyphs and the selected cells are redrawn in `sel_ink`,
+// so the band and its text stay readable; the unselected parts use `ink`.
 procedure draw_line(start: int; stop: int; y: int);
 var
   from: int;
@@ -2002,13 +2087,13 @@ begin
   begin
     st := syslib.fill_rect(
       text_x + (band_from - from) * 8, y + 2,
-      (band_to - band_from) * 8, 12, accent);
-    draw_segment(from, from, band_from, y, black);
-    draw_segment(from, band_from, band_to, y, white);
-    draw_segment(from, band_to, to, y, black);
+      (band_to - band_from) * 8, 12, sel_bg);
+    draw_segment(from, from, band_from, y, ink);
+    draw_segment(from, band_from, band_to, y, sel_ink);
+    draw_segment(from, band_to, to, y, ink);
   end
   else
-    draw_segment(from, from, to, y, black);
+    draw_segment(from, from, to, y, ink);
 end;
 
 // One line with lexical colours (M9.1). `block_open` is the block-comment
@@ -2058,7 +2143,7 @@ begin
   if band_from < band_to then
     st := syslib.fill_rect(
       text_x + (band_from - from) * 8, y + 2,
-      (band_to - band_from) * 8, 12, accent);
+      (band_to - band_from) * 8, 12, sel_bg);
 
   state := block_open;
   i := start;
@@ -2109,7 +2194,7 @@ begin
       if part_to > part_from then
         draw_segment(from, part_from, part_to, y, ink);
 
-      // Selected cells are white on the accent band, as before.
+      // Selected cells use the selection ink on the band.
       part_from := a;
       if part_from < band_from then
         part_from := band_from;
@@ -2117,7 +2202,7 @@ begin
       if part_to > band_to then
         part_to := band_to;
       if part_to > part_from then
-        draw_segment(from, part_from, part_to, y, white);
+        draw_segment(from, part_from, part_to, y, sel_ink);
 
       // The unselected span after the band.
       part_from := a;
@@ -2189,7 +2274,7 @@ begin
     begin
       y := text_y + (caret_line - top_line) * LineH;
       st := syslib.fill_rect(
-        text_x + (column - left_byte) * 8, y + 3, 1, 10, black);
+        text_x + (column - left_byte) * 8, y + 3, 1, 10, ink);
     end;
   end;
 end;
@@ -2199,13 +2284,15 @@ var
   width: int;
 begin
   if int(core.len(path)) = 0 then
-    st := syslib.draw_text(rect.x + 8, rect.y + PathTop + 4, "(no file)", gray)
+    st := syslib.draw_text(rect.x + 8, rect.y + PathTop + 4, "(no file)", dim)
   else
-    st := syslib.draw_text(rect.x + 8, rect.y + PathTop + 4, path, black);
+    st := syslib.draw_text(rect.x + 8, rect.y + PathTop + 4, path, ink);
   width := stdlib.ui_text_width("Ctrl+S save");
   st := syslib.draw_text(
-    rect.x + ContentW - 8 - width, rect.y + PathTop + 4, "Ctrl+S save", gray);
-  st := stdlib.ui_separator(rect.x, rect.y + PathTop + PathH - 1, ContentW);
+    rect.x + ContentW - 8 - width, rect.y + PathTop + 4, "Ctrl+S save", dim);
+  // The separator is a palette pixel in both themes, not the fixed black
+  // `stdlib.ui_separator` (which would vanish on the dark base).
+  st := syslib.fill_rect(rect.x, rect.y + PathTop + PathH - 1, ContentW, 1, rule);
 end;
 
 procedure draw_status();
@@ -2216,8 +2303,8 @@ var
   label_w: int;
   x: int;
 begin
-  st := stdlib.ui_separator(rect.x, status_y - 2, ContentW);
-  st := syslib.draw_text(rect.x + 8, status_y + 4, status_line, black);
+  st := syslib.fill_rect(rect.x, status_y - 2, ContentW, 1, rule);
+  st := syslib.draw_text(rect.x + 8, status_y + 4, status_line, ink);
 
   line := line_of_pos(text, caret);
   start := line_start_of(text, line);
@@ -2226,29 +2313,155 @@ begin
   used := core.format_int_into(digits_col, column + 1, uint(10), uint(0));
   label_w := (3 + int(core.len(digits_line)) + 6 + int(core.len(digits_col))) * 8;
   x := rect.x + ContentW - 8 - label_w;
-  st := syslib.draw_text(x, status_y + 4, "Ln ", gray);
-  st := syslib.draw_text(x + 24, status_y + 4, digits_line, black);
+  st := syslib.draw_text(x, status_y + 4, "Ln ", dim);
+  st := syslib.draw_text(x + 24, status_y + 4, digits_line, ink);
   st := syslib.draw_text(
-    x + 24 + int(core.len(digits_line)) * 8, status_y + 4, ", Col ", gray);
+    x + 24 + int(core.len(digits_line)) * 8, status_y + 4, ", Col ", dim);
   st := syslib.draw_text(
-    x + 24 + int(core.len(digits_line)) * 8 + 48, status_y + 4, digits_col, black);
+    x + 24 + int(core.len(digits_line)) * 8 + 48, status_y + 4, digits_col, ink);
+end;
+
+// ---- dark chrome ---------------------------------------------------------
+//
+// `stdlib.ui_menu_bar`, `ui_menu_dropdown` and `ui_scrollbar` hard-code the
+// light System 7.5 palette, so dark mode paints the same geometry here. The
+// hit-test helpers stay the library ones: the bar label starts at `x + 8`,
+// pull-down rows are 16 pixels with the check column at `x + 8` and the label
+// at `x + 22`, and the scrollbar uses `thumb_metrics` (track `ScrollH - 4`,
+// 8-pixel floor). Light mode still calls the `stdlib` helpers unchanged.
+
+// The seven-pixel check mark, at the same offsets as `ui_menu_dropdown`.
+procedure draw_check_theme(x: int; y: int; color: uint);
+begin
+  st := syslib.fill_rect(x + 2, y + 5, 1, 1, color);
+  st := syslib.fill_rect(x + 3, y + 6, 1, 1, color);
+  st := syslib.fill_rect(x + 4, y + 7, 1, 1, color);
+  st := syslib.fill_rect(x + 5, y + 6, 1, 1, color);
+  st := syslib.fill_rect(x + 6, y + 5, 1, 1, color);
+  st := syslib.fill_rect(x + 7, y + 4, 1, 1, color);
+  st := syslib.fill_rect(x + 8, y + 3, 1, 1, color);
+end;
+
+// The one-title menu bar. The active cell is `label width + 8` wide over the
+// 18-pixel interior, matching `ui_menu_bar`.
+procedure draw_menu_bar_themed();
+var
+  label_w: int;
+begin
+  if not dark then
+    st := stdlib.ui_menu_bar(rect.x, rect.y, ContentW, titles, 1, open_menu)
+  else
+  begin
+    st := syslib.fill_rect(rect.x, rect.y, ContentW, MenuBarH, bg);
+    label_w := stdlib.ui_text_width(titles[0]);
+    if open_menu = 0 then
+    begin
+      st := syslib.fill_rect(
+        rect.x + 4, rect.y + 2, label_w + 8, MenuBarH - 4, sel_bg);
+      st := syslib.draw_text(rect.x + 8, rect.y + 7, titles[0], sel_ink);
+    end
+    else
+      st := syslib.draw_text(rect.x + 8, rect.y + 7, titles[0], ink);
+    st := syslib.fill_rect(rect.x, rect.y + MenuBarH - 1, ContentW, 1, rule);
+  end;
+end;
+
+// The pull-down in the dark palette. Separators are palette rules, the chosen
+// row is `sel_bg`/`sel_ink`, the check mark follows the row ink, labels sit at
+// `x + 22` and shortcuts are right-aligned at `x + w - 8`.
+procedure draw_dark_dropdown();
+var
+  x: int;
+  y: int;
+  height: int;
+  row: int;
+  row_y: int;
+  text_y: int;
+  ink_color: uint;
+  shortcut_w: int;
+begin
+  x := rect.x + 4;
+  y := rect.y + MenuBarH;
+  height := FileItemCount * 16 + 2;
+  st := syslib.fill_rect(x + 1, y + 1, MenuW - 2, height - 2, bg);
+  st := syslib.draw_rect(x, y, MenuW, height, rule);
+  row := 0;
+  while row < FileItemCount do
+  begin
+    row_y := y + 1 + row * 16;
+    text_y := row_y + 4;
+    if file_items[row] = "-" then
+      st := syslib.fill_rect(x + 8, row_y + 8, MenuW - 16, 1, rule)
+    else
+    begin
+      ink_color := ink;
+      if row = selected then
+      begin
+        st := syslib.fill_rect(x + 1, row_y, MenuW - 2, 16, sel_bg);
+        ink_color := sel_ink;
+      end;
+      if stdlib.ui_menu_has(file_checked, row) then
+        draw_check_theme(x + 8, row_y, ink_color);
+      shortcut_w := stdlib.ui_text_width(file_keys[row]);
+      if shortcut_w > 0 then
+      begin
+        if row = selected then
+          st := syslib.draw_text(
+            x + MenuW - 8 - shortcut_w, text_y, file_keys[row], sel_ink)
+        else
+          st := syslib.draw_text(
+            x + MenuW - 8 - shortcut_w, text_y, file_keys[row], dim);
+      end;
+      st := syslib.draw_text(x + 22, text_y, file_items[row], ink_color);
+    end;
+    row := row + 1;
+  end;
 end;
 
 procedure draw_dropdown();
 begin
-  st := stdlib.ui_menu_dropdown(
-    rect.x + 4, rect.y + MenuBarH, MenuW, file_items, file_keys, FileItemCount,
-    selected, file_checked, file_disabled, true);
+  if dark then
+    draw_dark_dropdown()
+  else
+    st := stdlib.ui_menu_dropdown(
+      rect.x + 4, rect.y + MenuBarH, MenuW, file_items, file_keys,
+      FileItemCount, selected, file_checked, file_disabled, true);
 end;
 
 // The scrollbar strip alone, at `position` over `total` lines. It is redrawn
 // without the document rows during a drag preview (M16.8): the canvas keeps
-// the rest of the frame, so only this rectangle changes.
+// the rest of the frame, so only this rectangle changes. Dark mode paints the
+// same `ui_scrollbar` geometry from the palette.
 procedure draw_scrollbar_at(position: int; total: int);
+var
+  thumb_h: int;
+  travel: int;
+  max: int;
+  pos: int;
+  thumb_y: int;
 begin
   st := syslib.window_begin(id);
-  st := stdlib.ui_scrollbar(
-    scroll_x, scroll_y, ScrollW, ScrollH, position, Rows, total, false);
+  if not dark then
+    st := stdlib.ui_scrollbar(
+      scroll_x, scroll_y, ScrollW, ScrollH, position, Rows, total, false)
+  else
+  begin
+    st := syslib.fill_rect(
+      scroll_x + 1, scroll_y + 1, ScrollW - 2, ScrollH - 2, bg);
+    st := syslib.draw_rect(scroll_x, scroll_y, ScrollW, ScrollH, rule);
+    thumb_metrics(total, thumb_h, travel);
+    max := total - Rows;
+    if max < 0 then
+      max := 0;
+    pos := stdlib.ui_scrollbar_clamp(position, Rows, total);
+    thumb_y := scroll_y + 2;
+    if max > 0 and travel > 0 then
+      thumb_y := scroll_y + 2 + (travel * pos) div max;
+    st := syslib.fill_rect(
+      scroll_x + 2, thumb_y, ScrollW - 4, thumb_h, dim);
+    st := syslib.draw_rect(
+      scroll_x + 2, thumb_y, ScrollW - 4, thumb_h, rule);
+  end;
 end;
 
 // One complete frame: background, menu, path line, text view, carets,
@@ -2261,8 +2474,8 @@ begin
   // one per-task draw scope (spec 0026, C3/C20). Re-opening our own window at
   // the start of every frame keeps the editor drawable after the dialog closes.
   st := syslib.window_begin(id);
-  st := syslib.fill_rect(rect.x, rect.y, ContentW, ContentH, white);
-  st := stdlib.ui_menu_bar(rect.x, rect.y, ContentW, titles, 1, open_menu);
+  st := syslib.fill_rect(rect.x, rect.y, ContentW, ContentH, bg);
+  draw_menu_bar_themed();
   draw_path_line();
   draw_lines();
   if scroll_dragging then
@@ -2549,6 +2762,43 @@ begin
   end;
 end;
 
+// Sends Ctrl+D through the injected-key queue and drains up to eight events,
+// routing the KeyDown through the same `handle_key` as the interactive loop.
+// Returns whether a KeyDown addressed to this window arrived (the theme
+// toggle itself is asserted by the caller).
+function pump_ctrl_d(): bool;
+var
+  i: int;
+  arrived: bool;
+begin
+  arrived := false;
+  drain_quiet();
+  st := inject.inject_key_mods(0x64, 0, 2);
+  i := 0;
+  while i < 8 and not arrived do
+  begin
+    st := syslib.poll_event(ev);
+    if st = Ok then
+    begin
+      if ev.kind = Expose then
+      begin
+        if ev.window = id then
+          refresh_layout();
+      end
+      else if ev.kind = KeyDown then
+      begin
+        arrived := ev.window = id;
+        if arrived then
+          handle_key();
+      end;
+    end
+    else
+      i := 8;
+    i := i + 1;
+  end;
+  return arrived;
+end;
+
 procedure pointer_to(px: int; py: int);
 begin
   st := inject.pointer_to(px, py);
@@ -2701,24 +2951,124 @@ begin
   draw_all();
   present_frame();
 
-  verify("menu rule", syslib.get_pixel(rect.x + 300, rect.y + 21) = black);
-  verify("path rule", syslib.get_pixel(rect.x + 300, rect.y + 37) = black);
-  verify("glyph ink", syslib.get_pixel(text_x + 1, text_y + 4) = black);
-  verify("glyph hole", syslib.get_pixel(text_x + 4, text_y + 5) = white);
-  verify("caret", syslib.get_pixel(text_x, text_y + 8) = black);
+  verify("menu rule", syslib.get_pixel(rect.x + 300, rect.y + 21) = rule);
+  verify("path rule", syslib.get_pixel(rect.x + 300, rect.y + 37) = rule);
+  verify("glyph ink", syslib.get_pixel(text_x + 1, text_y + 4) = ink);
+  verify("glyph hole", syslib.get_pixel(text_x + 4, text_y + 5) = bg);
+  verify("caret", syslib.get_pixel(text_x, text_y + 8) = ink);
 
   anchor := 0;
   caret := 2;
   draw_all();
   present_frame();
-  verify("selection band", syslib.get_pixel(text_x + 8, text_y + 2) = accent);
+  verify("selection band", syslib.get_pixel(text_x + 8, text_y + 2) = sel_bg);
   collapse_to(0);
   draw_all();
   present_frame();
 
-  verify("scrollbar border", syslib.get_pixel(scroll_x, scroll_y) = black);
-  verify("scrollbar thumb", syslib.get_pixel(scroll_x + 4, scroll_y + 3) = gray);
-  verify("status rule", syslib.get_pixel(rect.x + 300, status_y - 2) = black);
+  verify("scrollbar border", syslib.get_pixel(scroll_x, scroll_y) = rule);
+  verify("scrollbar thumb", syslib.get_pixel(scroll_x + 4, scroll_y + 3) = dim);
+  verify("status rule", syslib.get_pixel(rect.x + 300, status_y - 2) = rule);
+
+  // Dark theme: the row and its check bit, then every themed region by exact
+  // pixel. The direct toggle is exercised here; Ctrl+D goes through the
+  // injected-key path below.
+  verify("dark item", file_items[FileDarkItem] = "Dark");
+  verify("dark row", FileDarkItem = 4 and FileQuitItem = 5);
+  verify("dark starts off", not dark and
+    not stdlib.ui_menu_has(file_checked, FileDarkItem));
+  toggle_dark();
+  verify("dark toggled on", dark and
+    stdlib.ui_menu_has(file_checked, FileDarkItem));
+  verify("dark status", status_line = "dark on");
+  verify("dark keeps document", int(core.len(text)) > 0 and
+    caret = 0 and anchor = 0 and highlight);
+  draw_all();
+  present_frame();
+  verify("dark base", bg = uint(0x001E1E1E) and ink = uint(0x00D4D4D4));
+  verify("dark background",
+    syslib.get_pixel(text_x + 500, text_y + 300) = bg);
+  verify("dark menu rule", syslib.get_pixel(rect.x + 300, rect.y + 21) = rule);
+  verify("dark path rule", syslib.get_pixel(rect.x + 300, rect.y + 37) = rule);
+  verify("dark glyph ink", syslib.get_pixel(text_x + 1, text_y + 4) = ink);
+  verify("dark glyph hole", syslib.get_pixel(text_x + 4, text_y + 5) = bg);
+  verify("dark caret", syslib.get_pixel(text_x, text_y + 8) = ink);
+
+  anchor := 0;
+  caret := 2;
+  draw_all();
+  present_frame();
+  verify("dark selection", syslib.get_pixel(text_x + 8, text_y + 2) = sel_bg);
+  collapse_to(0);
+  draw_all();
+  present_frame();
+  verify("dark scrollbar border", syslib.get_pixel(scroll_x, scroll_y) = rule);
+  verify("dark scrollbar thumb",
+    syslib.get_pixel(scroll_x + 4, scroll_y + 3) = dim);
+  verify("dark status rule",
+    syslib.get_pixel(rect.x + 300, status_y - 2) = rule);
+
+  // The dark menu bar and pull-down: the active "File" cell is the selection
+  // colour, the open pull-down frames a dark interior, the chosen Dark row is
+  // filled and its check mark uses the selection ink, and a plain row keeps
+  // the base colour. `ui_menu_hit` still answers for the same geometry.
+  open_menu := 0;
+  selected := FileDarkItem;
+  draw_all();
+  present_frame();
+  verify("dark menu active cell",
+    syslib.get_pixel(rect.x + 6, rect.y + 10) = sel_bg);
+  verify("dark dropdown frame",
+    syslib.get_pixel(rect.x + 4, rect.y + MenuBarH) = rule);
+  verify("dark dropdown row",
+    syslib.get_pixel(rect.x + 84, rect.y + MenuBarH + 1 + FileDarkItem * 16 + 8) = sel_bg);
+  verify("dark dropdown plain row",
+    syslib.get_pixel(rect.x + 84, rect.y + MenuBarH + 1 + 8) = bg);
+  verify("dark dropdown check",
+    syslib.get_pixel(rect.x + 12 + 4, rect.y + MenuBarH + 1 + FileDarkItem * 16 + 7) = sel_ink);
+  verify("dark dropdown hit",
+    stdlib.ui_menu_hit(
+      rect.x + 4, rect.y + MenuBarH, MenuW, file_items, FileItemCount,
+      rect.x + 84, rect.y + MenuBarH + 1 + FileDarkItem * 16 + 8) = FileDarkItem);
+  close_menu();
+  draw_all();
+  present_frame();
+
+  // The five syntax classes keep their distinction in the dark palette.
+  text := "unit child; // note\nvar n: int; const k := 1;\nconst s := \"x\";";
+  refresh_line_states();
+  collapse_to(int(core.len(text)));
+  top_line := 0;
+  left_byte := 0;
+  draw_all();
+  present_frame();
+  verify("dark syntax keyword",
+    region_has_color(text_x, text_y + 4, 320, 8, kw_color));
+  verify("dark syntax comment",
+    region_has_color(text_x, text_y + 4, 320, 8, comment_color));
+  verify("dark syntax type",
+    region_has_color(text_x, text_y + 4 + LineH, 320, 8, type_color));
+  verify("dark syntax number",
+    region_has_color(text_x, text_y + 4 + LineH, 320, 8, number_color));
+  verify("dark syntax string",
+    region_has_color(text_x, text_y + 4 + 2 * LineH, 320, 8, string_color));
+
+  // Toggling back restores the light palette and drawing exactly.
+  toggle_dark();
+  verify("dark toggled off", not dark and
+    not stdlib.ui_menu_has(file_checked, FileDarkItem));
+  verify("light palette", bg = stdlib.ui_white() and ink = stdlib.ui_black());
+  text := "IGIS editor\nline two\nline three";
+  refresh_line_states();
+  status_line := "check mode";
+  collapse_to(0);
+  top_line := 0;
+  left_byte := 0;
+  draw_all();
+  present_frame();
+  verify("light background",
+    syslib.get_pixel(text_x + 500, text_y + 300) = bg);
+  verify("light glyph ink", syslib.get_pixel(text_x + 1, text_y + 4) = ink);
 
   // One injected key event proves the queue/routing path: it must arrive with
   // this window's id and flow through handle_key.
@@ -2762,6 +3112,16 @@ begin
   delete_selection_or_backspace();
   verify("event undone", stdlib.starts_with(text, "IGIS"));
 
+  // Ctrl+D reaches the same toggle through the routed key path, twice: on and
+  // back off, so the drag proof below runs on the light palette.
+  verify("dark key routed", pump_ctrl_d());
+  verify("dark key on", dark and
+    stdlib.ui_menu_has(file_checked, FileDarkItem) and status_line = "dark on");
+  verify("dark key routed off", pump_ctrl_d());
+  verify("dark key off", not dark and
+    not stdlib.ui_menu_has(file_checked, FileDarkItem) and
+    status_line = "dark off");
+
   // M9.2: the scrollbar thumb drags through the real pointer path, matching the
   // browser's M8.9. M16.8 defers the view: the held drag moves the thumb strip
   // only and the release applies the dropped position.
@@ -2790,9 +3150,9 @@ begin
   // strip's own recomposite already shows the preview on screen.
   verify("drag preview", top_line = 0 and scroll_preview = total - Rows);
   verify("preview thumb leaves the top",
-    syslib.get_pixel(scroll_x + 4, scroll_y + 4) = white);
+    syslib.get_pixel(scroll_x + 4, scroll_y + 4) = bg);
   verify("preview thumb at the bottom",
-    syslib.get_pixel(scroll_x + 4, scroll_y + ScrollH - 6) = gray);
+    syslib.get_pixel(scroll_x + 4, scroll_y + ScrollH - 6) = dim);
   pointer_up();
   verify("scrollbar drag applies",
     not scroll_dragging and top_line = total - Rows);
@@ -2801,7 +3161,7 @@ begin
   scrollbar_thumb(total, thumb_y, thumb_h);
   travel := (ScrollH - 4) - thumb_h;
   verify("scrollbar thumb moved",
-    travel > 0 and syslib.get_pixel(scroll_x + 4, thumb_y + 2) = gray);
+    travel > 0 and syslib.get_pixel(scroll_x + 4, thumb_y + 2) = dim);
 
   st := syslib.window_close(id);
   if failed then
@@ -2981,17 +3341,12 @@ begin
   dialog_path := "";
   refresh_line_states();
   status_line := "";
-  black := stdlib.ui_black();
-  white := stdlib.ui_white();
-  gray := stdlib.ui_gray();
-  accent := stdlib.ui_accent();
-  // M9.1 palette: keyword blue, type dark red, string dark green, comment
-  // medium gray, number dark brown. Selected text stays white on the accent.
-  kw_color := uint(0x000080);
-  type_color := uint(0x800000);
-  string_color := uint(0x008000);
-  comment_color := uint(0x808080);
-  number_color := uint(0x804000);
+  // The theme starts light on every launch. `apply_theme` fills the role
+  // fields and the five syntax colours; the M9.1 light palette (keyword blue,
+  // type dark red, string dark green, comment medium gray, number dark brown)
+  // and the System 7.5 role colours are its light branch.
+  dark := false;
+  apply_theme();
   highlight := true;
   block_open := false;
   file_checked := uint(0);

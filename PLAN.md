@@ -40,7 +40,7 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   scopes. 637 host tests; golden `c9546f45…79fbc65e` (one intended re-baseline for the
   22-pixel work area). Remaining: M16.7's `perf` re-take, then **M17 (local client
   coordinates)**. M16.8 (deferred scrollbar drag in the editor, browser and
-  `/lib` file dialog) landed on 2026-11-26. The deferred table below and
+  `/lib` file dialog) and M16.9 (editor dark theme) landed on 2026-11-26. The deferred table below and
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) hold the parked work.
 - **Historical context (M8–M10; counts below are from those slices):** **505 host
   tests**; specs 0001–0019 (0018 and 0019 Implemented); ABI v1 at 75 opcodes; M5,
@@ -2484,6 +2484,17 @@ flag, the persistent region claim, the console's explicit-clip paint path and th
   Note: the dialog harness's later navigation step and `input_routing_qmp.py`'s
   Apps row fail on this tree before the drag proof (stale rows; they fail at
   HEAD too).
+- [x] **M16.9 Dark theme in the text editor.** User request: "text editöründe dark
+  tema desteği". File > Dark (index 4) and `Ctrl+D` swap a six-row menu and a
+  theme-neutral palette (`bg`/`ink`/`dim`/`sel_bg`/`sel_ink`/`rule`) for the whole
+  client content: menu bar, pull-down, path line, text view with brightened syntax
+  colours, selection band, caret, scrollbar and status line. Dark chrome is painted
+  app-locally with the `ui_menu_bar`/`ui_menu_dropdown`/`ui_scrollbar` geometry, so
+  `stdlib` and the hit tests are unchanged; light mode is pixel-identical, the theme
+  starts light and is independent of the document. Proof: `editor check` on
+  `-smp 4`/`-smp 1` (dark pixel probes, Ctrl+D routing, light restore),
+  `scripts/editor_screenshot_qmp.py --dark` beside the light capture, 637 host
+  tests. No opcode, builtin, `Host`, `stdlib` or kernel change.
 
 ### M17: local client coordinates
 
