@@ -317,8 +317,16 @@ pub struct Task {
     pub session: u64,
     /// Releases so far (quantum expiry), printed at termination.
     pub yields: u64,
-    /// Accumulated time between claim and release, in nanoseconds.
+    /// Accumulated time between claim and release, in nanoseconds. For a
+    /// normal task this is the current run since it last blocked (ADR 0061);
+    /// for a realtime task it is the non-blocked time since promotion, which
+    /// the heartbeat deadline compares against.
     pub budget_ns: u64,
+    /// Machine steps at the start of the current normal-task run. The step
+    /// cap compares `machine.steps() - run_steps`, and `block` advances it, so
+    /// a long-lived task that blocks between inputs does not accumulate a
+    /// lifetime quota (ADR 0061).
+    pub run_steps: u64,
     /// Fixed `string[1024]` argument (spec 0007, "Services and task creation").
     pub args: [u8; 8 + ARGS_BYTES],
     pub regions: Regions,
@@ -368,6 +376,7 @@ impl Task {
             session: 0,
             yields: 0,
             budget_ns: 0,
+            run_steps: 0,
             args: [0; 8 + ARGS_BYTES],
             regions: Regions { code, state, stack },
             machine: Machine::new(),
@@ -558,6 +567,14 @@ pub fn block(task: Task, wait: WaitFor) {
     let mut task = task;
     task.state = TaskState::Blocked;
     task.waiting = Some(wait);
+    // ADR 0061: the normal-task budget is a watchdog for one continuous run.
+    // A task that blocks is not monopolising a core, so its next run starts
+    // with a fresh budget and step base. A realtime task keeps its
+    // accumulated non-blocked time: the heartbeat deadline spans blocks.
+    if task.class == TaskClass::Normal {
+        task.budget_ns = 0;
+        task.run_steps = task.machine.steps();
+    }
     let index = task.slot;
     let Some(slot) = SLOTS.get(index) else {
         println!("sched: task {} blocked before it was enqueued", task.id);

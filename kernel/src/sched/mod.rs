@@ -13,8 +13,11 @@
 //!
 //! Two limits apply to a task. The quantum is fairness: expiry releases and
 //! re-enqueues, never faults. The total CPU budget is the watchdog and expires
-//! unconditionally into `Faulted(BudgetExceeded)` (Sch8). The budget is tracked
-//! two ways:
+//! unconditionally into `Faulted(BudgetExceeded)` (Sch8). It covers one
+//! continuous run: `task::block` resets it, so a long-lived interactive task
+//! that waits for input between events is not killed by a lifetime quota, while
+//! a task that keeps yielding without ever blocking still expires (ADR 0061).
+//! The budget is tracked two ways:
 //!
 //! - **CPU time** ([`TOTAL_BUDGET_NS`]) from claim/release timestamps;
 //! - **bytecodes** ([`TOTAL_BUDGET_STEPS`]), because the clock ticks at 1 ms
@@ -63,18 +66,22 @@ use crate::task::{Task, TaskClass, WaitFor};
 /// the coarse 1 ms tick. Tune after measurement.
 pub const QUANTUM_STEPS: u64 = 10_000;
 
-/// Total CPU time a task may consume before it is terminated (spec 0007 Q2,
-/// provisional). Blocked time is not counted; a task that never reaches a safe
-/// point cannot be killed (accepted cooperative liveness hole). Not applied to
-/// the realtime class, where the heartbeat replaces it.
+/// CPU time one continuous normal-task run may consume before the task is
+/// terminated (spec 0007 Q2, provisional; ADR 0061). A block ends the run and
+/// resets the counter, so a long-lived interactive task that waits for input
+/// is not killed by a lifetime quota. Blocked time is not counted; a task that
+/// never reaches a safe point cannot be killed (accepted cooperative liveness
+/// hole). Not applied to the realtime class, where the heartbeat replaces it.
 pub const TOTAL_BUDGET_NS: u64 = 10_000_000_000;
 
-/// Hard ceiling on total bytecodes per task.
+/// Hard ceiling on bytecodes in one continuous normal-task run.
 ///
 /// The 1 ms clock cannot resolve sub-millisecond quanta, so most claims add
 /// 0 ns to [`TOTAL_BUDGET_NS`]. This cap is the watchdog that actually fires
 /// in the first milestone; 200 000 000 steps is the same order of magnitude as
-/// ten seconds at interpreter speed. Not applied to the realtime class.
+/// ten seconds at interpreter speed. The base advances on every block, so only
+/// a task that never blocks accumulates the full run (ADR 0061). Not applied to
+/// the realtime class.
 pub const TOTAL_BUDGET_STEPS: u64 = 200_000_000;
 
 /// One second of non-blocked realtime time between heartbeats (spec 0007,
@@ -1077,8 +1084,15 @@ fn loop_body(core: usize) -> ! {
                             YIELDS[core].fetch_add(1, Ordering::Relaxed);
                         }
                         Outcome::Yielded => {
+                            // ADR 0061: the normal budget covers one continuous
+                            // run. `task::block` resets both counters, so an
+                            // interactive task that waits for input between
+                            // events never accumulates a lifetime quota; a
+                            // task that keeps yielding without blocking still
+                            // expires.
                             let expired = task.budget_ns >= TOTAL_BUDGET_NS
-                                || task.machine.steps() >= TOTAL_BUDGET_STEPS;
+                                || task.machine.steps().saturating_sub(task.run_steps)
+                                    >= TOTAL_BUDGET_STEPS;
                             if expired {
                                 // Sch8: unconditional, no `fault` handler in ABI v1.
                                 terminate(

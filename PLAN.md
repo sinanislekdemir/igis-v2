@@ -40,7 +40,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   scopes. 637 host tests; golden `c9546f45…79fbc65e` (one intended re-baseline for the
   22-pixel work area). Remaining: M16.7's `perf` re-take, then **M17 (local client
   coordinates)**. M16.8 (deferred scrollbar drag in the editor, browser and
-  `/lib` file dialog) and M16.9 (editor dark theme) landed on 2026-11-26. The deferred table below and
+  `/lib` file dialog), M16.9 (editor dark theme) and M16.10 (sparse line index
+  and per-run normal-task watchdog) landed on 2026-11-26. The deferred table below and
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) hold the parked work.
 - **Historical context (M8–M10; counts below are from those slices):** **505 host
   tests**; specs 0001–0019 (0018 and 0019 Implemented); ABI v1 at 75 opcodes; M5,
@@ -2495,6 +2496,25 @@ flag, the persistent region claim, the console's explicit-clip paint path and th
   `-smp 4`/`-smp 1` (dark pixel probes, Ctrl+D routing, light restore),
   `scripts/editor_screenshot_qmp.py --dark` beside the light capture, 637 host
   tests. No opcode, builtin, `Host`, `stdlib` or kernel change.
+- [x] **M16.10 Interactive budget: a sparse line index and a per-run watchdog.**
+  User report: "editör ... aşağı okuna basarak satır kaydırmaya çalışmak ama seri
+  şekilde yaptığımda uygulama çöküyor". Two causes. (1) The editor recomputed
+  `line_count`/`line_start_of`/`line_of_pos` several times per key by scanning the
+  whole 98 KiB document; `refresh_line_states` now also fills `total_lines` and a
+  16-line `line_starts` index in the same pass, so a lookup walks at most 15 lines
+  and `editor check` falls from 2,132 to 1,792 claims. (2) The normal-task budget
+  was a lifetime quota, so a responsive editor that blocked in `next_event`
+  between bursts still died after ~10 s of accumulated CPU; ADR 0061 makes it a
+  per-run watchdog, reset in `task::block`, with the same 10 s / 200 M-step
+  constants and an unchanged `BudgetExceeded` fault for a task that never blocks.
+  Proof: `samples/tests/apps/base/runaway` (non-blocking loop) still exits
+  `Faulted(BudgetExceeded)`; `run spin` still exits `Faulted(WatchdogTimeout)`;
+  300 injected Down keys to the interactive editor on the 98 KiB source end
+  `exit Ok` after 3,391 claims with no fault (150 keys on `-smp 1` end `Ok`
+  after 3,203); `editor check` is `editor: ok` on `-smp 4`/`-smp 1` (1,792
+  claims), and `shot` mode now holds its frame with `core.sleep(50)` instead
+  of a busy poll, so a large-file shot ends `Ok` after 1,695 claims. No
+  opcode, builtin, `Host` or `stdlib` change.
 
 ### M17: local client coordinates
 

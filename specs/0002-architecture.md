@@ -5,8 +5,8 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0001, 0002, 0003, 0004, 0006, 0011, 0012, 0013, 0014, 0015, 0016, 0018,
-  0020, 0021, 0022
-- **Updated:** 2026-11-16
+  0020, 0021, 0022, 0061
+- **Updated:** 2026-11-26
 
 ## Context
 
@@ -93,10 +93,11 @@ Two limits exist and they mean different things:
 
 - **Quantum** — fairness. When it expires the core releases the task at the next safe
   point and re-enqueues it. This is preemption by cooperation, not a kill.
-- **Total budget** — watchdog. Cumulative CPU time consumed by the task, with blocked
-  time excluded. It is a single kernel-wide constant in the first milestone; applications
-  cannot negotiate it (vision OQ 20). Expiry terminates the task **unconditionally** at
-  the next safe point: `fault(BudgetExceeded)`, recovery rejected, `exit`, reclaim.
+- **Total budget** — watchdog. CPU time consumed by one continuous run of the task, with
+  blocked time excluded and the counter reset whenever the task blocks (ADR 0061). It is
+  a single kernel-wide constant in the first milestone; applications cannot negotiate it
+  (vision OQ 20). Expiry terminates the task **unconditionally** at the next safe point:
+  `fault(BudgetExceeded)`, recovery rejected, `exit`, reclaim.
 
 The unconditional rule replaces the conditional "terminate if another task is waiting on
 the same core" rule of ADR 0003. Under work stealing there is no "same core" to reason
@@ -544,7 +545,7 @@ task; after that, shutdown.
 
 | Situation | Behaviour |
 |-----------|-----------|
-| Task exceeds total budget | Terminate unconditionally at next safe point; `fault(BudgetExceeded)`; recovery rejected; `exit`; reclaim |
+| Task exceeds the budget of one continuous run | Terminate unconditionally at next safe point; `fault(BudgetExceeded)`; recovery rejected; `exit`; reclaim. A block starts a new run; a quantum yield does not |
 | Task exhausts its quantum | Release at next safe point; re-enqueue; no fault |
 | Realtime promotion with no free core | `Status.Full`; task stays normal |
 | Realtime task misses its heartbeat | Terminate at next safe point; `fault(WatchdogTimeout)`; recovery rejected; `exit`; reclaim |

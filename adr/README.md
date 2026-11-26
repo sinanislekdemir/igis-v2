@@ -35,7 +35,7 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0008 | [Fatal faults invoke an application exit handler, then the task is reclaimed](0008-exit-handler.md) | Accepted (amended by 0010) | 2026-11-03 |
 | 0009 | [Exit handlers may transfer control to an application recovery point](0009-exit-recovery-point.md) | Superseded by 0010 | 2026-11-03 |
 | 0010 | [Separate exit (teardown) and fault (recovery) handlers; no retry](0010-exit-and-fault-handlers.md) | Accepted | 2026-11-03 |
-| 0011 | [Per-core interpreter loops with work-stealing tasks (no core pinning)](0011-work-stealing-interpreters.md) | Accepted | 2026-11-12 |
+| 0011 | [Per-core interpreter loops with work-stealing tasks (no core pinning)](0011-work-stealing-interpreters.md) | Accepted (budget reset amended by 0061) | 2026-11-12 |
 | 0012 | [Implement the kernel and runtime in Rust](0012-rust-implementation-language.md) | Accepted | 2026-11-12 |
 | 0013 | [x86_64 first, with a multi-architecture layout from day one](0013-x86_64-first-multi-arch.md) | Accepted | 2026-11-12 |
 | 0014 | [Boot via GRUB and multiboot2, with a hand-written long-mode transition](0014-grub-multiboot2-boot.md) | Accepted | 2026-11-12 |
@@ -85,3 +85,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0058 | [Ship the image corpus as uncompressed PPM P6 and keep PNG support](0058-ppm-raw-corpus.md) | Accepted | 2026-11-22 |
 | 0059 | [Boot only the kernel and mount the application image from an ATA disk](0059-boot-only-the-kernel.md) | Accepted | 2026-11-22 |
 | 0060 | [Retain every window's content and compose the screen from surfaces](0060-per-window-canvas-and-service-compositor.md) | Accepted (implemented M16; local coordinates deferred) | 2026-11-25 |
+| 0061 | [The normal-task budget covers one continuous run, reset on block](0061-per-run-normal-task-budget.md) | Accepted | 2026-11-26 |

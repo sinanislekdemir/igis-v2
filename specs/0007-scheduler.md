@@ -5,8 +5,9 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0003 (cooperative model, budget intent), 0006 (guard pages), 0011 (work
-  stealing), 0016 (realtime class), 0018 (floating point)
-- **Updated:** 2026-11-17
+  stealing), 0016 (realtime class), 0018 (floating point), 0061 (per-run normal-task
+  budget)
+- **Updated:** 2026-11-26
 
 ## Context
 
@@ -34,8 +35,9 @@ ADR 0011 concrete.
   only core-local data.
 - **Sch7 (MUST):** Exhausting the quantum releases the task and re-enqueues it; it does
   not terminate it.
-- **Sch8 (MUST):** Exhausting the total CPU budget terminates the task unconditionally at
-  the next safe point, with `fault(BudgetExceeded)`. Recovery is rejected.
+- **Sch8 (MUST):** Exhausting the total CPU budget of one continuous run terminates the
+  task unconditionally at the next safe point, with `fault(BudgetExceeded)`. A block ends
+  the run and resets the budget; a plain quantum yield does not. Recovery is rejected.
 - **Sch9 (MUST):** Blocked tasks consume no CPU and are not in the runnable set.
 - **Sch10 (MUST):** Termination is deterministic: remove from all queues, close stream
   endpoints, invalidate handles, release all regions.
@@ -76,14 +78,16 @@ other limits in the system, so they are stated together once:
 | Limit | Measured over | On expiry |
 |-------|---------------|-----------|
 | **Quantum** | one claim: one run of one task on one core | Release at a safe point and re-enqueue; not a fault |
-| **Total CPU budget** | the task's whole lifetime, blocked time excluded | Terminate unconditionally at a safe point |
+| **Total CPU budget** | one continuous normal-task run: reset at spawn and at every block | Terminate unconditionally at a safe point |
 | **Handler budget** | one `fault` or `exit` invocation | Abandon the handler and reclaim the task |
 | **Realtime heartbeat** | one second of non-blocked realtime time | Terminate with `WatchdogTimeout`; recovery rejected |
 
 A quantum is measured in interpreter steps (bytecodes), with a time fallback; it is not
-measured in source lines. The total budget is the watchdog for normal tasks. The handler
-budget is the emergency allowance for teardown and diagnosis. The heartbeat is the
-liveness/progress contract that replaces the total budget for realtime tasks.
+measured in source lines. The total budget is the watchdog for normal tasks; it measures
+one continuous non-blocked run, so a long-lived interactive task that blocks between
+events is not killed by a lifetime quota (ADR 0061). The handler budget is the emergency
+allowance for teardown and diagnosis. The heartbeat is the liveness/progress contract
+that replaces the total budget for realtime tasks.
 
 ### Task states
 
@@ -182,20 +186,28 @@ another core.
 
 ### Budget
 
-- Total CPU time consumed by the task, accumulated across cores, excluding blocked time.
+- CPU time consumed by one continuous run of a normal task, accumulated across cores,
+  excluding blocked time. A run starts at spawn and at every block: `task::block` resets
+  `budget_ns` and the step base, because a task that waits for input, a stream, a socket,
+  a child or a timer is not monopolising a core (ADR 0061).
 - A single compile-time constant in the first milestone. Applications cannot negotiate
   (vision OQ 20).
-- Checked at safe points against the monotonic clock.
+- Checked at safe points against the monotonic clock and the machine's step counter.
 - Expiry terminates: `fault(BudgetExceeded)` is delivered for logging, recovery is
   rejected, `exit` runs, regions are reclaimed.
+- A plain quantum yield does not reset the run; only a block does. An infinite loop that
+  never blocks therefore still reaches the budget.
 - A task that never reaches a safe point cannot be terminated; that is the one liveness
   hole the cooperative model accepts, and it is why blocking builtins are forbidden
   (`0002`).
-- The first milestone uses **10 s of CPU time** (`TOTAL_BUDGET_NS`) with a hard cap of
-  **200 000 000 executed bytecodes** (`TOTAL_BUDGET_STEPS`). The 1 ms clock cannot resolve
-  a sub-millisecond quantum, so time alone under-counts; until the clock is finer, the
-  step cap is the watchdog that actually fires and the time budget is the backstop for
-  slow builtins. Both values are provisional (Q2).
+- The first milestone uses **10 s of CPU time per run** (`TOTAL_BUDGET_NS`) with a hard
+  cap of **200 000 000 executed bytecodes per run** (`TOTAL_BUDGET_STEPS`). The 1 ms
+  clock cannot resolve a sub-millisecond quantum, so time alone under-counts; until the
+  clock is finer, the step cap is the watchdog that actually fires and the time budget is
+  the backstop for slow builtins. Both values are provisional (Q2).
+- Realtime tasks keep the accumulated non-blocked `budget_ns` across blocks because the
+  heartbeat deadline is measured from promotion; the reset applies to the normal class
+  only.
 
 ### Realtime tasks
 
@@ -576,3 +588,4 @@ fn terminate(task: TaskRef, reason: FaultCode);
 | 2026-11-17 | Q50 fixed: Sch17 states the kill invariant, the per-slot record is an id-tagged `AtomicU64` (task ids are monotonic, so it cannot reach a later tenant), `request_kill` publishes under the slot lock, `task::block` re-checks the record under that lock after the boundary check (the lost-wake window), `take_kill(slot, id)` compare-exchanges its own id only, and `reclaim` clears the reservation and record under the lock for its own id. The in-service window is now stated explicitly: a request popped for compilation has no slot, so `kill` returns `NotFound` there and never interrupts the compile; the caller retries once the task is live. Boot self-check `kill: records ok` proves the interleaving on real slot state; `samples/apps/kill_stress` (300 spawn/kill/wait iterations across the three blocking waits) passes on `-smp 4` and `-smp 1` and hangs on the first iteration of the pre-fix kernel (ADR 0034). |
 | 2026-11-17 | Multi-source waits (Q39, ADR 0036): `WaitFor::Any(abi::wait::WaitSet)` is the fifth blocking condition, carrying up to eight sources in one `Copy` value. `wake_console`/`wake_input`/`wake_stream` wake a matching `Any` set in addition to their single wait; the block arm maps `WaitKind::Any` and rechecks with `task::wait_any_ready`, then `task::wake_any_sources` when a source became ready in the failed-probe-to-block window. The `Any` probes are the same functions the builtins use (`console::has_line`, `event::has_event`/`window::has_expose`, `stream::readable`). Single-source wait behaviour and the id-tagged kill path are unchanged. |
 | 2026-11-17 | Q44 resolved (ADR 0037): `WaitFor::Console` and `WaitKind::Console` are gone because `core.read_input` never blocks. Console input is one `WaitFor::Any` source `0` ("a byte is available"); `task::wake_console_input` wakes matching sets and the post-block recheck uses `console::has_byte`. All other conditions and the id-tagged kill path are unchanged. |
+| 2026-11-26 | Per-run normal-task budget (ADR 0061; user report "editör ... aşağı okuna basarak satır kaydırmaya çalışmak ama seri şekilde yaptığımda uygulama çöküyor"). The budget is no longer a lifetime quota: a normal task's run starts at spawn and at every block, `task::block` resets `budget_ns` and records the current machine step count as the new `run_steps` base, and expiry compares the per-run time and `machine.steps() - run_steps` against the same 10 s / 200 000 000-step constants. A plain quantum yield does not reset, so an infinite loop still faults; a task that waits for input, a stream, a socket, a child or a timer does not accumulate one. Realtime is unchanged (its `budget_ns` spans blocks for the heartbeat). Proof: `samples/tests/apps/base/runaway` (non-blocking loop) exits `Faulted(BudgetExceeded)`; `run spin` still exits `Faulted(WatchdogTimeout)`; 300 injected Down keys to the interactive editor on a 98 KiB document end `exit Ok` after 3,391 claims with no fault; `editor check` stays `editor: ok` on `-smp 4`/`-smp 1`. |

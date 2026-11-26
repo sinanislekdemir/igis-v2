@@ -150,6 +150,15 @@ const
   // One cached block-comment state per line start: a 131072-byte document has
   // at most 131073 lines (one per '\n' plus the final empty line).
   LineStateCapacity = BufferCapacity + 1;
+  // A sparse line-start index: one entry per 16 lines (8193 anchors for the
+  // worst case), rebuilt in the same publication pass as the comment state.
+  // `line_start_of` walks at most 15 lines and `line_of_pos` binary-searches
+  // the anchors and then walks at most 15 lines, so a caret move or a frame is
+  // O(visible lines) rather than O(document). Without it a held Down key on a
+  // 98 KiB source scanned the whole buffer about a dozen times per key and
+  // reached `BudgetExceeded` after ~80 presses (M16.10).
+  LineIndexStride = 16;
+  LineIndexCapacity = (BufferCapacity + LineIndexStride) div LineIndexStride;
 
   HoldSeconds = 5;
   NanosPerSecond = 1000000000;
@@ -199,6 +208,11 @@ var
   // M9.2: the block-comment state at each line start, refreshed when the
   // document is published; `draw_lines` reads one entry per frame.
   line_states: bytes[LineStateCapacity];
+  // M16.10: the line count and the sparse start index, refreshed in the same
+  // publication pass. Every line lookup below reads these instead of scanning
+  // the document; `line_count` returns `total_lines`.
+  total_lines: int;
+  line_starts: array[int, LineIndexCapacity];
 
   // Window and absolute layout.
   id: int;
@@ -293,49 +307,41 @@ begin
 end;
 
 // One line per '\n', plus a final empty line when the text ends with one; an
-// empty document is one empty line.
+// empty document is one empty line. M16.10: the count is cached by
+// `refresh_line_states`, so this is O(1) and never scans the document; the
+// `t` parameter stays for the call sites that already hold the text.
 function line_count(t: const string[0]): int;
-var
-  length: int;
-  i: int;
-  count: int;
 begin
-  length := int(core.len(t));
-  count := 1;
-  i := 0;
-  while i < length do
-  begin
-    if t[i] = byte(10) then
-      count := count + 1;
-    i := i + 1;
-  end;
-  return count;
+  return total_lines;
 end;
 
 // Byte offset of the first byte of `line` (0-based); past the last line yields
-// the text length.
+// the text length. M16.10: jump to the nearest 16-line anchor and walk at most
+// `LineIndexStride - 1` lines, never the document from byte 0.
 function line_start_of(t: const string[0]; line: int): int;
 var
   length: int;
   i: int;
   seen: int;
+  anchor: int;
+  wanted: int;
 begin
   length := int(core.len(t));
   if line <= 0 then
     return 0;
-  i := 0;
+  if line >= total_lines then
+    return length;
+  anchor := line div LineIndexStride;
+  i := line_starts[anchor];
   seen := 0;
-  while i < length do
+  wanted := line - anchor * LineIndexStride;
+  while i < length and seen < wanted do
   begin
     if t[i] = byte(10) then
-    begin
       seen := seen + 1;
-      if seen = line then
-        return i + 1;
-    end;
     i := i + 1;
   end;
-  return length;
+  return i;
 end;
 
 // Byte offset of the line's terminating '\n', or the text length.
@@ -357,24 +363,50 @@ begin
   return length;
 end;
 
-// 0-based line containing byte offset `pos`.
+// 0-based line containing byte offset `pos`. M16.10: binary-search the anchors
+// for the last one at or before `pos`, then count newlines only within that
+// 16-line block. A click, a caret move and every frame therefore cost O(log
+// anchors + LineIndexStride lines), not O(document).
 function line_of_pos(t: const string[0]; pos: int): int;
 var
   length: int;
   i: int;
   line: int;
+  lo: int;
+  hi: int;
+  mid: int;
+  anchors: int;
 begin
   length := int(core.len(t));
   if pos > length then
     pos := length;
-  line := 0;
-  i := 0;
-  while i < pos do
+  if pos < 0 then
+    pos := 0;
+  anchors := (total_lines + LineIndexStride - 1) div LineIndexStride;
+  if anchors < 1 then
+    anchors := 1;
+  lo := 0;
+  hi := anchors - 1;
+  while lo < hi do
+  begin
+    mid := (lo + hi + 1) div 2;
+    if line_starts[mid] <= pos then
+      lo := mid
+    else
+      hi := mid - 1;
+  end;
+  line := lo * LineIndexStride;
+  i := line_starts[lo];
+  while i < pos and i < length do
   begin
     if t[i] = byte(10) then
       line := line + 1;
     i := i + 1;
   end;
+  if line > total_lines - 1 then
+    line := total_lines - 1;
+  if line < 0 then
+    line := 0;
   return line;
 end;
 
@@ -682,13 +714,14 @@ begin
   out_end := at + codepoint_length(t, at, stop);
 end;
 
-// Recomputes the block-comment state at every line start (M9.2). This is one
-// allocation-free scan of the whole document - a `//` comment ends at its own
-// line's '\n', so one line's `//` never swallows a later line's `{` - and it
-// runs once whenever the text is published (`publish_staged` from an open or a
-// check-mode load, `ed_replace` from an edit), not once per frame. `draw_lines`
-// then reads the state for its first visible line from `line_states`, so
-// scrolling and dragging cost O(visible lines), not O(document).
+// Recomputes the block-comment state and the sparse line index (M9.2/M16.10).
+// This is one allocation-free scan of the whole document - a `//` comment ends
+// at its own line's '\n', so one line's `//` never swallows a later line's `{`
+// - and it runs once whenever the text is published (`publish_staged` from an
+// open or a check-mode load, `ed_replace` from an edit), not once per frame.
+// The same pass writes one start anchor per `LineIndexStride` lines and the
+// total line count, so later caret moves, frames and scrollbar math are
+// O(visible lines) instead of O(document).
 procedure refresh_line_states();
 var
   length: int;
@@ -703,12 +736,14 @@ var
   line: int;
 begin
   length := int(core.len(text));
-  total := line_count(text);
+  total := 0;
   state := false;
   start := 0;
   line := 0;
-  while line < total and line < LineStateCapacity do
+  while line < LineStateCapacity do
   begin
+    if line mod LineIndexStride = 0 then
+      line_starts[line div LineIndexStride] := start;
     if state then
       line_states[line] := byte(1)
     else
@@ -723,12 +758,16 @@ begin
       state := next_state;
       i := finish;
     end;
+    total := line + 1;
     if stop < length then
-      start := stop + 1
+    begin
+      start := stop + 1;
+      line := line + 1;
+    end
     else
-      start := length;
-    line := line + 1;
+      line := LineStateCapacity;
   end;
+  total_lines := total;
 end;
 
 function class_color(cls: int): uint;
@@ -3282,6 +3321,11 @@ begin
       draw_all();
       present_frame();
     end;
+    // Hold the frame without a spin. A 5 s busy poll is a single continuous
+    // run and, on a large document, would spend the whole watchdog budget just
+    // waiting for the harness; blocking in `core.sleep` keeps the task idle
+    // and lets its per-run budget reset (ADR 0061).
+    st := core.sleep(uint(50));
   end;
   st := syslib.window_close(id);
   out.say("editor: done\n");

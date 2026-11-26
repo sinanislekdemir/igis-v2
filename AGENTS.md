@@ -19,7 +19,10 @@ continuity is design intent and the constraints learned there.
   load, never prebuilt binaries (ADR 0019). Everything runs at ring 0 in one address
   space (ADR 0001).
 - **Execution:** one interpreter loop per core; tasks are claimed from a global runnable
-  set and are never pinned to a core (ADR 0011).
+  set and are never pinned to a core (ADR 0011). The normal-task CPU watchdog covers one
+  continuous run and resets when the task blocks (ADR 0061), so a long-lived interactive
+  task that waits for input is not killed by a lifetime quota; a task that never blocks
+  still faults `BudgetExceeded`.
 
 The long-form narrative, the decision index and the dated status log live in
 [`docs/HISTORY.md`](docs/HISTORY.md). Normative behavior is in `specs/`, lasting
