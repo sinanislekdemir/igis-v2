@@ -164,7 +164,7 @@ mount is behind its own `SpinLock` (Q59).
 | targets installed | `x86_64-unknown-linux-gnu`, `x86_64-unknown-none` |
 | extra components | `rust-src` (nightly), required for `-Z build-std` |
 | QEMU | qemu-system-x86_64 10.2.2 |
-| boot tooling | GRUB 2.12 (`grub2-mkrescue`), xorriso |
+| boot tooling | GRUB 2.12 (`grub2-mkrescue` or `grub-mkrescue`), xorriso |
 | image corpus | Python 3 + Pillow (`scripts/make_image_corpus.py`) |
 
 ## Build commands
@@ -178,12 +178,15 @@ The kernel is cross-built for `x86_64-unknown-none`; `xtask` itself builds for t
 | `cargo xtask run` | image + QEMU with a display and the home disk, serial on stdio |
 | `cargo xtask run --headless` | image + QEMU with no display (serial only) |
 | `cargo xtask clean` | remove build artifacts |
+| `scripts/run-release.sh` | boot an assembled release (`igis.iso` + `apps.img` + `home.img`) in QEMU; shipped as `run.sh` |
 | `cargo test -p abi -p compiler -p interpreter -p langhost -p ext2w -p net` | host language, filesystem and network-stack tests (the kernel crates have no test harness) |
 | `cargo run -p langhost -- samples/lang/hello.ig` | compile and run one unit on the host |
 
 `.cargo/config.toml` pins the linker script, `code-model=kernel`, and the static
 relocation model for the bare-metal target. The workspace has no default target, so
-host tools are unaffected.
+host tools are unaffected. Pushing a tag publishes a GitHub release of the kernel,
+`apps.img`, `home.img` and `run.sh` through `.github/workflows/release.yml`; the Ubuntu
+runner ships the Debian GRUB name, which `xtask` resolves, and the host tests run first.
 
 ## Document conventions
 

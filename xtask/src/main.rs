@@ -20,6 +20,16 @@ fn root() -> PathBuf {
         .to_path_buf()
 }
 
+/// First `name` found in `PATH`, if any. Tool names differ between
+/// distributions (`grub2-mkrescue` on Fedora, `grub-mkrescue` on Debian), so
+/// the image step resolves the executable instead of assuming one spelling.
+fn find_command(name: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let command = args.first().map(String::as_str).unwrap_or("build");
@@ -138,12 +148,22 @@ fn image(shell: bool, reset_home: bool, net_irq: &str) -> ExitCode {
 
     let iso_name = if shell { "igis-shell.iso" } else { "igis.iso" };
     let iso = root().join("build").join(iso_name);
-    let status = Command::new("grub2-mkrescue")
+    // Fedora names the tool `grub2-mkrescue`; Debian/Ubuntu ship
+    // `grub-mkrescue`. Use whichever is on PATH so the release workflow can
+    // run on a stock Ubuntu image.
+    let Some(grub_mkrescue) = ["grub2-mkrescue", "grub-mkrescue"]
+        .into_iter()
+        .find(|name| find_command(name).is_some())
+    else {
+        eprintln!("image: grub2-mkrescue or grub-mkrescue is not in PATH");
+        return ExitCode::FAILURE;
+    };
+    let status = Command::new(grub_mkrescue)
         .arg("-o")
         .arg(&iso)
         .arg(&iso_root)
         .status()
-        .expect("failed to run grub2-mkrescue");
+        .expect("failed to run grub-mkrescue");
 
     if !status.success() {
         return ExitCode::FAILURE;

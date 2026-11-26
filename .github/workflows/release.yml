@@ -1,0 +1,150 @@
+name: release
+
+# Publishing a tag publishes a release. Narrow this to e.g. `v*` if the repo
+# ever grows tags that are not releases.
+on:
+  push:
+    tags:
+      - "**"
+
+permissions:
+  contents: write
+
+# Two pushes of the same tag cannot publish at the same time; a re-run finishes
+# the already-started release instead of replacing its assets mid-flight.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: build the bootable release
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out the tagged tree
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install image and boot tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            e2fsprogs grub-common grub-pc-bin xorriso mtools python3-pil \
+            qemu-system-x86
+
+      - name: Install the Rust toolchain and the bare-metal target
+        run: |
+          rustup toolchain install stable --profile minimal \
+            --target x86_64-unknown-none
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Cache cargo and the kernel build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-release-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-release-
+
+      - name: Host tests
+        # A release must not ship an untested language/compiler/filesystem/net
+        # change. The two large-stack langhost samples need a bigger test
+        # thread stack (the same note as the M15.2 status log).
+        run: |
+          RUST_MIN_STACK=16777216 cargo test -p abi -p compiler \
+            -p interpreter -p langhost -p ext2w -p net
+
+      - name: Build the kernel, application volume, /home and ISO
+        run: cargo xtask image
+
+      - name: Assemble the release files
+        run: |
+          mkdir -p dist
+          cp build/igis.iso build/apps.img build/home.img dist/
+          install -m 0755 scripts/run-release.sh dist/run.sh
+          (cd dist && sha256sum igis.iso apps.img home.img run.sh > SHA256SUMS)
+          ls -lh dist
+
+      - name: Boot the assembled release headless
+        # The ISO carries only the kernel (spec 0025): the application volume
+        # and /home are the two disk images. Prove the four-file set boots.
+        run: |
+          cd dist
+          timeout 90 ./run.sh --headless > boot.log 2>&1 || true
+          grep -q "desktop_shell: ready" boot.log
+          grep -q "apps: volume ok" boot.log
+          tail -n 8 boot.log
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          cat > release-notes.md <<EOF
+          ## igis-v2 ${tag}
+
+          A from-scratch operating system: a Rust kernel whose applications are
+          source text compiled in the kernel, running at ring 0 in one address
+          space. The ISO carries the kernel and GRUB; the applications and
+          \`/home\` are separate ext2 volumes (spec 0025).
+
+          | File | Purpose |
+          |------|---------|
+          | \`igis.iso\` | kernel + GRUB (the boot medium) |
+          | \`apps.img\` | read-only 128 MiB ext2 application volume (primary slave) |
+          | \`home.img\` | writable 8 MiB ext2 \`/home\` seed (primary master) |
+          | \`run.sh\` | QEMU launcher for the four files |
+          | \`SHA256SUMS\` | checksums of the files above |
+
+          \`\`\`sh
+          ./run.sh                 # 4 cores, TCG, 256 MiB, graphical window
+          ./run.sh --headless      # serial log only
+          ./run.sh --cores 1       # single-core boot
+          IGIS_ACCEL=kvm ./run.sh  # use KVM when available
+          \`\`\`
+
+          Requires \`qemu-system-x86_64\`. Keep all files in one directory;
+          \`apps.img\` is opened with \`snapshot=on\` (never modified) and
+          \`home.img\` is attached writable, so edits persist there.
+          EOF
+          gh release view "$tag" >/dev/null 2>&1 || \
+            gh release create "$tag" --draft \
+              --title "igis-v2 ${tag}" \
+              --notes-file release-notes.md \
+              --verify-tag
+          gh release upload "$tag" \
+            dist/igis.iso dist/apps.img dist/home.img dist/run.sh \
+            dist/SHA256SUMS --clobber
+          gh release edit "$tag" --draft=false
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### igis-v2 ${GITHUB_REF_NAME}"
+            if [ -d dist ]; then
+              echo
+              echo '| Asset | Size |'
+              echo '|---|---|'
+              (
+                cd dist
+                for file in igis.iso apps.img home.img run.sh SHA256SUMS; do
+                  if [ -f "$file" ]; then
+                    echo "| \`$file\` | $(du -h --apparent-size "$file" | cut -f1) |"
+                  fi
+                done
+              )
+            fi
+            echo
+            echo '```sh'
+            echo './run.sh'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

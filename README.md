@@ -29,6 +29,22 @@ These are unedited 1024×768 QEMU framebuffer captures, not mockups. The harness
 |---|---|
 | ![File Browser over the image tree](docs/screenshots/browser.png) | ![Analog and digital clock window](docs/screenshots/clock.png) |
 
+## Releases
+
+Pushing a tag builds the kernel, the ext2 application volume and the `/home`
+seed, then publishes them as a GitHub release
+([`.github/workflows/release.yml`](.github/workflows/release.yml)):
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release carries `igis.iso`, `apps.img`, `home.img`, `run.sh` and
+`SHA256SUMS`. Keep them in one directory and run `./run.sh` (QEMU required).
+The ISO contains only the kernel — the application volume and `/home` are the
+two disk images — so all three files are needed to boot the desktop.
+
 ## Implementation
 
 x86_64 first, with architecture-specific code isolated so other ISAs can follow
