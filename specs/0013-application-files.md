@@ -217,11 +217,15 @@ tree view:
   `stdlib.ui_button`, left of the writability label); a pointer-down on it goes
   up exactly like `Backspace`/`Ctrl+Up` (M8.8). The status hint names
   `Bksp up`, so the keyboard route stays discoverable;
-- the scrollbar thumb can be **grabbed and dragged** (M8.9): a pointer-down in
-  the thumb (hit class 3) records the offset inside the thumb, pointer moves
-  while the primary button is held map the thumb top onto `top` over the travel,
-  and release ends the drag. A track click still pages, and the thumb geometry
-  matches `stdlib.ui_scrollbar` (track `BodyH - 4`, 8-pixel floor, travel
+- the scrollbar thumb can be **grabbed and dragged** (M8.9; the view is
+  deferred in M16.8): a pointer-down in the thumb (hit class 3) records the
+  offset inside the thumb; held primary-button moves move only a **preview**
+  thumb (`scroll_preview`) and redraw/recomposite just the scrollbar strip, so
+  `top`, the selection and the list rows stay where they are; the release (or a
+  move that lost the primary button) applies the dropped position to `top`
+  once, clamps the selection into the new window and repaints the frame. A
+  track click still pages immediately, and the thumb geometry matches
+  `stdlib.ui_scrollbar` (track `BodyH - 4`, 8-pixel floor, travel
   `track - thumb`);
 - a kind-0 entry is previewed on `Enter`/double-click (at most 2048 bytes via
   `fs_size` and 256-byte `fs_read` chunks, one strict-UTF-8 `substr_into`), and
@@ -238,7 +242,7 @@ tree view:
   status line and is not opened;
 - no browser action writes a file or adds a handle.
 
-### The text editor (M2.5.3; lexical highlighting M9.1; pointer/scroll M9.2; file dialog M9.3; 128 KiB buffer M9.4)
+### The text editor (M2.5.3; lexical highlighting M9.1; pointer/scroll M9.2; file dialog M9.3; 128 KiB buffer M9.4; deferred drag M16.8)
 
 `samples/apps/base/editor.ig` records the application-level contract over the file
 API. The document, editing and save rules are in spec 0003 ("Application
@@ -313,27 +317,34 @@ drawing/drag rule, M9.3 the file-open dialog and M9.4 the document capacity:
   old all-black/all-white drawing path is used exactly;
 - a pointer event repaints only when it changes visible state (M9.2). A
   no-button move over the text does nothing; a move with the File menu open
-  repaints only when the highlighted row changes; a thumb-drag move only when
-  `top_line` changes; a press or release only when it opens or closes the menu,
-  moves the caret or selection, pages the view, toggles a menu item or starts or
-  ends a visible drag (pressing the thumb itself need not repaint). Every event
-  is still delivered and handled; only the redundant frame is skipped. Key
-  events and an owner `Expose` still repaint as before;
-- the scrollbar thumb drags (M9.2, matching the browser's M8.9). A press in hit
-  class 3 records the grab offset; held primary-button moves map the thumb top
-  onto `top_line` over the travel `track - thumb` and clamp it, and a release or
-  a move without the button ends the drag. The geometry matches
+  repaints only when the highlighted row changes; a press or release only when
+  it opens or closes the menu, moves the caret or selection, pages the view,
+  toggles a menu item or starts or ends a visible drag (pressing the thumb
+  itself need not repaint). Every event is still delivered and handled; only
+  the redundant frame is skipped. Key events and an owner `Expose` still
+  repaint as before;
+- the scrollbar thumb drag is **deferred** (M16.8, matching the browser and the
+  file dialog). A press in hit class 3 records the grab offset, the line count
+  and the current view as the preview position; held primary-button moves map
+  the thumb top onto `scroll_preview` over the travel `track - thumb`, and only
+  the scrollbar strip is redrawn into the retained canvas and recomposited with
+  `syslib.present(scroll_x, scroll_y, ScrollW, ScrollH)`. The document rows, the
+  caret, the selection and `top_line` do not change while the button is down, so
+  a drag step costs the strip rather than a frame over a 128 KiB document. The
+  release (or a move without the button) applies `scroll_preview` to `top_line`
+  once, clamps the caret into the visible lines and repaints the frame. A track
+  click still pages immediately, and the geometry matches
   `stdlib.ui_scrollbar` (track `ScrollH - 4`, visible fraction with an 8-pixel
-  floor, `Rows` visible against `line_count(text)`), and track clicks still
-  page. A page or drag clamps the caret into the visible lines so the next key
-  does not jump the view;
+  floor, `Rows` visible against the line count cached at the press);
 - the normal-task CPU budget is unchanged. The user-reported
   `Faulted(BudgetExceeded)` after 2,893 claims was the 10 s watchdog, not a
   crash: before M9.2 every pointer event addressed to the editor repainted the
   whole 640×480 panel and rescanned the document for the block state, so moving
   the pointer over the editor spent the task's lifetime budget on frames whose
   visible pixels did not change. M9.2 removes that work rather than raising the
-  budget (spec 0007);
+  budget (spec 0007). M16.8 removes the last per-drag-step frame: a held thumb
+  recomposites only the scrollbar rectangle until the release, so a heavy
+  document cannot turn a slow drag into a full-frame burst;
 - token boundaries are whole UTF-8 code points and every drawn run still goes
   through `core.substr_into` and the existing `snap_boundary`, so a multi-byte
   code point is never split. Non-ASCII default text stays black;
@@ -341,19 +352,28 @@ drawing/drag rule, M9.3 the file-open dialog and M9.4 the document capacity:
   is added. `editor check` covers source-vs-plain detection, the menu check,
   every palette class, a block comment that spans lines and one that starts
   above the visible first line, that the toggle off leaves no palette pixel,
-  (M9.2) a scrollbar-thumb press and drag through the injected pointer path to
-  the bottom (`top_line = line_count - Rows`, the drag ended and the thumb
-  redrawn at the bottom), and (M9.4) `open_path("base/calculator")` returning
-  `Ok` with the whole 32,516-byte document (`core.fs_size` agrees), the
-  `base/calculator` path and valid UTF-8, followed by a restore of `base/child`;
-  the host path has no screen and reports the same logical verdict.
+  (M9.2/M16.8) a scrollbar-thumb press and held drag through the injected
+  pointer path to the bottom: while held `top_line` is unchanged and
+  `scroll_preview = line_count - Rows`, the strip's recomposite already shows
+  the thumb at the bottom and the track top white, and the release applies the
+  position, ends the drag and redraws the document at the bottom, and (M9.4)
+  `open_path("base/calculator")` returning `Ok` with the whole 32,516-byte
+  document (`core.fs_size` agrees), the `base/calculator` path and valid UTF-8,
+  followed by a restore of `base/child`; the host path has no screen and reports
+  the same logical verdict.
   `scripts/editor_scroll_qmp.py` proves the budget rule on the real pointer
   path: a burst of no-button moves plus a held-button drag ends `exit Ok` with
-  no `BudgetExceeded`, while the pre-M9.2 editor faults on the same burst.
-  `scripts/file_dialog_qmp.py` proves the user-facing M9.4 case: the dialog
-  loads `lib/math.ig`, then `base/calculator`, with the text region changing
-  and the path line showing the longer chosen path, before Escape cancels and
-  `Ctrl+Q` exits `Ok`.
+  no `BudgetExceeded`, while the pre-M9.2 editor faults on the same burst. It
+  captures **during** the hold and after the release: the text region is
+  unchanged (0 differing pixels) and the thumb strip moves while the button is
+  down, and the release changes the text region (12,575 px), which is the M16.8
+  deferral. `scripts/file_dialog_qmp.py` proves the user-facing M9.4 case: the
+  dialog loads `lib/math.ig`, then `base/calculator`, with the text region
+  changing and the path line showing the longer chosen path, before Escape
+  cancels and `Ctrl+Q` exits `Ok`; it also drags the dialog's own thumb
+  (`base`, 88 entries, 17 rows) and asserts the same deferral (list rows 0
+  differing pixels while held, the strip changes, the rows shift after the
+  release).
 
 ## Interfaces
 
@@ -407,3 +427,4 @@ drawing/drag rule, M9.3 the file-open dialog and M9.4 the document capacity:
 | 2026-11-19 | M9.2: the editor repaints a pointer event only when it changes visible state, and its scrollbar thumb drags. The block-comment state at every line start is cached in a `bytes[8193]` table refreshed once per document publication, so a frame scans only the visible lines; the drag matches `stdlib.ui_scrollbar` and track clicks still page. The reported `Faulted(BudgetExceeded)` after 2,893 claims was the normal 10 s CPU watchdog, caused by a full repaint (and O(document) block scan) per pointer move; the fix removes the waste and leaves the budget, scheduler and realtime policy unchanged. `editor check` drags the thumb through the injected pointer path and `scripts/editor_scroll_qmp.py` proves the burst ends `Ok` with no budget fault. No file API, opcode, builtin, `Host` or `stdlib` change. |
 | 2026-11-19 | M9.3: File > Open and `Ctrl+O` run the `/lib` modal file-open dialog (`lib.file_dialog.open_file`) and load its result through the existing `open_path`; a cancel (`Invalid`) leaves every editor state untouched. The dialog starts in the current directory with the current name selected, lists up to 96 entries (directories/files selectable, kind-2 gray and refused), navigates with keys, row click/double-click, `Up`/`Open`/`Cancel`, scrollbar paging and thumb dragging, and returns a regular-file path or a cancel. The editor's `PathCapacity` becomes 256 (`PATH_MAX`) and `TempCapacity` 260; the destination is published only on `Ok`. No file API, opcode, builtin, `Host` or `stdlib` change. |
 | 2026-11-19 | M9.4: the editor's document buffer is 131072 bytes (128 KiB, the spec 0008 per-unit source cap), raised from the M2.5.3 8 KiB. The file-open dialog was already correct: it returned `base/calculator` (32,516 B), but `open_path` refused it with a `too large (8192 max)` status line, while the tiny `beat` (554 B) and `deep` (874 B) samples opened. Every current sample now fits (the largest is `editor` at 81,509 B); a file over 131072 bytes is still refused by size before it is read with `too large (131072 max)`, and an over-capacity edit still returns `CapacityExceeded`. The state grows to 530,392 B and the task stack to 174,328 B (the `ed_replace` staging buffer is now 128 KiB), both under the 1 MiB region caps; `editor check` proves `base/calculator` opens with the full size and valid UTF-8 and restores `base/child`, while `scripts/file_dialog_qmp.py` opens it through the dialog. No file API, opcode, builtin, `Host`, `stdlib` or kernel change. |
+| 2026-11-26 | M16.8 (user request "scrollbar önce çekilsin ... release ettiğinde ... uygulama oraya gitsin. aktif scroll çünkü ağır içerikte crashe yol açıyor"): a scrollbar-thumb drag is **deferred** in the browser, the editor and the `/lib` file dialog. Held primary-button moves move a preview thumb (`scroll_preview`) and redraw/recomposite only the scrollbar strip (`window_begin` + the retained canvas + `syslib.present` of that rectangle); the list/document view, selection/caret and `top`/`top_line` do not change while the button is down. Release (or a move that lost the button) applies the dropped position once, clamps the selection/caret visible and repaints one frame. Track clicks and keys still act immediately. The editor caches the line count at the press so no drag step rescans a 128 KiB document, and the thumb arithmetic is factored into `thumb_metrics` (the same `stdlib.ui_scrollbar` geometry). Proven by `editor check` and `browser check` mid-drag pixel assertions, and by `scripts/editor_scroll_qmp.py` (held text region 0 px changed, thumb strip moved, release 12,575 px, `exit Ok` on `-smp 4`/`-smp 1`) and the dialog drag in `scripts/file_dialog_qmp.py` (held rows 0 px, strip 240 px, release 3,844 px). No file API, opcode, builtin, `Host`, `stdlib` or kernel change. |

@@ -61,13 +61,18 @@ unit editor;
 //
 // M9.2 keeps the pointer path cheap: a pointer event repaints only when it
 // changes visible state (a plain move over the text does nothing, a menu move
-// repaints only when the highlight row changes, a thumb drag only when
-// `top_line` changes). The M9.1 block-comment state at every line start is also
-// cached in `line_states` and refreshed once per document publication instead
-// of rescanning from byte 0 on every frame. Together these remove the full
-// repaint per pointer move that spent a normal task's 10 s CPU budget
-// (`Faulted(BudgetExceeded)`) when the user moved the mouse over the editor;
-// the budget itself is unchanged.
+// repaints only when the highlight row changes). The M9.1 block-comment state at
+// every line start is also cached in `line_states` and refreshed once per
+// document publication instead of rescanning from byte 0 on every frame.
+// Together these remove the full repaint per pointer move that spent a normal
+// task's 10 s CPU budget (`Faulted(BudgetExceeded)`) when the user moved the
+// mouse over the editor; the budget itself is unchanged.
+//
+// M16.8 defers the view while the thumb is held: a pointer move redraws and
+// recomposites only the scrollbar strip, and the document view (`top_line`, the
+// caret and every text row) changes once, when the button is released. A heavy
+// 128 KiB document is therefore never re-rendered per drag step. The line count
+// is cached at the press for the same reason: no move rescans the document.
 //
 // Drawing is client content only: the window service owns the frame, this app
 // paints inside its content rectangle and never calls `syslib.clear`. Every
@@ -155,8 +160,12 @@ var
   top_line: int;
   left_byte: int;
   // M9.2 scrollbar thumb drag: the grab offset is `pointer - thumb top`.
+  // M16.8 defers the view: `scroll_preview` moves the thumb alone and
+  // `top_line` (and the document) changes only on release.
   scroll_dragging: bool;
   scroll_grab_dy: int;
+  scroll_preview: int;
+  drag_total: int;
 
   // File menu.
   open_menu: int;
@@ -1658,20 +1667,16 @@ begin
   end;
 end;
 
-// The current scrollbar thumb geometry, matching `stdlib.ui_scrollbar`: the
-// track is `ScrollH - 4` tall, the thumb is the visible fraction with an
-// 8-pixel floor (clamped to the track), and it travels over `track - thumb`.
-// The drag handler and the check-mode proof use the same arithmetic (M9.2).
-procedure scrollbar_thumb(thumb_y: var int; thumb_h: var int);
+// The thumb height and travel for `total` lines against `Rows` visible rows,
+// matching `stdlib.ui_scrollbar`: the track is `ScrollH - 4` tall, the thumb
+// the visible fraction with an 8-pixel floor (clamped to the track), and it
+// travels over `track - thumb`. The drag preview passes the line count cached
+// at the press, so no pointer move rescans the document (M16.8).
+procedure thumb_metrics(total: int; thumb_h: var int; travel: var int);
 var
   track_h: int;
-  total: int;
-  max: int;
-  pos: int;
-  travel: int;
 begin
   track_h := ScrollH - 4;
-  total := line_count(text);
   if total <= 0 then
     thumb_h := track_h
   else
@@ -1685,14 +1690,39 @@ begin
     if thumb_h > track_h then
       thumb_h := track_h;
   end;
+  travel := track_h - thumb_h;
+end;
+
+// The current scrollbar thumb geometry for `total` lines, matching
+// `stdlib.ui_scrollbar`. The press, the check-mode proof and the preview use
+// the same arithmetic (M9.2).
+procedure scrollbar_thumb(total: int; thumb_y: var int; thumb_h: var int);
+var
+  max: int;
+  pos: int;
+  travel: int;
+begin
+  thumb_metrics(total, thumb_h, travel);
   max := total - Rows;
   if max < 0 then
     max := 0;
   pos := stdlib.ui_scrollbar_clamp(top_line, Rows, total);
-  travel := track_h - thumb_h;
   thumb_y := scroll_y + 2;
   if max > 0 and travel > 0 then
     thumb_y := scroll_y + 2 + (travel * pos) div max;
+end;
+
+// Ends a thumb drag and applies the preview to the view: the document jumps
+// to the dropped position once, here, not on every pointer move (M16.8).
+// Returns whether the view or the clamped caret changed.
+function end_scroll_drag(): bool;
+begin
+  scroll_dragging := false;
+  if scroll_preview = top_line then
+    return false;
+  top_line := scroll_preview;
+  clamp_caret_to_view();
+  return true;
 end;
 
 // Places the caret and returns true only when the caret, the selection or the
@@ -1763,11 +1793,13 @@ begin
   return top_line <> was_top or caret <> was_caret or anchor <> was_anchor;
 end;
 
-// Handles one pointer event and returns whether anything visible changed
-// (M9.2). The interactive loop repaints only on true: a no-button move over
-// the text and a move that keeps the same menu row are free, and a thumb drag
-// repaints only while `top_line` changes. A press on the thumb itself starts
-// the drag without repainting; release ends it without repainting.
+// Handles one pointer event and returns whether a whole frame is needed
+// (M9.2/M16.8). A thumb drag never returns true while held: it redraws and
+// recomposites only the scrollbar strip, leaving the document view where it
+// was, and applies the dropped position on release. A no-button move over the
+// text and a move that keeps the same menu row are free; a press on the thumb
+// itself starts the drag without repainting; release repaints only when the
+// preview moved the view.
 function handle_pointer(): bool;
 var
   bar: int;
@@ -1775,37 +1807,25 @@ var
   action: int;
   was_menu: int;
   was_selected: int;
-  was_top: int;
-  was_caret: int;
-  was_anchor: int;
   thumb_y: int;
   thumb_h: int;
   travel: int;
   max_top: int;
   desired: int;
+  preview: int;
 begin
   // A grabbed thumb follows the pointer while the primary button is held; a
   // release or a move without the button ends the drag (M9.2, like M8.9).
   if scroll_dragging then
   begin
     if ev.kind = PointerUp then
-    begin
-      scroll_dragging := false;
-      return false;
-    end;
+      return end_scroll_drag();
     if ev.kind = PointerMove then
     begin
       if ev.code mod uint(2) <> uint(1) then
-      begin
-        scroll_dragging := false;
-        return false;
-      end;
-      was_top := top_line;
-      was_caret := caret;
-      was_anchor := anchor;
-      scrollbar_thumb(thumb_y, thumb_h);
-      travel := (ScrollH - 4) - thumb_h;
-      max_top := line_count(text) - Rows;
+        return end_scroll_drag();
+      thumb_metrics(drag_total, thumb_h, travel);
+      max_top := drag_total - Rows;
       if max_top < 0 then
         max_top := 0;
       if travel > 0 and max_top > 0 then
@@ -1815,12 +1835,18 @@ begin
           desired := scroll_y + 2;
         if desired > scroll_y + 2 + travel then
           desired := scroll_y + 2 + travel;
-        top_line := ((desired - (scroll_y + 2)) * max_top) div travel;
-        top_line := stdlib.ui_scrollbar_clamp(
-          top_line, Rows, line_count(text));
-        clamp_caret_to_view();
+        preview := ((desired - (scroll_y + 2)) * max_top) div travel;
+        preview := stdlib.ui_scrollbar_clamp(preview, Rows, drag_total);
+        if preview <> scroll_preview then
+        begin
+          scroll_preview := preview;
+          // M16.8: only the strip. The retained canvas keeps the old text
+          // rows, and `syslib.present` recomposites just this rectangle.
+          draw_scrollbar_at(scroll_preview, drag_total);
+          st := syslib.present(scroll_x, scroll_y, ScrollW, ScrollH);
+        end;
       end;
-      return top_line <> was_top or caret <> was_caret or anchor <> was_anchor;
+      return false;
     end;
     return false;
   end;
@@ -1860,8 +1886,10 @@ begin
         top_line, Rows, line_count(text));
       if action = 3 then
       begin
-        scrollbar_thumb(thumb_y, thumb_h);
+        drag_total := line_count(text);
+        scrollbar_thumb(drag_total, thumb_y, thumb_h);
         scroll_dragging := true;
+        scroll_preview := top_line;
         scroll_grab_dy := ev.y - thumb_y;
         return false;
       end;
@@ -2213,9 +2241,20 @@ begin
     selected, file_checked, file_disabled, true);
 end;
 
+// The scrollbar strip alone, at `position` over `total` lines. It is redrawn
+// without the document rows during a drag preview (M16.8): the canvas keeps
+// the rest of the frame, so only this rectangle changes.
+procedure draw_scrollbar_at(position: int; total: int);
+begin
+  st := syslib.window_begin(id);
+  st := stdlib.ui_scrollbar(
+    scroll_x, scroll_y, ScrollW, ScrollH, position, Rows, total, false);
+end;
+
 // One complete frame: background, menu, path line, text view, carets,
 // scrollbar, status line, then the open pull-down on top. The caller presents
-// once afterwards.
+// once afterwards. While a thumb is held the scrollbar shows the preview
+// position and the document stays at `top_line` (M16.8).
 procedure draw_all();
 begin
   // The file dialog is a second window of this task, and opening it takes the
@@ -2226,8 +2265,10 @@ begin
   st := stdlib.ui_menu_bar(rect.x, rect.y, ContentW, titles, 1, open_menu);
   draw_path_line();
   draw_lines();
-  st := stdlib.ui_scrollbar(
-    scroll_x, scroll_y, ScrollW, ScrollH, top_line, Rows, line_count(text), false);
+  if scroll_dragging then
+    draw_scrollbar_at(scroll_preview, drag_total)
+  else
+    draw_scrollbar_at(top_line, line_count(text));
   draw_status();
   if open_menu >= 0 then
     draw_dropdown();
@@ -2722,7 +2763,9 @@ begin
   verify("event undone", stdlib.starts_with(text, "IGIS"));
 
   // M9.2: the scrollbar thumb drags through the real pointer path, matching the
-  // browser's M8.9. `base/child` has more lines than the 26-row view.
+  // browser's M8.9. M16.8 defers the view: the held drag moves the thumb strip
+  // only and the release applies the dropped position.
+  // `base/child` has more lines than the 26-row view.
   value := open_path("base/child");
   verify("drag open", value = Ok and highlight);
   top_line := 0;
@@ -2733,7 +2776,7 @@ begin
   present_frame();
   total := line_count(text);
   verify("drag scrollable", total > Rows);
-  scrollbar_thumb(thumb_y, thumb_h);
+  scrollbar_thumb(total, thumb_y, thumb_h);
   verify("drag starts on thumb",
     stdlib.ui_scrollbar_hit(
       scroll_x, scroll_y, ScrollW, ScrollH,
@@ -2741,15 +2784,21 @@ begin
       top_line, Rows, total) = 3);
   pointer_to(scroll_x + 8, thumb_y + thumb_h div 2);
   pointer_down();
-  verify("drag grabs thumb", scroll_dragging);
+  verify("drag grabs thumb", scroll_dragging and scroll_preview = top_line);
   pointer_drag_to(scroll_x + 8, scroll_y + ScrollH - 4);
-  verify("scrollbar drag down", top_line = total - Rows);
+  // The document view did not move; only the thumb strip did, and the
+  // strip's own recomposite already shows the preview on screen.
+  verify("drag preview", top_line = 0 and scroll_preview = total - Rows);
+  verify("preview thumb leaves the top",
+    syslib.get_pixel(scroll_x + 4, scroll_y + 4) = white);
+  verify("preview thumb at the bottom",
+    syslib.get_pixel(scroll_x + 4, scroll_y + ScrollH - 6) = gray);
   pointer_up();
-  verify("scrollbar drag ends",
+  verify("scrollbar drag applies",
     not scroll_dragging and top_line = total - Rows);
   draw_all();
   present_frame();
-  scrollbar_thumb(thumb_y, thumb_h);
+  scrollbar_thumb(total, thumb_y, thumb_h);
   travel := (ScrollH - 4) - thumb_h;
   verify("scrollbar thumb moved",
     travel > 0 and syslib.get_pixel(scroll_x + 4, thumb_y + 2) = gray);

@@ -49,7 +49,10 @@ unit browser;
 // a directory has more than fifty; the scrollbar is
 // `ui_scrollbar`/`ui_scrollbar_hit`. Keys are Up/Down/PageUp/PageDown/Home/End,
 // Enter (open), Backspace/Ctrl+Up (up), Ctrl+L (launch), Ctrl+Q (quit); a
-// double-click opens. Drawing is client content only: no `syslib.clear` and no
+// double-click opens. A track click pages at once; while the thumb is held the
+// view is deferred (M16.8): only the scrollbar strip is redrawn and recomposed,
+// and the listing jumps to the dropped row when the button is released.
+// Drawing is client content only: no `syslib.clear` and no
 // assumption of a blank screen. Every frame is complete before one
 // `window_present`, and an owner `Expose` repaints the whole content.
 //
@@ -127,8 +130,11 @@ var
   selected: int;
   top: int;
   // Scrollbar thumb drag (M8.9): grabbed at a pointer offset within the thumb.
+  // M16.8 defers the view: the held thumb moves alone in `scroll_preview` and
+  // `top` changes only when the button is released.
   scroll_dragging: bool;
   scroll_grab_dy: int;
+  scroll_preview: int;
 
   // Preview.
   preview: string[PreviewCapacity];
@@ -292,6 +298,7 @@ begin
   entry_count := 0;
   truncated := false;
   scroll_dragging := false;
+  scroll_preview := 0;
   index := uint(0);
   st := core.fs_list(dir, index, name, kind, size);
   while st = Ok and entry_count < EntryCapacity do
@@ -739,39 +746,64 @@ begin
     status_line := "remove failed";
 end;
 
-// The current scrollbar thumb geometry, matching `stdlib.ui_scrollbar`
-// (M8.9): the track is `BodyH - 4` tall, the thumb is the visible fraction
-// with an 8-pixel floor, and it travels over `track - thumb`. The drag handler
-// and the check-mode proof use the same arithmetic.
-procedure scrollbar_thumb(thumb_y: var int; thumb_h: var int);
+// The thumb height and travel for `total` entries against `ListRows` visible
+// rows, matching `stdlib.ui_scrollbar` (M8.9): the track is `BodyH - 4` tall,
+// the thumb the visible fraction with an 8-pixel floor, and it travels over
+// `track - thumb`.
+procedure thumb_metrics(total: int; thumb_h: var int; travel: var int);
 var
   track_h: int;
-  max: int;
-  pos: int;
-  travel: int;
 begin
   track_h := BodyH - 4;
-  if entry_count <= 0 then
+  if total <= 0 then
     thumb_h := track_h
   else
   begin
     if ListRows <= 0 then
       thumb_h := 8
     else
-      thumb_h := (track_h * ListRows) div entry_count;
+      thumb_h := (track_h * ListRows) div total;
     if thumb_h < 8 then
       thumb_h := 8;
     if thumb_h > track_h then
       thumb_h := track_h;
   end;
-  max := entry_count - ListRows;
+  travel := track_h - thumb_h;
+end;
+
+// The current scrollbar thumb geometry for `total` entries, matching
+// `stdlib.ui_scrollbar`. The press, the drag preview and the check-mode proof
+// use the same arithmetic.
+procedure scrollbar_thumb(total: int; thumb_y: var int; thumb_h: var int);
+var
+  max: int;
+  pos: int;
+  travel: int;
+begin
+  thumb_metrics(total, thumb_h, travel);
+  max := total - ListRows;
   if max < 0 then
     max := 0;
-  pos := stdlib.ui_scrollbar_clamp(top, ListRows, entry_count);
-  travel := track_h - thumb_h;
+  pos := stdlib.ui_scrollbar_clamp(top, ListRows, total);
   thumb_y := scroll_y + 2;
   if max > 0 and travel > 0 then
     thumb_y := scroll_y + 2 + (travel * pos) div max;
+end;
+
+// Ends a thumb drag and applies the preview to the view (M16.8): the list
+// jumps to the dropped row once, on release, and the selection is kept inside
+// the new window. Returns whether anything visible changed.
+function end_scroll_drag(): bool;
+begin
+  scroll_dragging := false;
+  if scroll_preview = top then
+    return false;
+  top := scroll_preview;
+  if selected < top then
+    selected := top;
+  if selected >= top + ListRows then
+    selected := top + ListRows - 1;
+  return true;
 end;
 
 // ---- key and pointer handling ---------------------------------------------
@@ -835,38 +867,36 @@ begin
     activate_selected();
 end;
 
-procedure handle_pointer();
+// One pointer event addressed to the browser. Returns whether a whole frame is
+// needed (M16.8): a held thumb drag redraws only the scrollbar strip, and the
+// list view changes once, on release.
+function handle_pointer(): bool;
 var
   hit: int;
   action: int;
   now: uint;
   thumb_y: int;
   thumb_h: int;
-  track_h: int;
   travel: int;
   desired: int;
   max_top: int;
+  preview: int;
+  was_top: int;
+  was_selected: int;
 begin
   // A grabbed scrollbar thumb follows the pointer while the primary button is
-  // held (M8.9). The move maps the thumb position onto the scrollbar travel;
-  // release (or a move without the button) ends the drag.
+  // held (M8.9); the move maps the thumb position onto the scrollbar travel.
+  // M16.8 defers the list: release (or a move without the button) applies the
+  // dropped position.
   if scroll_dragging then
   begin
     if ev.kind = PointerUp then
-    begin
-      scroll_dragging := false;
-      return;
-    end;
+      return end_scroll_drag();
     if ev.kind = PointerMove then
     begin
       if ev.code mod uint(2) <> uint(1) then
-      begin
-        scroll_dragging := false;
-        return;
-      end;
-      scrollbar_thumb(thumb_y, thumb_h);
-      track_h := BodyH - 4;
-      travel := track_h - thumb_h;
+        return end_scroll_drag();
+      thumb_metrics(entry_count, thumb_h, travel);
       max_top := entry_count - ListRows;
       if max_top < 0 then
         max_top := 0;
@@ -877,25 +907,26 @@ begin
           desired := scroll_y + 2;
         if desired > scroll_y + 2 + travel then
           desired := scroll_y + 2 + travel;
-        top := ((desired - (scroll_y + 2)) * max_top) div travel;
-        top := stdlib.ui_scrollbar_clamp(top, ListRows, entry_count);
-        if selected < top then
-          selected := top;
-        if selected >= top + ListRows then
-          selected := top + ListRows - 1;
+        preview := ((desired - (scroll_y + 2)) * max_top) div travel;
+        preview := stdlib.ui_scrollbar_clamp(preview, ListRows, entry_count);
+        if preview <> scroll_preview then
+        begin
+          scroll_preview := preview;
+          preview_scrollbar();
+        end;
       end;
-      return;
+      return false;
     end;
-    return;
+    return false;
   end;
 
   if ev.kind <> PointerDown then
-    return;
+    return false;
 
   if stdlib.ui_button_hit(up_x, up_y, up_w, up_h, ev.x, ev.y) then
   begin
     go_up();
-    return;
+    return true;
   end;
 
   if stdlib.ui_rect_hit(scroll_x, scroll_y, ScrollW, BodyH, ev.x, ev.y) then
@@ -903,26 +934,30 @@ begin
     action := stdlib.ui_scrollbar_hit(
       scroll_x, scroll_y, ScrollW, BodyH, ev.x, ev.y,
       top, ListRows, entry_count);
+    if action = 3 then
+    begin
+      scrollbar_thumb(entry_count, thumb_y, thumb_h);
+      scroll_dragging := true;
+      scroll_preview := top;
+      scroll_grab_dy := ev.y - thumb_y;
+      return false;
+    end;
+    was_top := top;
+    was_selected := selected;
     if action = 1 then
       top := stdlib.ui_scrollbar_clamp(top - ListRows, ListRows, entry_count)
     else if action = 2 then
-      top := stdlib.ui_scrollbar_clamp(top + ListRows, ListRows, entry_count)
-    else if action = 3 then
-    begin
-      scrollbar_thumb(thumb_y, thumb_h);
-      scroll_dragging := true;
-      scroll_grab_dy := ev.y - thumb_y;
-    end;
+      top := stdlib.ui_scrollbar_clamp(top + ListRows, ListRows, entry_count);
     if selected < top then
       selected := top;
     if selected >= top + ListRows then
       selected := top + ListRows - 1;
-    return;
+    return top <> was_top or selected <> was_selected;
   end;
 
   hit := index_at(ev.x, ev.y);
   if hit < 0 then
-    return;
+    return false;
   selected := hit;
   ensure_visible();
   now := core.clock();
@@ -943,6 +978,7 @@ begin
     if kinds[hit] = uint(2) then
       value := open_entry(names[hit], kinds[hit]);
   end;
+  return true;
 end;
 
 // ---- drawing --------------------------------------------------------------
@@ -1203,14 +1239,34 @@ begin
     "Enter open  Ctrl+L launch  Bksp up  N new  Del delete", gray);
 end;
 
-// One complete frame; the caller presents once afterwards.
+// The scrollbar strip at `position` over the current listing.
+procedure draw_scrollbar_at(position: int);
+begin
+  st := stdlib.ui_scrollbar(
+    scroll_x, scroll_y, ScrollW, BodyH, position, ListRows, entry_count, false);
+end;
+
+// The scrollbar strip alone after a drag preview moved the thumb (M16.8): the
+// canvas keeps the list rows, and `syslib.present` recomposites just this
+// rectangle from the surface stack.
+procedure preview_scrollbar();
+begin
+  st := syslib.window_begin(id);
+  draw_scrollbar_at(scroll_preview);
+  st := syslib.present(scroll_x, scroll_y, ScrollW, BodyH);
+end;
+
+// One complete frame; the caller presents once afterwards. While a thumb is
+// held the strip shows the preview and the list stays at `top` (M16.8).
 procedure draw_all();
 begin
   st := syslib.fill_rect(rect.x, rect.y, ContentW, ContentH, white);
   draw_path();
   draw_list();
-  st := stdlib.ui_scrollbar(
-    scroll_x, scroll_y, ScrollW, BodyH, top, ListRows, entry_count, false);
+  if scroll_dragging then
+    draw_scrollbar_at(scroll_preview)
+  else
+    draw_scrollbar_at(top);
   draw_preview();
   draw_status();
 end;
@@ -1263,8 +1319,8 @@ begin
         else if ev.kind = PointerDown or ev.kind = PointerUp
                 or ev.kind = PointerMove then
         begin
-          handle_pointer();
-          dirty := true;
+          if handle_pointer() then
+            dirty := true;
         end;
       end;
     end
@@ -1774,20 +1830,24 @@ begin
     syslib.get_pixel(hint_x + 1, status_y + 1) = gray);
 
   // Grab the scrollbar thumb and drag it to the bottom through the real
-  // pointer path (M8.9). The thumb geometry matches `ui_scrollbar`; the move
-  // maps the thumb position onto `top`, and release ends the drag.
+  // pointer path (M8.9). M16.8 defers the view: the held drag moves the thumb
+  // strip only, and release applies the dropped position to `top`.
   top := 0;
   selected := 0;
   ensure_visible();
   draw_all();
-  scrollbar_thumb(thumb_y, thumb_h);
+  scrollbar_thumb(entry_count, thumb_y, thumb_h);
   pointer_to(scroll_x + 8, thumb_y + thumb_h div 2);
   pointer_down();
   pointer_drag_to(scroll_x + 8, scroll_y + BodyH - 4);
   max_top := entry_count - ListRows;
-  verify("scrollbar drag down", top > 0 and top = max_top);
+  verify("scrollbar drag preview", top = 0 and scroll_preview = max_top);
+  verify("preview thumb leaves the top",
+    syslib.get_pixel(scroll_x + 4, scroll_y + 4) = white);
+  verify("preview thumb at the bottom",
+    syslib.get_pixel(scroll_x + 4, scroll_y + BodyH - 6) = gray);
   pointer_up();
-  verify("scrollbar drag ends", not scroll_dragging and top = max_top);
+  verify("scrollbar drag applies", not scroll_dragging and top = max_top);
   top := 0;
   selected := 0;
   ensure_visible();
@@ -1908,8 +1968,8 @@ begin
       else if ev.kind = PointerDown or ev.kind = PointerUp
               or ev.kind = PointerMove then
       begin
-        handle_pointer();
-        ready := true;
+        if handle_pointer() then
+          ready := true;
       end;
       if ready and running then
       begin

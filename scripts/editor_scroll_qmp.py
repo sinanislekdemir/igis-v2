@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove the editor's pointer path is cheap and its scrollbar thumb drags (M9.2).
+"""Prove the editor's pointer path is cheap and its thumb drag is deferred (M9.2/M16.8).
 
 This is the M9.2 regression harness for the report "task 4: exit
 Faulted(BudgetExceeded) after 2893 claims (2891 yields) while trying to scroll
@@ -15,16 +15,19 @@ interactive `editor` (it opens `base/child`, 28 lines in the 26-row view), and:
 
 1. sends a burst of no-button absolute moves over the text (the user's shape),
 2. grabs the scrollbar thumb and drags it to the bottom with a real held-button
-   pointer drag,
-3. captures before/after and requires the text view to change and the thumb to
-   leave the top of the track,
+   pointer drag, capturing while the button is still down,
+3. captures before/during/after: the held drag must leave the text view
+   unchanged (M16.8 defers the view and recomposes only the scrollbar strip),
+   the thumb must leave the top of the track, and the release must change the
+   text view,
 4. sends Ctrl+Q and requires the editor's exit line to be `exit Ok` with no
    `BudgetExceeded` anywhere, the shell prompt to return, and no idle
    summary/halt.
 
 The editor repaints only when a pointer event changes visible state after
-M9.2, so the burst should cost almost nothing; the drag repaints only while
-`top_line` changes. The claims count in the exit line is printed as evidence
+M9.2, so the burst should cost almost nothing; since M16.8 a held drag
+recomposites only the scrollbar strip and applies the dropped position once, on
+release. The claims count in the exit line is printed as evidence
 that the guest really consumed the burst (QEMU/USB can coalesce if events are
 sent too fast; `--move-delay-ms`/`--drag-delay-ms` pace them).
 
@@ -34,8 +37,9 @@ Usage:
     python3 scripts/editor_scroll_qmp.py build/igis-shell.iso --cores 1
     python3 scripts/editor_scroll_qmp.py build/igis-shell.iso --no-capture
 
-Exit status is 0 when the editor exits `Ok`, the prompt returns, the text view
-scrolled and no budget fault was printed.
+Exit status is 0 when the editor exits `Ok`, the prompt returns, the held drag
+left the text view unchanged, the release scrolled it, and no budget fault was
+printed.
 """
 
 import argparse
@@ -72,6 +76,9 @@ SCROLL_H = 416
 # A generous text area for the before/after comparison: the pointer moves stay
 # inside it and the scroll shifts every visible row.
 TEXT_REGION = (TEXT_X + 10, TEXT_Y + 10, 560, 320)
+# A neutral pointer home outside `TEXT_REGION`, so the software cursor cannot
+# account for a text-region difference: the status line under the view.
+NEUTRAL = (TEXT_X + 300, TEXT_Y + 430)
 # The top of the scrollbar track: gray while the thumb is at `top_line = 0`,
 # white once the drag moved it down.
 THUMB_TOP_STRIP = (SCROLL_X + 2, SCROLL_Y + 2, SCROLL_W - 4, 20)
@@ -228,6 +235,7 @@ def run(args):
 
     scratch = tempfile.mkdtemp(prefix="igis-editor-scroll-")
     before_path = os.path.join(scratch, "before.png")
+    mid_path = os.path.join(scratch, "mid.png")
     after_path = os.path.join(scratch, "after.png")
 
     socket_path = os.path.join(
@@ -290,8 +298,9 @@ def run(args):
         time.sleep(1.2)
 
         tablet = Tablet(qmp, width, height)
-        # Start from a known point inside the text view.
-        tablet.move(TEXT_X + 20, TEXT_Y + 20)
+        # Park the pointer away from the text and the scrollbar, so the cursor
+        # cannot contribute to the text-region comparison.
+        tablet.move(*NEUTRAL)
         time.sleep(0.2)
         capture(qmp, before_path)
 
@@ -317,6 +326,10 @@ def run(args):
             tablet.move(THUMB_PRESS[0], y)
             if args.drag_delay_ms > 0:
                 time.sleep(args.drag_delay_ms / 1000.0)
+        # M16.8: while the button is still held the text view must not have
+        # changed; only the scrollbar strip moved. Capture before the release.
+        time.sleep(0.3)
+        capture(qmp, mid_path)
         tablet.button(THUMB_PRESS[0], SCROLL_BOTTOM, down=False)
         drag_elapsed = time.time() - drag_started
         time.sleep(0.3)
@@ -326,21 +339,30 @@ def run(args):
             f"{args.drag_moves}-step drag in {drag_elapsed:.1f}s"
         )
 
-        # 3. The frame must show the scroll: the text view changed and the thumb
-        # left the top of the track (gray -> white).
+        # 3. M16.8: the held drag changed only the thumb strip; the document
+        # view moved once, on release.
         from PIL import Image
 
         with Image.open(before_path) as before_image:
             before = before_image.convert("RGB")
+        with Image.open(mid_path) as mid_image:
+            mid = mid_image.convert("RGB")
         with Image.open(after_path) as after_image:
             after = after_image.convert("RGB")
+        preview_diff, preview_box = differing_pixels(before, mid, TEXT_REGION)
+        preview_gray = gray_pixels(mid, THUMB_TOP_STRIP)
         text_diff, text_box = differing_pixels(before, after, TEXT_REGION)
         gray_before = gray_pixels(before, THUMB_TOP_STRIP)
         gray_after = gray_pixels(after, THUMB_TOP_STRIP)
         print(
-            f"[harness] text region diff {text_diff} px {text_box}; "
-            f"thumb strip gray {gray_before} -> {gray_after}"
+            f"[harness] held-drag text region diff {preview_diff} px "
+            f"{preview_box}; thumb strip gray {gray_before} -> {preview_gray}"
         )
+        print(
+            f"[harness] released text region diff {text_diff} px {text_box}; "
+            f"thumb strip gray {preview_gray} -> {gray_after}"
+        )
+        deferred = preview_diff == 0 and preview_gray == 0
         scrolled = text_diff > 2000 and gray_before > 0 and gray_after == 0
 
         # 4. Ctrl+Q must end the editor `Ok` with no budget fault.
@@ -372,8 +394,12 @@ def run(args):
             outcome == "Ok"
             and not budget_faults
             and not summary
+            and deferred
             and scrolled
-            and claims >= 1000
+            # The pixel evidence above is the real gate; the count only proves
+            # the guest consumed some of the burst (USB coalesces under TCG,
+            # and a deferred drag no longer burns a frame per step).
+            and claims >= 200
         )
         print(f"[harness] {'ok' if ok else 'FAIL'}")
         if not args.no_capture:

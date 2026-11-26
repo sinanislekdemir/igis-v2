@@ -69,7 +69,10 @@ decisions in `adr/`, and work items in `PLAN.md`.
   a switch is an origin change in the service: the compositor repaints the damaged
   rectangles from the retained canvases, so a moved window cannot leave stale content on
   the windows below and the cursor's restore source is always valid (spec 0026, ADR 0060;
-  it replaces ADR 0055).
+  it replaces ADR 0055). A scrollbar-thumb drag is **deferred**: the editor, browser and
+  `/lib` file dialog move only a preview thumb and recomposite the scrollbar strip while
+  the button is held, and the application jumps to the dropped position on release, so a
+  heavy document is never re-rendered per drag step (spec 0013, spec 0018, M16.8).
 
 ## Ground rules
 

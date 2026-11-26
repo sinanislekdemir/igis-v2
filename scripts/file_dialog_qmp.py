@@ -6,6 +6,9 @@ the interactive editor (it opens `base/child`) and drives the M9.3 dialog:
 
 1. Ctrl+O opens the dialog. Its service chrome and client face are checked at
    known pixels, and the whole dialog frame must differ from the editor frame.
+   The listing starts in `base` (88 entries in the shell image, 17 visible), so
+   Home then a held thumb drag proves the M16.8 deferral: the rows stay put
+   while the strip moves, and the release applies the dropped position.
 2. Backspace goes from `base` to the root, the `lib` row is clicked, Enter
    descends, the `math.ig` row is clicked and `Open` is clicked. The editor
    must load `lib/math.ig`: the text and path regions change and the dialog
@@ -130,6 +133,12 @@ class Tablet:
             },
         )
         time.sleep(0.3)
+
+    def button(self, x, y, down):
+        """A raw button edge at an absolute position (a held drag step)."""
+        events = self._axis(x, y)
+        events.append({"type": "btn", "data": {"down": down, "button": "left"}})
+        self.qmp.command("input-send-event", {"events": events})
 
 
 def send_key(qmp, qcode):
@@ -312,6 +321,9 @@ def run(args):
     scratch = tempfile.mkdtemp(prefix="igis-file-dialog-")
     before_path = os.path.join(scratch, "before.png")
     dialog_path = os.path.join(scratch, "dialog.png")
+    hold_before_path = os.path.join(scratch, "hold_before.png")
+    hold_mid_path = os.path.join(scratch, "hold_mid.png")
+    hold_after_path = os.path.join(scratch, "hold_after.png")
     dialog2_path = os.path.join(scratch, "dialog2.png")
     dialog3_path = os.path.join(scratch, "dialog3.png")
     opened_path = os.path.join(scratch, "opened.png")
@@ -438,6 +450,61 @@ def run(args):
         )
         if changed < 10000 or not chrome_ok:
             print("[harness] FAIL: the dialog window did not appear correctly")
+            return 1
+
+        # 1b. Deferred thumb drag (M16.8). The dialog opens in `base`, which
+        # has more entries than the 17-row view. Home puts the view at the top,
+        # so the thumb starts at the track top; the held drag must leave the
+        # rows alone and move only the strip, and the release applies the drop.
+        send_key(qmp, "home")
+        time.sleep(0.3)
+        tablet.move(10, 10)
+        time.sleep(0.2)
+        capture(qmp, hold_before_path)
+        scroll_top = content_y + LIST_TOP + 2
+        scroll_bottom = content_y + LIST_TOP + BODY_H - 4
+        press_x = scroll_x + 8
+        press_y = scroll_top + 20
+        tablet.move(press_x, press_y)
+        time.sleep(0.15)
+        tablet.button(press_x, press_y, True)
+        time.sleep(0.15)
+        for step in range(1, 21):
+            y = press_y + (scroll_bottom - press_y) * step // 20
+            tablet.button(press_x, y, True)
+            time.sleep(0.02)
+        time.sleep(0.3)
+        capture(qmp, hold_mid_path)
+        tablet.button(press_x, scroll_bottom, False)
+        time.sleep(0.5)
+        tablet.move(10, 10)
+        time.sleep(0.2)
+        capture(qmp, hold_after_path)
+
+        with Image.open(hold_before_path) as handle:
+            hold_before = handle.convert("RGB")
+        with Image.open(hold_mid_path) as handle:
+            hold_mid = handle.convert("RGB")
+        with Image.open(hold_after_path) as handle:
+            hold_after = handle.convert("RGB")
+        rows_region = (list_x + 1, list_y + 1, LIST_W - 2, LIST_ROWS * LINE_H)
+        strip_region = (scroll_x + 2, list_y + 2, SCROLL_W - 4, 20)
+        held_rows, held_rows_box = differing_pixels(
+            hold_before, hold_mid, rows_region
+        )
+        held_strip, held_strip_box = differing_pixels(
+            hold_before, hold_mid, strip_region
+        )
+        released_rows, released_rows_box = differing_pixels(
+            hold_mid, hold_after, rows_region
+        )
+        print(
+            f"[harness] held dialog drag: rows {held_rows} px {held_rows_box}, "
+            f"thumb strip {held_strip} px {held_strip_box}; after release rows "
+            f"{released_rows} px {released_rows_box}"
+        )
+        if held_rows != 0 or held_strip == 0 or released_rows < 100:
+            print("[harness] FAIL: the dialog thumb drag was not deferred")
             return 1
 
         # 2. base -> root -> lib -> math.ig -> Open.

@@ -274,7 +274,10 @@ draws with `stdlib.ui_*` and the `syslib` graphics primitives only. Up/Down,
 PageUp/PageDown, Home/End, Enter, Backspace/Ctrl+Up and Escape work; a row click
 selects and a double-click opens, the visible `Up`/`Open`/`Cancel` buttons work,
 the scrollbar track pages and the thumb drags, and the close box cancels through
-the owner `EventKind.Close` request. An owner `Expose` re-reads
+the owner `EventKind.Close` request. The thumb drag is deferred (M16.8): held
+primary-button moves move only a preview thumb and recomposite just the
+scrollbar strip, and the release applies the dropped position to `top` once and
+repaints the listing. An owner `Expose` re-reads
 `window_content_rect` so a dragged dialog redraws at its new origin, and only a
 visible change repaints.
 
@@ -341,3 +344,4 @@ window and task that host it, and the caller's own window stays behind.
 | 2026-11-20 | L3 adds the source extension: `samples/apps/{base,system}` and `samples/tests/apps/{base,system}` sources are `<name>.ig`, and the stager drops `.ig` so image names stay extensionless (`base/shell`). `lib` keeps `<name>.ig`. `langhost` maps image paths to `.ig` sources, lists bare command names, and reports a path that descends through an application file (`base/child/x`) as `Invalid`. |
 | 2026-11-20 | M11 adds the top-level `apps` directory and its category tree (`apps/accessories`, `apps/games`, `apps/productivity`, `apps/utilities`). Bare launch names are searched in `base`, those four categories, then `system`; explicit paths are unchanged. The shipped GUI sources move under `samples/apps/apps/<category>/`. |
 | 2026-11-21 | L1/X1 add the read-only `image/` PNG corpus, staged from `samples/image`, and the apps image grows to 64 MiB to hold it (spec 0023). `langhost` resolves `image` and `image/...` against the sibling `samples/image` tree. |
+| 2026-11-26 | M16.8 defers the dialog's scrollbar-thumb drag, matching the browser and editor: held primary-button moves move a `scroll_preview` thumb and recomposite only the scrollbar rectangle, the list rows and `top` stay fixed, and the release applies the dropped position once and clamps the selection visible. Track clicks and keys keep their immediate behavior. No opcode, builtin, file API or `stdlib` change. |

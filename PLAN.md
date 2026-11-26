@@ -39,7 +39,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   (97), the region claim deleted, the desktop shell on planes, and the corpus inside
   scopes. 637 host tests; golden `c9546f45…79fbc65e` (one intended re-baseline for the
   22-pixel work area). Remaining: M16.7's `perf` re-take, then **M17 (local client
-  coordinates)**. The deferred table below and
+  coordinates)**. M16.8 (deferred scrollbar drag in the editor, browser and
+  `/lib` file dialog) landed on 2026-11-26. The deferred table below and
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) hold the parked work.
 - **Historical context (M8–M10; counts below are from those slices):** **505 host
   tests**; specs 0001–0019 (0018 and 0019 Implemented); ABI v1 at 75 opcodes; M5,
@@ -2461,6 +2462,28 @@ flag, the persistent region claim, the console's explicit-clip paint path and th
   `perf` re-take stays open because the sample is a `--shell` test app and the number is
   a documentation datum, not a gate. Landed so far: 637 host tests, builtins 92–97,
   region claim 60/61 deleted, golden `c9546f45…79fbc65e`.
+- [x] **M16.8 Deferred scrollbar drag in the editor, browser and file dialog.**
+  User request: "scrollbar önce çekilsin, mouse scrollbar'ı release ettiğinde
+  scrollbar uygulamaya mevcut konumunu bildirsin, uygulama oraya gitsin. aktif
+  scroll çünkü ağır içerikte crashe yol açıyor." A held thumb drag no longer
+  scrolls the content: each move updates a `scroll_preview` thumb, redraws the
+  strip into the retained canvas and recomposites only
+  `(scroll_x, scroll_y, ScrollW, BodyH)` with `syslib.present` (spec 0026 C7);
+  the list/document rows, selection/caret and `top`/`top_line` stay put. The
+  release (or a lost button) applies the preview once, clamps the
+  selection/caret visible and repaints one frame. Track clicks and keys remain
+  immediate. The editor caches the line count at the press so a drag step never
+  rescans a 128 KiB document; `thumb_metrics` factors the shared
+  `stdlib.ui_scrollbar` geometry. Proof: `editor check` and `browser check` add
+  mid-drag assertions (preview applied to no view field; strip pixels already
+  moved), `scripts/editor_scroll_qmp.py` captures during the hold (text region
+  0 px, thumb strip moved, release 12,575 px, `exit Ok` 668 claims, no budget
+  fault) on `-smp 4`/`-smp 1`, and `scripts/file_dialog_qmp.py` drags the
+  dialog's thumb (held rows 0 px, strip 240 px, release rows 3,844 px). No
+  opcode, builtin, `Host`, `stdlib` or kernel change; specs 0013/0018 updated.
+  Note: the dialog harness's later navigation step and `input_routing_qmp.py`'s
+  Apps row fail on this tree before the drag proof (stale rows; they fail at
+  HEAD too).
 
 ### M17: local client coordinates
 
