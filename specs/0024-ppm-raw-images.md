@@ -141,10 +141,10 @@ add a kernel codec, compression, or any Netpbm format other than P6.
   and ends at `Ready`/100%. The PPM row loop is promoted to realtime when
   admission allows and heartbeats once per output row (admission refusal falls
   back to the normal class); each row read is bounded.
-- **V6 (MUST):** The opening window's queued `Expose` is answered with
-  `window_present`, not a second PPM open/row pass (spec 0023 V5). A later real
-  `Expose` still re-opens and re-reads the preview rows. One open therefore
-  performs one preview pass, not two back to back.
+- **V6 (MUST, implemented):** The opening window's queued `Expose` needs no answer,
+  exactly like every later one (spec 0023 V5): the retained canvas already holds the
+  preview, so the viewer never re-opens the header or re-reads the rows. One open
+  performs one preview pass.
 
 ## Design
 

@@ -2666,6 +2666,7 @@ context menu with editor/terminal/cut/copy/paste/delete.
 | Cursor composited into the shadow | a cursor-only fast path or a hardware cursor (open question 3) |
 | Window resize on a canvas (reallocate, reflow, scale) | a resize ticket (open question 4) |
 | Per-task scope slots instead of a scan of the surface tables | the resolution cost shows in `perf` |
+| Stop marking a whole-content `Expose` for origin-only damage (move, drag, raise, restore): the retained canvas needs no client repaint, so every app currently redraws once per drag step. Keep the mark for `open`/mode change (or for focus, if a client wants it) via an explicit expose set instead of deriving it from the chrome damage list | the drag cost shows in `perf`, or the next window-service ticket; needs spec 0011 W11/W12/W31 and 0026 C16 amendments plus new expectations in `local_coords_qmp`, `window_repaint_qmp` and `browser_drag_qmp` |
 
 ## Deferred (not UI; pick up when they matter)
 

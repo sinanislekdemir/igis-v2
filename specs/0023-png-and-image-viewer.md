@@ -101,12 +101,12 @@ colour, gamma/colour-management or a kernel codec.
 - **V3 (MUST, implemented):** The viewer supports `check` and `shot` modes like the other
   GUI applications, and its file dialog starts at `image`.
 - **V4 (MUST, implemented):** The viewer is listed under `Accessories` in the Apps menu.
-- **V5 (MUST, implemented):** The initial render owns the final window canvas. The
-  window service also queues one whole-content `Expose` for a newly opened window;
-  the viewer answers that first `Expose` with `window_present` and does **not**
-  decode the image again. A later, real `Expose` (move, switch, mode change) re-runs
-  the draw with `png.rewind`/a fresh PPM open as before. Opening one image therefore
-  decodes it exactly once, not twice back to back.
+- **V5 (MUST, implemented):** The initial render owns the final window canvas for the
+  window's whole life. The service keeps that canvas and recomposites it (spec 0026
+  C10/C14/C16), so a move, raise, restore or display-mode change is an origin change in
+  the service and needs nothing from this client. The viewer therefore ignores every
+  `Expose`, including the one the service queues for a newly opened window, and decodes
+  the image exactly once.
 
 ## Design
 
@@ -301,8 +301,9 @@ function png.next_row(d: var Decoder; row: var bytes[16384];
   unfiltered row so the first row sees zeros exactly as after `open`. The
   prefix, `idat_len`, palette/`tRNS` and geometry are kept. It returns `Ok` for
   an opened decoder and `Invalid` when no prefix/header is present; it performs
-  no `fs_read`. A viewer uses it to repaint an `Expose` without re-reading the
-  512 KiB prefix.
+  no `fs_read`. It is for a client that must re-decode without re-reading the
+  512 KiB prefix; the bundled viewer does not need it, because its retained
+  canvas is never invalidated by a move (spec 0026 C10/C16).
 - **Accepted subset.** 8-bit colour type 0 (grey), 2 (RGB), 3 (palette), 4
   (grey+alpha) and 6 (RGBA). Bit depths other than 8, unknown colour types,
   non-zero compression/filter methods, interlace flags other than 0/1, and
@@ -328,7 +329,8 @@ function png.next_row(d: var Decoder; row: var bytes[16384];
   `trns: bytes[256]`, and scalars: 611,360 bytes compiled. It is well under the
   1 MiB state cap. The caller's `row` is `bytes[16384]`. `rewind` keeps the
   staged prefix and geometry in that state and resets only the inflater and row
-  cursor, so an `Expose` repaint reads no file bytes and allocates nothing.
+  cursor, so a client that re-decodes over the staged prefix reads no file bytes
+  and allocates nothing.
 - **Prefix and statuses.** `inflate.read` is called with the staged
   `(idat, idat_len)` on every row; `in_pos` persists inside the inflater, so a
   row is resumable across calls. `WouldBlock` maps to `CapacityExceeded` when
@@ -387,26 +389,22 @@ run image_viewer check            deterministic check, `image_viewer: ok`
   it is redrawn and presented every 8 rows, and the last row draws `Ready` and
   a full bar. Pass 1 for the PNG corpus is 472x354 … 576x371; the PPM corpus
   preview is the same geometry.
-- **Budget and repaint.** The first PNG frame stages the IDAT prefix with
+- **Budget and repaint.** The PNG frame stages the IDAT prefix with
   `png.open` under the **normal** class (this part fits the normal 10 s /
   200M-step budget). Only after a successful `open` does the PNG row loop call
   `core.realtime_on()`, heartbeat immediately and once per decoded row, and
-  leave the task realtime while it pumps events. An `Expose` repaint calls
-  `png.rewind` over the already-staged prefix (no `fs_read`) and runs the same
-  boosted row loop. `lib.inflate` heartbeats internally every 64 symbols/header
-  items and every 1 KiB of output, so even the first row cannot trip the 1 s
-  watchdog. PPM is promoted the same way when admission allows and heartbeats
-  once per output row; a refusal falls back to the normal class. Admission refusal (`Full`) is reported once and falls back to the normal
-  class; it never faults on admission.
-- **Expose.** The owner `Expose` re-runs the draw/present in window-local coordinates
-  (spec 0026 C8); it deliberately skips the white fill and redraws
-  only the status strip at 0% (without a present, so the last complete frame
-  stays on screen until the first 8-row progress present). PNG uses
-  `png.rewind` over the staged prefix; PPM re-opens the header and reads its
-  rows again. The service queues an initial expose for the new window, so the
-  image is never blanked. An image buffer is forbidden. A read/decode failure
-  on that path opens the same error panel. Close/Escape on the image window
-  exits.
+  leave the task realtime while it pumps events. `lib.inflate` heartbeats
+  internally every 64 symbols/header items and every 1 KiB of output, so even
+  the first row cannot trip the 1 s watchdog. PPM is promoted the same way when
+  admission allows and heartbeats once per output row; admission refusal (`Full`)
+  keeps the normal class, is reported once and never faults.
+- **Expose.** An owner `Expose` needs no answer: the window canvas is retained and
+  the compositor places it at the frame origin (spec 0026 C10/C14/C16), so a move,
+  raise, restore or mode change is an origin change in the service. The viewer
+  ignores it — the image is drawn, presented and decoded exactly once, and the
+  status strip is never reset to 0% by a repaint. An image buffer is forbidden. A
+  read/decode failure on that one render opens the same error panel. Close/Escape
+  on the image window exits.
 - **Check.** `png.probe("system/png_grad_il.png")` must report 16x16 with a
   2x2 interlace-1 output; `png.open` plus two `next_row` calls must yield
   (0,0) black, (1,0) (128,0,64), (0,1) (0,128,32) and (1,1) (128,128,96).
