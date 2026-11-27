@@ -16,8 +16,8 @@ unit desktop_shell;
 //
 //   File      enumerate the live windows into the terminal window
 //   Apps      pull-down: Calculator, Clock, Widgets, Image Viewer,
-//             Minesweeper, Text Editor, File Browser, Terminal, Settings;
-//             each is a non-blocking core.spawn
+//             Minesweeper, Text Editor, File Browser, Calendar, Terminal,
+//             Settings; each is a non-blocking core.spawn
 //   Windows   raise the terminal window (the existing "bring forward" item)
 //   Terminal  launch `shell` non-blocking; a later click raises the existing
 //             Terminal window instead of spawning a second shell
@@ -58,7 +58,7 @@ const
   SysMenuWidth = 224;
   SysMenuCount = 4;
   AppMenuWidth = 220;
-  AppMenuCount = 13;
+  AppMenuCount = 14;
   WindowMenuWidth = 220;
   WindowListCapacity = 16;
   AboutContentW = 420;
@@ -954,12 +954,13 @@ end;
 //   7  #Productivity
 //   8  Text Editor      apps/productivity/editor
 //   9  File Browser     apps/productivity/browser
-//  10  #Utilities
-//  11  Terminal         apps/utilities/terminal (always a new instance)
-//  12  Settings         apps/utilities/settings
+//  10  Calendar         apps/productivity/calendar
+//  11  #Utilities
+//  12  Terminal         apps/utilities/terminal (always a new instance)
+//  13  Settings         apps/utilities/settings
 //
 // Every item is a non-blocking `core.spawn`; the shell never waits. The menu
-// frame is `(menu_apps_x - 4, MenuHeight, AppMenuWidth, 13 * 16 + 2)`.
+// frame is `(menu_apps_x - 4, MenuHeight, AppMenuWidth, 14 * 16 + 2)`.
 
 procedure init_apps_menu();
 begin
@@ -973,9 +974,10 @@ begin
   app_items[7] := "#Productivity";
   app_items[8] := "Text Editor";
   app_items[9] := "File Browser";
-  app_items[10] := "#Utilities";
-  app_items[11] := "Terminal";
-  app_items[12] := "Settings";
+  app_items[10] := "Calendar";
+  app_items[11] := "#Utilities";
+  app_items[12] := "Terminal";
+  app_items[13] := "Settings";
   pos := 0;
   while pos < AppMenuCount do
   begin
@@ -1146,12 +1148,14 @@ begin
     launch_app("apps/productivity/editor", "Text Editor")
   else if action = 9 then
     launch_app("apps/productivity/browser", "File Browser")
-  else if action = 11 then
+  else if action = 10 then
+    launch_app("apps/productivity/calendar", "Calendar")
+  else if action = 12 then
   begin
     terminal_runs := terminal_runs + 1;
     launch_shell();
   end
-  else if action = 12 then
+  else if action = 13 then
     launch_app("apps/utilities/settings", "Settings");
 end;
 
@@ -1682,14 +1686,15 @@ begin
       stdlib.ui_menu_is_header(app_items[0])
         and stdlib.ui_menu_is_header(app_items[5])
         and stdlib.ui_menu_is_header(app_items[7])
-        and stdlib.ui_menu_is_header(app_items[10]));
+        and stdlib.ui_menu_is_header(app_items[11]));
     verify(
       "apps item labels",
       app_items[1] = "Calculator" and app_items[2] = "Clock"
         and app_items[3] = "Widgets" and app_items[4] = "Image Viewer"
         and app_items[6] = "Minesweeper"
         and app_items[8] = "Text Editor" and app_items[9] = "File Browser"
-        and app_items[11] = "Terminal" and app_items[12] = "Settings");
+        and app_items[10] = "Calendar"
+        and app_items[12] = "Terminal" and app_items[13] = "Settings");
     verify(
       "apps image viewer item",
       app_items[4] = "Image Viewer"
@@ -1698,13 +1703,14 @@ begin
       "apps headers not selectable",
       not stdlib.ui_menu_selectable(app_items[0], uint(0), 0)
         and not stdlib.ui_menu_selectable(app_items[5], uint(0), 5)
-        and not stdlib.ui_menu_selectable(app_items[10], uint(0), 10));
+        and not stdlib.ui_menu_selectable(app_items[11], uint(0), 11));
     verify(
       "apps items are selectable",
       stdlib.ui_menu_selectable(app_items[1], uint(0), 1)
         and stdlib.ui_menu_selectable(app_items[4], uint(0), 4)
-        and stdlib.ui_menu_selectable(app_items[11], uint(0), 11)
-        and stdlib.ui_menu_selectable(app_items[12], uint(0), 12));
+        and stdlib.ui_menu_selectable(app_items[10], uint(0), 10)
+        and stdlib.ui_menu_selectable(app_items[12], uint(0), 12)
+        and stdlib.ui_menu_selectable(app_items[13], uint(0), 13));
     // Opening the menu takes the modal grab and launches nothing.
     handle_menu(menu_apps_x + 4, 10);
     verify("apps menu open", handled and app_open and not system_open);
@@ -1764,12 +1770,12 @@ begin
     // emulator so no long-lived child is left behind.
     handle_menu(menu_apps_x + 4, 10);
     pos := 0;
-    while app_selected <> 11 and pos < AppMenuCount do
+    while app_selected <> 12 and pos < AppMenuCount do
     begin
       handle_apps_key(uint(0x1130000));
       pos := pos + 1;
     end;
-    verify("apps terminal selected", app_selected = 11);
+    verify("apps terminal selected", app_selected = 12);
     handle_apps_key(uint(0x1030000));
     verify(
       "apps terminal launches",

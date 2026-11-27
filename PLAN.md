@@ -14,8 +14,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Current state (M16):** **637 host tests**; specs 0001–0026 (0025 and 0026 implemented);
-  ABI v1 at 75 opcodes with builtins 80–91; **M2–M15 complete**. Boot loads only
+- **Current state (M16):** **638 host tests**; specs 0001–0027 (0025 and 0026 implemented,
+  0027 implemented); ABI v1 at 75 opcodes with builtins 80–91; **M2–M15 complete**. Boot loads only
   `kernel.elf`: the ISO carries no application image, and the 128 MiB read-only ext2
   volume on `ide0` unit 1 is mounted on demand through `ext2w` (229 MiB free in a
   256 MiB guest), with `/home` on the primary master. On TCG/4 cores the desktop is
@@ -25,7 +25,9 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   corpus under `image/`; `apps/accessories/image_viewer` dispatches PNG (Adam7
   pass-1 through `lib.png`/`lib.inflate`) and PPM (fixed-stride row seek and 1/8
   sampling through `lib.ppm`), both through `syslib.blit_rgb`, with no full-image
-  buffer. The Settings app (`apps/utilities/settings`) changes the
+  buffer. `apps/productivity/calendar` is a read-only six-row month grid with an
+  RTC today and month/year navigation (spec 0027). The Settings app
+  (`apps/utilities/settings`) changes the
   real display mode through the Bochs VBE dispi (spec 0022, ADR 0056): presets,
   allocation-first shadow swap, window reflow and the Apps menu row. A window
   switch or a completed move runs a full-stack repaint (spec 0011 W31, ADR 0055).
@@ -37,11 +39,12 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   (`window_begin`, builtin 92), the compositor (recomposition replaced the erase/
   `covers_from`/snapshot/visible-parts machinery), planes (93–96), `work_area_reserve`
   (97), the region claim deleted, the desktop shell on planes, and the corpus inside
-  scopes. 637 host tests; golden `c9546f45…79fbc65e` (one intended re-baseline for the
+  scopes. 638 host tests; golden `c9546f45…79fbc65e` (one intended re-baseline for the
   22-pixel work area). Remaining: M16.7's `perf` re-take, then **M17 (local client
   coordinates)**. M16.8 (deferred scrollbar drag in the editor, browser and
   `/lib` file dialog), M16.9 (editor dark theme) and M16.10 (sparse line index
-  and per-run normal-task watchdog) landed on 2026-11-26. The deferred table below and
+  and per-run normal-task watchdog) landed on 2026-11-26, as did the Calendar
+  application (spec 0027). The deferred table below and
   [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) hold the parked work.
 - **Historical context (M8–M10; counts below are from those slices):** **505 host
   tests**; specs 0001–0019 (0018 and 0019 Implemented); ABI v1 at 75 opcodes; M5,
@@ -2515,6 +2518,22 @@ flag, the persistent region claim, the console's explicit-clip paint path and th
   claims), and `shot` mode now holds its frame with `core.sleep(50)` instead
   of a busy poll, so a large-file shot ends `Ok` after 1,695 claims. No
   opcode, builtin, `Host` or `stdlib` change.
+
+### Post-M16 application work
+
+- [x] **Calendar window (spec 0027).** `samples/apps/apps/productivity/calendar` draws a
+  Monday-first six-row month grid in a 252×240 window, reads today's date from the CMOS
+  RTC (BCD/binary, century fallback), inverts today only in the host month, and walks
+  months/years with the arrow keys or its `<`/`>` buttons; a day click selects. `check`
+  verifies leap/month/weekday/navigation logic plus bezel, today fill, hit tests,
+  one Left-key dispatch and one `>` press/release; `shot` holds the host month; the host
+  path prints `calendar: host ok`. The Apps menu gains `Productivity` → `Calendar`
+  (14 rows):
+  `#Utilities` moves to 11, Terminal to 12 and Settings to 13. Proofs: 638 host tests,
+  `calendar: ok` and `calendar: ready 2026-11-26` on `-smp 4`/`-smp 1`, `desktop_shell
+  check` with the new item table, and `scripts/calendar_qmp.py` launching it from the
+  menu, clicking next month, capturing `build/screenshots/igis-calendar.png` and closing
+  on the close box on both core counts. No opcode, builtin, `Host` or `stdlib` change.
 
 ### M17: local client coordinates
 

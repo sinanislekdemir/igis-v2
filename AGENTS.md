@@ -30,7 +30,7 @@ decisions in `adr/`, and work items in `PLAN.md`.
 
 ## Current state
 
-- Specs 0001–0026 are accepted; **M2–M16 are complete** (desktop, language,
+- Specs 0001–0027 are accepted; **M2–M16 are complete** (desktop, language,
   filesystems, networking, terminal emulator, runtime display modes, PNG/PPM image
   viewer, kernel-only boot with the application volume on disk, and the composition
   model). Current milestone work is tracked in `PLAN.md`. **M16 (composition and
@@ -43,7 +43,7 @@ decisions in `adr/`, and work items in `PLAN.md`.
   machinery and the persistent region claim (60/61) are deleted. Client coordinates are
   still absolute screen coordinates translated by the surface origin; **M17 (local
   coordinates and window-local events)** is the deferred remainder.
-- **637 host tests** (556 language + 56 `net` + 23 `ext2w` + 2 builtin tests); ABI v1 has
+- **638 host tests** (557 language + 56 `net` + 23 `ext2w` + 2 builtin tests); ABI v1 has
   **75 opcodes** (runtime display modes add builtins 80–83; the machine-level bit and
   bulk buffer primitives are builtins 84–90, `syslib.blit_rgb` is 91, the surface model
   adds 92–97, no opcode).
@@ -63,7 +63,7 @@ decisions in `adr/`, and work items in `PLAN.md`.
   (`apps/utilities/terminal`) over kernel console sessions, a Settings app
   (`apps/utilities/settings`) that changes the real mode through the Bochs VBE dispi
   (spec 0022, ADR 0056), and source apps (`editor`, `browser`, `calculator`,
-  `minesweeper`, `clock_window`, `widgets`, `image_viewer`). The editor's File >
+  `minesweeper`, `clock_window`, `calendar`, `widgets`, `image_viewer`). The editor's File >
   Dark row (`Ctrl+D`) switches the whole client content to a dark palette
   (spec 0013); light mode is unchanged. The image viewer
   opens PNG (Adam7 pass-1 stream) and PPM (fixed-stride row seek and 1/8

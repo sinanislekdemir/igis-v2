@@ -199,14 +199,15 @@ resize. Those are M2.4/M2.5.
   Calculator drag/click proof. A boot desktop cannot halt the system by losing its own
   window.
 - **D20 (MUST):** The `Apps` item is the application-selection pull-down (M8.3, updated
-  by M11 and by the PNG viewer slice). It has one 16-pixel row per item, 13 rows in
-  four sections led by non-selectable header rows:
+  by M11, the PNG viewer slice and the calendar). It has one 16-pixel row per item,
+  14 rows in four sections led by non-selectable header rows:
   `Accessories` → `apps/accessories/calculator`, `apps/accessories/clock_window`,
   `apps/accessories/widgets`, `apps/accessories/image_viewer`;
   `Games` → `apps/games/minesweeper`;
-  `Productivity` → `apps/productivity/editor`, `apps/productivity/browser`;
+  `Productivity` → `apps/productivity/editor`, `apps/productivity/browser`,
+  `apps/productivity/calendar`;
   `Utilities` → `apps/utilities/terminal`, `apps/utilities/settings`. The frame is
-  `(menu_apps_x - 4, MenuHeight, 220, 13 * 16 + 2)` (210 pixels tall); it is drawn with
+  `(menu_apps_x - 4, MenuHeight, 220, 14 * 16 + 2)` (226 pixels tall); it is drawn with
   the M2.4.3 menu helpers, and a section header is a `#`-prefixed label that the helpers
   draw as plain non-selectable text. Opening the menu takes the modal popup input grab
   (spec 0011, W26) with the frame as the advisory rectangle and launches nothing;
@@ -216,12 +217,12 @@ resize. Those are M2.4/M2.5.
   never waits in normal mode. Every Terminal activation spawns a new emulator; there is
   no raise-first path. `F9` toggles Apps, `F10` toggles System, Up/Down move the
   highlight across selectable rows, Enter activates and Left/Right switch between the
-  two pull-downs. The check mode verifies the item table (rows 0–12; `Image Viewer` is
+  two pull-downs. The check mode verifies the item table (rows 0–13; `Image Viewer` is
   row 4 and selectable but is not launched, because its file dialog would block), the
   section headers, both menus' grab/open/close, one real launch (the `clock_window`
   deterministic check exits on its own and is reaped with `core.wait`), the outside-click
-  dismissal, the key switching and the pixels; the Settings row (12) is part of the item
-  table and is selectable, and the Terminal row is index 11. `scripts/apps_menu_qmp.py`
+  dismissal, the key switching and the pixels; the Settings row (13) is part of the item
+  table and is selectable, and the Terminal row is index 12. `scripts/apps_menu_qmp.py`
   proves a real `Clock` click on the boot desktop and a second Terminal activation.
   The shell also claims the persistent pointer-region claim
   `(0, 0, screen_w, MenuHeight)` at startup, in normal and check mode, and releases it on
@@ -438,3 +439,4 @@ while that id is its own; otherwise it presents what the service last left.
 | 2026-11-21 | Runtime display modes (spec 0022): `Utilities` gains `Settings`, the Apps frame grows to 12 rows, and the shell re-reads the screen size and re-claims the menu-bar region before a draw after a mode change. The item-table check includes the new row. |
 | 2026-11-21 | The PNG image viewer (spec 0023) adds `Accessories` → `Image Viewer` at row 4. The Apps menu is now 13 rows (210 pixels): rows 5/7/10 are the `#Games`, `#Productivity` and `#Utilities` headers, Minesweeper is 6, Text Editor 8, File Browser 9, Terminal 11 and Settings 12; the check mode's Terminal walk ends at index 11 and the item-table check confirms row 4 is `Image Viewer` and selectable (it is not launched, because its file dialog would block). `scripts/apps_menu_qmp.py` moves the File Browser row to y = 175 and the Terminal row to y = 207; the Clock row stays y = 63. No opcode, builtin or `stdlib` helper changes. |
 | 2026-11-25 | Surfaces and composition (ADR 0060, spec 0026): D3 paints each cell into the console window's own canvas in content-local coordinates and recomposites the frame, so the visible-parts/generation machinery is retired; D8 is rewritten because an application can no longer clear the screen at all (`syslib.clear` is scope-local, spec 0026 C5) and the log's canvas is its retained state; D10 puts the menu bar and pull-downs in planes with a reserved work area (C11–C13), which replaces the M8.4 region claim; D14 changes from "no work area" to the reserved strip; D17 adds the `CANVAS` lock between `WINDOW` and `SCREEN`; D13's pixel checks move inside their draw scopes. |
+| 2026-11-26 | The calendar (spec 0027) adds `Productivity` → `Calendar` at row 10. The Apps menu is now 14 rows (226 pixels): the `#Utilities` header moves to 11, Terminal to 12 and Settings to 13; Calendar is row 10. `scripts/apps_menu_qmp.py` and `scripts/boot_desktop_qmp.py` move the Terminal row to y = 223, and `scripts/settings_desktop_qmp.py` uses Settings row 13 (y = 239). No opcode, builtin or `stdlib` helper changes. |

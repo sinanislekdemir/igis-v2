@@ -2279,6 +2279,19 @@ fn clock_window_compiles_and_reports_the_host_path() {
     assert_eq!(result.output, b"clock_window: host ok\n".to_vec());
 }
 
+/// The spec 0027 calendar against `langhost`'s disabled screen: leap years,
+/// month lengths, weekday/lead/row math, navigation clamping and the host
+/// verdict run with no window.
+#[test]
+fn calendar_compiles_and_reports_the_host_path() {
+    let path = app_path("calendar");
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "calendar").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"calendar: host ok\n".to_vec());
+}
+
 /// The M5.1 calculator against `langhost`'s disabled screen: the same routine
 /// arithmetic, parsing, formatting, entry editing and key dispatch run with no
 /// window and print the host verdict.

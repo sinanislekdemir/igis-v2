@@ -56,15 +56,16 @@ is pinned ([ADR 0011](adr/0011-work-stealing-interpreters.md)). The shell is its
 application: a kernel REPL service compiles it at boot and starts it, and applications
 start others through a `run`/`spawn` request queue ([ADR 0017](adr/0017-repl-spawn-service.md)).
 
-**Status: implementation.** Specs 0001–0026 are accepted; milestones M2–M16 are complete
+**Status: implementation.** Specs 0001–0027 are accepted; milestones M2–M16 are complete
 (desktop, language, filesystems, networking, terminal emulator, runtime display modes,
-PNG/PPM image viewer, and the retained-surface composition model), 637 host tests pass, and
+PNG/PPM image viewer, and the retained-surface composition model), 638 host tests pass, and
 ABI v1 has 75 opcodes. The read-only 128 MiB image tree carries a full-resolution PPM P6
 corpus generated from the tracked
 `samples/image-src` JPEGs (the generated PPMs are not committed; the PNG decoder is
 retained), and `apps/accessories/image_viewer` opens both PNG (Adam7 pass-1) and PPM
 (fixed-stride 1/8 sampling) without a full-image buffer. A Settings application changes the real display
-mode through the QEMU `std` VGA Bochs VBE dispi (spec 0022, ADR 0056). See
+mode through the QEMU `std` VGA Bochs VBE dispi (spec 0022, ADR 0056), and the Calendar
+application shows the host month from the CMOS RTC (spec 0027). See
 [`AGENTS.md`](AGENTS.md) for the current state and [`PLAN.md`](PLAN.md) for what is next.
 
 | Document | Purpose |

@@ -38,10 +38,10 @@ os.makedirs(SHOT_DIR, exist_ok=True)
 DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-boot-desktop.png")
 
 # The desktop bar is `File / Apps / Windows / System`; Terminal is the last
-# Apps row (row 11: y = 22 + 1 + 11*16 + 8 = 207). Row 10 is the `#Utilities`
+# Apps row (row 12: y = 22 + 1 + 12*16 + 8 = 223). Row 11 is the `#Utilities`
 # section header and is not selectable.
 APPS_LABEL = (64, 10)
-TERMINAL_ROW = (140, 207)
+TERMINAL_ROW = (140, 223)
 
 
 def hid_axis(pixel, extent):

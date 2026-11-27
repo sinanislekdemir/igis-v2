@@ -33,6 +33,7 @@ revised as understanding improves, and their history lives in git.
 | 0024 | [Raw PPM images](0024-ppm-raw-images.md) | Implemented | samples/apps/lib, samples/apps/apps, samples/image, samples/tests/apps, langhost, xtask | 2026-11-22 |
 | 0025 | [The application image on a block device](0025-application-image-on-a-block-device.md) | Accepted | xtask, kernel ata/fs/ext2/main, ext2w, scripts | 2026-11-22 |
 | 0026 | [Composition, surfaces and coordinate spaces](0026-composition-and-surfaces.md) | Accepted | abi, compiler, interpreter, kernel gfx/window/console/sched, syslib, samples/apps | 2026-11-26 |
+| 0027 | [The calendar window](0027-calendar-window.md) | Implemented | samples/apps (calendar, desktop_shell), langhost, scripts | 2026-11-26 |
 
 ## Lifecycle
 
