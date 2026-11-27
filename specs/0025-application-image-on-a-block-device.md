@@ -6,7 +6,7 @@
 - **Supersedes:** none (amends spec 0018 X1–X2 delivery; spec 0019 unchanged)
 - **Superseded by:** none
 - **ADRs:** 0014, 0015 (superseded by 0059), 0019, 0059
-- **Updated:** 2026-11-22
+- **Updated:** 2026-11-27
 
 ## Context
 
@@ -67,7 +67,8 @@ format, the `/home` volume, the ABI, or the desktop's boot order (ADR 0029).
 
 - **B4 (MUST):** The image is the same ext2 tree as today: 1 KiB blocks, revision 1,
   `INCOMPAT_FILETYPE` as the only incompatible feature, built by `xtask image` from
-  `samples/apps` and the generated `samples/image` corpus (spec 0018 X1–X2).
+  `samples/apps`, the generated `samples/image` corpus and the committed
+  `samples/icons/ppm` icon set (spec 0018 X1–X2; spec 0028).
 - **B5 (MUST):** The two drives on `ide0` share one register set, so every port
   sequence on that channel (identify, read, write) runs under one kernel lock, with the
   drive selected per command. There is no per-device channel lock.
@@ -89,7 +90,7 @@ format, the `/home` volume, the ABI, or the desktop's boot order (ADR 0029).
   the file API.
 - **B10 (MUST):** The boot self-check over the new reader proves the same three facts as
   today (`tree ok`): `base/shell` exists and is a regular file, its first byte streams,
-  and the root lists `base`, `apps`, `home`, `lib`, `system` and `image`.
+  and the root lists `base`, `apps`, `home`, `lib`, `system`, `image` and `icons`.
 
 ### Failure
 
@@ -234,3 +235,4 @@ kind), mapped from `ext2w::Entry`; callers do not change.
 | 2026-11-22 | M15.3 landed (1.70 s to ready, 229 MiB free). B8 now names the frame pool; B19/B20 added because `ext2w::read_at` walks from block zero, making the PPM preview cost 329 s once reads are real I/O. |
 | 2026-11-22 | Implemented (M15.5): 1.8 s to `desktop_shell: ready`, 229 MiB free, the viewer opens the full-resolution sample in 45-48 s, `--no-apps` halts with `apps: no image`, and the visual golden is unchanged. |
 | 2026-11-22 | B21 added (open question 1 resolved): `xtask image` fsck-checks the volume it just built, validates the primary superblock, and fails the build on any inconsistency. |
+| 2026-11-27 | M18 stages the committed 32×32 PPM icon set at the new read-only top-level `icons/` directory (spec 0028); the boot tree check now expects seven directories. No kernel, ABI or block-device change. |

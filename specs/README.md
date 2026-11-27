@@ -34,6 +34,7 @@ revised as understanding improves, and their history lives in git.
 | 0025 | [The application image on a block device](0025-application-image-on-a-block-device.md) | Accepted | xtask, kernel ata/fs/ext2/main, ext2w, scripts | 2026-11-22 |
 | 0026 | [Composition, surfaces and coordinate spaces](0026-composition-and-surfaces.md) | Accepted | abi, compiler, interpreter, kernel gfx/window/console/sched, syslib, samples/apps | 2026-11-26 |
 | 0027 | [The calendar window](0027-calendar-window.md) | Implemented | samples/apps (calendar, desktop_shell), langhost, scripts | 2026-11-26 |
+| 0028 | [RGB icon assets and the icon view widget](0028-icon-assets-and-icon-view.md) | Implemented | samples/icons, scripts, xtask, samples/apps/lib, samples/apps/apps/productivity/browser, samples/tests/apps, langhost | 2026-11-27 |
 
 ## Lifecycle
 

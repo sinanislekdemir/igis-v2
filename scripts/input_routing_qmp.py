@@ -13,12 +13,12 @@ window's owner.
 The harness boots `build/igis.iso` (the boot desktop stays alive throughout)
 and proves, with the desktop and the Browser both live:
 
-1. Launch File Browser from Apps. Move the pointer over the third list row
-   (a directory in every image), capture, click the row, capture: the list and
-   preview must change, proving the click reached the Browser instead of the
-   desktop. Then send Enter (a key event addressed to the focused Browser
-   window) and capture: the path line and entry count/list must change, proving
-   the Browser navigated into the directory.
+1. Launch File Browser from Apps. Move the pointer over the second icon-grid
+   cell (`base`, a directory in every image), capture, click the cell, capture:
+   the selection band and the grid must change, proving the click reached the
+   Browser instead of the desktop. Then send Enter (a key event addressed to the
+   focused Browser window) and capture: the path line and icon grid must change,
+   proving the Browser navigated into the directory.
 2. Open System -> About, click About's close box, and require
    `desktop_shell: about closed`. The Browser stays live. Open About again and
    press Escape, requiring a second `about closed`; the desktop must still be
@@ -57,10 +57,10 @@ os.makedirs(SHOT_DIR, exist_ok=True)
 DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-input-routing.png")
 
 # `desktop_shell` menu geometry: `File` starts at x = 24, `Apps` at x = 56 and
-# its pull-down frame is (52, 22, 176, 98). Row 3 (`File Browser`) is
-# y = 23 + 3 * 16 = 71..86; row 0 (`Calculator`) is y 23..38.
+# its pull-down frame starts at y = 22 with 16-pixel rows. `File Browser` is
+# row 9 (centre y = 31 + 9*16 = 175); `Calculator` is row 1 (centre y = 47).
 APPS_LABEL = (64, 10)
-BROWSER_ROW = (140, 159)
+BROWSER_ROW = (140, 175)
 CALCULATOR_ROW = (140, 47)
 # The `System` label starts at x = 208; its pull-down frame is
 # (204, 22, 224, 66) and row 0 (`About igis-v2`) is y 23..38. Row 0 is clicked
@@ -73,30 +73,32 @@ APPLE = (10, 10)
 # (y >= 90) so the click reaches the Desktop window while the Browser is live.
 DESKTOP_CLOSE = (609, 80)
 
-# `samples/apps/apps/productivity/browser.ig` opens content 680x480 at (160, 90); content
-# origin (161, 106). `ListLeft` 8, `ListTop` 30, `LineH` 16, `BodyH` 420.
+# `samples/apps/apps/productivity/browser.ig` opens content 680x480 at (160, 90);
+# content origin (161, 106). The full-width icon grid is at content + (8, 30),
+# 640x420, with 100x68 cells (6 columns, 6 rows); the scrollbar is at
+# content + (656, 30), 16x420.
 BROWSER_CONTENT = (161, 106)
-BROWSER_LIST_X = BROWSER_CONTENT[0] + 8
-BROWSER_LIST_Y = BROWSER_CONTENT[1] + 30
-BROWSER_LIST_W = 342
-# Third row centre: list_y + 1 + 2 * 16 + 8.
-BROWSER_ROW_THREE = (BROWSER_LIST_X + 40, BROWSER_LIST_Y + 41)
+BROWSER_GRID_X = BROWSER_CONTENT[0] + 8
+BROWSER_GRID_Y = BROWSER_CONTENT[1] + 30
+BROWSER_GRID_W = 640
+# Root grid order is lost+found, apps, base, home, icons, image, lib, system:
+# cell 2 is `base` (a long directory). The icon centre of cell 2 is
+# grid + (4 + 2*100 + 50, 4 + 16).
+BROWSER_CELL_BASE = (BROWSER_GRID_X + 254, BROWSER_GRID_Y + 20)
+BROWSER_ROW_THREE = BROWSER_CELL_BASE
 # The visible `Up` button is content + (ContentW - 8 - 104 - 8 - 44, 2) =
 # (677, 108), 44x18; its centre is (699, 117). `home writable` is 13 code
 # points (104 px) in the 8x8 UI font.
 BROWSER_UP_BUTTON = (699, 117)
-# Root row 2 (`base`, a long directory; the image's directory order is
-# lost+found, apps, base, home, lib, system). The scrollbar is at
-# content + (352, 30), track 16x420, with the thumb near the top.
-BROWSER_ROW_BASE = (BROWSER_LIST_X + 40, BROWSER_LIST_Y + 41)
-BROWSER_SCROLL_X = BROWSER_CONTENT[0] + 352 + 8
+BROWSER_ROW_BASE = BROWSER_CELL_BASE
+BROWSER_SCROLL_X = BROWSER_CONTENT[0] + 656 + 8
 BROWSER_SCROLL_TOP = BROWSER_CONTENT[1] + 30 + 2
 BROWSER_SCROLL_BOTTOM = BROWSER_CONTENT[1] + 30 + 420 - 4
-SCROLL_REGION = (BROWSER_CONTENT[0] + 352, BROWSER_CONTENT[1] + 30, 16, 420)
-# The path line is the first 22 pixels of the content; the list strip is the
-# first five rows plus the selection/preview band.
+SCROLL_REGION = (BROWSER_CONTENT[0] + 656, BROWSER_CONTENT[1] + 30, 16, 420)
+# The path line is the first 22 pixels of the content; the grid region covers
+# the first row and the selection band.
 PATH_REGION = (BROWSER_CONTENT[0], BROWSER_CONTENT[1], 360, 21)
-LIST_REGION = (BROWSER_LIST_X, BROWSER_LIST_Y, BROWSER_LIST_W, 90)
+LIST_REGION = (BROWSER_GRID_X, BROWSER_GRID_Y, BROWSER_GRID_W, 90)
 
 # `samples/apps/apps/accessories/calculator.ig`: content 300x360 at frame origin (180, 100),
 # so the content origin is (181, 116). The display is content + (8, 10),
@@ -346,9 +348,9 @@ def run(args):
         time.sleep(1.2)
         print("[harness] File Browser launched (desktop alive)")
 
-        # Move over the third list row, capture, then click it. The pointer
-        # does not move between the two captures, so a clean-cursor pixel diff
-        # isolates the selection/preview change caused by the click.
+        # Move over the second icon cell (`base`), capture, then click it. The
+        # pointer does not move between the two captures, so a clean-cursor
+        # pixel diff isolates the selection-band/grid change caused by the click.
         move(qmp, *BROWSER_ROW_THREE, width, height)
         time.sleep(0.3)
         capture(qmp, before_click_path)
@@ -366,11 +368,11 @@ def run(args):
             before_click, after_click, LIST_REGION
         )
         print(
-            f"[harness] list row click changed {click_changed} pixels "
+            f"[harness] grid cell click changed {click_changed} pixels "
             f"at {click_bbox}"
         )
         if click_changed < 50:
-            print("[harness] FAIL: the list click did not reach the Browser")
+            print("[harness] FAIL: the grid click did not reach the Browser")
             return 1
 
         # Enter is a key event addressed to the focused Browser window; the
@@ -444,10 +446,11 @@ def run(args):
             f"{scroll_bbox}, list {scrolled_list} pixels at {scrolled_bbox}"
         )
         if scroll_changed < 20 or scrolled_list < 100:
-            # M11 moved the GUI apps out of `base`; it now fits the 26-row
-            # view, so the thumb has no travel. The drag/scroll proof needs a
-            # directory longer than the view and is exercised by the test
-            # image's larger `base` corpus.
+            # M11 moved the GUI apps out of `base`; its 25 product entries fill
+            # five 6-column rows and fit the six-row grid, so the thumb has no
+            # travel. The drag/scroll proof needs a directory longer than the
+            # view and is exercised by `browser check` on the `--shell` image's
+            # larger `base` corpus.
             print(
                 "[harness] scrollbar has no travel (base fits the view); "
                 "drag proof skipped"

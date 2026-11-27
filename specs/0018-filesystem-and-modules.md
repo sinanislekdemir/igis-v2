@@ -6,7 +6,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0038
-- **Updated:** 2026-11-18
+- **Updated:** 2026-11-27
 
 ## Context
 
@@ -34,8 +34,8 @@ mount table. `stdlib` stays embedded and is not moved into the image.
 ### Layout and path syntax
 
 - **L1 (MUST):** The application image is one read-only ext2 tree (spec 0015) with
-  the top-level directories `lib`, `base`, `apps`, `home`, `system` and `image`.
-  The only other root entry is `mke2fs`'s `lost+found`.
+  the top-level directories `lib`, `base`, `apps`, `home`, `system`, `image` and
+  `icons`. The only other root entry is `mke2fs`'s `lost+found`.
 - **L2 (MUST):** `lib` holds importable module sources named `<name>.ig`; nesting is
   allowed (`lib/ui/menu.ig`).
 - **L3 (MUST):** `base` holds the command-line and session applications a user
@@ -142,9 +142,10 @@ mount table. `stdlib` stays embedded and is not moved into the image.
 
 - **X1 (MUST):** `xtask image` stages the shipped corpus `samples/apps` to the same
   paths in the image, dropping the `.ig` suffix from `base`/`system` sources and
-  keeping `lib` names, fills `home/` from `samples/home`, and stages the PNG
-  corpus `samples/image` to `image/`, creating real directories. No file is staged
-  at the image root.
+  keeping `lib` names, fills `home/` from `samples/home`, stages the PNG/PPM
+  corpus `samples/image` to `image/`, and stages the four committed 32×32 PPM
+  icons from `samples/icons/ppm` to `icons/`, creating real directories. No file
+  is staged at the image root.
 - **X2 (MUST):** `xtask image --shell` stages the test corpus `samples/tests/apps`
   over the shipped one (colliding names are an error) and omits `system/entrypoint`,
   so the fallback boot (`base/shell`) is exercised and every proof app is reachable.
@@ -174,6 +175,7 @@ mount table. `stdlib` stays embedded and is not moved into the image.
 ├── home/           user files           home/readme.txt (read-only)
 ├── system/         kernel/boot apps     system/entrypoint, system/system_probe
 ├── image/          PNG corpus           image/<name>.png (spec 0023)
+├── icons/          32×32 PPM icons      icons/folder.ppm (spec 0028)
 └── lost+found/     mke2fs (kind 1, unreadable, unchanged)
 ```
 
@@ -186,9 +188,11 @@ The source side splits into the shipped corpus
 (`samples/apps/{lib,base,apps,system}`) and the test-only corpus
 (`samples/tests/apps/{base,system}`); `samples/home` is
 the single seed for the image's `home` directory and the writable disk, and
-`samples/image` is the source of the read-only `image/` PNG corpus (spec 0023).
-Only the `--shell` test image overlays `samples/tests/apps`, so the product image
-contains just the shipped applications and the PNG corpus.
+`samples/image` is the source of the read-only `image/` PNG corpus (spec 0023),
+and `samples/icons/ppm` is the source of the read-only `icons/` PPM icon set
+(spec 0028). Only the `--shell` test image overlays `samples/tests/apps`, so the
+product image contains just the shipped applications, the image corpus and the
+icon set.
 
 ### Resolution and validation
 
@@ -196,7 +200,7 @@ One validator implements L6 for all call sites. A resolver then:
 
 1. rejects an empty path, a leading/trailing `/`, an empty `.`/`..` component,
    more than 8 components, or a component over 64 bytes;
-2. walks `lib`/`base`/`apps`/`home`/`system`/`image` from the root, one
+2. walks `lib`/`base`/`apps`/`home`/`system`/`image`/`icons` from the root, one
    directory at a time;
 3. returns `NotFound` for a missing component, `Invalid` for a kind-2 inode.
 
@@ -345,3 +349,4 @@ window and task that host it, and the caller's own window stays behind.
 | 2026-11-20 | M11 adds the top-level `apps` directory and its category tree (`apps/accessories`, `apps/games`, `apps/productivity`, `apps/utilities`). Bare launch names are searched in `base`, those four categories, then `system`; explicit paths are unchanged. The shipped GUI sources move under `samples/apps/apps/<category>/`. |
 | 2026-11-21 | L1/X1 add the read-only `image/` PNG corpus, staged from `samples/image`, and the apps image grows to 64 MiB to hold it (spec 0023). `langhost` resolves `image` and `image/...` against the sibling `samples/image` tree. |
 | 2026-11-26 | M16.8 defers the dialog's scrollbar-thumb drag, matching the browser and editor: held primary-button moves move a `scroll_preview` thumb and recomposite only the scrollbar rectangle, the list rows and `top` stay fixed, and the release applies the dropped position once and clamps the selection visible. Track clicks and keys keep their immediate behavior. No opcode, builtin, file API or `stdlib` change. |
+| 2026-11-27 | M18 adds the read-only top-level `icons/` directory, staged from the committed 32×32 PPMs in `samples/icons/ppm` (spec 0028). `lib.icons` loads them once and `lib.iconview` draws the browser grid; no API or module-system change. |

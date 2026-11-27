@@ -1,67 +1,79 @@
 unit browser;
 
-// M2.5.4, navigation M3.4: a windowed file browser over the read-only
-// application file API.
+// M2.5.4, navigation M3.4, icon grid M18: a windowed file browser over the
+// read-only application file API.
 //
-//   run browser         // interactive: navigate, preview and launch
+//   run browser         // interactive: navigate, open and launch
 //   run browser check   // deterministic checks, prints `browser: ok`
-//   run browser shot    // lists and previews, prints `browser: ready` and
+//   run browser shot    // shows the icon grid, prints `browser: ready` and
 //                       // holds ~5 s for the QMP screenshot harness
 //
-// The browser shows one directory at a time (spec 0013, "The file browser").
-// `dir` is the current image path and `""` is the root; the path line shows
-// `igis:/` or `igis:/<dir>`. The listing is `core.fs_list(dir, ...)` read from
-// index 0 until `NotFound` into fixed arrays (96 names, kinds and sizes). `.`
-// and `..` never appear, the order is the image's directory order and no
-// sorting is assumed. A directory with more than 96 entries reports a
-// truncated listing rather than dropping silently.
+// The browser shows one directory at a time (spec 0013, "The file browser";
+// spec 0028, "Browser integration"). `dir` is the current image path and `""`
+// is the root; the path line shows `igis:/` or `igis:/<dir>`. The listing is
+// `core.fs_list(dir, ...)` read from index 0 until `NotFound` into a 96-entry
+// `lib.iconview` view plus a parallel size array. `.` and `..` never appear,
+// the order is the image's directory order and no sorting is assumed. A
+// directory with more than 96 entries reports a truncated listing rather than
+// dropping silently.
 //
-// Enter and a double-click on a kind-1 entry descend into it
-// (`dir := dir + "/" + name`, or the name at the root) and reload the listing
-// with the selection, view, preview and status reset. Backspace and Ctrl+Up go
-// up by truncating the last component of `dir`; at the root that is a no-op.
-// The path line also carries a visible `Up` button, so the parent directory is
-// reachable with the pointer alone (M8.8). There is no `..` path and no history
-// stack. Path construction is bounded by
-// PATH_MAX (256 bytes): a combination that would not fit sets the status line
-// and is not opened.
+// The body is a full-width 32x32 icon grid in the style of the old Windows
+// Explorer: 100x68 cells (six columns and six visible rows at 640x420), a
+// two-line 12-pixel label under each icon, the unchanged path line above and
+// the status line below. The 16-pixel scrollbar sits at the right. There is no
+// text preview pane: the browser never reads file contents for display, it
+// only lists names, kinds and sizes. The four icons (`folder`, `igfile`,
+// `file`, `image`) are loaded once at startup from the read-only `icons/`
+// image directory, after the window is open, and reused for every frame and
+// every directory. A failed load is non-fatal: `iconview.draw`/`icons.draw`
+// paint the monochrome fallback and navigation keeps working. Icon ids are
+// numeric module constants in `lib.icons` that are not exported across a unit,
+// so the browser repeats the four fixed ids. The mapping is: kind 1 -> folder,
+// kind 2 -> file; kind 0 ending in `.ig` (ASCII case-insensitive) or an
+// extensionless file under `base`/`system`/`apps/<category>` (the stager drops
+// the suffix there) -> source; kind 0 ending in
+// `.png`/`.ppm`/`.jpg`/`.jpeg` -> image; anything else -> file.
 //
-// Preview: a kind-0 entry at any depth is addressed by its full image path
-// (`dir/name`, or the name at the root). A file at most 2048 bytes is read with
-// `core.fs_size` plus 256-byte `core.fs_read` chunks into a staged `bytes[2048]`
-// and published with one strict-UTF-8 `core.substr_into` (a `bytes` source is
-// the checked conversion). A missing name, a directory, a malformed path, a
-// file over the preview cap and invalid UTF-8 all set the status line and leave
-// the old preview byte-identical. This is a preview, not a second editor: there
-// is no cursor and no write path.
+// Enter and a double-click open the selected entry like Explorer: a kind-1
+// entry is descended into (`dir := dir + "/" + name`, or the name at the root)
+// and a kind-0 entry is launched by its full image path with `core.spawn` and
+// a blocking `core.wait`. A kind-2 entry (device, socket, symlink) is refused
+// with a status line and is never entered, read or launched. Ctrl+L keeps the
+// same launch meaning. Launching a `/lib` module is allowed and surfaces the
+// compiler's `missing main` diagnostic, which is the compiler's
+// classification, not a browser rule. Backspace and Ctrl+Up go up by
+// truncating the last component of `dir`; at the root that is a no-op. The
+// path line also carries a visible 44x18 `Up` button, so the parent directory
+// is reachable with the pointer alone (M8.8). There is no `..` path and no
+// history stack; path construction is bounded by PATH_MAX (256 bytes) and a
+// combination that would not fit sets the status line and is not opened.
 //
-// Launch is a blocking launcher: Ctrl+L spawns the selected regular source app
-// by its full image path with `core.spawn` and then blocks in `core.wait` until
-// it exits. On a directory Ctrl+L descends instead; a kind-2 entry is refused.
-// Launching a `/lib` module is allowed and surfaces the compiler's `missing
-// main` diagnostic, which is the compiler's classification, not a browser
-// rule. The `check` proof launches `editor` with the argument `check`, which
-// terminates on its own, so no child is left running.
+// Keys: Left/Right move one entry, Up/Down one grid row (six entries),
+// PageUp/PageDown one page (`columns x visible rows`), Home/End the first or
+// last entry, Enter opens, Backspace/Ctrl+Up goes up, Ctrl+L launches, `N`
+// creates `home/newdir`, Delete/`D` removes the selection under `home` and
+// Ctrl+Q quits. A track click pages one screen at once. While the scrollbar
+// thumb is held the view is deferred (M16.8): only a preview thumb
+// (`scroll_preview`, a grid row) moves and the scrollbar strip alone is
+// redrawn and recomposited, so `view.top` and the selection stay put; the
+// release applies the dropped row once with `iconview.set_top`, clamps the
+// selection into the new visible rows and repaints one frame.
 //
-// The application owns the current directory, the selected index, the first
-// visible row, the status line and the preview state. Rows are drawn by the app
-// (a marker, the name and the size) because `ui_list` models eight items while
-// a directory has more than fifty; the scrollbar is
-// `ui_scrollbar`/`ui_scrollbar_hit`. Keys are Up/Down/PageUp/PageDown/Home/End,
-// Enter (open), Backspace/Ctrl+Up (up), Ctrl+L (launch), Ctrl+Q (quit); a
-// double-click opens. A track click pages at once; while the thumb is held the
-// view is deferred (M16.8): only the scrollbar strip is redrawn and recomposed,
-// and the listing jumps to the dropped row when the button is released.
-// Drawing is client content only: no `syslib.clear` and no
-// assumption of a blank screen. Every frame is complete before one
-// `window_present`, and an owner `Expose` repaints the whole content.
+// The status line shows a non-empty `status_line` (a failure or a completed
+// home/launch operation) at the left. When it is empty it shows the selected
+// entry's full name and its size or kind at the left; the short key hint stays
+// at the right. Long names are never truncated in this status text beyond the
+// 64-byte name capacity; the two-line grid label is the only wrapped form.
 //
-// `langhost` and a kernel without a framebuffer model a disabled screen, so the
-// sample runs the same navigation, listing, preview and selection logic over
-// the same tree and prints `browser: host ok`. The host path never launches a
-// child.
+// Drawing is client content only: no `syslib.clear` and no assumption of a
+// blank screen. Every frame is complete before one `window_present`, and an
+// owner `Expose` repaints the whole content. `langhost` and a kernel without a
+// framebuffer model a disabled screen, so the sample runs the same listing,
+// navigation, geometry and icon-mapping logic over the same tree, loads no
+// icons, draws nothing and never launches a child; it prints
+// `browser: host ok`.
 
-uses core, stdlib, syslib, lib.out, lib.inject;
+uses core, stdlib, syslib, lib.out, lib.inject, lib.icons, lib.iconview;
 
 const
   WindowX = 160;
@@ -69,10 +81,8 @@ const
   ContentW = 680;
   ContentH = 480;
 
-  // Listing capacity: 96 entries in any directory (the root has six on the
-  // host and seven in the kernel image, where mke2fs adds `lost+found`; `base`
-  // holds the most staged applications); 96 leaves room without a growth path
-  // (there is no allocation).
+  // Listing capacity: 96 entries in any directory. There is no allocation, so
+  // a larger directory reports the truncated listing.
   EntryCapacity = 96;
 
   // Path capacity: `abi::fs::PATH_MAX` (spec 0013 F2 / spec 0018 L6).
@@ -83,28 +93,32 @@ const
   MaxPathDirect = 28;
   MaxPathTail = 25;
 
-  // Preview cap and per-character layout of the M2.5.1 chunked read.
-  PreviewCapacity = 2048;
-  ReadChunk = 256;
-
-  LineH = 16;
   PathH = 22;
 
-  ListLeft = 8;
-  ListW = 342;
-  ListTop = 30;
-  BodyH = 420;
-  ScrollLeft = 352;
+  // The icon grid: 640 usable pixels over 100-pixel cells is six columns; 420
+  // over 68-pixel cells is six rows. The 16-pixel scrollbar sits at 656 with
+  // an 8-pixel gap after the grid's right edge at 648.
+  GridLeft = 8;
+  GridTop = 30;
+  GridW = 640;
+  GridH = 420;
+  CellW = 100;
+  CellH = 68;
+  CellMargin = 4;        // `lib.iconview`'s Margin (not exported)
+  IconSide = 32;
+  LabelGap = 4;
+  LabelLineH = 12;
+  LabelLines = 2;
+
+  ScrollLeft = 656;
   ScrollW = 16;
-  PreviewLeft = 378;
-  PreviewW = 294;
   StatusTop = 460;
 
-  ListRows = 26;
-  PreviewLines = 24;
-  MaxNameBytes = 30;
-  MaxTitleBytes = 20;
-  MaxPreviewCols = 34;
+  // The `lib.icons` ids (module constants are not exported across a unit).
+  FolderIcon = 0;
+  SourceIcon = 1;
+  FileIcon = 2;
+  ImageIcon = 3;
 
   HoldSeconds = 5;
   NanosPerSecond = 1000000000;
@@ -115,44 +129,28 @@ var
   path_buf: string[PathCapacity];
   display_path: string[64];
 
-  // Listing.
-  names: array[string[64], EntryCapacity];
-  kinds: array[uint, EntryCapacity];
+  // The listing: `lib.iconview` owns names, kinds and icon ids; `sizes` is the
+  // parallel inode size used by the status line and the proofs.
+  view: iconview.View;
   sizes: array[uint, EntryCapacity];
-  entry_count: int;
-  index: uint;
-  name: string[64];
-  kind: uint;
-  size: uint;
+  entry_name: string[64];
+  entry_kind: uint;
+  entry_size: uint;
   truncated: bool;
 
-  // Selection and view.
-  selected: int;
-  top: int;
   // Scrollbar thumb drag (M8.9): grabbed at a pointer offset within the thumb.
   // M16.8 defers the view: the held thumb moves alone in `scroll_preview` and
-  // `top` changes only when the button is released.
+  // `view.top` changes only when the button is released.
   scroll_dragging: bool;
   scroll_grab_dy: int;
   scroll_preview: int;
 
-  // Preview.
-  preview: string[PreviewCapacity];
-  preview_stage: bytes[PreviewCapacity];
-  preview_title: string[PathCapacity];
-  preview_size: uint;
   status_line: string[64];
+  status_text: string[128];
 
   // Window and absolute layout.
   id: int;
   rect: Rect;
-  list_x: int;
-  list_y: int;
-  scroll_x: int;
-  scroll_y: int;
-  preview_x: int;
-  preview_y: int;
-  status_y: int;
   // Visible parent-directory button in the path line (M8.8).
   up_x: int;
   up_y: int;
@@ -165,15 +163,16 @@ var
   gray: uint;
   accent: uint;
 
+  // Icons, loaded once on the kernel path.
+  icon_set: icons.Set;
+
   // Input and launch.
   ev: Event;
   last_click_ns: uint;
   last_click_item: int;
   opens: int;
   last_task: int;
-  launch_status: Status;
   diag: Diagnostic;
-  reason: ExitReason;
 
   // Mode and scratch.
   mode: int;
@@ -187,12 +186,8 @@ var
   step_text: string[16];
   st: Status;
   used: int;
-  copied: int;
   value: Status;
   digits: string[24];
-  name_buf: string[64];
-  title_buf: string[64];
-  line_buf: string[64];
   size_buf: string[32];
 
 // Silent check: the first failure is printed with its step number and label.
@@ -216,7 +211,7 @@ end;
 // Builds `base/name` (or just `name` when `base` is empty) into `out`.
 // PATH_MAX is 256 bytes; anything longer is `CapacityExceeded` and writes
 // nothing (spec 0013 F2).
-function join_path(base: const string[0]; entry_name: const string[0];
+function join_path(base: const string[0]; name: const string[0];
                    out: var string[PathCapacity]): Status;
 var
   base_len: int;
@@ -228,7 +223,7 @@ var
   stage: bytes[PathCapacity];
 begin
   base_len := int(core.len(base));
-  name_len := int(core.len(entry_name));
+  name_len := int(core.len(name));
   if base_len = 0 then
   begin
     total := name_len;
@@ -253,7 +248,7 @@ begin
   i := 0;
   while i < name_len do
   begin
-    stage[split + i] := entry_name[i];
+    stage[split + i] := name[i];
     i := i + 1;
   end;
 
@@ -287,30 +282,117 @@ begin
   return got >= 0;
 end;
 
-// ---- listing --------------------------------------------------------------
+// ---- icon mapping (spec 0028 B4) ------------------------------------------
 
-// Reads the current directory in directory order until `NotFound`. A new
-// directory starts with the selection, view, preview and status reset.
-procedure load_dir();
+// ASCII lower-case of one byte; every other byte is unchanged.
+function lower_byte(b: byte): byte;
+begin
+  if b >= byte(65) and b <= byte(90) then
+    return byte(int(b) + 32);
+  return b;
+end;
+
+// Whether `name` ends with `suffix`, ASCII case-insensitively.
+function has_suffix(name: const string[0]; suffix: const string[0]): bool;
+var
+  name_len: int;
+  suffix_len: int;
+  i: int;
+  a: byte;
+  b: byte;
+begin
+  name_len := int(core.len(name));
+  suffix_len := int(core.len(suffix));
+  if suffix_len = 0 or name_len < suffix_len then
+    return false;
+  i := 0;
+  while i < suffix_len do
+  begin
+    a := lower_byte(name[name_len - suffix_len + i]);
+    b := lower_byte(suffix[i]);
+    if a <> b then
+      return false;
+    i := i + 1;
+  end;
+  return true;
+end;
+
+// Whether the name has any dot, i.e. an extension separator.
+function has_dot(name: const string[0]): bool;
 var
   i: int;
 begin
-  entry_count := 0;
+  i := 0;
+  while i < int(core.len(name)) do
+  begin
+    if name[i] = byte(46) then
+      return true;
+    i := i + 1;
+  end;
+  return false;
+end;
+
+// The directories whose extensionless regular files are staged `.ig` source
+// applications (spec 0018 L3): `base`, `system` and `apps/<category>`.
+function is_source_dir(where: const string[0]): bool;
+begin
+  if where = "base" or where = "system" or where = "apps" then
+    return true;
+  return stdlib.starts_with(where, "apps/");
+end;
+
+// The icon id for one listing entry. A directory is a folder; any kind-2 entry
+// is a plain file. A regular file is a source when it ends in `.ig`, or when it
+// has no extension and lives in a source-application directory (the stager
+// drops `.ig` there); an image by its suffix; otherwise a plain file.
+function icon_for(name: const string[0]; kind: uint; where: const string[0]): int;
+begin
+  if kind = uint(1) then
+    return FolderIcon;
+  if kind <> uint(0) then
+    return FileIcon;
+  if has_suffix(name, ".ig") then
+    return SourceIcon;
+  if not has_dot(name) and is_source_dir(where) then
+    return SourceIcon;
+  if has_suffix(name, ".png") or has_suffix(name, ".ppm")
+     or has_suffix(name, ".jpg") or has_suffix(name, ".jpeg") then
+    return ImageIcon;
+  return FileIcon;
+end;
+
+// ---- listing --------------------------------------------------------------
+
+// Reads the current directory in directory order until `NotFound`. A new
+// directory starts with the selection, view and status reset. The icons are
+// not touched: the loaded set is reused for every directory (spec 0028 B1).
+procedure load_dir();
+var
+  i: int;
+  at: int;
+  cursor: uint;
+begin
+  iconview.clear(view);
   truncated := false;
   scroll_dragging := false;
   scroll_preview := 0;
-  index := uint(0);
-  st := core.fs_list(dir, index, name, kind, size);
-  while st = Ok and entry_count < EntryCapacity do
+  i := 0;
+  while i < EntryCapacity do
   begin
-    names[entry_count] := name;
-    kinds[entry_count] := kind;
-    sizes[entry_count] := size;
-    entry_count := entry_count + 1;
-    index := index + uint(1);
-    st := core.fs_list(dir, index, name, kind, size);
+    sizes[i] := uint(0);
+    i := i + 1;
   end;
-  if entry_count >= EntryCapacity and st = Ok then
+  cursor := uint(0);
+  st := core.fs_list(dir, cursor, entry_name, entry_kind, entry_size);
+  while st = Ok and view.count < EntryCapacity do
+  begin
+    at := iconview.add(view, entry_name, entry_kind, icon_for(entry_name, entry_kind, dir));
+    if at >= 0 then
+      sizes[at] := entry_size;
+    cursor := cursor + uint(1);
+    st := core.fs_list(dir, cursor, entry_name, entry_kind, entry_size);
+  end;
+  if view.count >= EntryCapacity and st = Ok then
   begin
     truncated := true;
     status_line := "listing truncated (96)"
@@ -319,19 +401,12 @@ begin
     status_line := "listing failed"
   else
     status_line := "";
-
-  selected := 0;
-  top := 0;
-  i := 0;
-  preview := "";
-  preview_title := "";
-  preview_size := uint(0);
 end;
 
-// Descends into `entry_name`: the new path is committed only when it fits and
-// is listable, so a failure leaves the current view untouched. An empty
+// Descends into `name`: the new path is committed only when it fits and is
+// listable, so a failure leaves the current view untouched. An empty
 // directory lists zero entries (`NotFound` at index 0 is a valid listing).
-function enter_dir(entry_name: const string[0]): Status;
+function enter_dir(name: const string[0]): Status;
 var
   candidate: string[PathCapacity];
   probe_name: string[64];
@@ -339,7 +414,7 @@ var
   probe_size: uint;
   err: Status;
 begin
-  err := join_path(dir, entry_name, candidate);
+  err := join_path(dir, name, candidate);
   if err <> Ok then
   begin
     status_line := "path too long";
@@ -376,9 +451,9 @@ var
   i: int;
 begin
   i := 0;
-  while i < entry_count do
+  while i < view.count do
   begin
-    if names[i] = target then
+    if view.names[i] = target then
       return i;
     i := i + 1;
   end;
@@ -391,146 +466,16 @@ var
   i: int;
 begin
   i := 0;
-  while i < entry_count do
+  while i < view.count do
   begin
-    if kinds[i] <> uint(0) then
+    if view.kinds[i] <> uint(0) then
       return i;
     i := i + 1;
   end;
   return -1;
 end;
 
-// ---- preview --------------------------------------------------------------
-
-// The checked bytes -> string publish. Staged bytes are converted with one
-// whole-buffer copy, so a rejected value leaves the old preview untouched.
-function publish_preview(count: int): Status;
-var
-  got: int;
-begin
-  got := core.substr_into(preview, preview_stage, 0, count);
-  if got = count then
-    return Ok;
-  if got = -6 then
-    return CapacityExceeded;
-  return Invalid;
-end;
-
-procedure set_error(err: Status);
-begin
-  if err = NotFound then
-    status_line := "no such file"
-  else if err = Invalid then
-    status_line := "unsupported path"
-  else if err = CapacityExceeded then
-    status_line := "preview too large (2048 max)"
-  else if err = IoError then
-    status_line := "read error"
-  else
-    status_line := "file error";
-end;
-
-// Opens a regular file in the current directory. The full image path is
-// `dir/name` (or the name at the root); it is size-checked, read in 256-byte
-// chunks and published through the strict-UTF-8 conversion. The preview title
-// is that full path. Every failure sets the status line and leaves
-// preview/title/size unchanged.
-function open_file(entry_name: const string[0]): Status;
-var
-  total: uint;
-  offset: uint;
-  got: int;
-  err: Status;
-  i: int;
-  chunk: bytes[256];
-begin
-  err := join_path(dir, entry_name, path_buf);
-  if err <> Ok then
-  begin
-    status_line := "path too long";
-    return err;
-  end;
-
-  err := core.fs_size(path_buf, size);
-  if err <> Ok then
-  begin
-    set_error(err);
-    return err;
-  end;
-  if size > uint(PreviewCapacity) then
-  begin
-    status_line := "preview too large (2048 max)";
-    return CapacityExceeded;
-  end;
-
-  total := size;
-  offset := uint(0);
-  err := Ok;
-  while offset < total and err = Ok do
-  begin
-    err := core.fs_read(path_buf, offset, chunk, got);
-    if err = Ok then
-    begin
-      if got <= 0 then
-        err := IoError
-      else
-      begin
-        i := 0;
-        while i < got do
-        begin
-          preview_stage[int(offset) + i] := chunk[i];
-          i := i + 1;
-        end;
-        offset := offset + uint(got);
-      end;
-    end;
-  end;
-  if err <> Ok then
-  begin
-    set_error(err);
-    return err;
-  end;
-  if offset <> total then
-  begin
-    status_line := "read error";
-    return IoError;
-  end;
-
-  err := publish_preview(int(total));
-  if err <> Ok then
-  begin
-    status_line := "invalid UTF-8";
-    return err;
-  end;
-  preview_size := total;
-  preview_title := path_buf;
-  status_line := "opened";
-  return Ok;
-end;
-
-// Dispatches one listing entry: a directory is entered, a regular file is
-// previewed and a kind-2 entry (device, socket, symlink) is refused before any
-// call.
-function open_entry(entry_name: const string[0]; entry_kind: uint): Status;
-begin
-  if entry_kind = uint(1) then
-    return enter_dir(entry_name);
-  if entry_kind <> uint(0) then
-  begin
-    status_line := "not a regular file";
-    return Invalid;
-  end;
-  return open_file(entry_name);
-end;
-
-// A direct name open for the error checks: the kind comes from the listing in
-// normal use, but a missing name still reports its own status.
-function open_name(entry_name: const string[0]): Status;
-begin
-  return open_file(entry_name);
-end;
-
-// ---- launch ---------------------------------------------------------------
+// ---- opening and launch ---------------------------------------------------
 
 // Blocking launcher for a full image path: spawn the source app, then wait for
 // it to exit. `Ok` means `ExitReason.Ok`; a killed or faulted child is
@@ -574,23 +519,23 @@ begin
   return err;
 end;
 
-// Blocking launcher for a name in the current directory: `base/name` at the
-// root, or just `name` when the directory is empty. On a directory Ctrl+L
-// descends instead; a kind-2 entry is refused before the spawn.
-function launch_name(entry_name: const string[0]; args: const string[0];
-                     entry_kind: uint): Status;
+// Blocking launcher for a name in the current directory: `dir/name`, or just
+// `name` at the root. On a directory Ctrl+L descends instead; a kind-2 entry is
+// refused before the spawn.
+function launch_name(name: const string[0]; args: const string[0];
+                     kind: uint): Status;
 var
   err: Status;
 begin
-  if entry_kind = uint(1) then
-    return enter_dir(entry_name);
-  if entry_kind <> uint(0) then
+  if kind = uint(1) then
+    return enter_dir(name);
+  if kind <> uint(0) then
   begin
     status_line := "cannot launch this entry";
     return Invalid;
   end;
 
-  err := join_path(dir, entry_name, path_buf);
+  err := join_path(dir, name, path_buf);
   if err <> Ok then
   begin
     status_line := "path too long";
@@ -599,52 +544,36 @@ begin
   return launch_path(path_buf, args);
 end;
 
+// Dispatches one listing entry: a directory is entered, a regular file is
+// launched by its full image path and a kind-2 entry (device, socket, symlink)
+// is refused before any call. There is no content read and no preview.
+function open_entry(name: const string[0]; kind: uint): Status;
+begin
+  if kind = uint(1) then
+    return enter_dir(name);
+  if kind <> uint(0) then
+  begin
+    status_line := "not a regular file";
+    return Invalid;
+  end;
+  return launch_name(name, "", kind);
+end;
+
 procedure launch_selected();
 begin
-  if selected >= 0 and selected < entry_count then
-    launch_status := launch_name(names[selected], "", kinds[selected]);
-end;
-
-// ---- selection and view ---------------------------------------------------
-
-procedure ensure_visible();
-begin
-  top := stdlib.ui_list_ensure_visible(selected, top, ListRows);
-  top := stdlib.ui_scrollbar_clamp(top, ListRows, entry_count);
-end;
-
-procedure move_selection(delta: int);
-begin
-  selected := stdlib.ui_list_move(selected, entry_count, delta);
-  ensure_visible();
+  if view.selected >= 0 and view.selected < view.count then
+    value := launch_name(
+      view.names[view.selected], "", view.kinds[view.selected]);
 end;
 
 procedure activate_selected();
 begin
-  if selected >= 0 and selected < entry_count then
+  if view.selected >= 0 and view.selected < view.count then
   begin
-    value := open_entry(names[selected], kinds[selected]);
+    value := open_entry(view.names[view.selected], view.kinds[view.selected]);
     if value = Ok then
       opens := opens + 1;
   end;
-end;
-
-// The row under a content point, or -1 outside the list interior. The list is
-// drawn from `top`, one 16-pixel row per entry.
-function index_at(px: int; py: int): int;
-var
-  row: int;
-  at: int;
-begin
-  if not stdlib.ui_rect_hit(list_x, list_y, ListW, BodyH, px, py) then
-    return -1;
-  if py < list_y + 1 or py >= list_y + 1 + ListRows * LineH then
-    return -1;
-  row := (py - list_y - 1) div LineH;
-  at := top + row;
-  if at < 0 or at >= entry_count then
-    return -1;
-  return at;
 end;
 
 // ---- home operations (spec 0019, E2) --------------------------------------
@@ -704,12 +633,12 @@ var
   keep: int;
 begin
   last_op := Ok;
-  if selected < 0 or selected >= entry_count then
+  if view.selected < 0 or view.selected >= view.count then
   begin
     status_line := "nothing selected";
     return;
   end;
-  err := join_path(dir, names[selected], full);
+  err := join_path(dir, view.names[view.selected], full);
   if err <> Ok then
   begin
     last_op := err;
@@ -722,18 +651,17 @@ begin
     status_line := "read-only: outside home";
     return;
   end;
-  keep := selected;
+  keep := view.selected;
   err := core.fs_remove(full);
   last_op := err;
   if err = Ok then
   begin
     load_dir();
-    if keep >= entry_count then
-      keep := entry_count - 1;
+    if keep >= view.count then
+      keep := view.count - 1;
     if keep < 0 then
       keep := 0;
-    selected := keep;
-    ensure_visible();
+    iconview.move_to(view, keep);
     status_line := "removed";
   end
   else if err = Invalid then
@@ -746,23 +674,25 @@ begin
     status_line := "remove failed";
 end;
 
-// The thumb height and travel for `total` entries against `ListRows` visible
-// rows, matching `stdlib.ui_scrollbar` (M8.9): the track is `BodyH - 4` tall,
-// the thumb the visible fraction with an 8-pixel floor, and it travels over
+// ---- scrollbar (over grid rows) -------------------------------------------
+
+// The thumb height and travel for `total` rows against the visible rows,
+// matching `stdlib.ui_scrollbar` (M8.9): the track is `GridH - 4` tall, the
+// thumb the visible fraction with an 8-pixel floor, travelling over
 // `track - thumb`.
 procedure thumb_metrics(total: int; thumb_h: var int; travel: var int);
 var
   track_h: int;
 begin
-  track_h := BodyH - 4;
+  track_h := GridH - 4;
   if total <= 0 then
     thumb_h := track_h
   else
   begin
-    if ListRows <= 0 then
+    if view.rows <= 0 then
       thumb_h := 8
     else
-      thumb_h := (track_h * ListRows) div total;
+      thumb_h := (track_h * view.rows) div total;
     if thumb_h < 8 then
       thumb_h := 8;
     if thumb_h > track_h then
@@ -771,9 +701,8 @@ begin
   travel := track_h - thumb_h;
 end;
 
-// The current scrollbar thumb geometry for `total` entries, matching
-// `stdlib.ui_scrollbar`. The press, the drag preview and the check-mode proof
-// use the same arithmetic.
+// The current scrollbar thumb geometry for `total` rows. The press, the drag
+// preview and the check-mode proof use the same arithmetic.
 procedure scrollbar_thumb(total: int; thumb_y: var int; thumb_h: var int);
 var
   max: int;
@@ -781,28 +710,35 @@ var
   travel: int;
 begin
   thumb_metrics(total, thumb_h, travel);
-  max := total - ListRows;
+  max := total - view.rows;
   if max < 0 then
     max := 0;
-  pos := stdlib.ui_scrollbar_clamp(top, ListRows, total);
-  thumb_y := scroll_y + 2;
+  pos := stdlib.ui_scrollbar_clamp(view.top, view.rows, total);
+  thumb_y := GridTop + 2;
   if max > 0 and travel > 0 then
-    thumb_y := scroll_y + 2 + (travel * pos) div max;
+    thumb_y := GridTop + 2 + (travel * pos) div max;
 end;
 
-// Ends a thumb drag and applies the preview to the view (M16.8): the list
+// Ends a thumb drag and applies the preview to the view (M16.8): the grid
 // jumps to the dropped row once, on release, and the selection is kept inside
-// the new window. Returns whether anything visible changed.
+// the new visible row window. Returns whether anything visible changed.
 function end_scroll_drag(): bool;
+var
+  first_at: int;
+  last_at: int;
 begin
   scroll_dragging := false;
-  if scroll_preview = top then
+  if scroll_preview = view.top then
     return false;
-  top := scroll_preview;
-  if selected < top then
-    selected := top;
-  if selected >= top + ListRows then
-    selected := top + ListRows - 1;
+  iconview.set_top(view, scroll_preview);
+  first_at := view.top * view.cols;
+  last_at := (view.top + view.rows) * view.cols - 1;
+  if last_at >= view.count then
+    last_at := view.count - 1;
+  if view.selected < first_at then
+    view.selected := first_at;
+  if view.selected > last_at then
+    view.selected := last_at;
   return true;
 end;
 
@@ -837,10 +773,14 @@ begin
     end;
   end;
 
-  if stdlib.ui_key_is_up(ev.code) then
-    move_selection(-1)
+  if stdlib.ui_key_is_left(ev.code) then
+    iconview.move(view, -1, 0)
+  else if stdlib.ui_key_is_right(ev.code) then
+    iconview.move(view, 1, 0)
+  else if stdlib.ui_key_is_up(ev.code) then
+    iconview.move(view, 0, -1)
   else if stdlib.ui_key_is_down(ev.code) then
-    move_selection(1)
+    iconview.move(view, 0, 1)
   else if stdlib.ui_key_is_delete(ev.code) then
     remove_selected()
   else if key = 0x4E or key = 0x6E then
@@ -850,26 +790,20 @@ begin
   else if stdlib.ui_key_is_backspace(ev.code) then
     go_up()
   else if key = 0x116 then
-    move_selection(0 - ListRows)
+    iconview.page(view, -1)
   else if key = 0x117 then
-    move_selection(ListRows)
+    iconview.page(view, 1)
   else if stdlib.ui_key_is_home(ev.code) then
-  begin
-    selected := 0;
-    top := 0;
-  end
+    iconview.first(view)
   else if stdlib.ui_key_is_end(ev.code) then
-  begin
-    selected := entry_count - 1;
-    ensure_visible();
-  end
+    iconview.last(view)
   else if stdlib.ui_key_is_enter(ev.code) then
     activate_selected();
 end;
 
 // One pointer event addressed to the browser. Returns whether a whole frame is
 // needed (M16.8): a held thumb drag redraws only the scrollbar strip, and the
-// list view changes once, on release.
+// grid view changes once, on release.
 function handle_pointer(): bool;
 var
   hit: int;
@@ -879,15 +813,18 @@ var
   thumb_h: int;
   travel: int;
   desired: int;
+  total: int;
   max_top: int;
   preview: int;
   was_top: int;
   was_selected: int;
 begin
+  total := iconview.total_rows(view);
+
   // A grabbed scrollbar thumb follows the pointer while the primary button is
-  // held (M8.9); the move maps the thumb position onto the scrollbar travel.
-  // M16.8 defers the list: release (or a move without the button) applies the
-  // dropped position.
+  // held (M8.9); the move maps the thumb position onto the row travel. M16.8
+  // defers the view: release (or a move without the button) applies the
+  // dropped row.
   if scroll_dragging then
   begin
     if ev.kind = PointerUp then
@@ -896,19 +833,22 @@ begin
     begin
       if ev.code mod uint(2) <> uint(1) then
         return end_scroll_drag();
-      thumb_metrics(entry_count, thumb_h, travel);
-      max_top := entry_count - ListRows;
+      thumb_metrics(total, thumb_h, travel);
+      max_top := total - view.rows;
       if max_top < 0 then
         max_top := 0;
       if travel > 0 and max_top > 0 then
       begin
         desired := ev.y - scroll_grab_dy;
-        if desired < scroll_y + 2 then
-          desired := scroll_y + 2;
-        if desired > scroll_y + 2 + travel then
-          desired := scroll_y + 2 + travel;
-        preview := ((desired - (scroll_y + 2)) * max_top) div travel;
-        preview := stdlib.ui_scrollbar_clamp(preview, ListRows, entry_count);
+        if desired < GridTop + 2 then
+          desired := GridTop + 2;
+        if desired > GridTop + 2 + travel then
+          desired := GridTop + 2 + travel;
+        preview := ((desired - (GridTop + 2)) * max_top) div travel;
+        if preview < 0 then
+          preview := 0;
+        if preview > max_top then
+          preview := max_top;
         if preview <> scroll_preview then
         begin
           scroll_preview := preview;
@@ -929,44 +869,39 @@ begin
     return true;
   end;
 
-  if stdlib.ui_rect_hit(scroll_x, scroll_y, ScrollW, BodyH, ev.x, ev.y) then
+  if stdlib.ui_rect_hit(ScrollLeft, GridTop, ScrollW, GridH, ev.x, ev.y) then
   begin
     action := stdlib.ui_scrollbar_hit(
-      scroll_x, scroll_y, ScrollW, BodyH, ev.x, ev.y,
-      top, ListRows, entry_count);
+      ScrollLeft, GridTop, ScrollW, GridH, ev.x, ev.y,
+      view.top, view.rows, total);
     if action = 3 then
     begin
-      scrollbar_thumb(entry_count, thumb_y, thumb_h);
+      scrollbar_thumb(total, thumb_y, thumb_h);
       scroll_dragging := true;
-      scroll_preview := top;
+      scroll_preview := view.top;
       scroll_grab_dy := ev.y - thumb_y;
       return false;
     end;
-    was_top := top;
-    was_selected := selected;
+    was_top := view.top;
+    was_selected := view.selected;
     if action = 1 then
-      top := stdlib.ui_scrollbar_clamp(top - ListRows, ListRows, entry_count)
+      iconview.page(view, -1)
     else if action = 2 then
-      top := stdlib.ui_scrollbar_clamp(top + ListRows, ListRows, entry_count);
-    if selected < top then
-      selected := top;
-    if selected >= top + ListRows then
-      selected := top + ListRows - 1;
-    return top <> was_top or selected <> was_selected;
+      iconview.page(view, 1);
+    return view.top <> was_top or view.selected <> was_selected;
   end;
 
-  hit := index_at(ev.x, ev.y);
+  hit := iconview.index_at(view, ev.x, ev.y);
   if hit < 0 then
     return false;
-  selected := hit;
-  ensure_visible();
+  iconview.move_to(view, hit);
   now := core.clock();
   if stdlib.ui_double_click(last_click_ns, now, last_click_item = hit)
-     and kinds[hit] <> uint(2) then
+     and view.kinds[hit] <> uint(2) then
   begin
     last_click_ns := uint(0);
     last_click_item := -1;
-    value := open_entry(names[hit], kinds[hit]);
+    value := open_entry(view.names[hit], view.kinds[hit]);
     if value = Ok then
       opens := opens + 1;
   end
@@ -975,8 +910,8 @@ begin
     last_click_ns := now;
     last_click_item := hit;
     // A single click on a kind-2 entry still explains why it cannot open.
-    if kinds[hit] = uint(2) then
-      value := open_entry(names[hit], kinds[hit]);
+    if view.kinds[hit] = uint(2) then
+      value := open_entry(view.names[hit], view.kinds[hit]);
   end;
   return true;
 end;
@@ -985,13 +920,6 @@ end;
 
 procedure compute_layout();
 begin
-  list_x := ListLeft;
-  list_y := ListTop;
-  scroll_x := ScrollLeft;
-  scroll_y := ListTop;
-  preview_x := PreviewLeft;
-  preview_y := ListTop;
-  status_y := StatusTop;
   // A small `Up` button at the right of the path line, left of the writability
   // label. It is the visible parent-directory affordance (M8.8); the Backspace
   // and Ctrl+Up keys keep working.
@@ -1002,27 +930,17 @@ begin
   up_y := 2;
 end;
 
-procedure draw_marker(x: int; y: int; entry_kind: uint; color: uint);
+// The view rectangle is fixed in window-local coordinates (M17); only the
+// `Up` button position depends on the palette text width.
+procedure setup_view();
 begin
-  if entry_kind = uint(1) then
-  begin
-    st := syslib.fill_rect(x, y + 1, 9, 6, color);
-    st := syslib.fill_rect(x, y, 6, 2, color);
-  end
-  else
-  begin
-    st := syslib.draw_rect(x + 1, y, 7, 8, color);
-    if entry_kind = uint(0) then
-    begin
-      st := syslib.fill_rect(x + 3, y + 2, 3, 1, color);
-      st := syslib.fill_rect(x + 3, y + 4, 3, 1, color);
-    end;
-  end;
+  compute_layout();
+  iconview.init(view, GridLeft, GridTop, GridW, GridH, CellW, CellH);
 end;
 
 // Builds the path line: `igis:/` plus the current directory. A directory too
 // wide for the line shows `igis:/...` and its deepest components, cut at a
-// code-point boundary (the full path is still in the preview title).
+// code-point boundary.
 procedure build_display_path();
 var
   length: int;
@@ -1083,7 +1001,7 @@ begin
   count_x := 8 + path_width + 16;
   if count_x < 96 then
     count_x := 96;
-  used := core.format_int_into(digits, entry_count, uint(10), uint(0));
+  used := core.format_int_into(digits, view.count, uint(10), uint(0));
   st := syslib.draw_text(count_x, 4, digits, black);
   st := syslib.draw_text(count_x + used * 8, 4, " entries", gray);
   width := stdlib.ui_text_width("home writable");
@@ -1093,161 +1011,59 @@ begin
   st := stdlib.ui_separator(0, PathH - 1, ContentW);
 end;
 
-procedure draw_list();
-var
-  row: int;
-  at: int;
-  y: int;
-  to: int;
-  size_len: int;
-  label_x: int;
-  color: uint;
-begin
-  st := syslib.fill_rect(list_x, list_y, ListW, BodyH, white);
-  st := syslib.draw_rect(list_x, list_y, ListW, BodyH, black);
-
-  row := 0;
-  while row < ListRows and top + row < entry_count do
-  begin
-    at := top + row;
-    y := list_y + 1 + row * LineH;
-    if at = selected then
-    begin
-      st := syslib.fill_rect(list_x + 1, y, ListW - 2, LineH, accent);
-      color := white;
-    end
-    else
-      color := black;
-
-    draw_marker(list_x + 8, y + 4, kinds[at], color);
-
-    to := int(core.len(names[at]));
-    if to > MaxNameBytes then
-      to := MaxNameBytes;
-    while to > 0 and not stdlib.str_boundary(names[at], to) do
-      to := to - 1;
-    copied := core.substr_into(name_buf, names[at], 0, to);
-    if copied > 0 then
-      st := syslib.draw_text(list_x + 24, y + 4, name_buf, color);
-
-    if kinds[at] = uint(1) then
-    begin
-      label_x := list_x + ListW - 8 - 3 * 8;
-      st := syslib.draw_text(label_x, y + 4, "dir", color);
-    end
-    else if kinds[at] = uint(2) then
-    begin
-      label_x := list_x + ListW - 8 - 5 * 8;
-      st := syslib.draw_text(label_x, y + 4, "other", color);
-    end
-    else
-    begin
-      copied := core.format_int_into(
-        size_buf, int(sizes[at]), uint(10), uint(0));
-      label_x := list_x + ListW - 8 - copied * 8;
-      st := syslib.draw_text(label_x, y + 4, size_buf, color);
-    end;
-
-    row := row + 1;
-  end;
-end;
-
-function preview_line_end(start: int): int;
-var
-  i: int;
-  length: int;
-begin
-  length := int(core.len(preview));
-  i := start;
-  while i < length do
-  begin
-    if preview[i] = byte(10) then
-      return i;
-    i := i + 1;
-  end;
-  return length;
-end;
-
-procedure draw_preview();
-var
-  start: int;
-  stop: int;
-  to: int;
-  row: int;
-  y: int;
-begin
-  st := syslib.fill_rect(preview_x, preview_y, PreviewW, BodyH, white);
-  st := syslib.draw_rect(preview_x, preview_y, PreviewW, BodyH, black);
-  st := syslib.draw_text(preview_x + 8, preview_y + 6, "Preview", gray);
-
-  if int(core.len(preview_title)) > 0 then
-  begin
-    to := int(core.len(preview_title));
-    if to > MaxTitleBytes then
-      to := MaxTitleBytes;
-    while to > 0 and not stdlib.str_boundary(preview_title, to) do
-      to := to - 1;
-    copied := core.substr_into(title_buf, preview_title, 0, to);
-    if copied > 0 then
-      st := syslib.draw_text(preview_x + 64, preview_y + 6, title_buf, black);
-  end;
-
-  st := stdlib.ui_separator(preview_x + 1, preview_y + 20, PreviewW - 2);
-
-  if int(core.len(preview)) = 0 then
-  begin
-    if int(core.len(preview_title)) > 0 then
-      st := syslib.draw_text(preview_x + 8, preview_y + 26, "(empty)", gray)
-    else
-      st := syslib.draw_text(preview_x + 8, preview_y + 26, "(no preview)", gray);
-  end
-  else
-  begin
-    start := 0;
-    row := 0;
-    while row < PreviewLines and start < int(core.len(preview)) do
-    begin
-      stop := preview_line_end(start);
-      to := start + MaxPreviewCols;
-      if to > stop then
-        to := stop;
-      while to > start and not stdlib.str_boundary(preview, to) do
-        to := to - 1;
-      copied := core.substr_into(line_buf, preview, start, to - start);
-      y := preview_y + 26 + row * LineH;
-      if copied > 0 then
-        st := syslib.draw_text(preview_x + 8, y, line_buf, black);
-      if stop < int(core.len(preview)) then
-        start := stop + 1
-      else
-        start := int(core.len(preview));
-      row := row + 1;
-    end;
-  end;
-end;
-
+// The status line. A non-empty `status_line` wins; otherwise the selected
+// entry's full name and its size or kind are shown at the left (spec 0028 B6).
+// The short key hint is always drawn at the right.
 procedure draw_status();
 var
   width: int;
+  left_width: int;
+  at: int;
+  hint: string[64];
 begin
-  st := stdlib.ui_separator(0, status_y - 6, ContentW);
-  st := syslib.draw_text(8, status_y, status_line, black);
-  width := stdlib.ui_text_width(
-    "Enter open  Ctrl+L launch  Bksp up  N new  Del delete");
-  st := syslib.draw_text(
-    ContentW - 8 - width, status_y,
-    "Enter open  Ctrl+L launch  Bksp up  N new  Del delete", gray);
+  hint := "Enter open  Ctrl+L run  Bksp up  N new  Del del";
+  st := stdlib.ui_separator(0, StatusTop - 6, ContentW);
+  left_width := 0;
+
+  if int(core.len(status_line)) > 0 then
+  begin
+    st := syslib.draw_text(8, StatusTop, status_line, black);
+    left_width := stdlib.ui_text_width(status_line);
+  end
+  else if view.selected >= 0 and view.selected < view.count then
+  begin
+    at := view.selected;
+    if view.kinds[at] = uint(1) then
+      status_text := view.names[at] + "  dir"
+    else if view.kinds[at] = uint(2) then
+      status_text := view.names[at] + "  other"
+    else
+    begin
+      used := core.format_int_into(
+        size_buf, int(sizes[at]), uint(10), uint(0));
+      status_text := view.names[at] + "  " + size_buf + " B";
+    end;
+    st := syslib.draw_text(8, StatusTop, status_text, black);
+    left_width := stdlib.ui_text_width(status_text);
+  end;
+
+  // The hint keeps its right-aligned position but is omitted when the left
+  // text would overlap it; a long full name is never truncated (spec 0028 B6).
+  width := stdlib.ui_text_width(hint);
+  if 8 + left_width + 16 <= ContentW - 8 - width then
+    st := syslib.draw_text(ContentW - 8 - width, StatusTop, hint, gray);
 end;
 
-// The scrollbar strip at `position` over the current listing.
+// The scrollbar strip at `position` (a grid row) over the visible rows.
 procedure draw_scrollbar_at(position: int);
 begin
   st := stdlib.ui_scrollbar(
-    scroll_x, scroll_y, ScrollW, BodyH, position, ListRows, entry_count, false);
+    ScrollLeft, GridTop, ScrollW, GridH,
+    position, view.rows, iconview.total_rows(view), false);
 end;
 
 // The scrollbar strip alone after a drag preview moved the thumb (M16.8): the
-// canvas keeps the list rows, and `syslib.present` recomposites just this
+// canvas keeps the grid rows, and `syslib.present` recomposites just this
 // rectangle from the surface stack.
 procedure preview_scrollbar();
 begin
@@ -1255,21 +1071,22 @@ begin
   draw_scrollbar_at(scroll_preview);
   // `present` is a screen rectangle (spec 0026 C7), so it is the one call that
   // still adds the content origin.
-  st := syslib.present(rect.x + scroll_x, rect.y + scroll_y, ScrollW, BodyH);
+  st := syslib.present(rect.x + ScrollLeft, rect.y + GridTop, ScrollW, GridH);
 end;
 
-// One complete frame; the caller presents once afterwards. While a thumb is
-// held the strip shows the preview and the list stays at `top` (M16.8).
+// One complete frame; the caller presents once afterwards. The icon view draws
+// the white grid, border, icons and two-line labels inside the open window
+// scope; while a thumb is held the strip shows the preview and the grid stays
+// at `view.top` (M16.8).
 procedure draw_all();
 begin
   st := syslib.fill_rect(0, 0, ContentW, ContentH, white);
   draw_path();
-  draw_list();
+  st := iconview.draw(view, icon_set);
   if scroll_dragging then
     draw_scrollbar_at(scroll_preview)
   else
-    draw_scrollbar_at(top);
-  draw_preview();
+    draw_scrollbar_at(view.top);
   draw_status();
 end;
 
@@ -1383,6 +1200,51 @@ begin
   drain_events();
 end;
 
+// ---- pixel probes ---------------------------------------------------------
+
+// Whether a `w x h` window-local rectangle contains `color`.
+function region_has(x: int; y: int; w: int; h: int; color: uint): bool;
+var
+  dx: int;
+  dy: int;
+begin
+  dy := 0;
+  while dy < h do
+  begin
+    dx := 0;
+    while dx < w do
+    begin
+      if syslib.get_pixel(x + dx, y + dy) = color then
+        return true;
+      dx := dx + 1;
+    end;
+    dy := dy + 1;
+  end;
+  return false;
+end;
+
+// Whether a `w x h` window-local rectangle contains a pixel other than
+// `color`. Used for icon ink over the white grid.
+function region_has_other(x: int; y: int; w: int; h: int; color: uint): bool;
+var
+  dx: int;
+  dy: int;
+begin
+  dy := 0;
+  while dy < h do
+  begin
+    dx := 0;
+    while dx < w do
+    begin
+      if syslib.get_pixel(x + dx, y + dy) <> color then
+        return true;
+      dx := dx + 1;
+    end;
+    dy := dy + 1;
+  end;
+  return false;
+end;
+
 // ---- shared checks --------------------------------------------------------
 
 function has_kind(target: const string[0]; want: uint): bool;
@@ -1392,21 +1254,51 @@ begin
   at := find_name(target);
   if at < 0 then
     return false;
-  return kinds[at] = want;
+  return view.kinds[at] = want;
 end;
 
-// The listing, the preview and every documented error class. Used by both the
-// host path and the kernel proof. Leaves the view in `base`.
+// The pure icon mapping, checked with synthetic names (spec 0028 B4).
+procedure mapping_checks();
+begin
+  verify("map folder", icon_for("base", uint(1), "") = FolderIcon);
+  verify("map source", icon_for("child.ig", uint(0), "base") = SourceIcon);
+  verify("map source upper", icon_for("CHILD.IG", uint(0), "lib") = SourceIcon);
+  verify("map app source", icon_for("shell", uint(0), "base") = SourceIcon);
+  verify("map category source",
+    icon_for("editor", uint(0), "apps/productivity") = SourceIcon);
+  verify("map system source", icon_for("entrypoint", uint(0), "system") = SourceIcon);
+  verify("map home plain", icon_for("readme", uint(0), "home") = FileIcon);
+  verify("map png", icon_for("photo.png", uint(0), "image") = ImageIcon);
+  verify("map ppm upper", icon_for("PHOTO.PPM", uint(0), "image") = ImageIcon);
+  verify("map jpg", icon_for("photo.jpg", uint(0), "image") = ImageIcon);
+  verify("map jpeg", icon_for("photo.jpeg", uint(0), "image") = ImageIcon);
+  verify("map plain", icon_for("readme.txt", uint(0), "home") = FileIcon);
+  verify("map other", icon_for("device", uint(2), "home") = FileIcon);
+end;
+
+// The grid geometry the browser initialized (spec 0028 B3).
+procedure grid_checks();
+begin
+  verify("grid columns", iconview.columns(view) = 6);
+  verify("visible rows", iconview.visible_rows(view) = 6);
+  verify("page size", iconview.page_size(view) = 36);
+  verify("grid origin", view.x = GridLeft and view.y = GridTop);
+  verify("grid size", view.w = GridW and view.h = GridH);
+  verify("cell size", view.cell_w = CellW and view.cell_h = CellH);
+end;
+
+// The listing and the documented error classes. Used by both the host path and
+// the kernel proof. Leaves the view in `base`.
 procedure data_checks(expect_lost_found: bool);
 var
   child_at: int;
   text_at: int;
-  keep_length: int;
+  at: int;
   err: Status;
 begin
   dir := "";
   load_dir();
-  verify("root listed", entry_count >= 6);
+  verify("root listed", view.count >= 6);
   verify("root complete", not truncated);
   verify("root base", has_kind("base", uint(1)));
   verify("root apps", has_kind("apps", uint(1)));
@@ -1414,20 +1306,22 @@ begin
   verify("root lib", has_kind("lib", uint(1)));
   verify("root system", has_kind("system", uint(1)));
   verify("root image", has_kind("image", uint(1)));
+  verify("base icon", view.icon_ids[find_name("base")] = FolderIcon);
   if expect_lost_found then
   begin
+    verify("root icons", has_kind("icons", uint(1)));
     verify("root lost+found", has_kind("lost+found", uint(1)));
-    verify("root entry count", entry_count = 7);
+    verify("root entry count", view.count = 8);
   end
   else
-    verify("root entry count", entry_count = 6);
+    verify("root entry count", view.count = 6);
 
   err := enter_dir("base");
   verify("enter base", err = Ok and dir = "base");
-  verify("listing non-empty", entry_count > 0);
+  verify("listing non-empty", view.count > 0);
   verify("listing complete", not truncated);
-  verify("listing capacity", entry_count <= EntryCapacity);
-  verify("listing size", entry_count >= 50);
+  verify("listing capacity", view.count <= EntryCapacity);
+  verify("listing size", view.count >= 50);
   verify("shell listed", has_kind("shell", uint(0)));
   verify("child listed", has_kind("child", uint(0)));
   verify("text listed", has_kind("text", uint(0)));
@@ -1437,86 +1331,71 @@ begin
   verify("child found", child_at >= 0);
   if child_at >= 0 then
   begin
-    selected := child_at;
-    ensure_visible();
-    activate_selected();
-    verify("preview child", preview_title = "base/child");
-    verify("preview prefix", stdlib.starts_with(preview, "unit child;"));
-    verify("preview size", int(core.len(preview)) = int(preview_size));
-    verify("preview lines", preview_line_end(0) > 0);
+    // The size comes from the listing; no content is read for display.
+    verify("child size", sizes[child_at] > uint(0));
+    verify("child icon", view.icon_ids[child_at] = SourceIcon);
+    iconview.move_to(view, child_at);
+    verify("child selected", view.selected = child_at);
   end;
-
-  keep_length := int(core.len(preview));
-
-  // A kind-2 entry is shown but not openable.
-  value := open_entry("child", uint(2));
-  verify("kind two refused",
-    value = Invalid and status_line = "not a regular file");
-  verify("kind two keeps preview", int(core.len(preview)) = keep_length);
-
-  // `apps/accessories/widgets` is 57,388 bytes: over the preview cap, refused
-  // without a read. Open it from the root by its full image path.
-  dir := "";
-  value := open_name("apps/accessories/widgets");
-  verify("preview too large", value = CapacityExceeded);
-  verify("too large keeps preview", int(core.len(preview)) = keep_length);
-  dir := "base";
-
-  // Missing, malformed and file-as-directory paths are the error classes.
-  value := open_name("no_such_file");
-  verify("missing file", value = NotFound and status_line = "no such file");
-  value := open_name(".");
-  verify("malformed path", value = Invalid);
-  value := open_name("child/x");
-  verify("file as directory", value = Invalid);
-  verify("errors keep preview", int(core.len(preview)) = keep_length);
-
-  // The checked bytes -> string publish rejects invalid UTF-8 atomically.
-  preview_stage[0] := byte(0xC3);
-  preview_stage[1] := byte(0x28);
-  value := publish_preview(2);
-  verify("invalid utf8", value = Invalid);
-  verify("invalid keeps preview",
-    int(core.len(preview)) = keep_length
-      and stdlib.starts_with(preview, "unit child;"));
-
-  // The text file is the second deterministic preview used by the key checks.
   text_at := find_name("text");
   verify("text found", text_at >= 0);
   if text_at >= 0 then
-  begin
-    selected := text_at;
-    ensure_visible();
-    activate_selected();
-    verify("preview text", preview_title = "base/text");
-    verify("preview text prefix", stdlib.starts_with(preview, "unit text;"));
-  end;
+    verify("text icon", view.icon_ids[text_at] = SourceIcon);
+
+  // A kind-2 entry is shown with the generic file icon but not openable.
+  value := open_entry("child", uint(2));
+  verify("kind two refused",
+    value = Invalid and status_line = "not a regular file");
+  verify("kind two keeps view", find_name("child") >= 0);
+
+  // A malformed name is refused by the file API before anything is listed or
+  // read; the current view is untouched.
+  value := enter_dir(".");
+  verify("malformed path",
+    value = Invalid and status_line = "unsupported path");
+  verify("malformed keeps dir", dir = "base");
+
+  // The old text preview refused a file over 2048 bytes; the icon grid lists a
+  // large source with its size and never reads it (spec 0028 B2).
+  go_up();
+  err := enter_dir("apps");
+  verify("enter apps", err = Ok and dir = "apps");
+  at := find_name("accessories");
+  verify("accessories listed", at >= 0 and view.kinds[at] = uint(1));
+  err := enter_dir("accessories");
+  verify("enter accessories", err = Ok and dir = "apps/accessories");
+  at := find_name("widgets");
+  verify("widgets listed", at >= 0 and view.kinds[at] = uint(0));
+  verify("no preview cap",
+    at >= 0 and sizes[at] > uint(2048) and status_line = "");
+  go_up();
+  go_up();
+  verify("back at root", int(core.len(dir)) = 0);
+  err := enter_dir("base");
+  verify("back in base", err = Ok and dir = "base");
 end;
 
-// Navigation (M3.4): the root, descend, full-path preview at depth, back up
-// with the parent rule, and the sibling directories. Used by both paths; the
-// host path sets `report` so its transcript names every stage it proved.
+// Navigation (M3.4): the root, descend, back up with the parent rule, and the
+// sibling directories. Used by both paths; the host path sets `report` so its
+// deterministic transcript names the stages it proved.
 procedure navigation_checks(expect_lost_found: bool; report: bool);
 var
   err: Status;
+  at: int;
 begin
   // `data_checks` leaves the view in `base`.
   if report then
     out.say("browser: nav dir=base\n");
-  err := open_name("child");
-  verify("base child path", err = Ok and preview_title = "base/child");
-  if report then
-  begin
-    out.say("browser: nav preview=");
-    out.say(preview_title);
-    out.say("\n");
-  end;
+  verify("base current", dir = "base" and find_name("child") >= 0);
 
   go_up();
   verify("back up to root", int(core.len(dir)) = 0);
   verify("up lists root", has_kind("base", uint(1)) and has_kind("lib", uint(1)));
   if expect_lost_found then
+  begin
+    verify("up lists icons", has_kind("icons", uint(1)));
     verify("up lists lost+found", has_kind("lost+found", uint(1)));
+  end;
   if report then
     out.say("browser: nav dir=/\n");
   go_up();
@@ -1525,39 +1404,21 @@ begin
   err := enter_dir("system");
   verify("enter system", err = Ok and dir = "system");
   verify("system_probe listed", has_kind("system_probe", uint(0)));
-  verify("terminal_probe listed", has_kind("terminal_probe", uint(0)));
-  err := open_name("system_probe");
-  verify("system preview path",
-    err = Ok and preview_title = "system/system_probe");
-  verify("system preview prefix",
-    stdlib.starts_with(preview, "unit system_probe;"));
-  if report then
-  begin
-    out.say("browser: nav preview=");
-    out.say(preview_title);
-    out.say("\n");
-  end;
   go_up();
   verify("back from system", int(core.len(dir)) = 0);
 
   err := enter_dir("home");
   verify("enter home", err = Ok and dir = "home");
-  err := open_name("readme.txt");
-  verify("home preview path", err = Ok and preview_title = "home/readme.txt");
-  verify("home preview prefix",
-    stdlib.starts_with(preview, "igis-v2 home"));
-  if report then
-  begin
-    out.say("browser: nav preview=");
-    out.say(preview_title);
-    out.say("\n");
-  end;
+  verify("readme listed", has_kind("readme.txt", uint(0)));
   go_up();
   verify("back from home", int(core.len(dir)) = 0);
 
   err := enter_dir("lib");
   verify("enter lib", err = Ok and dir = "lib");
-  verify("math.ig listed", has_kind("math.ig", uint(0)));
+  at := find_name("math.ig");
+  verify("math.ig listed", at >= 0 and view.kinds[at] = uint(0));
+  if at >= 0 then
+    verify("math icon", view.icon_ids[at] = SourceIcon);
   if report then
     out.say("browser: nav lib=math.ig\n");
   go_up();
@@ -1595,41 +1456,42 @@ begin
   verify("long path restored", dir = "base" and has_kind("child", uint(0)));
 end;
 
-// Movement, clamping, paging and the scrollbar share one model.
+// Movement, clamping, paging and the row scrollbar share the iconview model.
 procedure selection_checks();
 var
   keep_count: int;
 begin
-  keep_count := entry_count;
-  selected := 0;
-  top := 0;
-  move_selection(1);
-  verify("down one", selected = 1 and top = 0);
-  move_selection(-1);
-  verify("up clamps", selected = 0 and top = 0);
-  move_selection(1);
-  verify("down again", selected = 1);
+  keep_count := view.count;
+  iconview.first(view);
+  verify("first entry", view.selected = 0 and view.top = 0);
+  iconview.move(view, 1, 0);
+  verify("right one", view.selected = 1 and view.top = 0);
+  iconview.move(view, -1, 0);
+  verify("left one", view.selected = 0 and view.top = 0);
+  iconview.move(view, 1, 0);
+  verify("right again", view.selected = 1);
 
-  selected := 0;
-  top := 0;
-  move_selection(0 - ListRows);
-  verify("page up clamps", selected = 0 and top = 0);
-  move_selection(ListRows);
-  verify("page down", selected = ListRows and top = 1);
+  iconview.first(view);
+  iconview.page(view, -1);
+  verify("page up clamps", view.selected = 0 and view.top = 0);
+  iconview.page(view, 1);
+  verify("page down", view.selected = 36 and view.top = 1);
+  iconview.page(view, -1);
+  verify("page up", view.selected = 0 and view.top = 0);
 
-  selected := keep_count - 1;
-  ensure_visible();
-  verify("end reaches last",
-    selected = keep_count - 1 and top = keep_count - ListRows);
-  verify("scrollbar clamp",
-    stdlib.ui_scrollbar_clamp(keep_count, ListRows, keep_count)
-      = keep_count - ListRows);
-  selected := 0;
-  top := 0;
-  verify("scrollbar model",
-    stdlib.ui_list_ensure_visible(ListRows + 3, 0, ListRows) = 4);
+  iconview.move(view, 0, 1);
+  verify("down row", view.selected = 6 and view.top = 0);
+  iconview.move(view, 0, -1);
+  verify("up row", view.selected = 0 and view.top = 0);
+
+  iconview.last(view);
+  verify("end reaches last", view.selected = keep_count - 1);
+  verify("end scrolls last row",
+    view.top = iconview.total_rows(view) - view.rows);
+  iconview.first(view);
+  verify("home back to first", view.selected = 0 and view.top = 0);
   verify("move clamps",
-    stdlib.ui_list_move(keep_count - 1, keep_count, 1) = keep_count - 1);
+    not iconview.move(view, 0, 100) or view.selected = keep_count - 1);
 end;
 
 // Home operations (spec 0019, E2): create `home/newdir` from the root, list it,
@@ -1667,11 +1529,10 @@ begin
     err := enter_dir("home");
     verify("enter home after create", err = Ok and dir = "home");
     at := find_name("newdir");
-    verify("created listed", at >= 0 and kinds[at] = uint(1));
+    verify("created listed", at >= 0 and view.kinds[at] = uint(1));
     if at >= 0 then
     begin
-      selected := at;
-      ensure_visible();
+      iconview.move_to(view, at);
       if via_keys then
       begin
         auto_draw := false;
@@ -1701,6 +1562,9 @@ procedure host_path();
 begin
   failed := false;
   step := 0;
+  setup_view();
+  mapping_checks();
+  grid_checks();
   data_checks(false);
   navigation_checks(false, true);
   long_path_check();
@@ -1713,150 +1577,135 @@ begin
     out.say("browser: host ok\n");
 end;
 
-// The kernel proof. Data, navigation and selection checks first, then one
-// composed frame with pixel probes, then real navigation and a terminating
-// launch.
+// The kernel proof. Listing, navigation and selection checks first, then one
+// composed frame with pixel probes, then real navigation and terminating
+// launches.
 procedure check_mode();
 var
   child_at: int;
   text_at: int;
   before_opens: int;
   row: int;
-  other_row: int;
-  probe_row: int;
-  probe_at: int;
-  scan: int;
-  row_y: int;
-  preview_text_y: int;
+  col: int;
+  cell_x: int;
+  cell_y: int;
+  icon_x: int;
+  icon_y: int;
+  band_y: int;
   hint_x: int;
-  track_h: int;
+  total: int;
   thumb_h: int;
-  travel: int;
   thumb_y: int;
   max_top: int;
   home_at: int;
   err: Status;
 begin
+  verify("icon folder", icons.ready(icon_set, FolderIcon));
+  verify("icon source", icons.ready(icon_set, SourceIcon));
+  verify("icon file", icons.ready(icon_set, FileIcon));
+  verify("icon image", icons.ready(icon_set, ImageIcon));
+
+  mapping_checks();
   data_checks(true);
+  grid_checks();
   navigation_checks(true, false);
   long_path_check();
   selection_checks();
   writable_checks(true);
 
-  // Double-click: first show `text`, then open `child` with two real clicks on
-  // its visible row. Injected events take the normal routing path.
+  // Double-click: two real clicks on `child`'s visible cell launch it (the
+  // blocking launcher returns after the child exits).
   child_at := find_name("child");
   text_at := find_name("text");
   before_opens := opens;
-  selected := child_at;
-  ensure_visible();
-  preview_title := "base/text";
-  preview := "unit text;";
+  iconview.move_to(view, child_at);
   auto_draw := false;
   last_click_ns := uint(0);
   last_click_item := -1;
-  row := child_at - top;
-  row_y := list_y + 1 + row * LineH + LineH div 2;
-  pointer_to(list_x + 100, row_y);
+  row := (child_at div view.cols) - view.top;
+  col := child_at mod view.cols;
+  cell_x := GridLeft + CellMargin + col * CellW;
+  cell_y := GridTop + CellMargin + row * CellH;
+  pointer_to(cell_x + 12, cell_y + 12);
   pointer_down();
   pointer_up();
   pointer_down();
   pointer_up();
   auto_draw := true;
-  verify("double click opens",
-    preview_title = "base/child" and opens = before_opens + 1);
+  verify("double click launches",
+    opens = before_opens + 1 and status_line = "launched: ok");
 
-  // Enter on the (already selected) text row previews it.
-  selected := text_at;
-  ensure_visible();
+  // Enter on the (already selected) `text` row launches it by full path.
+  iconview.move_to(view, text_at);
+  auto_draw := false;
   inject_key(0x103, 0);
-  verify("enter opens", preview_title = "base/text" and opens = before_opens + 2);
+  auto_draw := true;
+  verify("enter launches", opens = before_opens + 2
+    and status_line = "launched: ok");
 
-  // Selection and view are back on a file whose first line draws a known
-  // glyph; build the frame the pixel probes describe.
-  selected := text_at;
-  ensure_visible();
-  value := open_entry(names[text_at], kinds[text_at]);
-  verify("text reopened", value = Ok and preview_title = "base/text");
+  // Build a frame whose selected cell is `text`; clear the operation status so
+  // the status bar shows the full-name fallback.
+  iconview.move_to(view, text_at);
+  status_line := "";
   draw_all();
   present_frame();
 
-  row := text_at - top;
-  row_y := list_y + 1 + row * LineH;
-  other_row := 0;
-  if row = 0 then
-    other_row := 1;
-  preview_text_y := preview_y + 26;
+  row := (text_at div view.cols) - view.top;
+  col := text_at mod view.cols;
+  cell_x := GridLeft + CellMargin + col * CellW;
+  cell_y := GridTop + CellMargin + row * CellH;
+  icon_x := cell_x + (CellW - IconSide) div 2;
+  icon_y := cell_y + CellMargin;
+  band_y := icon_y + IconSide + LabelGap;
   hint_x := ContentW - 8 - stdlib.ui_text_width(
-    "Enter open  Ctrl+L launch  Bksp up  N new  Del delete");
+    "Enter open  Ctrl+L run  Bksp up  N new  Del del");
   verify("path rule", syslib.get_pixel(300, PathH - 1) = black);
-  verify("list border", syslib.get_pixel(list_x, list_y) = black);
-  verify("selected row", syslib.get_pixel(list_x + 2, row_y + 3) = accent);
-  verify("other row", syslib.get_pixel(
-    list_x + 2, list_y + 1 + other_row * LineH + 3) = white);
-  // The selected row's marker is drawn white on the accent band; a different
-  // visible regular file keeps the black marker.
-  verify("selected marker", syslib.get_pixel(list_x + 9, row_y + 4) = white);
-  probe_row := -1;
-  scan := 0;
-  while scan < ListRows and probe_row < 0 do
-  begin
-    probe_at := top + scan;
-    if probe_at >= 0 and probe_at < entry_count
-       and probe_at <> text_at and kinds[probe_at] = uint(0) then
-      probe_row := scan;
-    scan := scan + 1;
-  end;
-  verify("other file present", probe_row >= 0);
-  verify("file marker", syslib.get_pixel(
-    list_x + 9, list_y + 1 + probe_row * LineH + 4) = black);
-  verify("preview border", syslib.get_pixel(preview_x, preview_y) = black);
-  verify("preview text ink",
-    syslib.get_pixel(preview_x + 9, preview_text_y + 2) = black);
-  verify("preview text hole",
-    syslib.get_pixel(preview_x + 8, preview_text_y) = white);
-  verify("preview divider",
-    syslib.get_pixel(preview_x + 100, preview_y + 20) = black);
-  verify("status rule",
-    syslib.get_pixel(300, status_y - 6) = black);
-  verify("scrollbar border", syslib.get_pixel(scroll_x, scroll_y) = black);
-  // The thumb sits at `top`, so probe the computed thumb rather than the track.
-  track_h := BodyH - 4;
-  thumb_h := (track_h * ListRows) div entry_count;
-  if thumb_h < 8 then
-    thumb_h := 8;
-  travel := track_h - thumb_h;
-  max_top := entry_count - ListRows;
-  thumb_y := scroll_y + 2;
-  if max_top > 0 and travel > 0 then
-    thumb_y := scroll_y + 2 + (travel * top) div max_top;
-  verify("scrollbar thumb",
-    syslib.get_pixel(scroll_x + 4, thumb_y + 2) = gray);
-  verify("hint ink",
-    syslib.get_pixel(hint_x + 1, status_y + 1) = gray);
+  verify("grid border", syslib.get_pixel(GridLeft, GridTop) = black);
+  verify("grid background", syslib.get_pixel(GridLeft + 2, GridTop + 2) = white);
+  verify("selection band", syslib.get_pixel(cell_x + 1, band_y + 1) = accent);
+  verify("label ink (white)", region_has(
+    cell_x + 1, band_y, CellW - 2, LabelLines * LabelLineH, white));
+  verify("icon ink", region_has_other(
+    icon_x, icon_y, IconSide, IconSide, white));
+  verify("status rule", syslib.get_pixel(300, StatusTop - 6) = black);
+  verify("status name ink", region_has(8, StatusTop, 240, 8, black));
+  verify("hint ink", syslib.get_pixel(hint_x + 1, StatusTop + 1) = gray);
 
-  // Grab the scrollbar thumb and drag it to the bottom through the real
-  // pointer path (M8.9). M16.8 defers the view: the held drag moves the thumb
-  // strip only, and release applies the dropped position to `top`.
-  top := 0;
-  selected := 0;
-  ensure_visible();
+  // The scrollbar is over grid rows. The thumb sits at `view.top` after the
+  // frame above, so probe the computed thumb.
+  total := iconview.total_rows(view);
+  scrollbar_thumb(total, thumb_y, thumb_h);
+  verify("scrollbar border", syslib.get_pixel(ScrollLeft, GridTop) = black);
+  verify("scrollbar thumb", syslib.get_pixel(ScrollLeft + 4, thumb_y + 2) = gray);
+  verify("thumb metrics", thumb_h >= 8 and thumb_h <= GridH - 4);
+
+  // A track click pages one screen through the real pointer path.
+  iconview.first(view);
   draw_all();
-  scrollbar_thumb(entry_count, thumb_y, thumb_h);
-  pointer_to(scroll_x + 8, thumb_y + thumb_h div 2);
+  pointer_to(ScrollLeft + 8, GridTop + GridH - 6);
   pointer_down();
-  pointer_drag_to(scroll_x + 8, scroll_y + BodyH - 4);
-  max_top := entry_count - ListRows;
-  verify("scrollbar drag preview", top = 0 and scroll_preview = max_top);
-  verify("preview thumb leaves the top",
-    syslib.get_pixel(scroll_x + 4, scroll_y + 4) = white);
-  verify("preview thumb at the bottom",
-    syslib.get_pixel(scroll_x + 4, scroll_y + BodyH - 6) = gray);
   pointer_up();
-  verify("scrollbar drag applies", not scroll_dragging and top = max_top);
-  top := 0;
-  selected := 0;
-  ensure_visible();
+  verify("track click pages", view.selected = 36 and view.top = 1);
+  iconview.first(view);
+  draw_all();
+
+  // Grab the thumb and drag it to the bottom (M8.9). M16.8 defers the view:
+  // the held drag moves the thumb strip only, and release applies the dropped
+  // row and clamps the selection into the visible window.
+  scrollbar_thumb(total, thumb_y, thumb_h);
+  pointer_to(ScrollLeft + 8, thumb_y + thumb_h div 2);
+  pointer_down();
+  pointer_drag_to(ScrollLeft + 8, GridTop + GridH - 4);
+  max_top := total - view.rows;
+  verify("scrollbar drag preview", view.top = 0 and scroll_preview = max_top);
+  verify("preview thumb leaves the top",
+    syslib.get_pixel(ScrollLeft + 4, GridTop + 4) = white);
+  verify("preview thumb at the bottom",
+    syslib.get_pixel(ScrollLeft + 4, GridTop + GridH - 6) = gray);
+  pointer_up();
+  verify("scrollbar drag applies", not scroll_dragging and view.top = max_top);
+  verify("drag clamps selection", view.selected = view.top * view.cols);
+  iconview.first(view);
 
   // The visible `Up` button goes to the parent through the real pointer path
   // (M8.8); the Backspace and Ctrl+Up keys are checked next.
@@ -1881,8 +1730,7 @@ begin
   // injected with the Ctrl modifier and takes the normal event path.
   home_at := find_name("home");
   verify("home row found", home_at >= 0);
-  selected := home_at;
-  ensure_visible();
+  iconview.move_to(view, home_at);
   auto_draw := false;
   inject_key_mods(0x6C, 0, 2);
   auto_draw := true;
@@ -1894,13 +1742,17 @@ begin
   auto_draw := true;
   verify("ctrl-up up", int(core.len(dir)) = 0);
 
-  // A kind-2 entry cannot launch.
+  // A kind-2 entry cannot open or launch.
+  value := open_entry("child", uint(2));
+  verify("open kind two refused",
+    value = Invalid and status_line = "not a regular file");
   value := launch_name("child", "", uint(2));
   verify("launch kind two refused",
     value = Invalid and status_line = "cannot launch this entry");
 
   // Back in `base`, `editor check` is a real terminating source app, so the
-  // blocking launcher leaves no child behind. The full path is `apps/productivity/editor`.
+  // blocking launcher leaves no child behind. The full path is
+  // `apps/productivity/editor`.
   err := enter_dir("base");
   verify("launch in base", err = Ok and dir = "base");
   value := launch_path("apps/productivity/editor", "check");
@@ -1929,17 +1781,9 @@ begin
 end;
 
 procedure interactive_mode();
-var
-  ready: bool;
 begin
   dir := "";
   load_dir();
-  if entry_count > 0 and kinds[0] = uint(0) then
-  begin
-    selected := 0;
-    top := 0;
-    value := open_entry(names[0], kinds[0]);
-  end;
   draw_all();
   present_frame();
   running := true;
@@ -1965,19 +1809,19 @@ begin
     end
     else if ev.window = id then
     begin
-      ready := false;
+      dirty := false;
       if ev.kind = KeyDown then
       begin
         handle_key();
-        ready := true;
+        dirty := true;
       end
       else if ev.kind = PointerDown or ev.kind = PointerUp
               or ev.kind = PointerMove then
       begin
         if handle_pointer() then
-          ready := true;
+          dirty := true;
       end;
-      if ready and running then
+      if dirty and running then
       begin
         draw_all();
         present_frame();
@@ -1997,19 +1841,18 @@ begin
   st := enter_dir("base");
   child_at := find_name("child");
   if child_at >= 0 then
-  begin
-    selected := child_at;
-    ensure_visible();
-    value := open_entry(names[child_at], kinds[child_at]);
-  end;
+    iconview.move_to(view, child_at);
   draw_all();
   present_frame();
   out.say("browser: ready\n");
   deadline := core.clock() + uint(HoldSeconds) * uint(NanosPerSecond);
   auto_draw := true;
+  // Block in `core.sleep` between event drains so the hold does not spend the
+  // CPU watchdog budget (ADR 0061), like the editor and iconview shot modes.
   while core.clock() < deadline and running do
   begin
     drain_events();
+    st := core.sleep(uint(50));
   end;
   st := syslib.window_close(id);
   out.say("browser: done\n");
@@ -2030,9 +1873,6 @@ begin
   last_click_item := -1;
   last_task := 0;
   status_line := "";
-  preview := "";
-  preview_title := "";
-  preview_size := uint(0);
   dir := "";
   black := stdlib.ui_black();
   white := stdlib.ui_white();
@@ -2070,7 +1910,11 @@ begin
         out.say("browser: no content rect\n")
       else
       begin
-        compute_layout();
+        setup_view();
+        // Load the four icons once, after the window is open and before any
+        // frame. A failed load is non-fatal: the fallback outline is drawn and
+        // navigation keeps working (spec 0028 B1).
+        value := icons.load(icon_set, "icons");
         if mode = 1 then
           check_mode()
         else if mode = 2 then

@@ -179,7 +179,7 @@ pub fn tree_self_check(apps: &ext2w::Fs<AtaDisk>) -> Result<(), u32> {
         _ => return Err(2),
     }
 
-    // 3: the root lists the six directories (and mke2fs's lost+found).
+    // 3: the root lists the seven directories (and mke2fs's lost+found).
     let mut seen = 0u8;
     let mut index = 0u32;
     loop {
@@ -188,9 +188,10 @@ pub fn tree_self_check(apps: &ext2w::Fs<AtaDisk>) -> Result<(), u32> {
                 if entry.kind != abi::fs::KIND_DIR {
                     return Err(3);
                 }
-                for (bit, directory) in ["base", "apps", "home", "lib", "system", "image"]
-                    .iter()
-                    .enumerate()
+                for (bit, directory) in
+                    ["base", "apps", "home", "lib", "system", "image", "icons"]
+                        .iter()
+                        .enumerate()
                 {
                     if &name[..entry.name_len] == directory.as_bytes() {
                         seen |= 1 << bit;
@@ -205,7 +206,7 @@ pub fn tree_self_check(apps: &ext2w::Fs<AtaDisk>) -> Result<(), u32> {
             Err(_) => return Err(3),
         }
     }
-    if seen != 0b11_1111 {
+    if seen != 0b111_1111 {
         return Err(3);
     }
 

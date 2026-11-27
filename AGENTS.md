@@ -3,7 +3,7 @@
 Operational guide for humans and coding agents working in this repository.
 Keep this file short and current. It points at documents; it does not duplicate them.
 
-**Last updated:** 2026-11-26
+**Last updated:** 2026-11-27
 
 ## What this is
 
@@ -30,10 +30,11 @@ decisions in `adr/`, and work items in `PLAN.md`.
 
 ## Current state
 
-- Specs 0001–0027 are accepted; **M2–M17 are complete** (desktop, language,
+- Specs 0001–0028 are accepted; **M2–M18 are complete** (desktop, language,
   filesystems, networking, terminal emulator, runtime display modes, PNG/PPM image
-  viewer, kernel-only boot with the application volume on disk, the composition model
-  and local client coordinates). Current milestone work is tracked in `PLAN.md`.
+  viewer, kernel-only boot with the application volume on disk, the composition model,
+  local client coordinates and the icon grid). Current milestone work is tracked in
+  `PLAN.md`.
   **M16 (composition and surfaces)** is implemented: every window owns a content-sized
   canvas, drawing requires a `window_begin`/`plane_begin` scope (`Status.Invalid` without
   one), the compositor is the only writer of the shadow and recomposes damaged
@@ -48,20 +49,27 @@ decisions in `adr/`, and work items in `PLAN.md`.
   absolute screen geometry, and the W12/W28 "re-read the origin on `Expose`" discipline
   is retired. `fill_dither`'s parity is surface-local, so the visual golden was
   re-baselined once (`62e8140a…e809d83c`); `scripts/local_coords_qmp.py` drags a window
-  whose owner is mid-frame.
-- **638 host tests** (557 language + 56 `net` + 23 `ext2w` + 2 builtin tests); ABI v1 has
+  whose owner is mid-frame. **M18 (icon grid)** adds four pre-rasterized 32×32 PPM icons
+  under the read-only `icons/` directory and the `/lib` modules `icons` (load/draw) and
+  `iconview` (a stateful grid with two-line labels, selection, paging and clamped
+  scrolling); the file browser is now a full-width 100×68 icon grid with no text preview,
+  maps folders, source apps, plain files and images, loads the icons once at start, and
+  launches a file on `Enter`/double-click (spec 0028, ADR 0062).
+- **639 host tests** (558 language + 56 `net` + 23 `ext2w` + 2 builtin tests); ABI v1 has
   **75 opcodes** (runtime display modes add builtins 80–83; the machine-level bit and
   bulk buffer primitives are builtins 84–90, `syslib.blit_rgb` is 91, the surface model
   adds 92–97, no opcode).
 - Boot: GRUB/multiboot2 → `system/entrypoint` (the desktop shell), falling back to
   `base/shell`; a graphics-less boot keeps a serial REPL.
 - Filesystems: a read-only 128 MiB ext2 application volume (`lib`, `base`, `apps`,
-  `home`, `system`, `image`) on `ide0` unit 1, mounted on demand by the kernel through
-  `ext2w`; boot loads only `kernel.elf` and the ISO carries no image. The
+  `home`, `system`, `image`, `icons`) on `ide0` unit 1, mounted on demand by the kernel
+  through `ext2w`; boot loads only `kernel.elf` and the ISO carries no image. The
   full-resolution PPM P6 corpus at `image/` is generated from the tracked
   `samples/image-src/` sources (the generated `.ppm` files are git-ignored; the PNG
-  decoder is retained for PNG files). A persistent 8 MiB ext2 `/home` is the primary
-  master (`ext2w`, `e2fsck -fn` clean). GUI applications live under `apps/<category>/`.
+  decoder is retained for PNG files). The four committed 32×32 icon PPMs live under
+  `samples/icons/ppm/` and are staged as `icons/` by `scripts/make_icons.py`. A
+  persistent 8 MiB ext2 `/home` is the primary master (`ext2w`, `e2fsck -fn` clean). GUI
+  applications live under `apps/<category>/`.
 - Networking: virtio-net and e1000/e1000e, IPv4/UDP/TCP, with DHCP/DNS/HTTP/`nc`/`purl`
   in `/lib` and `base/`.
 - UI: a kernel window server with service-drawn close and minimize boxes, proportional
@@ -146,6 +154,7 @@ fresh.
 │   └── apps/          #   proofs (`base/`) and binary fixtures (`system/`)
 ├── samples/image-src/ # source JPEGs for the generated PPM corpus
 ├── samples/image/     # generated PPM P6 corpus (git-ignored, staged as `image/`)
+├── samples/icons/     # owner SVG sources + committed 32×32 PPMs (staged as `icons/`)
 ├── samples/home/      # single seed tree for `home/` and the writable disk
 ├── samples/lang/      # language examples run by `langhost`
 ├── scripts/           # QEMU/QMP harnesses (screenshots, proofs, regressions)
@@ -177,6 +186,7 @@ mount is behind its own `SpinLock` (Q59).
 | QEMU | qemu-system-x86_64 10.2.2 |
 | boot tooling | GRUB 2.12 (`grub2-mkrescue` or `grub-mkrescue`), xorriso |
 | image corpus | Python 3 + Pillow (`scripts/make_image_corpus.py`) |
+| icon rasterizer | ImageMagick with librsvg (`scripts/make_icons.py`); only for regeneration |
 
 ## Build commands
 

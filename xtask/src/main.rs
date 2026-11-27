@@ -186,8 +186,10 @@ fn image(shell: bool, reset_home: bool, net_irq: &str) -> ExitCode {
 /// staged tree into a fresh 128 MiB ext2 filesystem with 1 KiB blocks. The
 /// image carries application source (ADR 0019) and the image corpus, and
 /// preserves the source tree (spec 0018, X1): `lib`, `base`, `apps`, `home`,
-/// `system` and `image` become real directories, and no file sits at the image
-/// root.
+/// `system`, `image` and `icons` become real directories, and no file sits at
+/// the image root. The pre-rasterized 32x32 PPM icons are committed under
+/// `samples/icons/ppm` and staged read-only as `icons/` (spec 0028, A3/A5);
+/// the build never invokes a rasterizer.
 ///
 /// The boot entry is `system/entrypoint` (spec 0018, A3): `base/desktop_shell`
 /// is staged a second time under that name so the boot unit can be the desktop
@@ -208,7 +210,7 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
     let top_level = ["lib", "base", "apps", "home", "system"];
     // The staged image also carries the read-only PPM corpus (spec 0024; the
     // PNG decoder is retained for PNG files).
-    let staged_dirs = ["lib", "base", "apps", "home", "system", "image"];
+    let staged_dirs = ["lib", "base", "apps", "home", "system", "image", "icons"];
     let entries =
         fs::read_dir(&source).map_err(|error| format!("{}: {error}", source.display()))?;
     for entry in entries {
@@ -247,6 +249,21 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
         return Err(format!("{} is not a directory", home_seed.display()));
     }
     stage_tree(&home_seed, &staging.join("home"), false)?;
+
+    // The four pre-rasterized icons are committed (spec 0028, A3/A5), so the
+    // build only requires them and stages the read-only `icons/` directory; it
+    // never invokes Python or ImageMagick.
+    let icon_seed = root().join("samples").join("icons").join("ppm");
+    for name in ["folder", "igfile", "file", "image"] {
+        let icon = icon_seed.join(format!("{name}.ppm"));
+        if !icon.is_file() {
+            return Err(format!(
+                "{}: missing committed icon (run scripts/make_icons.py)",
+                icon.display()
+            ));
+        }
+    }
+    stage_tree(&icon_seed, &staging.join("icons"), false)?;
 
     // The generated PPM corpus is served read-only at `image/` (spec 0024).
     // The tracked source photographs live in `samples/image-src/`; the PPMs
@@ -298,7 +315,7 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
         stage_apps(&tests, &staging, true)?;
     }
 
-    // The six top-level directories exist even when empty.
+    // The seven top-level directories exist even when empty.
     for name in staged_dirs {
         fs::create_dir_all(staging.join(name))
             .map_err(|error| format!("{}: {error}", staging.join(name).display()))?;

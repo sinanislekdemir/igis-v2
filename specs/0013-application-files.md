@@ -6,7 +6,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0015 (read-only ext2 delivery), 0019 (source-only delivery), 0027
-- **Updated:** 2026-11-26
+- **Updated:** 2026-11-27
 
 ## Context
 
@@ -198,18 +198,26 @@ not depend on the order), reads use the same 256-byte chunk, and a symlink or a
 file used as a directory is refused exactly as the kernel subset does. A bare
 test host keeps the `NotFound` defaults.
 
-### The file browser (M2.5.4, navigation M3.4)
+### The file browser (M2.5.4, navigation M3.4, icon view M18)
 
-`samples/apps/base/browser.ig` records the application-level contract over the
-tree view:
+`samples/apps/apps/productivity/browser.ig` records the application-level
+contract over the tree view. The icon grid and its assets are specified in
+spec 0028; this section states the browser behaviour:
 
 - the browser shows **one directory at a time**. Its state is the current
-  directory path (`""` is the root) and the selected index; the path line shows
-  `igis:/` or `igis:/<dir>`. The listing is read with `fs_list` from index 0
-  until `NotFound`, into 96 fixed entries; `.`/`..` never appear and no sorting
-  is assumed. A directory with more than 96 entries reports a truncated listing
-  rather than dropping silently;
-- a kind-1 entry is shown as a folder. `Enter` (or a double-click) **descends**
+  directory path (`""` is the root) and the `lib.iconview` view; the path line
+  shows `igis:/` or `igis:/<dir>`. The listing is read with `fs_list` from
+  index 0 until `NotFound`, into 96 fixed entries; `.`/`..` never appear and no
+  sorting is assumed. A directory with more than 96 entries reports a
+  truncated listing rather than dropping silently;
+- the body is a **full-width 32×32 icon grid** in the style of the old Windows
+  Explorer: 100×68 cells, two 12-pixel label lines under each icon, a 16-pixel
+  scrollbar at the right and the status line at the bottom. The text preview
+  pane is gone; the browser does not read file content for display. The four
+  icons (`folder`, `igfile`, `file`, `image`) are loaded once at start from the
+  read-only `icons/` directory and reused; a load failure is non-fatal and
+  draws the monochrome fallback (spec 0028 A–B);
+- a kind-1 entry is drawn as a folder. `Enter` (or a double-click) **descends**
   into it (`dir := dir + "/" + name`, or `name` at the root). `Backspace` (or
   `Ctrl+Up`) goes up by truncating the last component of the current path; at
   the root it does nothing. There is no `..` path and no backtracking stack;
@@ -221,23 +229,23 @@ tree view:
   deferred in M16.8): a pointer-down in the thumb (hit class 3) records the
   offset inside the thumb; held primary-button moves move only a **preview**
   thumb (`scroll_preview`) and redraw/recomposite just the scrollbar strip, so
-  `top`, the selection and the list rows stay where they are; the release (or a
+  `top`, the selection and the grid stay where they are; the release (or a
   move that lost the primary button) applies the dropped position to `top`
   once, clamps the selection into the new window and repaints the frame. A
   track click still pages immediately, and the thumb geometry matches
   `stdlib.ui_scrollbar` (track `BodyH - 4`, 8-pixel floor, travel
-  `track - thumb`);
-- a kind-0 entry is previewed on `Enter`/double-click (at most 2048 bytes via
-  `fs_size` and 256-byte `fs_read` chunks, one strict-UTF-8 `substr_into`), and
-  the previous preview is left byte-identical on every failure class in F14;
-- `Ctrl+L` launches the selected regular file by its **full image path**
-  (`dir + "/" + name`, or the name at the root) with `core.spawn` + `core.wait`;
-  a directory is entered instead, and a kind-2 entry is refused. Launching a
-  `/lib` source is allowed; the spawn-time compile failure appears in the System
-  Log and the browser reports a fault (`core.run` copies the compiler diagnostic
-  into `diag`, `core.spawn` + `wait` does not); that is the compiler's
-  classification, not a browser rule;
-- a kind-2 entry is shown but cannot be opened, entered or launched;
+  `track - thumb`) over grid rows;
+- keys: Left/Right move one entry, Up/Down one grid row, PageUp/PageDown one
+  page (`columns × visible rows`), Home/End the first/last entry;
+- `Enter`, a double-click and `Ctrl+L` **launch** a selected regular file by its
+  **full image path** (`dir + "/" + name`, or the name at the root) with
+  `core.spawn` + `core.wait`; a directory is entered instead, and a kind-2
+  entry is refused. Launching a `/lib` source is allowed; the spawn-time
+  compile failure appears in the System Log and the browser reports a fault
+  (`core.run` copies the compiler diagnostic into `diag`, `core.spawn` + `wait`
+  does not); that is the compiler's classification, not a browser rule;
+- a kind-2 entry is shown with the generic file icon but cannot be opened,
+  entered or launched;
 - path construction is bounded by `PATH_MAX`: a name that would not fit sets a
   status line and is not opened;
 - no browser action writes a file or adds a handle.
@@ -471,3 +479,4 @@ drawing/drag rule, M9.3 the file-open dialog and M9.4 the document capacity:
 | 2026-11-26 | M16.8 (user request "scrollbar önce çekilsin ... release ettiğinde ... uygulama oraya gitsin. aktif scroll çünkü ağır içerikte crashe yol açıyor"): a scrollbar-thumb drag is **deferred** in the browser, the editor and the `/lib` file dialog. Held primary-button moves move a preview thumb (`scroll_preview`) and redraw/recomposite only the scrollbar strip (`window_begin` + the retained canvas + `syslib.present` of that rectangle); the list/document view, selection/caret and `top`/`top_line` do not change while the button is down. Release (or a move that lost the button) applies the dropped position once, clamps the selection/caret visible and repaints one frame. Track clicks and keys still act immediately. The editor caches the line count at the press so no drag step rescans a 128 KiB document, and the thumb arithmetic is factored into `thumb_metrics` (the same `stdlib.ui_scrollbar` geometry). Proven by `editor check` and `browser check` mid-drag pixel assertions, and by `scripts/editor_scroll_qmp.py` (held text region 0 px changed, thumb strip moved, release 12,575 px, `exit Ok` on `-smp 4`/`-smp 1`) and the dialog drag in `scripts/file_dialog_qmp.py` (held rows 0 px, strip 240 px, release 3,844 px). No file API, opcode, builtin, `Host`, `stdlib` or kernel change. |
 | 2026-11-26 | Dark theme (user request "text editöründe dark tema desteği"): the editor gains a checked `Dark` row (index 4) in the File menu, `Ctrl+D`, and a dark palette for the whole client content. Dark mode repaints the menu bar, pull-down, path line, text view, selection band, caret, scrollbar and status line over `0x1E1E1E` with `0xD4D4D4` ink, `0x264F78` selection and brightened syntax colours; the light path still calls the `stdlib` helpers and is pixel-identical. The local dark chrome reproduces the `ui_menu_bar`/`ui_menu_dropdown`/`ui_scrollbar` geometry so the existing hit tests keep working. `editor check` covers the toggle, both check bits, `Ctrl+D`, dark pixel probes and the light restore; `scripts/editor_screenshot_qmp.py --dark` captures the dark frame. No file API, opcode, builtin, `Host`, `stdlib` or kernel change. |
 | 2026-11-26 | M16.10 (user report "editör ... aşağı okuna basarak satır kaydırmaya çalışmak ama seri şekilde yaptığımda uygulama çöküyor"): the editor caches the line count and a sparse line-start index in the same publication pass as the block-comment state, so `line_count` is O(1), `line_start_of` walks at most 15 lines and `line_of_pos` binary-searches 8,193 anchors and then walks at most 15 lines. Movement, caret clamping, scrollbar math, the status readout and every frame no longer scan the document several times per key; `editor check` drops from 2,132 to 1,792 claims. The remaining full-window redraw per key exposed the lifetime-quota false positive, fixed separately by the per-run normal-task watchdog (ADR 0061, spec 0007): 300 injected Down keys on a 98 KiB document now end `exit Ok` instead of `Faulted(BudgetExceeded)`. `shot` mode also holds its frame with `core.sleep(50)` instead of a busy poll, so `run editor shot apps/productivity/editor` now ends `editor: done`/`exit Ok` (1,695 claims) rather than spending the watchdog on the 5 s spin. No file API, opcode, builtin, `Host` or `stdlib` change. |
+| 2026-11-27 | M18 (user request "eski windows explorer tarzı, büyük ikonlarla bir listeleme"): the file browser becomes a full-width 32×32 icon grid (`lib.iconview`, spec 0028) with two-line labels, four PPM icons loaded once from `icons/` (`lib.icons`), and no text preview pane; `Enter`/double-click launches a regular file instead of previewing it. The path line, `Up` button, scrollbar (deferred drag over grid rows), home create/remove and `Ctrl+L` launcher are unchanged. No file API, opcode, builtin, `Host` or kernel change. |

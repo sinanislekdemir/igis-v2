@@ -8,4 +8,7 @@ __pycache__/
 # Generated full-resolution PPM corpus (scripts/make_image_corpus.py)
 /samples/image/*.ppm
 
+# Owner-supplied SVG library; not shipped or versioned in this change (spec 0028, A4)
+/samples/icons/scalable/
+
 # Harness scratch (screenshots, ISO images, home disk) is under build/

@@ -2259,6 +2259,19 @@ end;
     }
 }
 
+/// The spec 0028 icon-view proof against `langhost`'s disabled screen: the grid
+/// geometry, hit test, navigation, row scrolling, label wrapping and the
+/// 96-entry capacity run with no window and no icon load.
+#[test]
+fn iconview_compiles_and_reports_the_host_path() {
+    let path = app_path("iconview");
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "iconview").expect("compiles");
+    let result = langhost::run(&package.code, b"", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"iconview: host ok\n".to_vec());
+}
+
 #[test]
 fn widgets_compiles_and_reports_the_host_path() {
     let path = app_path("widgets");
@@ -2520,11 +2533,12 @@ fn the_editor_sample_checks_its_logic_on_the_host() {
     assert_eq!(result.output, b"editor: host ok\n".to_vec());
 }
 
-/// The M2.5.4/M3.4 browser sample against `langhost`'s disabled screen: it runs
-/// the same navigation (root, enter, full-path preview, up), listing, preview
-/// and selection logic as the kernel check, without a window or a child launch.
+/// The M18 browser sample against `langhost`'s disabled screen: the icon-grid
+/// listing, navigation (root, enter, up), grid geometry, icon mapping and
+/// selection logic run exactly as in the kernel check, with no window, no icon
+/// load and no child launch.
 #[test]
-fn the_browser_sample_lists_and_previews_on_the_host() {
+fn the_browser_sample_lists_and_navigates_on_the_host() {
     let path = app_path("browser");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     let package = langhost::compile(&source, "browser").expect("the browser sample compiles");
@@ -2533,30 +2547,11 @@ fn the_browser_sample_lists_and_previews_on_the_host() {
     assert_eq!(result.reason, ExitReason::Ok);
     let output = String::from_utf8(result.output).expect("UTF-8 output");
     // The host path proves the tree walk: it starts in `base` (from the data
-    // checks), previews by full path, goes up to the root, then enters `system`,
-    // `home` and `lib` and previews a file in each.
-    assert!(output.contains("browser: nav dir=base\n"), "{output}");
-    assert!(
-        output.contains("browser: nav preview=base/child\n"),
-        "{output}"
-    );
-    assert!(output.contains("browser: nav dir=/\n"), "{output}");
-    assert!(
-        output.contains("browser: nav preview=system/system_probe\n"),
-        "{output}"
-    );
-    assert!(
-        output.contains("browser: nav preview=home/readme.txt\n"),
-        "{output}"
-    );
-    assert!(output.contains("browser: nav lib=math.ig\n"), "{output}");
+    // checks), goes up to the root, then enters `lib` and back into `base`.
     assert_eq!(
         output,
         "browser: nav dir=base\n\
-         browser: nav preview=base/child\n\
          browser: nav dir=/\n\
-         browser: nav preview=system/system_probe\n\
-         browser: nav preview=home/readme.txt\n\
          browser: nav lib=math.ig\n\
          browser: host ok\n"
     );

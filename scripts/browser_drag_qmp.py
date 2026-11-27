@@ -3,19 +3,19 @@
 
 This is a verification harness, not part of the kernel. It reproduces the
 M8.5 regression a user found by dragging the File Browser: the frame moved but
-the client kept its old content-rectangle-derived layout (the list, preview
-and status stayed at the old absolute coordinates, leaving stale rows in the
-new frame). After M8.5 the service copies the topmost content snapshot and the
+the client kept its old content-rectangle-derived layout (the icon grid and
+status stayed at the old absolute coordinates, leaving stale rows in the new
+frame). After M8.5 the service copies the topmost content snapshot and the
 client re-reads the content rect and recomputes `compute_layout` on `Expose`.
 
 The harness boots `build/igis.iso` (the boot desktop), launches File Browser
 from Apps, drags the title bar, captures the framebuffer through QMP and checks
 the new layout's black borders:
   - path separator at content + 21 spans the content width;
-  - the list border at content + (8, 30) and the preview border at
-    content + (378, 30) run the full 420-pixel body height;
-  - the old absolute preview border (content_old + 378) and the old path
-    separator are gone.
+  - the icon-grid border at content + (8, 30) runs the full 420-pixel body
+    height, with its right edge at content + 647;
+  - the scrollbar frame at content + (656, 30) runs the same height;
+  - the old absolute grid and path borders are gone.
 It never displays the image: Pillow reads the captured framebuffer for the
 pixel checks only. The screenshot is written to
 `build/screenshots/igis-browser-drag.png`.
@@ -46,10 +46,12 @@ os.makedirs(SHOT_DIR, exist_ok=True)
 DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-browser-drag.png")
 
 # `desktop_shell` menu geometry: `File` starts at x = 24, `Apps` at x = 56 and
-# its pull-down frame is (52, 22, 176, 98). Row 3 (`File Browser`) is
-# y = 23 + 3*16 = 71..86; its centre is y = 78.
+# its pull-down frame starts at y = 22 with 16-pixel rows. `File Browser` is
+# row 9 (0 #Accessories, 1 Calculator, 2 Clock, 3 Widgets, 4 Image Viewer,
+# 5 #Games, 6 Minesweeper, 7 #Productivity, 8 Editor, 9 File Browser), so its
+# centre is y = 31 + 9*16 = 175.
 APPS_LABEL = (64, 10)
-BROWSER_ROW = (140, 159)
+BROWSER_ROW = (140, 175)
 
 # `samples/apps/apps/productivity/browser.ig` opens content 680x480 at (160, 90); the frame is
 # content + (2, 17). The title bar grab is 300 pixels from the frame's left edge
@@ -61,10 +63,11 @@ TITLE_GRAB = (300, 8)
 
 CONTENT_W = 680
 CONTENT_H = 480
-LIST_LEFT = 8
-LIST_TOP = 30
+GRID_LEFT = 8
+GRID_TOP = 30
+GRID_W = 640
 BODY_H = 420
-PREVIEW_LEFT = 378
+SCROLL_LEFT = 656
 PATH_H = 22
 
 
@@ -257,23 +260,35 @@ def main():
             path_run = longest_black_run(
                 image, content_y + PATH_H - 1, content_x, content_x + CONTENT_W
             )
-            list_column = black_column(
+            grid_column = black_column(
                 image,
-                content_x + LIST_LEFT,
-                content_y + LIST_TOP,
-                content_y + LIST_TOP + BODY_H,
+                content_x + GRID_LEFT,
+                content_y + GRID_TOP,
+                content_y + GRID_TOP + BODY_H,
             )
-            preview_column = black_column(
+            grid_right_column = black_column(
                 image,
-                content_x + PREVIEW_LEFT,
-                content_y + LIST_TOP,
-                content_y + LIST_TOP + BODY_H,
+                content_x + GRID_LEFT + GRID_W - 1,
+                content_y + GRID_TOP,
+                content_y + GRID_TOP + BODY_H,
             )
-            stale_preview = black_column(
+            scroll_column = black_column(
                 image,
-                old_content_x + PREVIEW_LEFT,
-                content_y + LIST_TOP,
-                content_y + LIST_TOP + BODY_H,
+                content_x + SCROLL_LEFT,
+                content_y + GRID_TOP,
+                content_y + GRID_TOP + BODY_H,
+            )
+            stale_old_layout = black_column(
+                image,
+                old_content_x + SCROLL_LEFT,
+                content_y + GRID_TOP,
+                content_y + GRID_TOP + BODY_H,
+            )
+            stale_grid = black_column(
+                image,
+                old_content_x + GRID_LEFT,
+                content_y + GRID_TOP,
+                content_y + GRID_TOP + BODY_H,
             )
             old_path_run = longest_black_run(
                 image,
@@ -284,25 +299,26 @@ def main():
 
         print(
             f"[harness] new path separator {path_run}/{CONTENT_W} black; "
-            f"list border {list_column}/{BODY_H}; "
-            f"preview border {preview_column}/{BODY_H}"
+            f"grid border {grid_column}/{BODY_H} and "
+            f"{grid_right_column}/{BODY_H}; "
+            f"scrollbar frame {scroll_column}/{BODY_H}"
         )
         print(
-            f"[harness] old layout is gone: stale preview {stale_preview}, "
-            f"old path run {old_path_run}"
+            f"[harness] old layout is gone: stale scroll {stale_old_layout}, "
+            f"stale grid {stale_grid}, old path run {old_path_run}"
         )
         failures = 0
         if path_run < CONTENT_W - 4:
             print("[harness] FAIL: the path separator is not at the new origin")
             failures += 1
-        if list_column < BODY_H - 4:
-            print("[harness] FAIL: the list border is not at the new origin")
+        if grid_column < BODY_H - 4 or grid_right_column < BODY_H - 4:
+            print("[harness] FAIL: the icon-grid border is not at the new origin")
             failures += 1
-        if preview_column < BODY_H - 4:
-            print("[harness] FAIL: the preview border is not at the new origin")
+        if scroll_column < BODY_H - 4:
+            print("[harness] FAIL: the scrollbar frame is not at the new origin")
             failures += 1
-        if stale_preview >= BODY_H // 2:
-            print("[harness] FAIL: the old preview border is still visible")
+        if stale_old_layout >= BODY_H // 2 or stale_grid >= BODY_H // 2:
+            print("[harness] FAIL: the old grid/scrollbar frame is still visible")
             failures += 1
         if old_path_run >= CONTENT_W // 2:
             print("[harness] FAIL: the old path separator is still visible")

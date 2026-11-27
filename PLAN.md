@@ -14,9 +14,11 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Current state (M17):** **638 host tests**; specs 0001–0027 (0025, 0026 and 0027
-  implemented; 0026 now includes the M17 local-coordinate model); ABI v1 at 75 opcodes with
-  builtins 80–97; **M2–M17 complete**. Boot loads only
+- **Current state (M18):** **639 host tests**; specs 0001–0028 (0025, 0026, 0027 and
+  0028 implemented; 0026 includes the M17 local-coordinate model; 0028 is the M18 icon
+  grid); ABI v1 at 75 opcodes with builtins 80–97; **M2–M18 complete**. The 128 MiB
+  application volume now also carries the read-only `icons/` directory (four committed
+  32×32 PPM icons) and the browser is a full-width icon grid. Boot loads only
   `kernel.elf`: the ISO carries no application image, and the 128 MiB read-only ext2
   volume on `ide0` unit 1 is mounted on demand through `ext2w` (229 MiB free in a
   256 MiB guest), with `/home` on the primary master. On TCG/4 cores the desktop is
@@ -2584,6 +2586,47 @@ nothing a client computes and the W12/W28 "re-read the rectangle" discipline dis
   `scripts/local_coords_qmp.py` and `samples/tests/apps/base/local_coords` (drag a window
   mid-frame, assert both corner marks at the new origin and a content-local pointer
   event).
+
+### M18: icon grid and file browser (2026-11-27)
+
+Normative: spec 0028 (assets A1–A6, `lib.icons` L1–L4, `lib.iconview` V1–V8,
+browser B1–B8, proof P1–P3); ADR 0062. Goal: the file browser becomes an old
+Windows Explorer-style large-icon view with colour icons, and the widget is
+reusable.
+
+- [x] **M18.1 Decision and spec.** Spec 0028 accepted and ADR 0062 accepted;
+  specs 0013 (browser), 0018 (image layout) and 0025 (image contents) updated.
+  No code yet.
+- [x] **M18.2 Icon assets and staging.** `scripts/make_icons.py` renders the four
+  `samples/icons/*.svg` sources to 32×32 P6 PPM (`samples/icons/ppm`), commits
+  the four outputs, ignores `samples/icons/scalable/`, and `xtask image` stages
+  `icons/` for the product and `--shell` images. Acceptance: script idempotent
+  and `--check` clean; PPMs are P6 32×32 maxval 255; `build/apps-root/icons`
+  and `build/apps-shell-root/icons` carry the four files; no other image root
+  entry appears.
+- [x] **M18.3 `lib.icons` and `lib.iconview`.** The loader reads the four
+  icons once with `lib.ppm`; the widget implements the V2 contract, two-line
+  labels, selection, paging and clamped scrolling. Acceptance: host pure checks
+  for geometry/hit/navigation/label; the module compiles as `/lib`; no new
+  builtin/opcode.
+- [x] **M18.4 Browser icon grid.** The browser loads the set once at start,
+  maps folder/igfile/image/file, draws the full-width grid with the existing
+  path line, scrollbar and status, removes the preview read path, and launches
+  a regular file on `Enter`/double-click. Acceptance: `browser check` covers
+  the grid, mapping, labels, selection/paging, scrollbar, home operations and
+  launch; `browser shot` holds a framed grid.
+- [x] **M18.5 Proof, harnesses and docs.** `samples/tests/apps/base/iconview`
+  (`check`/`shot`), the `langhost` e2e tests, updated
+  `browser_drag_qmp.py`/`input_routing_qmp.py` for the new layout, and a
+  screenshot harness. Acceptance: 638+ host tests; `browser check`,
+  `iconview check` and `ui_icons` on `-smp 4` and `-smp 1`; browser drag,
+  input routing and browser screenshot harnesses pass; `AGENTS.md` current
+  state, `docs/HISTORY.md` and the spec indexes updated.
+  **Done (2026-11-27):** `icons.load` loads all four PPMs once, `iconview: ok`
+  and `browser: ok` on both core counts, `browser_drag_qmp.py` and
+  `input_routing_qmp.py` pass, and the browser screenshot was refreshed. The
+  product root shows folder icons; the shell `base` shows the source icon for
+  extensionless staged apps. 639 host tests.
 
 ### M16 deferred
 

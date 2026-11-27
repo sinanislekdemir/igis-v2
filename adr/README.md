@@ -86,3 +86,4 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0059 | [Boot only the kernel and mount the application image from an ATA disk](0059-boot-only-the-kernel.md) | Accepted | 2026-11-22 |
 | 0060 | [Retain every window's content and compose the screen from surfaces](0060-per-window-canvas-and-service-compositor.md) | Accepted (implemented M16; local coordinates deferred) | 2026-11-25 |
 | 0061 | [The normal-task budget covers one continuous run, reset on block](0061-per-run-normal-task-budget.md) | Accepted | 2026-11-26 |
+| 0062 | [Pre-rasterize the icon set to 32×32 PPM P6](0062-pre-rasterized-ppm-icons.md) | Accepted | 2026-11-27 |

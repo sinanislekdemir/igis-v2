@@ -3,8 +3,8 @@
 
 This is a verification harness, not part of the kernel. It boots the ISO with
 no display and no USB tablet, runs `browser shot`, waits for its
-`browser: ready` line (the browser window with the root
-listing, the selected source preview and its status line), and writes the guest framebuffer to a PNG
+`browser: ready` line (the browser window with the root icon
+grid, its selection and status line), and writes the guest framebuffer to a PNG
 through QMP `screendump`. If the QEMU build rejects the PNG format, it dumps a
 PPM and converts it with PIL.
 
