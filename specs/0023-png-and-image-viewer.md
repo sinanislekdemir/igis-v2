@@ -7,7 +7,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0057
-- **Updated:** 2026-11-22
+- **Updated:** 2026-11-27
 
 ## Context
 
@@ -101,6 +101,12 @@ colour, gamma/colour-management or a kernel codec.
 - **V3 (MUST, implemented):** The viewer supports `check` and `shot` modes like the other
   GUI applications, and its file dialog starts at `image`.
 - **V4 (MUST, implemented):** The viewer is listed under `Accessories` in the Apps menu.
+- **V5 (MUST, implemented):** The initial render owns the final window canvas. The
+  window service also queues one whole-content `Expose` for a newly opened window;
+  the viewer answers that first `Expose` with `window_present` and does **not**
+  decode the image again. A later, real `Expose` (move, switch, mode change) re-runs
+  the draw with `png.rewind`/a fresh PPM open as before. Opening one image therefore
+  decodes it exactly once, not twice back to back.
 
 ## Design
 
@@ -459,3 +465,4 @@ run image_viewer check            deterministic check, `image_viewer: ok`
 | 2026-11-22 | The viewer gains a decode progress strip: the window content is `out_w x (out_h + 20)`, the image stays 1:1 at the top and the bottom 20 pixels show a separator, `Decoding NN%` / `Ready` in the 8x8 font and a 6-pixel gray track with a proportional black fill. The strip is drawn at 0% before `png.open`, redrawn and presented every 8 decoded rows, and ends at `Ready`/100%. On `Expose` the white fill is skipped and only the strip is redrawn at 0% (without a present), so the last complete frame stays visible while `png.rewind` re-decodes. The viewer state grows by the color scalar to 629,000 bytes. No lib/kernel/scheduler change. |
 | 2026-11-22 | The active shipped corpus becomes full-resolution uncompressed PPM P6 under `image/` (spec 0024, ADR 0058); the apps image is 128 MiB. The PNG decoder and every PNG requirement here are retained for PNG input, and `lib.png` is unchanged. `samples/apps/lib/ppm.ig` adds the P6 header/row reader, proved by `ppm_probe`. |
 | 2026-11-22 | The viewer dispatches PNG/PPM (spec 0024): `lib.png` is retained unchanged for `.png` paths, and `.ppm` paths use `lib.ppm` with a `ceil(w/8) x ceil(h/8)` preview built by row seek and nearest-column sampling into a 3,072-byte preview row. A path with neither suffix is sniffed (PPM first, then PNG). The PNG branch keeps the normal-class `png.open`, realtime row loop and `png.rewind` on `Expose`; PPM re-opens the header per repaint and is promoted with a per-row heartbeat like PNG (needed under TCG). The check path adds the 8x8 `system/ppm_rgb.ppm` fixture. Viewer state is now 648,784 bytes (one PNG decoder, one small PPM decoder, a 16,384-byte source row and a 3,072-byte preview row). No lib/kernel/scheduler change. |
+| 2026-11-27 | Image viewer: the opening window's queued Expose is answered with `window_present` instead of a second decode (spec V5), so a normal open no longer decodes PNG Adam7 pass 1 / reads every PPM preview row twice. Later real Exposes still repaint. No ABI, builtin or kernel change. |

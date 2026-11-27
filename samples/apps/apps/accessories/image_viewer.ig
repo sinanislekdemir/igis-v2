@@ -22,8 +22,11 @@ unit image_viewer;
 //
 // The first frame is drawn and presented *before* `png.open`: opening stages
 // up to 512 KiB of IDAT payload, which takes visible time on the real corpus.
-// An owner `Expose` re-runs the draw in window-local coordinates (spec 0026
-// C8); the PNG path uses `png.rewind` over the staged prefix and
+// The initial render owns the final canvas. A newly opened window also gets
+// one queued Expose from the service; that first Expose is answered with a
+// present, not a second decode, so opening an image decodes it exactly once. A
+// later, real owner `Expose` re-runs the draw in window-local coordinates
+// (spec 0026 C8); the PNG path uses `png.rewind` over the staged prefix and
 // the PPM path re-opens the header and reads rows again. There is no image
 // buffer to keep. Close/Escape leaves. Each output row reaches the window
 // through one `syslib.blit_rgb` call with `pw = ow, ph = 1`.
@@ -112,6 +115,11 @@ var
   // True once `png.open` has staged the IDAT prefix; an Expose then uses
   // `png.rewind` instead of touching the file again.
   decoded: bool;
+  // The service queues one whole-content Expose when a window opens. The
+  // initial render already produced the final canvas, so that first expose is
+  // answered with a present instead of a second decode. Later exposes are real
+  // repaints.
+  first_expose: bool;
   // One warning only when realtime admission is refused.
   boost_warned: bool;
 
@@ -353,11 +361,13 @@ end;
 
 // One complete image frame: one blitted row per decoded row, plus the status
 // strip. On the first frame the whole content is also filled white and the
-// strip at 0% is presented before the staged-IDAT work. An `Expose` repaint
-// deliberately skips the blanking, redraws only the strip at 0% (without a
-// present, so the last complete frame stays on screen), then `png.rewind`s and
-// runs the same row loop with a progress present every 8 rows. Returns the
-// first failing status so the caller can open the error window.
+// strip at 0% is presented before the staged-IDAT work. A later `Expose`
+// repaint deliberately skips the blanking, redraws only the strip at 0%
+// (without a present, so the last complete frame stays on screen), then
+// `png.rewind`s and runs the same row loop with a progress present every 8
+// rows. The opening window's own queued Expose is not a repaint and is
+// answered by the caller with a present instead. Returns the first failing
+// status so the caller can open the error window.
 //
 // The first frame stages the 512 KiB IDAT prefix with `png.open` under the
 // normal class, which fits the normal budget. Only the row loop is promoted to
@@ -627,30 +637,10 @@ begin
     show_error(st);
     return;
   end;
-  // The service queues an Expose for the new window. A PPM repaint is fast
-  // enough that a shot would otherwise capture its early progress strip; finish
-  // that repaint before announcing so the capture sees the final `Ready`.
-  if announce and kind = KindPpm then
-  begin
-    status := syslib.next_event(ev);
-    if status = Ok then
-    begin
-      if ev.kind = Expose then
-      begin
-        if ev.window = id then
-        begin
-          st := render_image(source);
-          if st <> Ok then
-          begin
-            status := syslib.window_close(id);
-            id := 0;
-            show_error(st);
-            return;
-          end;
-        end;
-      end;
-    end;
-  end;
+  // The initial render owns the final canvas. The window service also queues
+  // one Expose for the newly opened window; the loop below answers that one
+  // with a present, not a second decode (spec 0023/0024).
+  first_expose := true;
   if announce then
   begin
     out.say("image_viewer: ready ");
@@ -674,11 +664,23 @@ begin
       begin
         if ev.window = id then
         begin
-          st := render_image(source);
-          if st <> Ok then
+          if first_expose then
           begin
-            error_status := st;
-            keep := false;
+            // The opening window's queued expose: the initial render already
+            // filled the retained canvas, so only present it again.
+            first_expose := false;
+            error_status := syslib.window_present(id);
+            if error_status <> Ok then
+              keep := false;
+          end
+          else
+          begin
+            st := render_image(source);
+            if st <> Ok then
+            begin
+              error_status := st;
+              keep := false;
+            end;
           end;
         end;
       end
@@ -881,6 +883,7 @@ begin
   running := true;
   kind := KindPng;
   decoded := false;
+  first_expose := false;
   boost_warned := false;
   screen_w := syslib.screen_width();
   screen_h := syslib.screen_height();

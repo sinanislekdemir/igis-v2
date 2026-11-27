@@ -7,7 +7,7 @@
 - **Supersedes:** none
 - **Superseded by:** none
 - **ADRs:** 0058
-- **Updated:** 2026-11-22
+- **Updated:** 2026-11-27
 
 ## Context
 
@@ -141,6 +141,10 @@ add a kernel codec, compression, or any Netpbm format other than P6.
   and ends at `Ready`/100%. The PPM row loop is promoted to realtime when
   admission allows and heartbeats once per output row (admission refusal falls
   back to the normal class); each row read is bounded.
+- **V6 (MUST):** The opening window's queued `Expose` is answered with
+  `window_present`, not a second PPM open/row pass (spec 0023 V5). A later real
+  `Expose` still re-opens and re-reads the preview rows. One open therefore
+  performs one preview pass, not two back to back.
 
 ## Design
 
@@ -225,3 +229,4 @@ holds the path and geometry.
 | 2026-11-22 | Accepted with the full-resolution P6 corpus (123.0 MB), the 128 MiB apps image, the `lib.ppm` header/row contract and the PNG/PPM viewer dispatch (ADR 0058). |
 | 2026-11-22 | `samples/apps/lib/ppm.ig` is implemented and proved by `ppm_probe` on `langhost` and in the `--shell` image: `probe`/`open`/`info`/`read_row`, 256-byte header refills with absolute offsets and comments, one whitespace separator after maxval, P6/maxval-255 only, and the status set `NotFound`/`Invalid`/`CapacityExceeded`/`IoError`. |
 | 2026-11-22 | The dual-format viewer is implemented (`apps/accessories/image_viewer`): `.png` keeps the spec 0023 `lib.png` path (normal-class open, realtime row loop, `png.rewind` on `Expose`), `.ppm` uses `lib.ppm` with `ceil(w/8) x ceil(h/8)` row-seek/nearest-column sampling into a 3,072-byte `preview_row` and a per-row realtime heartbeat (needed under TCG), and a suffix-less path tries PPM then PNG. The 20 px status strip is shared and ends at `Ready`. `check` adds the 8x8 `system/ppm_rgb.ppm` formula fixture. The `image_viewer_qmp.py` proof now opens `image/simon-twukN12EN7c-unsplash.ppm`; the Desktop capture is 1024x768 with the `Ready` strip. |
+| 2026-11-27 | Image viewer: the opening window's queued Expose is answered with `window_present` instead of a second PPM open/row-seek preview pass (spec V6). `image_viewer shot` no longer consumes and re-renders that Expose; `Ready` still follows the one complete pass. No ABI, builtin, kernel or file-API change. |
