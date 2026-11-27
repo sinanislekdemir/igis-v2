@@ -138,8 +138,8 @@ an `int`; `0` is never a valid id.
     `Expose`, or any injected addressed event) is passed through unchanged.
   A click that raises a window may mark an expose; the routing path wakes input waiters
   after dropping the window lock.
-- **W17 (MUST):** `syslib.window_present(id)` closes an open draw scope for `id` (W34),
-  marks the canvas valid and **recomposites the window's frame rectangle** from the surface
+- **W17 (MUST):** `syslib.window_present(id)` marks the canvas valid and
+  **recomposites the window's frame rectangle** from the surface
   stack (spec 0026 C14/C16), presenting it. Because the compositor paints layers in order,
   the result always shows the window in its correct place in the stack; a canvas is never
   copied over a higher window. It is owner-only like `close`/`move`: `Ok`, `NotFound` for
@@ -380,8 +380,9 @@ an `int`; `0` is never a valid id.
   There is at most one scope per task, recorded in the window record (not in per-quantum
   host state), so preemption, a blocking `next_event` or a long frame cannot redirect a
   later draw: a second `window_begin` of any owned window replaces the previous scope,
-  `window_present` closes the scope of its argument, and `close`/`close_task` clear it with
-  the window. A scope grants no presentation; only `window_present` composites. Drawing
+  `window_begin(0)` clears it, and `close`/`close_task` clear it with the window. A
+  present does **not** close it. A scope grants no presentation; only `window_present`
+  composites. Drawing
   into the canvas of a minimized window is legal and invisible until it is restored (W30).
 - **W35 (MUST):** Window content reaches the screen only through the compositor's
   painter's-order pass (spec 0026 C14): for the rectangle being repaired it paints the

@@ -59,9 +59,11 @@ damage tracking, hardware cursors, a wallpaper.
   then returns `Status.Full` and creates nothing. A half-created surface is never
   observable.
 - **C3 (MUST):** A task draws into a surface only inside an open **draw scope**, opened by
-  `syslib.window_begin(id)` or `syslib.plane_begin(id)` and closed by the matching
-  present call, by the surface's destruction or by the task's termination. There is at
-  most one scope per task. The scope is recorded in the surface record, not in per-quantum
+  `syslib.window_begin(id)` or `syslib.plane_begin(id)` and cleared by
+  `syslib.window_begin(0)`, by another scope, by the surface's destruction or by the
+  task's termination. A present does **not** close the scope, so an app can draw, present,
+  verify its canvas and draw the next frame without reopening it. There is at most one
+  scope per task. The scope is recorded in the surface record, not in per-quantum
   host state, so preemption, a blocking `next_event` or a long frame cannot redirect a
   later draw. Opening a scope is owner-only: `Ok` for the caller's live surface,
   `NotFound` for an unknown id, `Invalid` for another task's surface or disabled
@@ -193,7 +195,7 @@ cheap to regenerate. That is why no repair needs to know history.
 ```text
 window_begin(id) / plane_begin(id) ──▶ scope (in the surface record)
 syslib.fill_rect(x, y, …)           ──▶ canvas write at local (x, y), clipped
-window_present(id) / plane_present  ──▶ scope closes; recomposite the surface rect
+window_present(id) / plane_present  ──▶ recomposite the surface rect (scope stays open)
 ```
 
 A client's whole frame lands in its canvas and is presented in one step; nothing it draws
