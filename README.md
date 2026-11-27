@@ -56,16 +56,19 @@ is pinned ([ADR 0011](adr/0011-work-stealing-interpreters.md)). The shell is its
 application: a kernel REPL service compiles it at boot and starts it, and applications
 start others through a `run`/`spawn` request queue ([ADR 0017](adr/0017-repl-spawn-service.md)).
 
-**Status: implementation.** Specs 0001–0028 are accepted; milestones M2–M18 are complete
+**Status: implementation.** Specs 0001–0029 are accepted; milestones M2–M19 are complete
 (desktop, language, filesystems, networking, terminal emulator, runtime display modes,
-PNG/PPM image viewer, retained-surface composition, local client coordinates and the
-large-icon file browser), 639 host tests pass, and ABI v1 has 75 opcodes. The read-only
+PNG/PPM image viewer, retained-surface composition, local client coordinates, the
+large-icon file browser and its open-with/context-menu actions), 639 host tests pass, and
+ABI v1 has 75 opcodes. The read-only
 128 MiB image tree carries a full-resolution PPM P6 corpus generated from the tracked
 `samples/image-src` JPEGs (the generated PPMs are not committed; the PNG decoder is
 retained), and `apps/accessories/image_viewer` opens both PNG (Adam7 pass-1) and PPM
 (fixed-stride 1/8 sampling) without a full-image buffer. The four committed 32×32 icon
 PPMs under `samples/icons/ppm` are loaded once from the read-only `icons/` directory and
-drive the file browser's icon grid. A Settings application changes the real display
+drive the file browser's icon grid; `.ppm`/`.png` files open in the image viewer, `.txt`
+files in the editor, and other files get a context menu with editor, terminal,
+cut/copy/paste and delete actions. A Settings application changes the real display
 mode through the QEMU `std` VGA Bochs VBE dispi (spec 0022, ADR 0056), and the Calendar
 application shows the host month from the CMOS RTC (spec 0027). See
 [`AGENTS.md`](AGENTS.md) for the current state and [`PLAN.md`](PLAN.md) for what is next.

@@ -237,13 +237,17 @@ spec 0028; this section states the browser behaviour:
   `track - thumb`) over grid rows;
 - keys: Left/Right move one entry, Up/Down one grid row, PageUp/PageDown one
   page (`columns × visible rows`), Home/End the first/last entry;
-- `Enter`, a double-click and `Ctrl+L` **launch** a selected regular file by its
-  **full image path** (`dir + "/" + name`, or the name at the root) with
-  `core.spawn` + `core.wait`; a directory is entered instead, and a kind-2
-  entry is refused. Launching a `/lib` source is allowed; the spawn-time
-  compile failure appears in the System Log and the browser reports a fault
+- `Enter` and a double-click **open** the selected entry by spec 0029: a
+  `.ppm`/`.png` file opens the image viewer, a `.txt` file opens the editor, a
+  source application is launched with `core.spawn` + `core.wait`, and every
+  other regular file opens a context menu with editor, terminal, cut, copy,
+  paste and delete actions. `Ctrl+L` keeps the launch meaning. A kind-2 entry
+  is refused. Launching a `/lib` source is allowed; the spawn-time compile
+  failure appears in the System Log and the browser reports a fault
   (`core.run` copies the compiler diagnostic into `diag`, `core.spawn` + `wait`
   does not); that is the compiler's classification, not a browser rule;
+- a right-click on a regular file opens the same context menu; its copy/paste
+  clipboard is browser-local and only writes under `home/` (spec 0029 C);
 - a kind-2 entry is shown with the generic file icon but cannot be opened,
   entered or launched;
 - path construction is bounded by `PATH_MAX`: a name that would not fit sets a
@@ -480,3 +484,4 @@ drawing/drag rule, M9.3 the file-open dialog and M9.4 the document capacity:
 | 2026-11-26 | Dark theme (user request "text editöründe dark tema desteği"): the editor gains a checked `Dark` row (index 4) in the File menu, `Ctrl+D`, and a dark palette for the whole client content. Dark mode repaints the menu bar, pull-down, path line, text view, selection band, caret, scrollbar and status line over `0x1E1E1E` with `0xD4D4D4` ink, `0x264F78` selection and brightened syntax colours; the light path still calls the `stdlib` helpers and is pixel-identical. The local dark chrome reproduces the `ui_menu_bar`/`ui_menu_dropdown`/`ui_scrollbar` geometry so the existing hit tests keep working. `editor check` covers the toggle, both check bits, `Ctrl+D`, dark pixel probes and the light restore; `scripts/editor_screenshot_qmp.py --dark` captures the dark frame. No file API, opcode, builtin, `Host`, `stdlib` or kernel change. |
 | 2026-11-26 | M16.10 (user report "editör ... aşağı okuna basarak satır kaydırmaya çalışmak ama seri şekilde yaptığımda uygulama çöküyor"): the editor caches the line count and a sparse line-start index in the same publication pass as the block-comment state, so `line_count` is O(1), `line_start_of` walks at most 15 lines and `line_of_pos` binary-searches 8,193 anchors and then walks at most 15 lines. Movement, caret clamping, scrollbar math, the status readout and every frame no longer scan the document several times per key; `editor check` drops from 2,132 to 1,792 claims. The remaining full-window redraw per key exposed the lifetime-quota false positive, fixed separately by the per-run normal-task watchdog (ADR 0061, spec 0007): 300 injected Down keys on a 98 KiB document now end `exit Ok` instead of `Faulted(BudgetExceeded)`. `shot` mode also holds its frame with `core.sleep(50)` instead of a busy poll, so `run editor shot apps/productivity/editor` now ends `editor: done`/`exit Ok` (1,695 claims) rather than spending the watchdog on the 5 s spin. No file API, opcode, builtin, `Host` or `stdlib` change. |
 | 2026-11-27 | M18 (user request "eski windows explorer tarzı, büyük ikonlarla bir listeleme"): the file browser becomes a full-width 32×32 icon grid (`lib.iconview`, spec 0028) with two-line labels, four PPM icons loaded once from `icons/` (`lib.icons`), and no text preview pane; `Enter`/double-click launches a regular file instead of previewing it. The path line, `Up` button, scrollbar (deferred drag over grid rows), home create/remove and `Ctrl+L` launcher are unchanged. No file API, opcode, builtin, `Host` or kernel change. |
+| 2026-11-27 | M19 (user request "ppm dosyalarını image viewer, .txt dosyalarını text editör ile açabilir miyiz? diğer dosyaları ... context menu ile"): default open maps `.ppm`/`.png` to the image viewer, `.txt` to the editor, source apps to the existing launch, and every other regular file to the context menu; right-click opens the same menu. The menu offers editor, terminal, cut, copy, paste and delete; the clipboard is browser-local and writes only under `home/` (spec 0029). No file API, opcode, builtin, `Host` or kernel change. |

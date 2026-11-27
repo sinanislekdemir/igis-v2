@@ -35,6 +35,7 @@ revised as understanding improves, and their history lives in git.
 | 0026 | [Composition, surfaces and coordinate spaces](0026-composition-and-surfaces.md) | Accepted | abi, compiler, interpreter, kernel gfx/window/console/sched, syslib, samples/apps | 2026-11-26 |
 | 0027 | [The calendar window](0027-calendar-window.md) | Implemented | samples/apps (calendar, desktop_shell), langhost, scripts | 2026-11-26 |
 | 0028 | [RGB icon assets and the icon view widget](0028-icon-assets-and-icon-view.md) | Implemented | samples/icons, scripts, xtask, samples/apps/lib, samples/apps/apps/productivity/browser, samples/tests/apps, langhost | 2026-11-27 |
+| 0029 | [File browser open-with, context menu and clipboard](0029-file-browser-actions.md) | Implemented | samples/apps (browser, terminal), samples/tests/apps, langhost, scripts | 2026-11-27 |
 
 ## Lifecycle
 

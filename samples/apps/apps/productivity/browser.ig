@@ -34,19 +34,46 @@ unit browser;
 // the suffix there) -> source; kind 0 ending in
 // `.png`/`.ppm`/`.jpg`/`.jpeg` -> image; anything else -> file.
 //
-// Enter and a double-click open the selected entry like Explorer: a kind-1
-// entry is descended into (`dir := dir + "/" + name`, or the name at the root)
-// and a kind-0 entry is launched by its full image path with `core.spawn` and
-// a blocking `core.wait`. A kind-2 entry (device, socket, symlink) is refused
-// with a status line and is never entered, read or launched. Ctrl+L keeps the
-// same launch meaning. Launching a `/lib` module is allowed and surfaces the
-// compiler's `missing main` diagnostic, which is the compiler's
-// classification, not a browser rule. Backspace and Ctrl+Up go up by
-// truncating the last component of `dir`; at the root that is a no-op. The
-// path line also carries a visible 44x18 `Up` button, so the parent directory
-// is reachable with the pointer alone (M8.8). There is no `..` path and no
-// history stack; path construction is bounded by PATH_MAX (256 bytes) and a
-// combination that would not fit sets the status line and is not opened.
+// Enter and a double-click follow the default-open rules of spec 0029: a
+// kind-1 entry is descended into (`dir := dir + "/" + name`, or the name at
+// the root); a `.ppm`/`.png` file (ASCII case-insensitive) is opened in
+// `apps/accessories/image_viewer`; a `.txt` file is opened in
+// `apps/productivity/editor`; a source application (`.ig`, or an extensionless
+// file in `base`/`system`/`apps`/`apps/<category>`) keeps the M18 blocking
+// `core.spawn` + `core.wait` launch. The viewer, the editor and the terminal
+// are spawned WITHOUT waiting, so the browser stays usable while they run. Any
+// other regular file opens the context menu at the selected cell and spawns no
+// child. A kind-2 entry (device, socket, symlink) is refused with a status line
+// and is never entered, read or launched. Ctrl+L keeps the blocking launch
+// meaning. Launching a `/lib` module is allowed and surfaces the compiler's
+// `missing main` diagnostic, which is the compiler's classification, not a
+// browser rule. Backspace and Ctrl+Up go up by truncating the last component
+// of `dir`; at the root that is a no-op. The path line also carries a visible
+// 44x18 `Up` button, so the parent directory is reachable with the pointer
+// alone (M8.8). There is no `..` path and no history stack; path construction
+// is bounded by PATH_MAX (256 bytes) and a combination that would not fit sets
+// the status line and is not opened.
+//
+// A right-click (pointer button bit 1) on a regular file selects it and opens
+// the context menu at the pointer; a right-click on a directory or a kind-2
+// entry does not. The menu has exactly six 16-pixel rows in this order:
+// `Open with editor`, `Run in terminal`, `Cut`, `Copy`, `Paste`, `Delete`. It
+// is 220 pixels wide, framed, clamped inside the 680x480 content with a 4-pixel
+// margin and drawn last by `stdlib.ui_menu_dropdown`. `Open with editor` spawns
+// the editor with the full path and `Run in terminal` spawns
+// `apps/utilities/terminal` with the single argument string `run <full path>`;
+// neither waits. Up/Down move the highlight, Enter activates, Escape closes,
+// a click inside activates or dismisses, and a click outside dismisses the menu
+// and is consumed. A directory change closes it.
+//
+// The clipboard is browser-local and holds one entry (full path, kind and a
+// copy/cut mode). It is not a system clipboard and lasts until it is replaced,
+// until a successful cut-paste or until the browser exits. Paste targets the
+// current directory under the source basename and only writes under `home/`:
+// it never overwrites (an existing target is `already exists`), a copy
+// streams 256-byte `core.fs_read` chunks into a new destination (removed on a
+// failure), and a cut moves the source with `core.fs_rename`. `Delete` keeps
+// the home-only remove rule (spec 0013).
 //
 // Keys: Left/Right move one entry, Up/Down one grid row (six entries),
 // PageUp/PageDown one page (`columns x visible rows`), Home/End the first or
@@ -114,6 +141,35 @@ const
   ScrollW = 16;
   StatusTop = 460;
 
+  // Context menu (spec 0029, M2/M3): six 16-pixel rows, 220 pixels wide, a
+  // 1-pixel frame (98 pixels tall), clamped with a 4-pixel content margin.
+  MenuCount = 6;
+  MenuW = 220;
+  MenuRowH = 16;
+  MenuH = 98;
+  MenuMargin = 4;
+  MenuEditorRow = 0;
+  MenuTerminalRow = 1;
+  MenuCutRow = 2;
+  MenuCopyRow = 3;
+  MenuPasteRow = 4;
+  MenuDeleteRow = 5;
+
+  // Default-open actions (spec 0029, O1-O5).
+  ActionEnter = 0;
+  ActionRun = 1;
+  ActionEditor = 2;
+  ActionImage = 3;
+  ActionMenu = 4;
+
+  // The browser-local clipboard modes (spec 0029, C1).
+  ClipNone = 0;
+  ClipCopy = 1;
+  ClipCut = 2;
+
+  // `run <full path>` in one argument string: 4 + up to 255 bytes.
+  TermCapacity = 264;
+
   // The `lib.icons` ids (module constants are not exported across a unit).
   FolderIcon = 0;
   SourceIcon = 1;
@@ -173,6 +229,27 @@ var
   opens: int;
   last_task: int;
   diag: Diagnostic;
+
+  // Context menu (spec 0029, M1-M5). The labels and shortcuts are filled once
+  // by `init_menu`; the browser owns the open state, the anchor and the
+  // highlight.
+  menu_items: array[string[64], 16];
+  menu_shortcuts: array[string[32], 16];
+  menu_open: bool;
+  menu_x: int;
+  menu_y: int;
+  menu_selected: int;
+  menu_target: int;
+
+  // One browser-local clipboard entry (spec 0029, C1).
+  clip_mode: int;
+  clip_full: string[PathCapacity];
+  clip_name: string[64];
+  clip_kind: uint;
+
+  // The `Run in terminal` argument buffer: `run <full path>` in one string.
+  terminal_args: string[TermCapacity];
+  terminal_stage: bytes[TermCapacity];
 
   // Mode and scratch.
   mode: int;
@@ -361,6 +438,28 @@ begin
   return FileIcon;
 end;
 
+// The default-open action (spec 0029, O1-O5). A directory is entered; a
+// regular file is handed to the one application that knows it, or to the
+// blocking source launcher; everything else opens the context menu. A kind-2
+// entry is never dispatched here (`open_entry` refuses it first).
+function default_action(name: const string[0]; kind: uint;
+                        where: const string[0]): int;
+begin
+  if kind = uint(1) then
+    return ActionEnter;
+  if kind <> uint(0) then
+    return ActionMenu;
+  if has_suffix(name, ".ppm") or has_suffix(name, ".png") then
+    return ActionImage;
+  if has_suffix(name, ".txt") then
+    return ActionEditor;
+  if has_suffix(name, ".ig") then
+    return ActionRun;
+  if not has_dot(name) and is_source_dir(where) then
+    return ActionRun;
+  return ActionMenu;
+end;
+
 // ---- listing --------------------------------------------------------------
 
 // Reads the current directory in directory order until `NotFound`. A new
@@ -376,6 +475,8 @@ begin
   truncated := false;
   scroll_dragging := false;
   scroll_preview := 0;
+  // A directory change closes the context menu (spec 0029, M3).
+  menu_open := false;
   i := 0;
   while i < EntryCapacity do
   begin
@@ -544,10 +645,156 @@ begin
   return launch_path(path_buf, args);
 end;
 
-// Dispatches one listing entry: a directory is entered, a regular file is
-// launched by its full image path and a kind-2 entry (device, socket, symlink)
-// is refused before any call. There is no content read and no preview.
+// Non-blocking launch (spec 0029, O2/O3/M4): spawn and return without a
+// `core.wait`, so the browser stays usable while the viewer, the editor or the
+// terminal runs. The blocking `launch_path` remains for source applications.
+function spawn_detached(path: const string[0]; args: const string[0]): Status;
+var
+  err: Status;
+  child: int;
+begin
+  child := 0;
+  err := core.spawn(path, args, diag, child);
+  if err <> Ok then
+  begin
+    status_line := "launch failed";
+    return err;
+  end;
+  last_task := child;
+  status_line := "launched: ok";
+  return Ok;
+end;
+
+// Builds the selected entry's full image path into `path_buf`. A bad selection
+// or an over-long path reports the existing status and launches nothing (O7).
+function selected_path(): Status;
+var
+  err: Status;
+begin
+  if view.selected < 0 or view.selected >= view.count then
+  begin
+    status_line := "nothing selected";
+    return Invalid;
+  end;
+  err := join_path(dir, view.names[view.selected], path_buf);
+  if err <> Ok then
+    status_line := "path too long";
+  return err;
+end;
+
+// `Open with editor` (M4): the editor receives the full image path, without a
+// wait.
+procedure open_editor_selected();
+begin
+  if selected_path() <> Ok then
+    return;
+  value := spawn_detached("apps/productivity/editor", path_buf);
+end;
+
+// `Run in terminal` (M4, T2): the terminal receives one argument string,
+// `run <full path>`, and forwards it to its shell; the browser does not wait.
+procedure run_in_terminal_selected();
+var
+  total: int;
+  length: int;
+  i: int;
+  got: int;
+begin
+  if selected_path() <> Ok then
+    return;
+  length := int(core.len(path_buf));
+  total := 4 + length;
+  if total > TermCapacity then
+  begin
+    status_line := "path too long";
+    return;
+  end;
+  terminal_stage[0] := byte(114);  // r
+  terminal_stage[1] := byte(117);  // u
+  terminal_stage[2] := byte(110);  // n
+  terminal_stage[3] := byte(32);   // space
+  i := 0;
+  while i < length do
+  begin
+    terminal_stage[4 + i] := path_buf[i];
+    i := i + 1;
+  end;
+  got := core.substr_into(terminal_args, terminal_stage, 0, total);
+  if got <> total then
+  begin
+    status_line := "path too long";
+    return;
+  end;
+  value := spawn_detached("apps/utilities/terminal", terminal_args);
+end;
+
+// ---- context menu (spec 0029, M1-M3) --------------------------------------
+
+// The disabled mask for the menu: `Paste` is gray and inert while the
+// browser-local clipboard is empty.
+function menu_disabled_mask(): uint;
+begin
+  if clip_mode = ClipNone then
+    return stdlib.ui_menu_bit(MenuPasteRow);
+  return uint(0);
+end;
+
+// Opens the menu at a window-local point, clamped into the 680x480 content
+// with a 4-pixel margin (M2). The top-left anchor is clamped, so the frame can
+// never leave the canvas.
+procedure open_menu(at: int; px: int; py: int);
+var
+  hit: int;
+begin
+  menu_target := at;
+  menu_x := px;
+  menu_y := py;
+  if menu_x < MenuMargin then
+    menu_x := MenuMargin;
+  if menu_x > ContentW - MenuMargin - MenuW then
+    menu_x := ContentW - MenuMargin - MenuW;
+  if menu_y < MenuMargin then
+    menu_y := MenuMargin;
+  if menu_y > ContentH - MenuMargin - MenuH then
+    menu_y := ContentH - MenuMargin - MenuH;
+  menu_open := true;
+  hit := stdlib.ui_menu_hit(
+    menu_x, menu_y, MenuW, menu_items, MenuCount, px, py);
+  if hit < 0 or not stdlib.ui_menu_selectable(
+       menu_items[hit], menu_disabled_mask(), hit) then
+    hit := stdlib.ui_menu_first(MenuCount, menu_items, menu_disabled_mask());
+  menu_selected := hit;
+end;
+
+// The context menu anchored to the selected cell (O5): the whole cell.
+procedure open_selected_menu();
+var
+  row: int;
+  col: int;
+  at: int;
+begin
+  at := view.selected;
+  if at < 0 or at >= view.count then
+    return;
+  if view.kinds[at] <> uint(0) then
+    return;
+  row := (at div view.cols) - view.top;
+  col := at mod view.cols;
+  open_menu(
+    at,
+    GridLeft + CellMargin + col * CellW + 8,
+    GridTop + CellMargin + row * CellH + 8);
+end;
+
+// Dispatches one listing entry by the default-open rule: a directory is
+// entered, a known regular file is spawned without waiting, a source
+// application is launched with the blocking `core.wait` and every other
+// regular file opens the context menu at its cell. There is no content read
+// and no preview. A kind-2 entry is refused before any call.
 function open_entry(name: const string[0]; kind: uint): Status;
+var
+  action: int;
+  err: Status;
 begin
   if kind = uint(1) then
     return enter_dir(name);
@@ -556,7 +803,25 @@ begin
     status_line := "not a regular file";
     return Invalid;
   end;
-  return launch_name(name, "", kind);
+
+  action := default_action(name, kind, dir);
+  if action = ActionMenu then
+  begin
+    open_selected_menu();
+    return Ok;
+  end;
+
+  err := join_path(dir, name, path_buf);
+  if err <> Ok then
+  begin
+    status_line := "path too long";
+    return err;
+  end;
+  if action = ActionImage then
+    return spawn_detached("apps/accessories/image_viewer", path_buf);
+  if action = ActionEditor then
+    return spawn_detached("apps/productivity/editor", path_buf);
+  return launch_path(path_buf, "");
 end;
 
 procedure launch_selected();
@@ -571,7 +836,8 @@ begin
   if view.selected >= 0 and view.selected < view.count then
   begin
     value := open_entry(view.names[view.selected], view.kinds[view.selected]);
-    if value = Ok then
+    // A menu is an offer, not an open: only a real launch increments `opens`.
+    if value = Ok and not menu_open then
       opens := opens + 1;
   end;
 end;
@@ -674,6 +940,239 @@ begin
     status_line := "remove failed";
 end;
 
+// ---- browser-local clipboard (spec 0029, C1-C5) ---------------------------
+
+// `Copy` / `Cut` (C2): store the selected regular file and set the status.
+// Nothing is written to the filesystem and no child is spawned.
+procedure store_clipboard(want: int);
+var
+  err: Status;
+  length: int;
+  copied: int;
+begin
+  if view.selected < 0 or view.selected >= view.count then
+  begin
+    status_line := "nothing selected";
+    return;
+  end;
+  err := join_path(dir, view.names[view.selected], clip_full);
+  if err <> Ok then
+  begin
+    status_line := "path too long";
+    return;
+  end;
+  length := int(core.len(view.names[view.selected]));
+  copied := core.substr_into(clip_name, view.names[view.selected], 0, length);
+  if copied <> length then
+  begin
+    clip_mode := ClipNone;
+    status_line := "path too long";
+    return;
+  end;
+  clip_kind := view.kinds[view.selected];
+  clip_mode := want;
+  if want = ClipCut then
+    status_line := "cut"
+  else
+    status_line := "copied";
+end;
+
+// Streams `src[0..total)` into the new `dst` in 256-byte chunks (C4). The
+// destination is created first (a one-byte write, then truncate to zero, so a
+// zero-byte source still produces a file) and a partial destination is removed
+// on any failure. The source may be read-only; only `dst` must be under home.
+function copy_file(src: const string[0]; dst: const string[0];
+                   total: uint): Status;
+var
+  chunk: bytes[256];
+  one: bytes[1];
+  offset: uint;
+  got: int;
+  written: int;
+  err: Status;
+begin
+  one[0] := byte(0);
+  written := -1;
+  err := core.fs_write(dst, uint(0), one, written);
+  if err <> Ok or written <> 1 then
+  begin
+    err := core.fs_remove(dst);
+    return IoError;
+  end;
+  err := core.fs_truncate(dst, uint(0));
+  if err <> Ok then
+  begin
+    err := core.fs_remove(dst);
+    return IoError;
+  end;
+  offset := uint(0);
+  while offset < total do
+  begin
+    got := -1;
+    err := core.fs_read(src, offset, chunk, got);
+    if err <> Ok or got <= 0 then
+    begin
+      err := core.fs_remove(dst);
+      return IoError;
+    end;
+    written := -1;
+    err := core.fs_write(dst, offset, chunk, written);
+    if err <> Ok or written <> got then
+    begin
+      err := core.fs_remove(dst);
+      return IoError;
+    end;
+    offset := offset + uint(got);
+  end;
+  return Ok;
+end;
+
+// `Paste` (C3-C5): the target is the current directory plus the source
+// basename. It refuses an empty clipboard, the source itself, an existing
+// target (never overwrite) and a destination outside `home/`. A cut moves with
+// `core.fs_rename`; a copy streams. Success reloads the directory, selects the
+// pasted name and reports `pasted`; a cut clears the clipboard, a copy keeps it.
+procedure paste_clipboard();
+var
+  target: string[PathCapacity];
+  total: uint;
+  at: int;
+  err: Status;
+  was_cut: bool;
+begin
+  last_op := Ok;
+  if clip_mode = ClipNone then
+  begin
+    status_line := "clipboard empty";
+    return;
+  end;
+  err := join_path(dir, clip_name, target);
+  if err <> Ok then
+  begin
+    last_op := err;
+    status_line := "path too long";
+    return;
+  end;
+  if target = clip_full then
+  begin
+    last_op := Invalid;
+    status_line := "same directory";
+    return;
+  end;
+  total := uint(0);
+  err := core.fs_size(target, total);
+  // A regular file is `Ok`; a directory or another non-regular entry is
+  // `Invalid`. Both are an existing target and must never be removed or
+  // overwritten, so only `NotFound` proceeds.
+  if err = Ok or err = Invalid then
+  begin
+    last_op := Invalid;
+    status_line := "already exists";
+    return;
+  end;
+  if err <> NotFound then
+  begin
+    last_op := err;
+    status_line := "paste failed";
+    return;
+  end;
+  if not under_home() then
+  begin
+    last_op := Invalid;
+    status_line := "read-only: outside home";
+    return;
+  end;
+
+  was_cut := clip_mode = ClipCut;
+  if was_cut then
+  begin
+    err := core.fs_rename(clip_full, target);
+    last_op := err;
+    if err <> Ok then
+    begin
+      status_line := "paste failed";
+      return;
+    end;
+  end
+  else
+  begin
+    err := core.fs_size(clip_full, total);
+    if err <> Ok then
+    begin
+      last_op := err;
+      status_line := "copy failed";
+      return;
+    end;
+    err := copy_file(clip_full, target, total);
+    last_op := err;
+    if err <> Ok then
+    begin
+      status_line := "copy failed";
+      return;
+    end;
+  end;
+
+  load_dir();
+  at := find_name(clip_name);
+  if at >= 0 then
+    iconview.move_to(view, at);
+  status_line := "pasted";
+  if was_cut then
+    clip_mode := ClipNone;
+end;
+
+// The six menu labels (M2), filled once. The shortcuts array belongs to the
+// library's headless menu model and stays empty: the browser binds no menu
+// accelerators beyond the documented keys.
+procedure init_menu();
+var
+  i: int;
+begin
+  menu_items[0] := "Open with editor";
+  menu_items[1] := "Run in terminal";
+  menu_items[2] := "Cut";
+  menu_items[3] := "Copy";
+  menu_items[4] := "Paste";
+  menu_items[5] := "Delete";
+  i := 0;
+  while i < 16 do
+  begin
+    menu_shortcuts[i] := "";
+    i := i + 1;
+  end;
+  menu_open := false;
+  menu_x := 0;
+  menu_y := 0;
+  menu_selected := 0;
+  menu_target := -1;
+end;
+
+// Activates one menu row (M3/M4). A disabled row is a no-op and the menu stays
+// open; every other activation closes it first, so an action that reloads the
+// directory (paste, delete) cannot leave stale menu pixels behind.
+procedure activate_menu_row(row: int);
+begin
+  if row < 0 or row >= MenuCount then
+    return;
+  if not stdlib.ui_menu_selectable(
+       menu_items[row], menu_disabled_mask(), row) then
+    return;
+  menu_open := false;
+  menu_target := view.selected;
+  if row = MenuEditorRow then
+    open_editor_selected()
+  else if row = MenuTerminalRow then
+    run_in_terminal_selected()
+  else if row = MenuCutRow then
+    store_clipboard(ClipCut)
+  else if row = MenuCopyRow then
+    store_clipboard(ClipCopy)
+  else if row = MenuPasteRow then
+    paste_clipboard()
+  else if row = MenuDeleteRow then
+    remove_selected();
+end;
+
 // ---- scrollbar (over grid rows) -------------------------------------------
 
 // The thumb height and travel for `total` rows against the visible rows,
@@ -749,10 +1248,30 @@ var
   key: int;
   mods: int;
   ctrl: bool;
+  action: int;
 begin
   key := stdlib.ui_key_code(ev.code);
   mods := stdlib.ui_key_modifiers(ev.code);
   ctrl := (mods div 2) mod 2 = 1;
+
+  // The context menu owns the documented menu keys (M3): Up/Down move the
+  // highlight, Enter activates, Escape closes. Other keys are ignored while it
+  // is open so they cannot move the grid underneath.
+  if menu_open then
+  begin
+    action := stdlib.ui_menu_key(ev.code, true);
+    if action = 6 then
+      menu_open := false
+    else if action = 1 then
+      menu_selected := stdlib.ui_menu_move(
+        menu_selected, MenuCount, -1, menu_items, menu_disabled_mask())
+    else if action = 2 then
+      menu_selected := stdlib.ui_menu_move(
+        menu_selected, MenuCount, 1, menu_items, menu_disabled_mask())
+    else if action = 5 then
+      activate_menu_row(menu_selected);
+    return;
+  end;
 
   if ctrl then
   begin
@@ -818,6 +1337,7 @@ var
   preview: int;
   was_top: int;
   was_selected: int;
+  right: bool;
 begin
   total := iconview.total_rows(view);
 
@@ -860,8 +1380,60 @@ begin
     return false;
   end;
 
+  // The context menu consumes the pointer while it is open (M3). A move
+  // follows the pointer, a press inside activates or dismisses it, and a press
+  // outside dismisses it and is consumed by the browser.
+  if menu_open then
+  begin
+    if ev.kind = PointerMove then
+    begin
+      hit := stdlib.ui_menu_hit(
+        menu_x, menu_y, MenuW, menu_items, MenuCount, ev.x, ev.y);
+      if hit >= 0 and stdlib.ui_menu_selectable(
+           menu_items[hit], menu_disabled_mask(), hit) then
+      begin
+        if hit <> menu_selected then
+        begin
+          menu_selected := hit;
+          return true;
+        end;
+      end;
+      return false;
+    end;
+    if ev.kind <> PointerDown then
+      return false;
+    if stdlib.ui_rect_hit(menu_x, menu_y, MenuW, MenuH, ev.x, ev.y) then
+    begin
+      hit := stdlib.ui_menu_hit(
+        menu_x, menu_y, MenuW, menu_items, MenuCount, ev.x, ev.y);
+      if hit >= 0 then
+        activate_menu_row(hit)
+      else
+        menu_open := false;
+      return true;
+    end;
+    menu_open := false;
+    return true;
+  end;
+
   if ev.kind <> PointerDown then
     return false;
+
+  // A right-click (button bit 1) on a regular file selects it and opens the
+  // menu at the pointer (M1). A directory or a kind-2 entry only selects.
+  right := (ev.code div uint(2)) mod uint(2) = uint(1);
+  if right then
+  begin
+    hit := iconview.index_at(view, ev.x, ev.y);
+    if hit < 0 then
+      return false;
+    iconview.move_to(view, hit);
+    last_click_ns := uint(0);
+    last_click_item := -1;
+    if view.kinds[hit] = uint(0) then
+      open_menu(hit, ev.x, ev.y);
+    return true;
+  end;
 
   if stdlib.ui_button_hit(up_x, up_y, up_w, up_h, ev.x, ev.y) then
   begin
@@ -902,7 +1474,7 @@ begin
     last_click_ns := uint(0);
     last_click_item := -1;
     value := open_entry(view.names[hit], view.kinds[hit]);
-    if value = Ok then
+    if value = Ok and not menu_open then
       opens := opens + 1;
   end
   else
@@ -1088,6 +1660,12 @@ begin
   else
     draw_scrollbar_at(view.top);
   draw_status();
+  // The context menu is drawn last, over the grid and status line but clipped
+  // to the content canvas (M2).
+  if menu_open then
+    st := stdlib.ui_menu_dropdown(
+      menu_x, menu_y, MenuW, menu_items, menu_shortcuts, MenuCount,
+      menu_selected, uint(0), menu_disabled_mask(), true);
 end;
 
 procedure present_frame();
@@ -1173,6 +1751,16 @@ end;
 procedure pointer_up();
 begin
   st := inject.pointer_up();
+  drain_events();
+end;
+
+// A right-click at the current pointer: button bit 1 (`uint(2)`), then the
+// release, each drained. The pointer must already be placed with `pointer_to`.
+procedure pointer_right();
+begin
+  st := syslib.inject_pointer(0, 0, uint(2));
+  drain_events();
+  st := syslib.inject_pointer(0, 0, uint(0));
   drain_events();
 end;
 
@@ -1274,6 +1862,55 @@ begin
   verify("map jpeg", icon_for("photo.jpeg", uint(0), "image") = ImageIcon);
   verify("map plain", icon_for("readme.txt", uint(0), "home") = FileIcon);
   verify("map other", icon_for("device", uint(2), "home") = FileIcon);
+end;
+
+// The pure default-open mapping (spec 0029, O1-O7 / V1): directory, source,
+// image, text and the context-menu fallback, including uppercase extensions.
+procedure action_checks();
+begin
+  verify("action dir", default_action("base", uint(1), "") = ActionEnter);
+  verify("action source app", default_action("child", uint(0), "base") = ActionRun);
+  verify("action ig", default_action("math.ig", uint(0), "lib") = ActionRun);
+  verify("action ig upper", default_action("MATH.IG", uint(0), "lib") = ActionRun);
+  verify("action category source",
+    default_action("editor", uint(0), "apps/productivity") = ActionRun);
+  verify("action system source",
+    default_action("entrypoint", uint(0), "system") = ActionRun);
+  verify("action ppm", default_action("alps.ppm", uint(0), "image") = ActionImage);
+  verify("action png", default_action("photo.png", uint(0), "image") = ActionImage);
+  verify("action ppm upper", default_action("ALPS.PPM", uint(0), "image") = ActionImage);
+  verify("action png upper", default_action("PHOTO.PNG", uint(0), "image") = ActionImage);
+  verify("action txt", default_action("readme.txt", uint(0), "home") = ActionEditor);
+  verify("action txt upper", default_action("README.TXT", uint(0), "home") = ActionEditor);
+  verify("action other", default_action("notes.md", uint(0), "home") = ActionMenu);
+  verify("action jpg is other", default_action("photo.jpg", uint(0), "image") = ActionMenu);
+  verify("action kind two", default_action("device", uint(2), "home") = ActionMenu);
+end;
+
+// The menu model and its pure geometry/hit test (spec 0029, M2 / V1). No window
+// is opened and nothing is drawn.
+procedure menu_model_checks();
+begin
+  verify("menu rows", MenuCount = 6);
+  verify("menu width", MenuW = 220);
+  verify("menu row height", MenuRowH = 16);
+  verify("menu height", MenuH = 98);
+  verify("menu item editor", menu_items[MenuEditorRow] = "Open with editor");
+  verify("menu item terminal", menu_items[MenuTerminalRow] = "Run in terminal");
+  verify("menu item cut", menu_items[MenuCutRow] = "Cut");
+  verify("menu item copy", menu_items[MenuCopyRow] = "Copy");
+  verify("menu item paste", menu_items[MenuPasteRow] = "Paste");
+  verify("menu item delete", menu_items[MenuDeleteRow] = "Delete");
+  verify("menu hit first",
+    stdlib.ui_menu_hit(0, 0, MenuW, menu_items, MenuCount, 10, 9) = 0);
+  verify("menu hit last",
+    stdlib.ui_menu_hit(
+      0, 0, MenuW, menu_items, MenuCount, 10,
+      1 + MenuDeleteRow * MenuRowH + 8) = MenuDeleteRow);
+  verify("menu hit border",
+    stdlib.ui_menu_hit(0, 0, MenuW, menu_items, MenuCount, 10, 0) = -1);
+  verify("menu hit outside",
+    stdlib.ui_menu_hit(0, 0, MenuW, menu_items, MenuCount, MenuW + 1, 9) = -1);
 end;
 
 // The grid geometry the browser initialized (spec 0028 B3).
@@ -1556,6 +2193,171 @@ begin
   verify("writable back in base", err = Ok and dir = "base");
 end;
 
+// The right-click menu and the browser-local clipboard (spec 0029, M1-M5,
+// C1-C5 / V1). The clipboard source is `base/child`; the paste target is
+// `home/child`. The persistent home disk is cleaned before the proof so an
+// interrupted earlier run cannot make this one fail.
+procedure clipboard_checks();
+var
+  child_at: int;
+  readme_at: int;
+  at: int;
+  row: int;
+  col: int;
+  cell_x: int;
+  cell_y: int;
+  menu_row_y: int;
+  source_size: uint;
+  check_size: uint;
+  err: Status;
+  first_a: bytes[256];
+  first_b: bytes[256];
+  got_a: int;
+  got_b: int;
+  same: bool;
+  i: int;
+begin
+  clip_mode := ClipNone;
+  verify("paste disabled empty",
+    stdlib.ui_menu_has(menu_disabled_mask(), MenuPasteRow));
+
+  // In `base`: right-click `child` and take Copy from the menu. This half only
+  // needs the window and the clipboard, so it runs even without a home disk.
+  // `writable_checks` has already left the view in `base`; entering `base`
+  // again would build `base/base`.
+  if dir <> "base" then
+    err := enter_dir("base")
+  else
+    err := Ok;
+  verify("clip in base", err = Ok and dir = "base");
+  if not no_home then
+  begin
+    // Idempotent cleanup after an interrupted run.
+    err := core.fs_remove("home/child");
+    verify("clip cleanup", err = Ok or err = NotFound);
+  end;
+
+  child_at := find_name("child");
+  verify("clip source found", child_at >= 0 and view.kinds[child_at] = uint(0));
+  if child_at < 0 then
+    return;
+  source_size := sizes[child_at];
+  iconview.move_to(view, child_at);
+  row := (child_at div view.cols) - view.top;
+  col := child_at mod view.cols;
+  cell_x := GridLeft + CellMargin + col * CellW;
+  cell_y := GridTop + CellMargin + row * CellH;
+
+  auto_draw := false;
+  pointer_to(cell_x + 12, cell_y + 12);
+  pointer_right();
+  auto_draw := true;
+  verify("right-click opens menu", menu_open and menu_target = child_at);
+  draw_all();
+  present_frame();
+  verify("menu frame pixel", syslib.get_pixel(menu_x, menu_y) = black);
+  verify("menu text ink", region_has(
+    menu_x + 22, menu_y + 1 + MenuRowH, 180, 5 * MenuRowH, black));
+
+  menu_row_y := menu_y + 1 + MenuCopyRow * MenuRowH + MenuRowH div 2;
+  auto_draw := false;
+  pointer_to(menu_x + 40, menu_row_y);
+  pointer_down();
+  pointer_up();
+  auto_draw := true;
+  verify("copy from menu",
+    not menu_open and clip_mode = ClipCopy and status_line = "copied");
+  verify("copy enables paste",
+    not stdlib.ui_menu_has(menu_disabled_mask(), MenuPasteRow));
+
+  if no_home then
+  begin
+    // `writable_checks` already reported the missing home; the menu and the
+    // browser-local clipboard still ran above, the list/paste half cannot.
+    out.say("browser: clipboard paste skipped (no home)\n");
+    return;
+  end;
+
+  // Go up to the root and enter `home` (a directory change closes any menu).
+  go_up();
+  err := enter_dir("home");
+  verify("clip in home", err = Ok and dir = "home");
+  err := core.fs_remove("home/child");
+  verify("clip target clean", err = Ok or err = NotFound);
+
+  readme_at := find_name("readme.txt");
+  verify("clip target row", readme_at >= 0 and view.kinds[readme_at] = uint(0));
+  if readme_at < 0 then
+    return;
+  iconview.move_to(view, readme_at);
+  row := (readme_at div view.cols) - view.top;
+  col := readme_at mod view.cols;
+  cell_x := GridLeft + CellMargin + col * CellW;
+  cell_y := GridTop + CellMargin + row * CellH;
+  auto_draw := false;
+  pointer_to(cell_x + 12, cell_y + 12);
+  pointer_right();
+  auto_draw := true;
+  verify("paste menu opens", menu_open and menu_target = readme_at);
+
+  menu_row_y := menu_y + 1 + MenuPasteRow * MenuRowH + MenuRowH div 2;
+  auto_draw := false;
+  pointer_to(menu_x + 40, menu_row_y);
+  pointer_down();
+  pointer_up();
+  auto_draw := true;
+  verify("paste status", not menu_open and status_line = "pasted");
+  at := find_name("child");
+  verify("pasted selected", at >= 0 and view.selected = at);
+  verify("pasted size", at >= 0 and sizes[at] = source_size);
+
+  got_a := -1;
+  got_b := -1;
+  err := core.fs_read("base/child", uint(0), first_a, got_a);
+  err := core.fs_read("home/child", uint(0), first_b, got_b);
+  same := got_a > 0 and got_a = got_b;
+  i := 0;
+  while same and i < got_a do
+  begin
+    if first_a[i] <> first_b[i] then
+      same := false;
+    i := i + 1;
+  end;
+  verify("pasted bytes", same);
+
+  // Select the copy, right-click it and delete it from the menu.
+  at := find_name("child");
+  verify("copy row found", at >= 0);
+  if at >= 0 then
+  begin
+    iconview.move_to(view, at);
+    row := (at div view.cols) - view.top;
+    col := at mod view.cols;
+    cell_x := GridLeft + CellMargin + col * CellW;
+    cell_y := GridTop + CellMargin + row * CellH;
+    auto_draw := false;
+    pointer_to(cell_x + 12, cell_y + 12);
+    pointer_right();
+    auto_draw := true;
+    verify("delete menu opens", menu_open and menu_target = at);
+    menu_row_y := menu_y + 1 + MenuDeleteRow * MenuRowH + MenuRowH div 2;
+    auto_draw := false;
+    pointer_to(menu_x + 40, menu_row_y);
+    pointer_down();
+    pointer_up();
+    auto_draw := true;
+    verify("delete from menu",
+      status_line = "removed" and find_name("child") < 0);
+    check_size := uint(0);
+    verify("copy gone",
+      core.fs_size("home/child", check_size) = NotFound);
+  end;
+
+  go_up();
+  err := enter_dir("base");
+  verify("clip back in base", err = Ok and dir = "base");
+end;
+
 // ---- modes ---------------------------------------------------------------
 
 procedure host_path();
@@ -1564,6 +2366,8 @@ begin
   step := 0;
   setup_view();
   mapping_checks();
+  action_checks();
+  menu_model_checks();
   grid_checks();
   data_checks(false);
   navigation_checks(false, true);
@@ -1606,12 +2410,15 @@ begin
   verify("icon image", icons.ready(icon_set, ImageIcon));
 
   mapping_checks();
+  action_checks();
+  menu_model_checks();
   data_checks(true);
   grid_checks();
   navigation_checks(true, false);
   long_path_check();
   selection_checks();
   writable_checks(true);
+  clipboard_checks();
 
   // Double-click: two real clicks on `child`'s visible cell launch it (the
   // blocking launcher returns after the child exits).
@@ -1878,6 +2685,11 @@ begin
   white := stdlib.ui_white();
   gray := stdlib.ui_gray();
   accent := stdlib.ui_accent();
+  init_menu();
+  clip_mode := ClipNone;
+  clip_full := "";
+  clip_name := "";
+  clip_kind := uint(0);
 
   // A non-destructive writability probe: a missing name on a writable mount is
   // `NotFound`, while an absent disk refuses the remove with `Invalid`. This

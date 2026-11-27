@@ -14,11 +14,13 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Current state (M18):** **639 host tests**; specs 0001–0028 (0025, 0026, 0027 and
-  0028 implemented; 0026 includes the M17 local-coordinate model; 0028 is the M18 icon
-  grid); ABI v1 at 75 opcodes with builtins 80–97; **M2–M18 complete**. The 128 MiB
-  application volume now also carries the read-only `icons/` directory (four committed
-  32×32 PPM icons) and the browser is a full-width icon grid. Boot loads only
+- **Current state (M19):** **639 host tests**; specs 0001–0029 (0025–0029 implemented;
+  0026 includes the M17 local-coordinate model; 0028 is the M18 icon grid; 0029 is the
+  M19 browser actions); ABI v1 at 75 opcodes with builtins 80–97; **M2–M19 complete**.
+  The 128 MiB application volume carries the read-only `icons/` directory (four
+  committed 32×32 PPM icons), the browser is a full-width icon grid, and `.ppm`/`.png`,
+  `.txt` and the context menu open the viewer/editor or offer editor/terminal/cut/copy/
+  paste/delete. Boot loads only
   `kernel.elf`: the ISO carries no application image, and the 128 MiB read-only ext2
   volume on `ide0` unit 1 is mounted on demand through `ext2w` (229 MiB free in a
   256 MiB guest), with `/home` on the primary master. On TCG/4 cores the desktop is
@@ -2627,6 +2629,33 @@ reusable.
   `input_routing_qmp.py` pass, and the browser screenshot was refreshed. The
   product root shows folder icons; the shell `base` shows the source icon for
   extensionless staged apps. 639 host tests.
+
+### M19: browser open-with, context menu and clipboard (2026-11-27)
+
+Normative: spec 0029 (O1–O7, M1–M5, C1–C5, T1–T3, V1–V3); spec 0013 and
+spec 0021 amended. Goal: `.ppm`/`.png` open in the image viewer, `.txt` in the
+editor, source apps still run, and every other file gets an Explorer-style
+context menu with editor/terminal/cut/copy/paste/delete.
+
+- [x] **M19.1 Decision and spec.** Spec 0029 accepted; spec 0013 (default
+  open/menu) and spec 0021 (terminal initial command) amended; spec 0028 B5/B8
+  point at 0029. No code yet.
+- [x] **M19.2 Terminal initial command.** `terminal` accepts one optional
+  command, sends it to the shell session after the spawn, and keeps the clean
+  prompt for empty arguments. Acceptance: no ABI/builtin change; a QEMU launch
+  shows the shell running the command.
+- [x] **M19.3 Browser open-with, menu and clipboard.** Default-open mapping,
+  right-click menu (six rows), cut/copy/paste with a browser-local clipboard,
+  home-only writes, no overwrite, streaming copy and the existing delete.
+  Acceptance: `browser check` proves mapping, menu hit/pixels, copy/paste size
+  and menu delete; `browser: ok` on `-smp 4`/`-smp 1`; `browser: host ok`.
+- [x] **M19.4 Verification and docs.** Host suite, `--shell` browser check on
+  both core counts, the terminal command test, screenshot/menu pixel proof, and
+  the AGENTS/HISTORY/PLAN state updates. **Done (2026-11-27):** 639 host tests;
+  `browser: ok` (113 claims) and `iconview: ok`/`ui_icons: ok` on `-smp 4` and
+  `-smp 1`; terminal initial command 1237 vs 341 white pixels (47 vs 16 text
+  rows); browser clipboard check copies `base/child` to `home/child`, verifies
+  the bytes, deletes it, and stays green. No kernel/ABI/opcode change.
 
 ### M16 deferred
 

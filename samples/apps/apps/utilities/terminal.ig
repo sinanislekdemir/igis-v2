@@ -5,7 +5,15 @@ unit terminal;
 // `base/shell` into it, paints the bytes the shell writes, and sends keystrokes
 // back. Each instance has its own session, shell, cwd and screen.
 //
-//   run terminal
+//   run terminal                     // clean prompt
+//   run terminal run base/child      // send one initial command to the shell
+//
+// The optional argument is trimmed and sent to the freshly spawned shell once,
+// followed by a CR. The terminal does not parse it: the shell applies its
+// ordinary `run`/`cd`/`exit` syntax (spec 0029 T2). The file browser's
+// "Run in terminal" uses `terminal run <full path>` (spec 0029 T1/T2). An empty
+// argument keeps the clean prompt; a send failure is reported and leaves no
+// window or session behind.
 //
 // There is no scrollback: a full row wraps, a newline at the bottom scrolls the
 // visible grid one line and drops the oldest line. A close box kills the shell,
@@ -48,6 +56,9 @@ var
   id: int;
   r: Rect;
   title: string[64];
+  // The optional initial command (spec 0029 T1). Bounded: `shell` receives at
+  // most this many bytes plus the trailing CR.
+  initial: string[512];
   lines: array[string[MaxLine], MaxRows];
   chunk: bytes[ChunkBytes];
   read: int;
@@ -272,6 +283,41 @@ begin
   return count;
 end;
 
+function trim_space(value: byte): bool;
+begin
+  return value = byte(32) or value = byte(9) or value = byte(10)
+    or value = byte(13);
+end;
+
+// Copies the optional initial command into `initial`, trimming surrounding
+// whitespace. `stdlib.trim_into` covers the common case; its 256-byte window is
+// shorter than `run ` plus a PATH_MAX path, so a longer argument is trimmed by
+// hand and copied into the 512-byte buffer instead of being dropped.
+procedure prepare_initial(raw: const string[0]);
+var
+  first: int;
+  last: int;
+  length: int;
+  copied: int;
+begin
+  initial := "";
+  copied := stdlib.trim_into(initial, raw);
+  if copied >= 0 then
+    return;
+  first := 0;
+  last := int(core.len(raw));
+  while first < last and trim_space(raw[first]) do
+    first := first + 1;
+  while last > first and trim_space(raw[last - 1]) do
+    last := last - 1;
+  length := last - first;
+  if length > 511 then
+    length := 511;
+  copied := core.substr_into(initial, raw, first, length);
+  if copied < 0 then
+    initial := "";
+end;
+
 procedure main(args: const string[1024]);
 begin
   white := uint(0xFFFFFF);
@@ -283,6 +329,7 @@ begin
   shell_task := 0;
   running := false;
   session_closed := false;
+  prepare_initial(args);
 
   n := count_terminals();
   x := 24 + n * 28;
@@ -340,6 +387,24 @@ begin
   row := 0;
   col := 0;
   draw_screen();
+
+  // The shell owns interpretation (spec 0029 T1/T2). Send the one initial
+  // command after the session and shell exist, exactly once and only when it is
+  // non-empty. A failed send cleans up everything this instance owns.
+  if int(core.len(initial)) > 0 then
+  begin
+    send_bytes(initial);
+    if st = Ok then
+      st := core.session_send(session, "\r", sent);
+    if st <> Ok then
+    begin
+      out.say("terminal: initial command failed\n");
+      st := core.kill(shell_task);
+      st := core.session_close(session);
+      st := syslib.window_close(term);
+      return;
+    end;
+  end;
 
   sources[0] := core.session_source(session);
   sources[1] := uint(1);

@@ -30,11 +30,11 @@ decisions in `adr/`, and work items in `PLAN.md`.
 
 ## Current state
 
-- Specs 0001–0028 are accepted; **M2–M18 are complete** (desktop, language,
+- Specs 0001–0029 are accepted; **M2–M19 are complete** (desktop, language,
   filesystems, networking, terminal emulator, runtime display modes, PNG/PPM image
   viewer, kernel-only boot with the application volume on disk, the composition model,
-  local client coordinates and the icon grid). Current milestone work is tracked in
-  `PLAN.md`.
+  local client coordinates, the icon grid and the browser open-with/menu/clipboard
+  work). Current milestone work is tracked in `PLAN.md`.
   **M16 (composition and surfaces)** is implemented: every window owns a content-sized
   canvas, drawing requires a `window_begin`/`plane_begin` scope (`Status.Invalid` without
   one), the compositor is the only writer of the shadow and recomposes damaged
@@ -54,7 +54,12 @@ decisions in `adr/`, and work items in `PLAN.md`.
   `iconview` (a stateful grid with two-line labels, selection, paging and clamped
   scrolling); the file browser is now a full-width 100×68 icon grid with no text preview,
   maps folders, source apps, plain files and images, loads the icons once at start, and
-  launches a file on `Enter`/double-click (spec 0028, ADR 0062).
+  launches a file on `Enter`/double-click (spec 0028, ADR 0062). **M19 (browser
+  actions)** opens `.ppm`/`.png` in the image viewer, `.txt` in the editor and source
+  apps directly; every other regular file gets a six-row context menu (editor, terminal,
+  cut, copy, paste, delete). The clipboard is browser-local, writes only under `home/`
+  and never overwrites; `Run in terminal` passes `run <path>` to the terminal, which now
+  forwards one optional initial command to its shell (spec 0029).
 - **639 host tests** (558 language + 56 `net` + 23 `ext2w` + 2 builtin tests); ABI v1 has
   **75 opcodes** (runtime display modes add builtins 80–83; the machine-level bit and
   bulk buffer primitives are builtins 84–90, `syslib.blit_rgb` is 91, the surface model

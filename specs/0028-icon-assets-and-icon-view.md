@@ -228,11 +228,13 @@ regular file is launched).
   - kind 0 whose name ends in `.png`, `.ppm`, `.jpg` or `.jpeg`
     (ASCII case-insensitive) → `ImageId`;
   - every other kind 0 → `FileId`.
-- **B5 (MUST):** `Enter` and a double-click open the selected entry: kind 1 is
-  entered, kind 0 is launched with `core.spawn` + `core.wait` by its full image
-  path, and kind 2 is refused with the existing status line. `Ctrl+L` keeps the
-  same launch meaning. `Backspace`/`Ctrl+Up` and the visible `Up` button keep
-  going up; path construction stays bounded by `PATH_MAX`.
+- **B5 (MUST):** `Enter` and a double-click open the selected entry by the
+  default-open rules of spec 0029: a directory is entered, a `.ppm`/`.png` file
+  opens the image viewer, a `.txt` file opens the editor, a source application
+  is launched with `core.spawn` + `core.wait`, and every other regular file
+  opens the context menu. Kind 2 is refused with the existing status line.
+  `Ctrl+L` keeps the launch meaning. `Backspace`/`Ctrl+Up` and the visible `Up`
+  button keep going up; path construction stays bounded by `PATH_MAX`.
 - **B6 (MUST):** The label is the two-line `iconview` label. When the status
   line is empty the browser shows the selected entry's full name and its
   size/kind at the left of the status bar; the key hint stays at the right but

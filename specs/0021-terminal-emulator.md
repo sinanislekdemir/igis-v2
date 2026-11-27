@@ -6,7 +6,7 @@
 - **Supersedes:** 0014 (the machine-wide terminal window and `core.terminal_attach`)
 - **Superseded by:** none
 - **ADRs:** 0053 (a terminal emulator over kernel console sessions)
-- **Updated:** 2026-11-20
+- **Updated:** 2026-11-27
 
 ## Context
 
@@ -97,7 +97,10 @@ There is no kernel terminal window.
 
 - **T1 (MUST):** `apps/utilities/terminal.ig` is an ordinary GUI application.
   It opens its own window, opens a session, spawns `base/shell` into it and
-  pumps window events and the session output source.
+  pumps window events and the session output source. It accepts an optional
+  initial command string (spec 0029 T1): after the session and shell exist, a
+  non-empty argument is sent to the shell once with a trailing CR; an empty
+  argument keeps the clean prompt.
 - **T2 (MUST):** The emulator owns one fixed **screen grid**, derived from its
   window's content rectangle and capped by a static maximum. It has no
   scrollback: a full row wraps, a newline at the last row scrolls the grid one
@@ -275,3 +278,4 @@ mock stay deterministic.
   for the shell.
 - Blocking `core.write` backpressure is not introduced: the output ring is
   bounded and drops the oldest bytes.
+| 2026-11-27 | M19 adds the optional initial command (spec 0029 T1): `terminal` sends a non-empty argument to its shell session once after the spawn, so the browser's "Run in terminal" can pass `run <path>`. Empty arguments keep the clean prompt. No ABI, builtin or kernel change. |
