@@ -290,7 +290,7 @@ fn shell_spawns_and_waits_for_the_child_on_the_host() {
     let text = String::from_utf8(result.output).expect("UTF-8 output");
     for line in [
         "shell: help, echo <text>, cd [dir], run <app> [args], exit\n",
-        "shell: base apps: ls dir pwd cat head tail mkdir rmdir rm ifconfig nslookup\n",
+        "shell: base apps: ls dir pwd cat head tail mkdir rmdir rm touch ifconfig nslookup\n",
         "child: args world\n",
         "hi there\n",
     ] {
@@ -309,7 +309,7 @@ fn shell_spawns_and_waits_for_the_child_on_the_host() {
     assert!(
         text.contains(
             "igis:/> help\nshell: help, echo <text>, cd [dir], run <app> [args], exit\n\
-             shell: base apps: ls dir pwd cat head tail mkdir rmdir rm ifconfig nslookup\n"
+             shell: base apps: ls dir pwd cat head tail mkdir rmdir rm touch ifconfig nslookup\n"
         ),
         "{text:?}"
     );
@@ -343,7 +343,7 @@ fn shell_edits_the_line_with_backspace_on_the_host() {
     assert!(
         text.contains(
             "igis:/> helpzz\x08 \x08\x08 \x08\nshell: help, echo <text>, cd [dir], run <app> [args], exit\n\
-             shell: base apps: ls dir pwd cat head tail mkdir rmdir rm ifconfig nslookup\n"
+             shell: base apps: ls dir pwd cat head tail mkdir rmdir rm touch ifconfig nslookup\n"
         ),
         "the shell echoes the deletion and runs the edited line: {text:?}"
     );
@@ -355,8 +355,9 @@ fn shell_walks_the_tree_with_cd_and_bare_commands_on_the_host() {
     let path = app_path("shell");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
     let package = langhost::compile(&source, "shell").expect("shell compiles");
-    let input = b"pwd\nls\ncd base\npwd\nls\ncat child\nhead 3 child\ntail 3 child\n\
-cd /home\npwd\nmkdir nctest\nls\nrmdir nctest\ncd ..\npwd\ncd /\npwd\n\
+    let input = b"pwd\nls\nchild world\ncalculator check\ncd base\npwd\nls\ncat child\nhead 3 child\ntail 3 child\n\
+cd /home\npwd\nmkdir nctest\ntouch note.txt\nls\ntouch note.txt\nrm note.txt\nrmdir nctest\n\
+cd ..\npwd\ncd /\npwd\n\
 cd /base/cat\ncd /nope\ncd ~\npwd\ncd .\npwd\ncd /\nrun ls /home\nunknown\nhelp\nexit\n";
     let result = langhost::run_with_input(&package.code, b"", input, langhost::DEFAULT_BUDGET)
         .expect("verifies");
@@ -367,13 +368,22 @@ cd /base/cat\ncd /nope\ncd ~\npwd\ncd .\npwd\ncd /\nrun ls /home\nunknown\nhelp\
         "igis:/> pwd\n/\n",
         "igis:/base> pwd\n/base\n",
         "igis:/home> pwd\n/home\n",
-        // Bare commands are resolved under `base/` and receive `<cwd> <rest>`.
+        // Bare commands are resolved under `base/` and receive `<cwd>\n<rest>`;
+        // a non-file command reads only the tail and works the same as `run`.
+        "igis:/> child world\nchild: args world\n",
+        // An `apps/` GUI application found by a bare name keeps the raw tail.
+        "calculator: host ok\n",
         "igis:/base> cat child\nunit child;\n",
         "igis:/base> head 3 child\nunit child;\n",
         "igis:/base> tail 3 child\n",
-        // `home` is writable: `mkdir` creates and `rmdir` removes under it.
+        // `home` is writable: `mkdir` creates, `touch` creates an empty file,
+        // a second touch is a no-op, and `rm`/`rmdir` remove.
         "mkdir: created /home/nctest\n",
+        "touch: created /home/note.txt\n",
+        "f note.txt 0\n",
         "d nctest\n",
+        "touch: exists /home/note.txt\n",
+        "rm: removed /home/note.txt\n",
         "rmdir: removed /home/nctest\n",
         // `cd` refuses a file and a missing name, and `~`/`.`/`..` resolve.
         "cd: not a directory\n",
@@ -382,7 +392,7 @@ cd /base/cat\ncd /nope\ncd ~\npwd\ncd .\npwd\ncd /\nrun ls /home\nunknown\nhelp\
         "igis:/> run ls /home\nf readme.txt 238\nchild: ok\n",
         "unknown command: unknown\n",
         "shell: help, echo <text>, cd [dir], run <app> [args], exit\n",
-        "shell: base apps: ls dir pwd cat head tail mkdir rmdir rm ifconfig nslookup\n",
+        "shell: base apps: ls dir pwd cat head tail mkdir rmdir rm touch ifconfig nslookup\n",
     ] {
         assert!(text.contains(line), "missing {line:?} in {text:?}");
     }
@@ -3009,7 +3019,7 @@ fn the_nslookup_sample_reports_no_device_on_the_host() {
 /// `lib.path` is the shared command-path helper (spec 0018 modules): the
 /// `samples/lang/path.ig` sample pins `split_cwd`, `join`, `display` and
 /// `basename`, including `..` clamping at the root, `~`, absolute arguments
-/// and the trailing space of a bare command's `<cwd> ` argument string.
+/// and the `<cwd>\n<rest>` command convention (plus the raw `run` fallback).
 #[test]
 fn the_path_helpers_normalize_on_the_host() {
     let result = run_sample("path.ig", b"");
@@ -3028,6 +3038,9 @@ fn the_path_helpers_normalize_on_the_host() {
          ok split3 status\n\
          ok split3 cwd=/\n\
          ok split3 rest=base/child\n\
+         ok split4 status\n\
+         ok split4 cwd=/home\n\
+         ok split4 rest=note.txt\n\
          ok join1 status\n\
          ok join1=base/child\n\
          ok join2 status\n\

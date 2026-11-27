@@ -1,18 +1,26 @@
 unit child;
 
-uses core;
+uses core, lib.path;
 
 var
   line: string[32];
   n: int;
+  cwd: string[256];
+  rest: string[256];
+  st: Status;
 
 procedure main(args: const string[1024]);
 begin
-  // Echo the argument the parent passed, so `run child world` proves that
-  // the command tail reached `main(args)`.
+  // Echo the command tail (not the `<cwd>\n` context line), so `run child
+  // world` and a bare `child world` both prove that the argument reached
+  // `main(args)`.
+  st := path.split_cwd(args, cwd, rest);
   line := "child: args ";
   core.write(line);
-  core.write(args);
+  if st = Ok then
+    core.write(rest)
+  else
+    core.write(args);
   core.write("\n");
 
   // Enough work to cross more than one scheduler quantum, so the child is

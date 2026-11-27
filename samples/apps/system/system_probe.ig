@@ -13,20 +13,26 @@ unit system_probe;
 // them together with QEMU's exit/reset behaviour. A bare host (`langhost`)
 // returns `Invalid` from both, so the sample runs there without side effects.
 
-uses core;
+uses core, lib.path;
 
 var
   status: Status;
 
 procedure main(args: const string[1024]);
+var
+  cwd: string[256];
+  rest: string[256];
+  arg_st: Status;
 begin
-  if args = "halt" then
+  rest := "";
+  arg_st := path.split_cwd(args, cwd, rest);
+  if rest = "halt" then
   begin
     core.write("system_probe: halt requested\n");
     status := core.halt();
     core.write("system_probe: halt returned (no kernel authority)\n");
   end
-  else if args = "reboot" then
+  else if rest = "reboot" then
   begin
     core.write("system_probe: reboot requested\n");
     status := core.reboot();

@@ -65,6 +65,18 @@ mount table. `stdlib` stays embedded and is not moved into the image.
   for the test image (`xtask image --shell`). The product image carries only
   `samples/apps`. A test file name that collides with a shipped name is a staging
   error, not a silent shadow.
+- **L11 (MUST):** Every file under `base/` (and the `system/` fallback) is a
+  **command**: a unit with `main(args: const string[1024])`. A bare shell
+  invocation passes one context string, `args = "<cwd display>\n<tail>"`, where
+  `<cwd display>` is `/`, `/base`, ... and `<tail>` is the text after the command
+  name. Typed input cannot contain a newline, so the split is unambiguous even
+  when the tail contains spaces or starts with `/`. The explicit `run <path>
+  [args]` launcher passes the raw tail; the shared command parser
+  (`lib.path.split_cwd`) then uses `/` as cwd. Commands that ignore arguments
+  ignore the whole string. The shell MUST NOT keep a per-command list of which
+  commands receive cwd; it decides from the resolved directory (`base/` or
+  `system/`). An `apps/<category>/<name>` GUI application is not a command and
+  keeps its own raw argument string, including when found by a bare launch.
 
 ### Modules and `uses`
 
@@ -255,15 +267,17 @@ The kernel keeps its 128 KiB application-source buffer and adds the 16 MiB arena
 `.bss`; module sources are copied into the arena, so both buffers are static and
 preallocated (ADR 0007).
 
-### The `/lib` file-open dialog (M9.3)
+### The `/lib` file-open/save dialogs (M9.3; save M19.x)
 
 `samples/apps/lib/file_dialog.ig` is an ordinary module under M5/M6: it says
 `uses core, stdlib, syslib;`, declares no `main`, no top-level `var` state and no
 stream endpoint, and is compiled into every application that imports it with
-`uses lib.file_dialog;`. Its one public function is:
+`uses lib.file_dialog;`. Its two public functions are:
 
 ```text
 function file_dialog.open_file(initial: const string[0];
+                               chosen: var string[256]) -> Status;
+function file_dialog.save_file(initial: const string[0];
                                chosen: var string[256]) -> Status;
 ```
 
@@ -285,7 +299,22 @@ repaints the listing. The dialog draws in window-local coordinates (spec 0026 C8
 owner `Expose` repaints without refreshing an origin (the content rectangle is kept only
 for `syslib.present`'s screen rectangle), and only a visible change repaints.
 
-`Ok` publishes the whole regular-file path into `chosen` with one
+`save_file` reuses that listing, navigation, scrollbar and deferred drag in a
+`Save File` window. The content is 520 × 400: the same listing and `Up` line,
+then a `Name:` text field and the deeper `Save`/`Cancel` band. Its start
+directory is the directory part of `initial` when it is under the writable
+`home/` tree, otherwise `home`; the name is `initial`'s basename, or
+`untitled.txt`, selected whole so typing replaces it. Tab moves between the
+field and the listing, Enter saves, Escape cancels; the field uses the existing
+`stdlib.str_*` editing helpers and `stdlib.ui_text_field`. A row click selects, a
+double-click on a directory descends and on a file fills the name; `Up`,
+scrolling and the close box behave as in `open_file`. Save joins the current
+directory and the name and returns `Ok` only for a free regular-file target
+under `home/`; an empty name, `/` in a name, a target outside `home/`, an
+existing regular file and a directory set a status line and leave the dialog
+open. It never overwrites.
+
+`Ok` publishes the whole chosen path into `chosen` with one
 `core.substr_into`; a cancel is `Invalid` and a path that does not fit is
 `CapacityExceeded`, and in both cases `chosen` is untouched. A disabled screen
 (`langhost`) is `Invalid` without opening a window. The module adds no opcode,
@@ -350,3 +379,5 @@ window and task that host it, and the caller's own window stays behind.
 | 2026-11-21 | L1/X1 add the read-only `image/` PNG corpus, staged from `samples/image`, and the apps image grows to 64 MiB to hold it (spec 0023). `langhost` resolves `image` and `image/...` against the sibling `samples/image` tree. |
 | 2026-11-26 | M16.8 defers the dialog's scrollbar-thumb drag, matching the browser and editor: held primary-button moves move a `scroll_preview` thumb and recomposite only the scrollbar rectangle, the list rows and `top` stay fixed, and the release applies the dropped position once and clamps the selection visible. Track clicks and keys keep their immediate behavior. No opcode, builtin, file API or `stdlib` change. |
 | 2026-11-27 | M18 adds the read-only top-level `icons/` directory, staged from the committed 32×32 PPMs in `samples/icons/ppm` (spec 0028). `lib.icons` loads them once and `lib.iconview` draws the browser grid; no API or module-system change. |
+| 2026-11-27 | L11 defines the uniform command ABI (user request "komutlar ile kabul arasında convention olması lazım, hardcoded saçma bir liste değil. /base altındaki dosyalar birer komuttur!"). The shell now always passes `<cwd display>\n<tail>` to a bare `base/` command; `run` keeps the raw tail with `/` as cwd. `lib.path.split_cwd` is the one parser, and the shell's `is_file_command` list is deleted. The non-file commands that read arguments (`nc`, `purl`, `child`, `text`, `floats`, `ifconfig`, `nslookup`, `net_probe`) parse the same context; commands that ignore arguments need no change. No file API, opcode, builtin or kernel change. |
+| 2026-11-27 | `lib.file_dialog` gains `save_file` (user request "eğer yeni dosya editlemişsem, save as gibi bir save diyaloğuna ihtiyacımız var. sistem kütüphanesine open diyalog gibi save diyalog yaratıp bağlar mısın"). It shares the open dialog's listing, navigation, scrollbar and deferred drag in a 520×400 `Save File` window, adds a name field and `Save`/`Cancel`, and returns only a free regular-file target under `home/` (empty name, `/` in a name, outside-home, existing file and directory are refused with a status line). The editor binds Save As/`Ctrl+Shift+S` and the first Save of an unnamed New File to it, then writes through its existing temp+rename path. No file API, opcode, builtin or `stdlib` change. |

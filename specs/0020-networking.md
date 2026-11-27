@@ -142,7 +142,10 @@ as late M10 tickets, not prerequisites.
   `10.0.2.3`); a DHCP client follows in M10.8.
 - **N19 (MUST):** `xtask run` attaches one user-mode NIC by default and accepts
   `--no-net` (no device, graceful absence), `--net-device
-  virtio|e1000|e1000e` and `--net-irq intx|poll` (M10.6). `--net-irq intx|poll` (M10.6) selects the
+  virtio|e1000|e1000e` and `--net-irq intx|poll` (M10.6). The default NIC also
+  forwards host `127.0.0.1:18080` to guest `8080`, so the `httpserver` sample is
+  reachable from the host; `--no-net` removes the forward with the NIC.
+  `--net-irq intx|poll` (M10.6) selects the
   interrupt path: `poll` writes `igis.net_irq=poll` into the boot loader's
   command line, so the same kernel image skips the INTx route and proves the
   polling fallback. The deterministic harness starts a host
@@ -405,7 +408,8 @@ not in the wire crate. `cargo test -p net` joins the host suite.
 
 ### `xtask` and harness
 
-`xtask run` adds `-netdev user,id=n0` and
+`xtask run` adds
+`-netdev user,id=n0,hostfwd=tcp:127.0.0.1:18080-:8080` and
 `-device virtio-net-pci,netdev=n0,disable-modern=on` by default; `--no-net` omits
 both and proves the graceful-absence path. The deterministic harness
 `scripts/net_qmp.py` starts a host TCP service and passes a guest-forwarded
@@ -476,3 +480,4 @@ Boot lines: `pci: ...` (existing), `net: virtio-net 1af4:1000 mac ...`,
 | 2026-11-19 | Blocking sockets and `socket_source`: `WaitFor::Net(handle)`/`WaitFor::Deadline(ns)`, `Outcome::Blocked` retry, per-socket `core.socket_timeout` (71; 0 = none, default 30 s, connect keeps 5 s `Closed`), compiler-lowered `core.socket_source` (`1 << 63 \| handle`) in `next_any`/`poll_any`, and the readiness-event/wake path that drops `NET` before `task::wake_net`. `net_select` proves the selector and 300 ms recv/select timeouts; 605 host tests; `kill_stress` 300/300. |
 | 2026-11-19 | DNS host test: `samples/lang/dns_check.ig` (host-only, socket-free) exercises the query builder and `parse_response` on canned A/NXDOMAIN/CNAME/TC/truncated/overrun packets and `langhost/tests/e2e.rs` pins `dns_check: ok`; 606 host tests. M10 is complete. |
 | 2026-11-19 | Selector readiness correction: `core.socket_source`/`next_any` uses `select_ready` (data/EOF/error/pending listener/timeout), not a bare completed connect; `Stack::readable` still reports connect completion for other callers. This prevents a selector/console loop (`nc`) from selecting an empty established socket and then blocking where a console byte cannot wake it. |
+| 2026-11-27 | `httpserver` sample follow-up: `xtask run` forwards host `127.0.0.1:18080` to guest `8080` (N19), so the new `httpserver` application is reachable from the host without a second QEMU command; `--no-net` omits the forward with the NIC. No kernel, ABI or socket change. |

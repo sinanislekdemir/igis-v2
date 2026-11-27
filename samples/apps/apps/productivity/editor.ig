@@ -39,9 +39,12 @@ unit editor;
 // from a failed save never leaves a longer tail. A document opened from the
 // read-only image is saved as a copy under `home/<basename>` and the editor's
 // path switches to it. Without a home disk the save reports that and leaves the
-// document and path unchanged.
+// document and path unchanged. File > New File starts an unnamed buffer; its
+// first Save and File > Save As (`Ctrl+Shift+S`) run the `/lib` Save File dialog
+// (`lib.file_dialog.save_file`), which refuses an existing target and returns a
+// free `home/` path. The editor then writes through the same temp+rename path.
 //
-// The File menu's Open now runs a modal file-open dialog from `/lib`
+// The File menu's Open runs a modal file-open dialog from `/lib`
 // (`lib.file_dialog.open_file`, M9.3) instead of re-reading the current path;
 // Ctrl+O does the same. The dialog starts in the current document's directory,
 // lets the user navigate the image tree and returns a regular-file path, or a
@@ -115,7 +118,7 @@ const
 
   // Client layout inside the content rectangle.
   MenuBarH = 22;
-  MenuW = 160;
+  MenuW = 220;
   PathTop = 22;
   PathH = 16;
   TextTop = 38;
@@ -130,11 +133,16 @@ const
   ScrollH = 416;
   StatusTop = 456;
 
-  // File menu rows: Open, Save, separator, Highlight, Dark, Quit.
-  FileItemCount = 6;
-  FileHighlightItem = 3;
-  FileDarkItem = 4;
-  FileQuitItem = 5;
+  // File menu rows: New File, Open, Save, Save As, separator, Highlight,
+  // Dark, Quit.
+  FileItemCount = 8;
+  FileNewItem = 0;
+  FileOpenItem = 1;
+  FileSaveItem = 2;
+  FileSaveAsItem = 3;
+  FileHighlightItem = 5;
+  FileDarkItem = 6;
+  FileQuitItem = 7;
 
   // Lexical token classes and the longest word the highlighter compares
   // (`in_stream`/`out_stream` are 10 bytes; 16 leaves headroom).
@@ -169,6 +177,9 @@ var
   load_stage: bytes[BufferCapacity];
   save_stage: bytes[BufferCapacity];
   path: string[PathCapacity];
+  // True for a File > New File document that has no home name yet. Save (and
+  // Ctrl+S) opens the Save File dialog instead of writing.
+  untitled: bool;
   dialog_path: string[PathCapacity];
   save_target: string[PathCapacity];
   save_temp: string[TempCapacity];
@@ -1015,6 +1026,7 @@ begin
   anchor := 0;
   top_line := 0;
   left_byte := 0;
+  untitled := false;
   status_line := "opened";
   return Ok;
 end;
@@ -1175,7 +1187,9 @@ begin
   end;
 end;
 
-procedure try_save();
+// Writes the document to the current `path` through a sibling temporary and a
+// rename. The caller has already resolved a writable home target.
+procedure save_document();
 var
   length: int;
   staged: int;
@@ -1184,11 +1198,6 @@ var
   source_is_home: bool;
 begin
   no_home := false;
-  if int(core.len(path)) = 0 then
-  begin
-    status_line := "no file";
-    return;
-  end;
   value := build_save_paths();
   if value <> Ok then
   begin
@@ -1250,6 +1259,56 @@ begin
   end
   else
     set_saved_status(false);
+end;
+
+// File > Save As and Ctrl+Shift+S, and the first save of an unnamed New File:
+// run the `/lib` Save File dialog, then write through the same temp+rename
+// path. The suggested name is the current document's home target (or empty,
+// which starts at `home/untitled.txt`). A cancel leaves every document and
+// path field untouched.
+procedure save_as();
+var
+  start: string[PathCapacity];
+  chosen: string[PathCapacity];
+  value: Status;
+  copied: int;
+begin
+  start := "";
+  if int(core.len(path)) > 0 then
+  begin
+    value := build_save_paths();
+    if value = Ok then
+      copied := core.substr_into(
+        start, save_target, 0, int(core.len(save_target)));
+  end;
+  value := file_dialog.save_file(start, chosen);
+  if value = Ok then
+  begin
+    copied := core.substr_into(path, chosen, 0, int(core.len(chosen)));
+    if copied <> int(core.len(chosen)) then
+    begin
+      status_line := "path too long";
+      return;
+    end;
+    untitled := false;
+    save_document();
+  end
+  else if value = Invalid then
+    status_line := "save cancelled"
+  else if value = CapacityExceeded then
+    status_line := "path too long"
+  else
+    status_line := "save failed";
+end;
+
+// Save and Ctrl+S: an unnamed new document gets the Save File dialog; every
+// other document writes its current home target.
+procedure try_save();
+begin
+  if untitled or int(core.len(path)) = 0 then
+    save_as()
+  else
+    save_document();
 end;
 
 // ---- selection and cursor movement ---------------------------------------
@@ -1549,18 +1608,22 @@ end;
 procedure setup_menu();
 begin
   titles[0] := "File";
-  file_items[0] := "Open";
-  file_items[1] := "Save";
-  file_items[2] := "-";
-  file_items[3] := "Highlight";
-  file_items[4] := "Dark";
-  file_items[5] := "Quit";
-  file_keys[0] := "Ctrl+O";
-  file_keys[1] := "Ctrl+S";
-  file_keys[2] := "";
-  file_keys[3] := "";
-  file_keys[4] := "Ctrl+D";
-  file_keys[5] := "Ctrl+Q";
+  file_items[0] := "New File";
+  file_items[1] := "Open";
+  file_items[2] := "Save";
+  file_items[3] := "Save As...";
+  file_items[4] := "-";
+  file_items[5] := "Highlight";
+  file_items[6] := "Dark";
+  file_items[7] := "Quit";
+  file_keys[0] := "Ctrl+N";
+  file_keys[1] := "Ctrl+O";
+  file_keys[2] := "Ctrl+S";
+  file_keys[3] := "Ctrl+Shift+S";
+  file_keys[4] := "";
+  file_keys[5] := "";
+  file_keys[6] := "Ctrl+D";
+  file_keys[7] := "Ctrl+Q";
   // Every row is enabled now that the home filesystem is writable; the
   // separator is never selectable regardless of the mask.
   file_disabled := uint(0);
@@ -1606,6 +1669,28 @@ begin
     status_line := "dark off";
 end;
 
+// File > New File and Ctrl+N: replace the document with an unnamed, empty
+// buffer. Nothing is written yet; the first Save or Ctrl+S opens the Save File
+// dialog created by `lib.file_dialog.save_file`, so the user chooses the home
+// name and directory instead of the editor inventing one.
+procedure new_file();
+begin
+  text := "";
+  used := 0;
+  caret := 0;
+  anchor := 0;
+  top_line := 0;
+  left_byte := 0;
+  scroll_dragging := false;
+  scroll_preview := 0;
+  path := "";
+  untitled := true;
+  highlight := false;
+  file_checked := stdlib.ui_menu_set(file_checked, FileHighlightItem, false);
+  refresh_line_states();
+  status_line := "new file (unnamed)";
+end;
+
 // File > Open and Ctrl+O (M9.3): run the `/lib` modal file-open dialog with
 // the current path as its start, then load the chosen regular file. A cancel
 // or any dialog failure leaves the document, path, caret, selection and view
@@ -1629,15 +1714,25 @@ end;
 
 procedure activate_menu(index: int);
 begin
-  if index = 0 then
+  if index = FileNewItem then
+  begin
+    close_menu();
+    new_file();
+  end
+  else if index = FileOpenItem then
   begin
     close_menu();
     browse_open();
   end
-  else if index = 1 then
+  else if index = FileSaveItem then
   begin
     close_menu();
     try_save();
+  end
+  else if index = FileSaveAsItem then
+  begin
+    close_menu();
+    save_as();
   end
   else if index = FileHighlightItem then
   begin
@@ -1694,9 +1789,17 @@ begin
 
   if ctrl then
   begin
+    if key = 0x6E or key = 0x4E then
+    begin
+      new_file();
+      return;
+    end;
     if key = 0x73 or key = 0x53 then
     begin
-      try_save();
+      if shift then
+        save_as()
+      else
+        try_save();
       return;
     end;
     if key = 0x71 or key = 0x51 then
@@ -2712,6 +2815,28 @@ begin
   verify("save restore", value = Ok and path = "base/child");
 end;
 
+// File > New File (Ctrl+N): create a fresh empty home file, clear the document and
+// point the editor at it, then save an edit through the same path. Without a
+// writable home the current document and path stay untouched.
+procedure new_file_checks();
+var
+  value: Status;
+begin
+  value := open_path("base/child");
+  verify("new open", value = Ok and path = "base/child");
+  new_file();
+  verify("new item", file_items[FileNewItem] = "New File");
+  verify("new rows", FileNewItem = 0 and FileOpenItem = 1
+    and FileSaveItem = 2 and FileSaveAsItem = 3);
+  verify("new empty", int(core.len(text)) = 0 and caret = 0 and anchor = 0);
+  verify("new unnamed", untitled and int(core.len(path)) = 0);
+  verify("new status", status_line = "new file (unnamed)");
+  verify("new plain", not highlight and
+    not stdlib.ui_menu_has(file_checked, FileHighlightItem));
+  value := open_path("base/child");
+  verify("new restore", value = Ok and path = "base/child" and not untitled);
+end;
+
 // Vertical scrolling on `base/child` (28 lines in 26 rows) and horizontal scrolling
 // on a 100-byte line.
 procedure scroll_checks();
@@ -2881,6 +3006,7 @@ begin
   scroll_checks();
   buffer_checks();
   save_checks();
+  new_file_checks();
   if failed then
     out.say("editor: host failed\n")
   else
@@ -2903,6 +3029,7 @@ begin
   scroll_checks();
   buffer_checks();
   save_checks();
+  new_file_checks();
 
   // M9.1: source paths start highlighted, plain text files do not, and the
   // File > Highlight row is present and checked.
@@ -3019,7 +3146,7 @@ begin
   // pixel. The direct toggle is exercised here; Ctrl+D goes through the
   // injected-key path below.
   verify("dark item", file_items[FileDarkItem] = "Dark");
-  verify("dark row", FileDarkItem = 4 and FileQuitItem = 5);
+  verify("dark row", FileDarkItem = 6 and FileQuitItem = 7);
   verify("dark starts off", not dark and
     not stdlib.ui_menu_has(file_checked, FileDarkItem));
   toggle_dark();
@@ -3068,7 +3195,7 @@ begin
   verify("dark dropdown row",
     syslib.get_pixel(84, MenuBarH + 1 + FileDarkItem * 16 + 8) = sel_bg);
   verify("dark dropdown plain row",
-    syslib.get_pixel(84, MenuBarH + 1 + 8) = bg);
+    syslib.get_pixel(120, MenuBarH + 1 + 8) = bg);
   verify("dark dropdown check",
     syslib.get_pixel(12 + 4, MenuBarH + 1 + FileDarkItem * 16 + 7) = sel_ink);
   verify("dark dropdown hit",
@@ -3388,6 +3515,7 @@ begin
   top_line := 0;
   left_byte := 0;
   text := "";
+  untitled := false;
   dialog_path := "";
   refresh_line_states();
   status_line := "";

@@ -24,7 +24,7 @@ unit net_probe;
 // budget. A machine without a NIC (the `--no-net` boot) reports
 // `net_probe: no device`.
 
-uses core, stdlib, lib.socket, lib.http, lib.dns, lib.dhcp;
+uses core, stdlib, lib.socket, lib.http, lib.dns, lib.dhcp, lib.path;
 
 const
   BodyCapacity = 4096;
@@ -209,18 +209,19 @@ var
   st: Status;
   mode: string[256];
   trimmed: int;
+  cwd: string[256];
+  rest: string[256];
 begin
   // Mode dispatch: `http` (the default when the tail is empty), `dns` or
   // `dhcp`.
   mode := "";
-  if int(core.len(args)) > 0 then
+  rest := "";
+  st := path.split_cwd(args, cwd, rest);
+  trimmed := stdlib.trim_into(mode, rest);
+  if trimmed < 0 then
   begin
-    trimmed := stdlib.trim_into(mode, args);
-    if trimmed < 0 then
-    begin
-      core.write("net_probe: unknown mode\n");
-      return;
-    end;
+    core.write("net_probe: unknown mode\n");
+    return;
   end;
   if int(core.len(mode)) = 0 then
     mode := "http";

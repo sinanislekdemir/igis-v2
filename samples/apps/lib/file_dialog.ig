@@ -1,13 +1,21 @@
 unit file_dialog;
 
-// Importable file-open dialog (M9.3, spec 0018 M5/M6, spec 0013 "The text
+// Importable file-open/save dialogs (M9.3, spec 0018 M5/M6, spec 0013 "The text
 // editor"). It is ordinary `/lib` module source: no `main`, no top-level `var`
 // state, no stream endpoint and no kernel service. The calling application
-// supplies the path it is currently showing and receives a chosen regular-file
-// path, or a null-like cancel.
+// supplies the path it is currently showing and receives a chosen path, or a
+// null-like cancel.
 //
 //   value := file_dialog.open_file(path, chosen);
 //   if value = Ok then ...open(chosen)... else ...cancelled...
+//
+//   value := file_dialog.save_file(suggested, chosen);
+//   if value = Ok then ...write(chosen)... else ...cancelled...
+//
+// `save_file` shares the listing and navigation with `open_file` and adds a
+// name field and a `Save` button. It refuses an existing target rather than
+// overwriting it; the editor writes through its temp+rename path after the
+// dialog returns.
 //
 // `open_file` opens a normal task-owned window (title `Open File`; the window
 // service owns the frame, border, title bar and close box) and runs the modal
@@ -48,6 +56,17 @@ const
   // bar).
   ContentW = 520;
   ContentH = 380;
+  // Save mode adds one name field below the listing and a deeper status/button
+  // band. The open dialog keeps its original 380-pixel content.
+  SaveContentH = 400;
+  SaveStatusTop = 336;
+  SaveButtonTop = 360;
+  NameTop = 308;
+  NameLeft = 56;
+  NameW = ContentW - NameLeft - 8;
+  NameH = 20;
+  ModeOpen = 0;
+  ModeSave = 1;
 
   PathCapacity = 256;
   EntryCapacity = 96;
@@ -104,6 +123,18 @@ type Dialog = record
   done: bool;
   result: Status;
   picked: string[PathCapacity];
+  // Save mode (M19.x): the same listing plus a file-name field. Open mode
+  // leaves every one of these at its zero value and keeps the 380-pixel layout.
+  mode: int;
+  content_h: int;
+  status_top: int;
+  button_top: int;
+  name: string[PathCapacity];
+  name_cursor: int;
+  name_scroll: int;
+  name_sel_start: int;
+  name_sel_stop: int;
+  field_focus: bool;
 end;
 
 // `base/name`, or just `name` when `base` is empty, into a 256-byte image path.
@@ -155,6 +186,12 @@ begin
   if got = -6 then
     return CapacityExceeded;
   return Invalid;
+end;
+
+// True for `home` and `home/...`, the only writable tree (spec 0019, A2).
+function is_home_path(value: const string[0]): bool;
+begin
+  return value = "home" or stdlib.starts_with(value, "home/");
 end;
 
 // The directory before the last `/` of `base`; `false` at the root. The result
@@ -463,6 +500,247 @@ begin
     d.status := "cannot open this entry";
 end;
 
+// Save-mode activation: a directory descends; a regular file fills the name
+// field with that entry and selects it so typing replaces the name. Nothing is
+// written from the listing itself.
+procedure save_activate(d: var Dialog);
+var
+  candidate: string[PathCapacity];
+  probe_name: string[NameCapacity];
+  probe_kind: uint;
+  probe_size: uint;
+  length: int;
+  copied: int;
+  st: Status;
+begin
+  if d.selected < 0 or d.selected >= d.count then
+  begin
+    d.status := "nothing selected";
+    return;
+  end;
+  if d.kinds[d.selected] = uint(1) then
+  begin
+    st := join_path(d.dir, d.names[d.selected], candidate);
+    if st <> Ok then
+    begin
+      d.status := "path too long";
+      return;
+    end;
+    st := core.fs_list(candidate, uint(0), probe_name, probe_kind, probe_size);
+    if st <> Ok and st <> NotFound then
+    begin
+      d.status := "cannot open this folder";
+      return;
+    end;
+    d.dir := candidate;
+    load_dir(d);
+  end
+  else if d.kinds[d.selected] = uint(0) then
+  begin
+    length := int(core.len(d.names[d.selected]));
+    copied := core.substr_into(d.name, d.names[d.selected], 0, length);
+    if copied <> length then
+    begin
+      d.status := "name too long";
+      return;
+    end;
+    d.name_cursor := stdlib.str_cursor_end(d.name, d.name_cursor);
+    d.name_sel_start := 0;
+    d.name_sel_stop := d.name_cursor;
+    d.name_scroll := 0;
+    d.field_focus := true;
+    d.status := "name set";
+  end
+  else
+    d.status := "cannot save this entry";
+end;
+
+// Save: join the current directory and name, insist on `home/`, and refuse an
+// existing regular file or a directory. The editor writes the document through
+// its temp+rename path after this returns.
+function commit_save(d: var Dialog): bool;
+var
+  candidate: string[PathCapacity];
+  size: uint;
+  length: int;
+  i: int;
+  copied: int;
+  st: Status;
+begin
+  length := int(core.len(d.name));
+  if length = 0 then
+  begin
+    d.status := "name required";
+    return true;
+  end;
+  if length > NameCapacity then
+  begin
+    d.status := "name too long";
+    return true;
+  end;
+  i := 0;
+  while i < length do
+  begin
+    if d.name[i] = byte(47) then
+    begin
+      d.status := "name has /";
+      return true;
+    end;
+    i := i + 1;
+  end;
+  st := join_path(d.dir, d.name, candidate);
+  if st <> Ok then
+  begin
+    d.status := "path too long";
+    return true;
+  end;
+  if not is_home_path(candidate) then
+  begin
+    d.status := "choose home/";
+    return true;
+  end;
+  st := core.fs_size(candidate, size);
+  if st = Ok then
+  begin
+    d.status := "file exists";
+    return true;
+  end;
+  if st = Invalid then
+  begin
+    d.status := "not a regular file";
+    return true;
+  end;
+  if st <> NotFound then
+  begin
+    d.status := "cannot save";
+    return true;
+  end;
+  copied := core.substr_into(
+    d.picked, candidate, 0, int(core.len(candidate)));
+  if copied <> int(core.len(candidate)) then
+  begin
+    d.status := "path too long";
+    return true;
+  end;
+  d.result := Ok;
+  d.done := true;
+  return true;
+end;
+
+// One key while the save dialog's name field has focus: text editing, Tab to
+// the listing, Enter to save, Escape to cancel. ASCII input is enough for a
+// file name; the shared `stdlib` string helpers keep the buffer valid.
+function handle_name_key(d: var Dialog; ev: const Event): bool;
+var
+  key: int;
+  at: int;
+  copied: int;
+  text_byte: byte;
+  one: bytes[1];
+  ch: string[2];
+  st: Status;
+begin
+  key := stdlib.ui_key_code(ev.code);
+  if key = 0x100 then
+  begin
+    cancel(d);
+    return true;
+  end;
+  if stdlib.ui_key_is_enter(ev.code) then
+    return commit_save(d);
+  if stdlib.ui_key_is_tab(ev.code) then
+  begin
+    d.field_focus := false;
+    return true;
+  end;
+  if stdlib.ui_key_is_backspace(ev.code) then
+  begin
+    if d.name_sel_start <> d.name_sel_stop then
+    begin
+      st := stdlib.str_delete_into(
+        d.name, d.name_sel_start, d.name_sel_stop - d.name_sel_start);
+      d.name_cursor := d.name_sel_start;
+      d.name_sel_stop := d.name_sel_start;
+    end
+    else
+    begin
+      st := stdlib.str_backspace(d.name, d.name_cursor);
+      d.name_sel_start := d.name_cursor;
+      d.name_sel_stop := d.name_cursor;
+    end;
+    d.status := "";
+  end
+  else if stdlib.ui_key_is_delete(ev.code) then
+  begin
+    if d.name_sel_start <> d.name_sel_stop then
+    begin
+      st := stdlib.str_delete_into(
+        d.name, d.name_sel_start, d.name_sel_stop - d.name_sel_start);
+      d.name_cursor := d.name_sel_start;
+      d.name_sel_stop := d.name_sel_start;
+    end
+    else if d.name_cursor < int(core.len(d.name)) then
+    begin
+      at := stdlib.str_cursor_right(d.name, d.name_cursor);
+      if at > d.name_cursor then
+        st := stdlib.str_delete_into(
+          d.name, d.name_cursor, at - d.name_cursor);
+      d.name_sel_start := d.name_cursor;
+      d.name_sel_stop := d.name_cursor;
+    end;
+    d.status := "";
+  end
+  else if stdlib.ui_key_is_left(ev.code) then
+  begin
+    d.name_cursor := stdlib.str_cursor_left(d.name, d.name_cursor);
+    d.name_sel_start := d.name_cursor;
+    d.name_sel_stop := d.name_cursor;
+  end
+  else if stdlib.ui_key_is_right(ev.code) then
+  begin
+    d.name_cursor := stdlib.str_cursor_right(d.name, d.name_cursor);
+    d.name_sel_start := d.name_cursor;
+    d.name_sel_stop := d.name_cursor;
+  end
+  else if stdlib.ui_key_is_home(ev.code) then
+  begin
+    d.name_cursor := stdlib.str_cursor_home(d.name_cursor);
+    d.name_sel_start := d.name_cursor;
+    d.name_sel_stop := d.name_cursor;
+  end
+  else if stdlib.ui_key_is_end(ev.code) then
+  begin
+    d.name_cursor := stdlib.str_cursor_end(d.name, d.name_cursor);
+    d.name_sel_start := d.name_cursor;
+    d.name_sel_stop := d.name_cursor;
+  end
+  else
+  begin
+    text_byte := stdlib.ui_key_text(ev.code);
+    if text_byte >= byte(32) and text_byte < byte(127) then
+    begin
+      one[0] := text_byte;
+      copied := core.substr_into(ch, one, 0, 1);
+      if copied = 1 then
+      begin
+        st := stdlib.str_selection_replace(
+          d.name, d.name_sel_start, d.name_sel_stop, ch);
+        if st = Ok then
+        begin
+          d.name_cursor := d.name_sel_start;
+          d.name_sel_stop := d.name_sel_start;
+          d.status := "";
+        end
+        else
+          d.status := "name too long";
+      end;
+    end;
+  end;
+  d.name_scroll := stdlib.ui_text_field_reveal(
+    d.name, d.name_cursor, d.name_scroll, NameW - 6);
+  return true;
+end;
+
 // ---- drawing --------------------------------------------------------------
 
 procedure refresh_rect(d: var Dialog);
@@ -647,7 +925,7 @@ var
   hint: string[32];
   st: Status;
 begin
-  st := stdlib.ui_separator(0, StatusTop - 6, ContentW);
+  st := stdlib.ui_separator(0, d.status_top - 6, ContentW);
   to := int(core.len(d.status));
   if to > MaxStatusBytes then
     to := MaxStatusBytes;
@@ -656,12 +934,29 @@ begin
   copied := core.substr_into(text, d.status, 0, to);
   if copied > 0 then
     st := syslib.draw_text(
-      8, StatusTop, text, uint(ColorBlack));
-  hint := "Enter open  Bksp up  Esc cancel";
+      8, d.status_top, text, uint(ColorBlack));
+  if d.mode = ModeSave then
+    hint := "Enter save  Tab list  Esc cancel"
+  else
+    hint := "Enter open  Bksp up  Esc cancel";
   width := stdlib.ui_text_width(hint);
   st := syslib.draw_text(
-    ContentW - 8 - width, StatusTop,
+    ContentW - 8 - width, d.status_top,
     hint, uint(ColorGray));
+end;
+
+// The save dialog's file-name field: a label and the checked text field. The
+// listing stops at 304, so the field and the deeper status band fit without
+// changing the open dialog's layout.
+procedure draw_name(d: const Dialog);
+var
+  st: Status;
+begin
+  st := syslib.draw_text(8, NameTop + 6, "Name:", uint(ColorBlack));
+  st := stdlib.ui_text_field(
+    NameLeft, NameTop, NameW, NameH,
+    d.name, d.name_cursor, d.name_scroll,
+    d.name_sel_start, d.name_sel_stop, d.field_focus);
 end;
 
 procedure draw_buttons(d: const Dialog);
@@ -671,11 +966,15 @@ var
   y: int;
   st: Status;
 begin
-  y := ButtonTop;
+  y := d.button_top;
   cancel_x := ContentW - 8 - ButtonW;
   open_x := cancel_x - 12 - ButtonW;
-  st := stdlib.ui_dialog_button(
-    open_x, y, ButtonW, ButtonH, "Open", false, true);
+  if d.mode = ModeSave then
+    st := stdlib.ui_dialog_button(
+      open_x, y, ButtonW, ButtonH, "Save", false, true)
+  else
+    st := stdlib.ui_dialog_button(
+      open_x, y, ButtonW, ButtonH, "Open", false, true);
   st := stdlib.ui_dialog_button(
     cancel_x, y, ButtonW, ButtonH, "Cancel", false, false);
 end;
@@ -712,13 +1011,15 @@ procedure draw_dialog(d: const Dialog);
 var
   st: Status;
 begin
-  st := syslib.fill_rect(0, 0, ContentW, ContentH, uint(ColorWhite));
+  st := syslib.fill_rect(0, 0, ContentW, d.content_h, uint(ColorWhite));
   draw_path(d);
   draw_list(d);
   if d.scroll_dragging then
     draw_scrollbar_at(d, d.scroll_preview)
   else
     draw_scrollbar_at(d, d.top);
+  if d.mode = ModeSave then
+    draw_name(d);
   draw_status(d);
   draw_buttons(d);
 end;
@@ -884,7 +1185,7 @@ begin
   end;
 
   if stdlib.ui_button_hit(
-       ContentW - 8 - ButtonW, ButtonTop,
+       ContentW - 8 - ButtonW, d.button_top,
        ButtonW, ButtonH, ev.x, ev.y) then
   begin
     cancel(d);
@@ -892,10 +1193,25 @@ begin
   end;
 
   if stdlib.ui_button_hit(
-       ContentW - 8 - ButtonW - 12 - ButtonW, ButtonTop,
+       ContentW - 8 - ButtonW - 12 - ButtonW, d.button_top,
        ButtonW, ButtonH, ev.x, ev.y) then
   begin
-    activate(d);
+    if d.mode = ModeSave then
+      commit_save(d)
+    else
+      activate(d);
+    return true;
+  end;
+
+  if d.mode = ModeSave and stdlib.ui_rect_hit(
+       NameLeft, NameTop, NameW, NameH, ev.x, ev.y) then
+  begin
+    d.field_focus := true;
+    d.name_cursor := stdlib.str_cursor_end(d.name, d.name_cursor);
+    d.name_sel_start := d.name_cursor;
+    d.name_sel_stop := d.name_cursor;
+    d.name_scroll := stdlib.ui_text_field_reveal(
+      d.name, d.name_cursor, d.name_scroll, NameW - 6);
     return true;
   end;
 
@@ -919,6 +1235,7 @@ begin
   hit := index_at(d, ev.x, ev.y);
   if hit < 0 then
     return false;
+  d.field_focus := false;
   if not is_selectable(d, hit) then
   begin
     changed := d.status <> "cannot open this entry";
@@ -935,7 +1252,10 @@ begin
   begin
     d.last_click_ns := uint(0);
     d.last_click_item := -1;
-    activate(d);
+    if d.mode = ModeSave then
+      save_activate(d)
+    else
+      activate(d);
     return true;
   end;
   d.last_click_ns := now;
@@ -956,6 +1276,17 @@ begin
   key := stdlib.ui_key_code(ev.code);
   mods := stdlib.ui_key_modifiers(ev.code);
   ctrl := (mods div 2) mod 2 = 1;
+
+  if d.mode = ModeSave then
+  begin
+    if d.field_focus then
+      return handle_name_key(d, ev);
+    if stdlib.ui_key_is_tab(ev.code) then
+    begin
+      d.field_focus := true;
+      return true;
+    end;
+  end;
 
   if ctrl and stdlib.ui_key_is_up(ev.code) then
   begin
@@ -1005,7 +1336,10 @@ begin
   end;
   if stdlib.ui_key_is_enter(ev.code) then
   begin
-    activate(d);
+    if d.mode = ModeSave then
+      save_activate(d)
+    else
+      activate(d);
     return true;
   end;
   if key = 0x100 then
@@ -1059,6 +1393,16 @@ begin
   d.done := false;
   d.result := Invalid;
   d.picked := "";
+  d.mode := ModeOpen;
+  d.content_h := ContentH;
+  d.status_top := StatusTop;
+  d.button_top := ButtonTop;
+  d.name := "";
+  d.name_cursor := 0;
+  d.name_scroll := 0;
+  d.name_sel_start := 0;
+  d.name_sel_stop := 0;
+  d.field_focus := false;
 
   split_initial(initial, d.dir, start_name);
   if int(core.len(d.dir)) > 0 then
@@ -1094,6 +1438,175 @@ begin
     y := 0;
 
   st := syslib.window_open(x, y, ContentW, ContentH, "Open File", d.id);
+  if st <> Ok then
+    return st;
+  st := syslib.window_content_rect(d.id, r);
+  if st <> Ok then
+  begin
+    st := syslib.window_close(d.id);
+    return Invalid;
+  end;
+  d.rect := r;
+
+  draw_dialog(d);
+  st := syslib.window_present(d.id);
+  while not d.done do
+  begin
+    st := syslib.next_event(ev);
+    if st <> Ok then
+    begin
+      d.result := Invalid;
+      d.done := true;
+    end
+    else if ev.kind = Expose then
+    begin
+      if ev.window = d.id then
+      begin
+        refresh_rect(d);
+        draw_dialog(d);
+        st := syslib.window_present(d.id);
+      end;
+    end
+    else if ev.kind = Close then
+    begin
+      if ev.window = d.id then
+        cancel(d);
+    end
+    else if ev.kind = KeyDown then
+    begin
+      if ev.window = d.id then
+      begin
+        if handle_key(d, ev) and not d.done then
+        begin
+          draw_dialog(d);
+          st := syslib.window_present(d.id);
+        end;
+      end;
+    end
+    else if ev.kind = PointerDown or ev.kind = PointerUp or ev.kind = PointerMove then
+    begin
+      if ev.window = d.id then
+      begin
+        if handle_pointer(d, ev) and not d.done then
+        begin
+          draw_dialog(d);
+          st := syslib.window_present(d.id);
+        end;
+      end;
+    end;
+  end;
+  st := syslib.window_close(d.id);
+
+  if d.result = Ok then
+  begin
+    length := int(core.len(d.picked));
+    got := core.substr_into(chosen, d.picked, 0, length);
+    if got <> length then
+      return CapacityExceeded;
+    if length = 0 then
+      return NotFound;
+    return Ok;
+  end;
+  return d.result;
+end;
+
+// Opens the modal **Save File** dialog. `initial` is the suggested target:
+// its directory starts the listing (or `home` when it is not under the
+// writable tree) and its name pre-fills the field with the whole name selected,
+// so typing replaces it. `chosen` is written only on `Ok`; cancel is `Invalid`.
+//
+// The listing is the same one as `open_file`; single-click selects, double-click
+// on a directory descends and on a file fills the name, `Up` walks to the
+// parent. The name field edits with the usual keys, Tab moves between the field
+// and the listing, Enter saves, Escape cancels. Save refuses a name that is
+// empty or contains `/`, a target outside `home/`, an existing regular file and
+// a directory; it never overwrites. A disabled screen returns `Invalid`.
+function save_file(initial: const string[0]; chosen: var string[256]): Status;
+var
+  d: Dialog;
+  screen_w: uint;
+  screen_h: uint;
+  x: int;
+  y: int;
+  st: Status;
+  start_name: string[NameCapacity];
+  probe_name: string[NameCapacity];
+  probe_kind: uint;
+  probe_size: uint;
+  length: int;
+  got: int;
+  copied: int;
+  r: Rect;
+  ev: Event;
+begin
+  if syslib.screen_width() = uint(0) then
+    return Invalid;
+
+  d.id := 0;
+  d.dir := "";
+  d.count := 0;
+  d.selected := -1;
+  d.top := 0;
+  d.truncated := false;
+  d.status := "";
+  d.scroll_dragging := false;
+  d.scroll_grab_dy := 0;
+  d.scroll_preview := 0;
+  d.last_click_ns := uint(0);
+  d.last_click_item := -1;
+  d.done := false;
+  d.result := Invalid;
+  d.picked := "";
+  d.mode := ModeSave;
+  d.content_h := SaveContentH;
+  d.status_top := SaveStatusTop;
+  d.button_top := SaveButtonTop;
+  d.name := "";
+  d.name_cursor := 0;
+  d.name_scroll := 0;
+  d.name_sel_start := 0;
+  d.name_sel_stop := 0;
+  d.field_focus := true;
+
+  split_initial(initial, d.dir, start_name);
+  if not is_home_path(d.dir) then
+    d.dir := "home";
+  // A stale or read-only start directory falls back to `home`; an empty home
+  // is still listable as `NotFound` and is a valid save target.
+  st := core.fs_list(d.dir, uint(0), probe_name, probe_kind, probe_size);
+  if st <> Ok and st <> NotFound then
+  begin
+    d.dir := "home";
+    core.fs_list(d.dir, uint(0), probe_name, probe_kind, probe_size);
+  end;
+  load_dir(d);
+  if int(core.len(start_name)) = 0 then
+  begin
+    copied := core.substr_into(d.name, "untitled.txt", 0, 12);
+  end
+  else
+  begin
+    length := int(core.len(start_name));
+    copied := core.substr_into(d.name, start_name, 0, length);
+  end;
+  if copied < 0 then
+    copied := core.substr_into(d.name, "untitled.txt", 0, 12);
+  d.name_cursor := 0;
+  d.name_cursor := stdlib.str_cursor_end(d.name, d.name_cursor);
+  d.name_scroll := 0;
+  d.name_sel_start := 0;
+  d.name_sel_stop := d.name_cursor;
+
+  screen_w := syslib.screen_width();
+  screen_h := syslib.screen_height();
+  x := (int(screen_w) - (ContentW + 2)) div 2;
+  y := (int(screen_h) - (SaveContentH + 17)) div 2;
+  if x < 0 then
+    x := 0;
+  if y < 0 then
+    y := 0;
+
+  st := syslib.window_open(x, y, ContentW, SaveContentH, "Save File", d.id);
   if st <> Ok then
     return st;
   st := syslib.window_content_rect(d.id, r);

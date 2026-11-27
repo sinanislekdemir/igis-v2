@@ -15,7 +15,7 @@ unit nc;
 // `purl` are applied: 10.0.2.15/24, gateway 10.0.2.2, DNS 10.0.2.3. A machine
 // that already has a configuration keeps it.
 
-uses core, stdlib, lib.socket, lib.dns;
+uses core, stdlib, lib.socket, lib.dns, lib.path;
 
 const
   ArgsCapacity = 256;
@@ -160,13 +160,17 @@ var
   copied: int;
   quitting: bool;
   st: Status;
+  cwd: string[256];
+  rest: string[256];
 begin
-  if int(core.len(args)) = 0 then
+  rest := "";
+  st := path.split_cwd(args, cwd, rest);
+  if int(core.len(rest)) = 0 then
   begin
     usage();
     return;
   end;
-  trimmed := stdlib.trim_into(line, args);
+  trimmed := stdlib.trim_into(line, rest);
   if trimmed < 0 then
   begin
     usage();

@@ -14,8 +14,9 @@ var
   argv: string[256];
   // The shell's current directory in display form (`/`, `/base`, `/home/sub`).
   // `target` is the API path a `cd` resolves to; `app_path` and `external_args`
-  // stage a bare command's launch. The file commands receive
-  // `"<cwd display> <rest>"` (lib/path.ig `split_cwd`); other apps get `rest`.
+  // stage a bare launch. A `base/`/`system/` command receives
+  // `"<cwd display>\n<rest>"` (lib/path.ig `split_cwd`); an `apps/` GUI app and
+  // every `run` keep the raw tail.
   cwd: string[256];
   cd_arg: string[256];
   target: string[256];
@@ -194,32 +195,25 @@ end;
 // `fs_list` failing with `fs_size` returning `Invalid` is an empty one. A
 // regular file is `Invalid` from `fs_list` and `Ok` from `fs_size`; a missing
 // name is `NotFound` from both (spec 0013, F7/F13; spec 0019, A4).
-// The file commands need the current directory in their first argument; every
-// other application receives the raw tail exactly as typed. This keeps `nc`,
-// `purl`, `text`, `child` and the rest compatible with their original `run`
-// interfaces while the file commands can resolve relative paths.
-function is_file_command(name: const string[0]): bool;
-begin
-  return name = "ls" or name = "dir" or name = "pwd" or name = "cat"
-    or name = "head" or name = "tail" or name = "mkdir"
-    or name = "rmdir" or name = "rm";
-end;
-
-// Stages the argument string for a bare app. File commands get
-// `"<cwd> <rest>"`; every other app gets the raw tail. The procedure keeps this
-// branch out of `main`, whose body is already large enough to stress the host
-// compiler's test stack.
-procedure prepare_args(name: const string[0]; tail: const string[0]);
+// Stages the argument string for a bare launch. `base/` and `system/` entries
+// are commands and receive the L11 convention: `"<cwd display>\n<tail>"`. The
+// shared parser in `lib/path.split_cwd` splits the context line; commands that
+// ignore arguments simply ignore the whole string. A GUI application under
+// `apps/<category>/` is not a command and keeps its own raw argument string,
+// exactly as with `run`. The decision is the resolved directory, never a list
+// of command names. `run <app> [args]` is the explicit raw launcher and
+// bypasses this helper, so the image root is its cwd.
+procedure prepare_args(tail: const string[0]; command: bool);
 var
   copied: int;
 begin
-  if is_file_command(name) then
+  if command then
   begin
     if int(core.len(cwd)) + 1 + int(core.len(tail)) > ExternalArgsCapacity then
       too_long := true
     else
     begin
-      external_args := cwd + " " + tail;
+      external_args := cwd + "\n" + tail;
       too_long := false;
     end;
   end
@@ -293,10 +287,9 @@ begin
   // `core.substr_into` splits the line into the command and its tail.
   //
   // The builtins are `help`, `echo`, `cd`, `run`, `exit` and `terminal`; any
-  // other word is an application under `base/` (then `system/`). The file
-  // commands receive `"<cwd> <rest>"`; every other app receives the raw tail
-  // exactly as typed, preserving its original `run` interface. The prompt shows
-  // the current directory, which starts at the image root.
+  // other word is a command under `base/` (then `system/`). Every bare command
+  // receives `"<cwd>\n<rest>"`; `run` is the explicit raw launcher. The prompt
+  // shows the current directory, which starts at the image root.
   //
   // There is no `return` yet, so `main` ends by leaving the loop with `done`.
   sources[0] := uint(0);
@@ -348,7 +341,7 @@ begin
     if cmd = "help" then
     begin
       out.say("shell: help, echo <text>, cd [dir], run <app> [args], exit\n");
-      out.say("shell: base apps: ls dir pwd cat head tail mkdir rmdir rm ifconfig nslookup\n");
+      out.say("shell: base apps: ls dir pwd cat head tail mkdir rmdir rm touch ifconfig nslookup\n");
       handled := true;
     end;
     if cmd = "echo" then
@@ -435,12 +428,13 @@ begin
     end;
     if not handled then
     begin
-      // A bare word that is not a builtin is an application under `base/`,
-      // falling back to `system/`. The base commands expect
-      // `args = "<cwd display> <rest>"` (lib/path.ig `split_cwd`), so `pwd`
-      // prints the directory the prompt shows and `ls`/`cat` resolve their
-      // target against it. Only a regular file is runnable; `fs_size` says
-      // `Ok` for one and fails for a directory or a missing name.
+      // A bare word that is not a builtin is a `base/` command (then an
+      // `apps/<category>/` GUI application, then `system/`). Commands receive
+      // `args = "<cwd display>\n<rest>"` (lib/path.ig `split_cwd`), so `pwd`
+      // prints the directory the prompt shows and `ls`/`cat`/`touch` resolve
+      // their target against it. GUI apps keep the raw tail. Only a regular
+      // file is runnable; `fs_size` says `Ok` for one and fails for a
+      // directory or a missing name.
       // Search the app directories in the spec 0018 A1 order. The first
       // regular file wins; `system/` is last.
       app_dir := 0;
@@ -460,7 +454,8 @@ begin
       end
       else
       begin
-        prepare_args(cmd, rest);
+        prepare_args(rest, stdlib.starts_with(app_path, "base/")
+          or stdlib.starts_with(app_path, "system/"));
         if too_long then
         begin
           out.say(cmd);

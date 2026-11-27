@@ -10,7 +10,7 @@ unit floats;
 //   run floats 3.25       table, then `value=3.250`
 //   run floats nope       table, then `Invalid`
 
-uses core, stdlib, lib.out;
+uses core, stdlib, lib.out, lib.path;
 
 var
   text: string[64];
@@ -68,7 +68,12 @@ begin
 end;
 
 procedure main(args: const string[1024]);
+var
+  cwd: string[256];
+  rest: string[256];
 begin
+  rest := "";
+  st := path.split_cwd(args, cwd, rest);
   show("zero", 0.0, uint(2));
   show("negzero", -0.0, uint(3));
   show("neg", -1.5, uint(1));
@@ -92,12 +97,12 @@ begin
   show_short("s:tinysub", 5.0e-324);
   show_short("s:max", 1.7976931348623157e308);
 
-  if core.len(args) > uint(0) then
+  if core.len(rest) > uint(0) then
   begin
     out.say("parse=[");
-    out.say(args);
+    out.say(rest);
     out.say("] ");
-    st := stdlib.parse_f64_into(args, parsed);
+    st := stdlib.parse_f64_into(rest, parsed);
     if st = Ok then
       show("value", parsed, uint(3))
     else

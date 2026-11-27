@@ -705,9 +705,13 @@ fn run(args: &[String]) -> ExitCode {
 
     // One deterministic NIC on QEMU user networking (spec 0020, N19; ADR 0049).
     // `disable-modern=on` keeps the legacy I/O BAR0 register layout the virtio
-    // driver implements; `e1000`/`e1000e` select the MMIO driver instead.
+    // driver implements; `e1000`/`e1000e` select the MMIO driver instead. The
+    // host forward makes the `httpserver` sample reachable at 127.0.0.1:18080
+    // without a second harness-specific QEMU command.
     if !no_net {
-        qemu.arg("-netdev").arg("user,id=n0").arg("-device");
+        qemu.arg("-netdev")
+            .arg("user,id=n0,hostfwd=tcp:127.0.0.1:18080-:8080")
+            .arg("-device");
         match net_device {
             "e1000" => qemu.arg("e1000,netdev=n0"),
             "e1000e" => qemu.arg("e1000e,netdev=n0"),
@@ -717,6 +721,9 @@ fn run(args: &[String]) -> ExitCode {
         // QEMU adds a default e1000 when no network option is present;
         // `-nic none` makes `--no-net` a real absence (spec 0020, N19).
         qemu.arg("-nic").arg("none");
+    }
+    if !no_net {
+        println!("run: host 127.0.0.1:18080 -> guest 8080 (httpserver)");
     }
 
     if headless {

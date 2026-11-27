@@ -1,14 +1,14 @@
 unit path;
 
-// Importable path helpers for the base file commands (ls, cat, head, ...).
+// Importable path helpers for the base commands (ls, cat, head, ...).
 //
 // It is ordinary `/lib` module source: no `main`, no top-level `var` state, no
 // stream endpoint and no kernel service. The commands receive the shell's
-// `<cwd> <rest>` argument string and use these helpers to split it and to turn
+// `<cwd>\n<rest>` argument string and use these helpers to split it and to turn
 // a user path into an API path (`""` is the root, `base/child`,
 // `home/sub/file`).
 //
-//   path.split_cwd(args, cwd, rest)   // "<cwd> <rest>" or the explicit run form
+//   path.split_cwd(args, cwd, rest)   // "<cwd>\n<rest>" or the explicit run form
 //   path.join(cwd, arg, api)          // normalize `.`/`..`/`~` and `/`
 //   path.display(api, shown)          // `/`, `/base`, `/home/sub`
 //   path.basename(api, name)          // `child` for `base/child`, `""` at root
@@ -32,11 +32,17 @@ const
 // Splits the command argument string into the shell's current display path and
 // the user's tail (`rest`).
 //
-// A bare command is invoked with `args = "<cwd> <rest>"`, where `<cwd>` is a
-// display path such as `/` or `/base`; the shell may append one trailing space
-// after an empty tail. When `args` starts with something other than `/`, the
-// explicit `run <app> ...` form is assumed: the current directory is the root
-// and the whole `args` is the tail (so `run ls base` lists `base`).
+// A bare command is invoked with `args = "<cwd>\n<rest>"`: the current display
+// path (`/`, `/base`, ...), one newline, then the tail after the command name.
+// Typed input cannot contain a newline, so the split is unambiguous even when
+// the command's own arguments contain spaces or start with `/`. Every `base/`
+// command uses this one convention; the shell keeps no per-command list.
+//
+// The explicit `run <app> [args]` form has no newline. It is the raw launcher:
+// the current directory is the image root and the whole argument is the tail
+// (so `run ls /base` lists `base`). A command that only reads `rest` therefore
+// works for both forms, and a file command resolves its path against `/` when
+// launched with `run`.
 //
 // The cwd is not normalized here: `join` accepts a display or an API path.
 function split_cwd(args: const string[0];
@@ -44,7 +50,7 @@ function split_cwd(args: const string[0];
                    rest: var string[256]): Status;
 var
   length: int;
-  at: int;
+  newline: int;
   cwd_len: int;
   rest_start: int;
   rest_end: int;
@@ -52,56 +58,35 @@ var
   copied: int;
 begin
   length := int(core.len(args));
-  if length = 0 then
+  newline := core.find(args, byte(10));
+  if newline < 0 then
   begin
+    // Explicit `run`: raw tail, root as the current directory.
     copied := core.substr_into(cwd, "/", 0, 1);
-    copied := core.substr_into(rest, "", 0, 0);
-    return Ok;
-  end;
-
-  if args[0] <> byte(47) then
-  begin
-    copied := core.substr_into(cwd, "/", 0, 1);
+    if copied <> 1 then
+      return Invalid;
     rest_start := 0;
     rest_end := length;
-    while rest_start < rest_end and args[rest_start] = byte(32) do
-      rest_start := rest_start + 1;
-    while rest_end > rest_start and args[rest_end - 1] = byte(32) do
-      rest_end := rest_end - 1;
-    tail_len := rest_end - rest_start;
-    copied := core.substr_into(rest, args, rest_start, tail_len);
-    if copied = tail_len then
-      return Ok;
-    if copied = -6 then
-      return CapacityExceeded;
-    return Invalid;
-  end;
-
-  at := core.find(args, byte(32));
-  if at < 0 then
-  begin
-    cwd_len := length;
-    rest_start := length;
   end
   else
   begin
-    cwd_len := at;
-    rest_start := at + 1;
-  end;
-
-  if cwd_len = 0 then
-    return Invalid;
-  if cwd_len > PathCapacity then
-    return CapacityExceeded;
-  copied := core.substr_into(cwd, args, 0, cwd_len);
-  if copied <> cwd_len then
-  begin
-    if copied = -6 then
+    // Bare command: the context line, then the tail after the newline.
+    cwd_len := newline;
+    if cwd_len = 0 then
+      return Invalid;
+    if cwd_len > PathCapacity then
       return CapacityExceeded;
-    return Invalid;
+    copied := core.substr_into(cwd, args, 0, cwd_len);
+    if copied <> cwd_len then
+    begin
+      if copied = -6 then
+        return CapacityExceeded;
+      return Invalid;
+    end;
+    rest_start := newline + 1;
+    rest_end := length;
   end;
 
-  rest_end := length;
   while rest_start < rest_end and args[rest_start] = byte(32) do
     rest_start := rest_start + 1;
   while rest_end > rest_start and args[rest_end - 1] = byte(32) do

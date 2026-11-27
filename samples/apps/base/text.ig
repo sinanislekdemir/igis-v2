@@ -4,7 +4,7 @@ unit text;
 // real `main(args)` string. It trims the argument, splits it at the first
 // space, parses the tail as an `int`, and prints one fixed line per result.
 
-uses core, stdlib, lib.out;
+uses core, stdlib, lib.out, lib.path;
 
 var
   trimmed: string[256];
@@ -23,8 +23,13 @@ begin
 end;
 
 procedure main(args: const string[1024]);
+var
+  cwd: string[256];
+  rest: string[256];
 begin
-  count := stdlib.trim_into(trimmed, args);
+  rest := "";
+  st := path.split_cwd(args, cwd, rest);
+  count := stdlib.trim_into(trimmed, rest);
   out.say("text: trimmed=[");
   out.say(trimmed);
   out.say("] len=");

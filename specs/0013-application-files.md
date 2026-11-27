@@ -278,11 +278,12 @@ drawing/drag rule, M9.3 the file-open dialog and M9.4 the document capacity:
   plain; the File menu's **Highlight** row toggles colouring for the current
   document either way and carries a check mark while it is on. Opening a file
   resets the toggle from the path rule;
-- the File menu is six rows — `Open`, `Save`, `-`, `Highlight`, `Dark`,
-  `Quit` — so the Dark row is index 4 and the quit row is index 5.
-  `Ctrl+O`/`Ctrl+S`/`Ctrl+Q` keep their meanings, `Ctrl+D` toggles Dark and
-  Highlight still has no shortcut. The dropdown's checked mask carries both
-  check bits (Highlight and Dark) and is redrawn with the menu;
+- the File menu is eight rows — `New File`, `Open`, `Save`, `Save As...`, `-`,
+  `Highlight`, `Dark`, `Quit` — so Save As is index 3, Dark is index 6 and
+  Quit is index 7. `Ctrl+N`/`Ctrl+O`/`Ctrl+S`/`Ctrl+Shift+S`/`Ctrl+Q` keep
+  their meanings, `Ctrl+D` toggles Dark and Highlight still has no shortcut.
+  The dropdown's checked mask carries both check bits (Highlight and Dark) and
+  is redrawn with the menu;
 - **Dark theme.** The `Dark` row toggles a dark palette for the whole client
   content rectangle: the menu bar and its pull-down, the path line, the text
   view (default text, every syntax class, the selection band and the caret),
@@ -323,6 +324,24 @@ drawing/drag rule, M9.3 the file-open dialog and M9.4 the document capacity:
   result fits, and `TempCapacity` is 260 for `<target>.tmp`. The check and
   `langhost` paths keep calling `open_path` directly and never open the dialog;
   no opcode, builtin, `Host` method, file API or `stdlib` function is added;
+- **File > New File and `Ctrl+N`** replace the document with an unnamed, empty
+  buffer and reset the caret, selection, scroll, path, Highlight and status
+  line (`new file (unnamed)`); nothing is written yet. The first Save or
+  `Ctrl+S` on an unnamed buffer opens the Save File dialog (below), so the user
+  chooses the home name and directory. A named document's Save keeps the
+  existing temp+rename path;
+- **File > Save As... and `Ctrl+Shift+S`** run the `/lib` modal Save File dialog
+  (`lib.file_dialog.save_file`, spec 0018 "The `/lib` file-open dialog"). It
+  starts in the directory of the current home target (or the home directory
+  when the document is unnamed or read-only) and pre-fills the name with the
+  current target's basename (or `untitled.txt`) selected whole. The dialog
+  shares the open dialog's listing, `Up`, scrollbar, keys and click handling and
+  adds a name field and `Save`/`Cancel` buttons; Tab moves between the field and
+  the listing, Enter saves, Escape cancels. Save refuses an empty name, `/` in
+  a name, a target outside `home/`, an existing regular file and a directory;
+  it never overwrites. On `Ok` the editor writes the document through the same
+  temp+rename path and switches its path to the chosen file. A cancel leaves the
+  document, path and view untouched with `save cancelled`;
 - highlighting is **lexical only**, not a parser or type checker. One visible
   line is classified into: keywords (`unit`, `uses`, `const`, `var`, `type`,
   `record`, `end`, `procedure`, `function`, `begin`, `if`, `then`, `else`,
@@ -485,3 +504,4 @@ drawing/drag rule, M9.3 the file-open dialog and M9.4 the document capacity:
 | 2026-11-26 | M16.10 (user report "editör ... aşağı okuna basarak satır kaydırmaya çalışmak ama seri şekilde yaptığımda uygulama çöküyor"): the editor caches the line count and a sparse line-start index in the same publication pass as the block-comment state, so `line_count` is O(1), `line_start_of` walks at most 15 lines and `line_of_pos` binary-searches 8,193 anchors and then walks at most 15 lines. Movement, caret clamping, scrollbar math, the status readout and every frame no longer scan the document several times per key; `editor check` drops from 2,132 to 1,792 claims. The remaining full-window redraw per key exposed the lifetime-quota false positive, fixed separately by the per-run normal-task watchdog (ADR 0061, spec 0007): 300 injected Down keys on a 98 KiB document now end `exit Ok` instead of `Faulted(BudgetExceeded)`. `shot` mode also holds its frame with `core.sleep(50)` instead of a busy poll, so `run editor shot apps/productivity/editor` now ends `editor: done`/`exit Ok` (1,695 claims) rather than spending the watchdog on the 5 s spin. No file API, opcode, builtin, `Host` or `stdlib` change. |
 | 2026-11-27 | M18 (user request "eski windows explorer tarzı, büyük ikonlarla bir listeleme"): the file browser becomes a full-width 32×32 icon grid (`lib.iconview`, spec 0028) with two-line labels, four PPM icons loaded once from `icons/` (`lib.icons`), and no text preview pane; `Enter`/double-click launches a regular file instead of previewing it. The path line, `Up` button, scrollbar (deferred drag over grid rows), home create/remove and `Ctrl+L` launcher are unchanged. No file API, opcode, builtin, `Host` or kernel change. |
 | 2026-11-27 | M19 (user request "ppm dosyalarını image viewer, .txt dosyalarını text editör ile açabilir miyiz? diğer dosyaları ... context menu ile"): default open maps `.ppm`/`.png` to the image viewer, `.txt` to the editor, source apps to the existing launch, and every other regular file to the context menu; right-click opens the same menu. The menu offers editor, terminal, cut, copy, paste and delete; the clipboard is browser-local and writes only under `home/` (spec 0029). No file API, opcode, builtin, `Host` or kernel change. |
+| 2026-11-27 | File > New File and `Ctrl+N` (user request "New File istiyorum metin editörüne", then "eğer yeni dosya editlemişsem, save as gibi bir save diyaloğuna ihtiyacımız var. sistem kütüphanesine open diyalog gibi save diyalog yaratıp bağlar mısın"): New File replaces the document with an unnamed empty buffer (`new file (unnamed)`) instead of inventing a name. The File menu gains Save As... (`Ctrl+Shift+S`) at index 3 and grows to eight rows (New File, Open, Save, Save As..., separator, Highlight, Dark, Quit; Highlight/Dark/Quit move to 5/6/7); an unnamed document's first Save and Save As both run `lib.file_dialog.save_file`, which shares the open dialog's listing/navigation/scrollbar and adds a name field and Save/Cancel, refusing an empty name, `/`, a target outside `home/`, an existing file or a directory. On `Ok` the editor writes through its existing temp+rename path and adopts the chosen path; a cancel leaves the document and path untouched. `editor check` covers the unnamed state and the new row indices; the dialog itself is proved by the QMP save-as harness. No file API, opcode, builtin, `Host` or `stdlib` change. |

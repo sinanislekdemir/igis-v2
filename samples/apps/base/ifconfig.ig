@@ -12,7 +12,7 @@ unit ifconfig;
 // counters. Dotted quads are parsed locally into host-order `uint`s (the first
 // octet in bits 24..31), the same encoding `core.net_config` takes.
 
-uses core, stdlib, lib.socket, lib.dhcp;
+uses core, stdlib, lib.socket, lib.dhcp, lib.path;
 
 const
   PartCapacity = 8;
@@ -248,16 +248,17 @@ var
   current_dns: uint;
   st: Status;
   trimmed: int;
+  cwd: string[256];
+  rest: string[256];
 begin
   text := "";
-  if int(core.len(args)) > 0 then
+  rest := "";
+  st := path.split_cwd(args, cwd, rest);
+  trimmed := stdlib.trim_into(text, rest);
+  if trimmed < 0 then
   begin
-    trimmed := stdlib.trim_into(text, args);
-    if trimmed < 0 then
-    begin
-      usage();
-      return;
-    end;
+    usage();
+    return;
   end;
 
   if int(core.len(text)) = 0 then

@@ -51,7 +51,7 @@ unit desktop_shell;
 // `core.write`. It never attaches the terminal itself: the launched `shell`
 // does (spec 0014, the one-terminal rule).
 
-uses core, stdlib, syslib, lib.out, lib.inject;
+uses core, stdlib, syslib, lib.out, lib.inject, lib.path;
 
 const
   MenuHeight = 22;
@@ -2106,7 +2106,13 @@ begin
 end;
 
 procedure main(args: const string[1024]);
+var
+  cwd: string[256];
+  rest: string[256];
+  arg_st: Status;
 begin
+  rest := "";
+  arg_st := path.split_cwd(args, cwd, rest);
   white := uint(0xFFFFFF);
   black := uint(0x000000);
   screen_w := int(syslib.screen_width());
@@ -2128,7 +2134,7 @@ begin
   bar := 0;
   menu_plane := 0;
   halt_plane := 0;
-  if args = "check" then
+  if rest = "check" then
   begin
     if screen_w = 0 or screen_h = 0 then
       out.say("desktop_shell: no graphics\n")

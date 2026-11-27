@@ -14,7 +14,7 @@ unit purl;
 // QEMU user-network defaults are applied: 10.0.2.15/24, gateway 10.0.2.2,
 // DNS 10.0.2.3. On a configured machine the existing settings are kept.
 
-uses core, stdlib, lib.socket, lib.http, lib.dns;
+uses core, stdlib, lib.socket, lib.http, lib.dns, lib.path;
 
 const
   UrlCapacity = 256;
@@ -206,7 +206,7 @@ var
   digits: bytes[32];
   used: int;
   copied: int;
-  trimmed: int;
+  cwd: string[UrlCapacity];
   port: int;
   ip: uint;
   mask: uint;
@@ -216,13 +216,9 @@ var
   length: int;
   st: Status;
 begin
-  if int(core.len(args)) = 0 then
-  begin
-    usage();
-    return;
-  end;
-  trimmed := stdlib.trim_into(url, args);
-  if trimmed < 0 then
+  url := "";
+  st := path.split_cwd(args, cwd, url);
+  if int(core.len(url)) = 0 then
   begin
     usage();
     return;

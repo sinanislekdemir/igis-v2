@@ -11,7 +11,7 @@ unit nslookup;
 // without a query. `lib.dns` sends one UDP A query with its own retry/deadline
 // policy, so a dead server prints a timeout and the task stays in budget.
 
-uses core, stdlib, lib.socket, lib.dns;
+uses core, stdlib, lib.socket, lib.dns, lib.path;
 
 const
   HeadCapacity = 128;
@@ -113,16 +113,17 @@ var
   st: Status;
   split: int;
   trimmed: int;
+  cwd: string[256];
+  rest: string[256];
 begin
   text := "";
-  if int(core.len(args)) > 0 then
+  rest := "";
+  st := path.split_cwd(args, cwd, rest);
+  trimmed := stdlib.trim_into(text, rest);
+  if trimmed < 0 then
   begin
-    trimmed := stdlib.trim_into(text, args);
-    if trimmed < 0 then
-    begin
-      usage();
-      return;
-    end;
+    usage();
+    return;
   end;
   if int(core.len(text)) = 0 then
   begin

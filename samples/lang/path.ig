@@ -58,12 +58,12 @@ begin
   expect("split0 cwd", cwd, "/");
   expect("split0 rest", rest, "");
 
-  st := path.split_cwd("/base ", cwd, rest);
+  st := path.split_cwd("/base\n", cwd, rest);
   expect_status("split1 status", st, Ok);
   expect("split1 cwd", cwd, "/base");
   expect("split1 rest", rest, "");
 
-  st := path.split_cwd("/base ls -a", cwd, rest);
+  st := path.split_cwd("/base\nls -a", cwd, rest);
   expect_status("split2 status", st, Ok);
   expect("split2 cwd", cwd, "/base");
   expect("split2 rest", rest, "ls -a");
@@ -72,6 +72,11 @@ begin
   expect_status("split3 status", st, Ok);
   expect("split3 cwd", cwd, "/");
   expect("split3 rest", rest, "base/child");
+
+  st := path.split_cwd("/home\n  note.txt  ", cwd, rest);
+  expect_status("split4 status", st, Ok);
+  expect("split4 cwd", cwd, "/home");
+  expect("split4 rest", rest, "note.txt");
 
   st := path.join("/", "base/child", resolved);
   expect_status("join1 status", st, Ok);

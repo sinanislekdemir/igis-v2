@@ -201,8 +201,8 @@ The kernel is cross-built for `x86_64-unknown-none`; `xtask` itself builds for t
 |---------|---------|
 | `cargo xtask build` | build the kernel ELF (release) |
 | `cargo xtask image` | generate the PPM corpus if missing, then build and assemble `build/igis.iso` with GRUB and ensure `build/home.img` |
-| `cargo xtask run` | image + QEMU with a display and the home disk, serial on stdio |
-| `cargo xtask run --headless` | image + QEMU with no display (serial only) |
+| `cargo xtask run` | image + QEMU with a display and the home disk, serial on stdio; host `127.0.0.1:18080` is forwarded to guest `8080` (`httpserver`) |
+| `cargo xtask run --headless` | image + QEMU with no display (serial only); same 18080→8080 forward |
 | `cargo xtask clean` | remove build artifacts |
 | `scripts/run-release.sh` | boot an assembled release (`igis.iso` + `apps.img` + `home.img`) in QEMU; shipped as `run.sh` |
 | `cargo test -p abi -p compiler -p interpreter -p langhost -p ext2w -p net` | host language, filesystem and network-stack tests (the kernel crates have no test harness) |

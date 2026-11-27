@@ -124,10 +124,19 @@ beyond what ext2 requires for a consistent tree.
   failure status, and keep the document unchanged on failure. The temporary-file
   + rename path is kept even though `fs_truncate` exists: it is the closest thing
   to an atomic save without a journal, and a write+truncate save would leave a
-  mixed document if a power loss hit between the two calls.
+  mixed document if a power loss hit between the two calls. An unnamed New File
+  and File > Save As run the `/lib` Save File dialog first; its chosen `home/`
+  target then goes through the same temporary-file + rename path, and an
+  existing target is refused rather than overwritten.
 - **E2 (MUST):** The browser can create a directory and remove an empty directory
   or a file in the home tree, with the same confirmation-free status line it uses
   today; operations outside `home` are refused.
+- **E3 (MUST):** `base/touch <path>` creates an empty regular file under `home/`
+  (one-byte `fs_write` at offset 0, then `fs_truncate(path, 0)`) and reports
+  `created`; an existing regular file is a successful no-op reported as
+  `exists` and is never truncated, a directory or other non-regular kind is
+  `not a regular file`, a missing parent is `no such directory`, and a path
+  outside `home` is `read-only`.
 
 ### Verification
 
@@ -193,3 +202,4 @@ corrupt structure; it refuses the mount or returns `IoError`.
 | 2026-11-18 | Initial draft and acceptance: dedicated 8 MiB ext2 home image, ATA PIO, `ext2w`, the router, four write builtins (53–56), no truncate, no journal, `e2fsck` as the consistency proof. |
 | 2026-11-18 | Implemented in M6.1–M6.4: read mount and router, the writer and `fs_write`, `remove`/`mkdir`/`rename` with the editor save and browser actions, and the reboot persistence harness. ABI v1 stays at 75 opcodes; the kernel's application image remains read-only. |
 | 2026-11-18 | M7.1 adds `core.fs_truncate(path, size)` (builtin 57, ADR 0041): shrink frees blocks/pointers and zeroes the partial tail, extend zero-fills, only `home/*`; the editor keeps its temporary-file + rename save. ABI v1 stays at 75. |
+| 2026-11-27 | `base/touch` (user request "touch komutu istiyorum"): creates an empty `home/` file with the browser's one-byte write + `fs_truncate(0)` pair. An existing regular file is a successful no-op and is never truncated; a directory is refused, a missing parent reports `no such directory`, and a non-home path is `read-only`. The command joins the shell's cwd-aware file-command group and `help` list. No file API, opcode, builtin or kernel change. |

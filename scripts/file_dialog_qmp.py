@@ -510,7 +510,8 @@ def run(args):
         # 2. base -> root -> lib -> math.ig -> Open.
         send_key(qmp, "backspace")
         time.sleep(0.3)
-        tablet.click(*row_center(4))  # root order: lost+found, apps, base, home, lib
+        # Root order: lost+found, apps, base, home, icons, image, lib, system.
+        tablet.click(*row_center(6))
         time.sleep(0.2)
         send_key(qmp, "ret")
         time.sleep(0.4)
