@@ -51,6 +51,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   M16.8 (deferred scrollbar drag), M16.9 (editor dark theme), M16.10 (sparse line index
   and per-run watchdog) and the Calendar application landed on 2026-11-26. The deferred
   table below and [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) hold the parked work.
+- **Last commit:** `38ee6f7` (M17 local client coordinates). `build/home.img` is
+  reset.
 - **Historical context (M8–M10; counts below are from those slices):** **505 host
   tests**; specs 0001–0019 (0018 and 0019 Implemented); ABI v1 at 75 opcodes; M5,
   M6, M7.1 and **M8.1–M8.9 complete**, plus **M9.1–M9.4**. The
@@ -403,7 +405,8 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 Trust the repository, not a summary. On a fresh start:
 
 1. `git status --short` and `git log --oneline -8` — the tree should be clean and the top
-   commit should match the "Last commit" line above; if not, stop and reconcile first.
+   commit should be the "Last commit" line at the top of this section, or later; if not,
+   stop and reconcile first.
 2. `cargo test -q -p abi -p compiler -p interpreter -p langhost` — expect **382** tests
    plus the doctests, all green.
 3. `cargo xtask build` — expect a clean kernel build.
