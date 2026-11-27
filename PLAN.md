@@ -2575,7 +2575,9 @@ nothing a client computes and the W12/W28 "re-read the rectangle" discipline dis
 - [x] **M17.3 Retire W12/W28's re-read discipline** in specs 0026/0011/0009/0010/0012/
   0014/0018/0021/0023/0027 and ADR 0060; `lib/file_dialog` and the shell keep the content
   rectangle only for `syslib.present`'s screen rectangle. Acceptance: `638` host tests;
-  the QMP batch and `desktop_shell check` on `-smp 4`/`-smp 1`; `windows_proof` on both
+  the headless batch and `desktop_shell check` on `-smp 4`/`-smp 1`;
+  `boot_desktop_qmp`, `apps_menu_qmp`, `minimize_qmp` and `editor_scroll_qmp`;
+  `windows_proof` on both
   (its two "restored to the terminal" checks now sample the live window below instead of
   assuming white); the golden re-baselined once
   (`c9546f45…79fbc65e` → `62e8140a…e809d83c`, the dither patch only); the new
