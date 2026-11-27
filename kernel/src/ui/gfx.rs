@@ -185,15 +185,16 @@ fn clip_bounds(
     Some((x0, y0, x1, y1))
 }
 
-/// A rectangle of pixels and the mapping from screen coordinates onto it
+/// A rectangle of pixels and the mapping from the surface's coordinates onto it
 /// (spec 0026, C1/C4; ADR 0060).
 ///
-/// `clip` stays in **screen** coordinates. `ox`/`oy` translate a screen
-/// coordinate to a buffer coordinate (`buffer = screen - origin`) and `limit`
-/// is the buffer's extent in pixels, so a surface can cover a window canvas at
-/// some screen origin. The shadow is one surface with a zero origin and the
-/// whole screen as its limit; the public primitives run through
-/// [`Screen::surf`]. Pixel stores still bounds-check their slice, so a bad
+/// `ox`/`oy` translate a surface coordinate to a buffer coordinate
+/// (`buffer = surface - origin`) and `limit` is the buffer's extent in pixels.
+/// A **window canvas** is surface-local (spec 0026 C4/C8): its origin is
+/// `(0, 0)`, so the client's coordinates are the buffer's. A **plane canvas**
+/// and the shadow keep screen coordinates anchored at their origin (C11/C12);
+/// planes never move, so that origin cannot go stale. The client-facing
+/// primitives run through [`Surf`] and still bounds-check every store, so a bad
 /// range is ignored rather than panicking.
 struct Surf<'a> {
     pixels: &'a mut [u8],
@@ -233,6 +234,18 @@ impl Surf<'_> {
             Some(bytes) => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
             None => 0,
         }
+    }
+
+    /// Reads one pixel in the surface's own coordinates (spec 0026 C6/C8):
+    /// window-local for a canvas, screen for the shadow or a plane. Off-surface
+    /// coordinates read `0`.
+    fn read(&self, x: i64, y: i64) -> u32 {
+        let bx = x.saturating_sub(self.ox);
+        let by = y.saturating_sub(self.oy);
+        if bx < 0 || by < 0 || bx >= self.limit.0 || by >= self.limit.1 {
+            return 0;
+        }
+        self.load(bx as usize, by as usize)
     }
 
     /// Writes a pixel through the clip region. Used by the text and dither
@@ -399,7 +412,8 @@ impl Surf<'_> {
 
 /// A retained rectangle of pixels owned by one window (spec 0026, C1; ADR
 /// 0060). `base` is a frame-allocator allocation of `bytes` (no row padding:
-/// `pitch == w * 4`); `ox`/`oy` are the surface's current screen origin.
+/// `pitch == w * 4`); `ox`/`oy` are the surface's current screen origin (the
+/// compositor's placement).
 ///
 /// The owner task writes it under the window table lock and the compositor
 /// reads it under the same lock, so one writer and one reader are serialised.
@@ -415,10 +429,15 @@ pub struct Canvas {
     pub w: i64,
     /// Height in pixels.
     pub h: i64,
-    /// Screen origin of the canvas top-left.
+    /// Screen origin of the canvas top-left (for composition).
     pub ox: i64,
-    /// Screen origin of the canvas top-left.
+    /// Screen origin of the canvas top-left (for composition).
     pub oy: i64,
+    /// True for a window content canvas, whose drawing coordinates are
+    /// window-local `(0, 0)` at the canvas top-left (spec 0026 C4/C8). False
+    /// for a plane, whose client keeps screen coordinates anchored at
+    /// `(ox, oy)` (C11/C12). A plane never moves, so its origin is stable.
+    pub local: bool,
 }
 
 // SAFETY: the canvas has exactly one writer (the owning task, serialised by the
@@ -428,25 +447,27 @@ pub struct Canvas {
 unsafe impl Send for Canvas {}
 unsafe impl Sync for Canvas {}
 
-/// Builds a [`Surf`] over a canvas. The clip and the extent are in screen
-/// coordinates at the canvas origin, so the existing translated primitives
-/// apply the M16.3 scaffolding unchanged (spec 0026, C4).
+/// Builds a [`Surf`] over a canvas (spec 0026, C4/C8/C11). A window canvas is
+/// surface-local: its origin is `(0, 0)` and its clip and extent are the canvas
+/// size, so the client's coordinates are the buffer's. A plane canvas keeps
+/// screen coordinates anchored at its screen rectangle.
 fn canvas_surf<'a>(c: &'a Canvas) -> Surf<'a> {
     // SAFETY: `base`/`bytes` are the canvas allocation, kept alive by the
     // window record and only accessed under the window table lock. `pitch`,
     // `limit` and the clip keep every store inside `w * h * 4` bytes.
     let pixels = unsafe { core::slice::from_raw_parts_mut(c.base, c.bytes) };
+    let (ox, oy) = if c.local { (0, 0) } else { (c.ox, c.oy) };
     Surf {
         pixels,
         pitch: c.pitch,
         clip: Rect {
-            x: c.ox as i32,
-            y: c.oy as i32,
+            x: ox as i32,
+            y: oy as i32,
             w: c.w as i32,
             h: c.h as i32,
         },
-        ox: c.ox,
-        oy: c.oy,
+        ox,
+        oy,
         limit: (c.w, c.h),
     }
 }
@@ -833,11 +854,12 @@ pub fn clip_self_check() -> Option<bool> {
 }
 
 /// Boot self-check for the surface primitive (spec 0026, C4; ADR 0060): draws
-/// through a scratch surface with a non-zero origin and a small clip, reads the
-/// buffer back and verifies that translated coordinates land where they should
-/// and that nothing outside the clip or the surface extent was written. It uses
-/// a fixed stack buffer and never touches [`SCREEN`], so it runs with graphics
-/// enabled or disabled.
+/// through a scratch surface with a non-zero origin (a plane, screen
+/// coordinates), then through a window-local one, reads the buffer back and
+/// verifies that translated coordinates land where they should and that nothing
+/// outside the clip or the surface extent was written. It uses a fixed stack
+/// buffer and never touches [`SCREEN`], so it runs with graphics enabled or
+/// disabled.
 pub fn surface_self_check() -> bool {
     const W: usize = 16;
     const H: usize = 12;
@@ -920,6 +942,50 @@ pub fn surface_self_check() -> bool {
         for row in 0..H {
             for col in 0..W {
                 let expected = if (2..10).contains(&col) && (2..8).contains(&row) {
+                    PAINT
+                } else {
+                    0
+                };
+                if surf.load(col, row) != expected {
+                    ok = false;
+                }
+            }
+        }
+    }
+
+    // A window canvas (C4/C8) is surface-local: origin zero, clip and limit at
+    // the canvas size. A fill at local (0, 0) covers the buffer corner and a
+    // read of a local coordinate answers from that pixel.
+    scratch.fill(0);
+    {
+        let mut surf = Surf {
+            pixels: &mut scratch,
+            pitch: W * 4,
+            clip: Rect {
+                x: 0,
+                y: 0,
+                w: W as i32,
+                h: H as i32,
+            },
+            ox: 0,
+            oy: 0,
+            limit: (W as i64, H as i64),
+        };
+        surf.fill(0, 0, 4, 3, PAINT);
+        surf.put(3, 2, PUT);
+        if surf.read(0, 0) != PAINT
+            || surf.read(3, 2) != PUT
+            || surf.read(4, 0) != 0
+            || surf.read(0, 3) != 0
+            || surf.read(-1, 0) != 0
+        {
+            ok = false;
+        }
+        for row in 0..H {
+            for col in 0..W {
+                let expected = if (col, row) == (3, 2) {
+                    PUT
+                } else if col < 4 && row < 3 {
                     PAINT
                 } else {
                     0
@@ -1311,13 +1377,25 @@ pub fn blit_rgb_on(
 }
 
 /// `syslib.clear` into a window canvas: fills the whole surface (spec 0026,
-/// C5). It is scope-local, never screen-wide.
+/// C5). It is scope-local, never screen-wide; the fill covers the surface's own
+/// rectangle, whether that is window-local or plane-screen.
 pub fn clear_on(c: &Canvas, color: u32) -> Status {
     if color > MAX_COLOR {
         return Status::Invalid;
     }
-    canvas_surf(c).fill(c.ox, c.oy, c.w, c.h, color);
+    let mut surf = canvas_surf(c);
+    let x = i64::from(surf.clip.x);
+    let y = i64::from(surf.clip.y);
+    surf.fill(x, y, c.w, c.h, color);
     Status::Ok
+}
+
+/// `syslib.get_pixel` inside a draw scope (spec 0026, C6/C8): reads the scope
+/// surface in its own coordinates — window-local for a window canvas, screen
+/// for a plane — so a client's pixel self-check sees its own pixels before the
+/// present. Off-surface coordinates read `0`.
+pub fn read_pixel_on(c: &Canvas, x: i64, y: i64) -> u32 {
+    canvas_surf(c).read(x, y)
 }
 
 /// Paints one opaque 8×8 glyph cell into a window canvas (spec 0026, C4). The

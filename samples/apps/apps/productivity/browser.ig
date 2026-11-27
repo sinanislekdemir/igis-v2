@@ -985,21 +985,21 @@ end;
 
 procedure compute_layout();
 begin
-  list_x := rect.x + ListLeft;
-  list_y := rect.y + ListTop;
-  scroll_x := rect.x + ScrollLeft;
-  scroll_y := rect.y + ListTop;
-  preview_x := rect.x + PreviewLeft;
-  preview_y := rect.y + ListTop;
-  status_y := rect.y + StatusTop;
+  list_x := ListLeft;
+  list_y := ListTop;
+  scroll_x := ScrollLeft;
+  scroll_y := ListTop;
+  preview_x := PreviewLeft;
+  preview_y := ListTop;
+  status_y := StatusTop;
   // A small `Up` button at the right of the path line, left of the writability
   // label. It is the visible parent-directory affordance (M8.8); the Backspace
   // and Ctrl+Up keys keep working.
   up_w := 44;
   up_h := 18;
-  up_x := rect.x + ContentW - 8 - stdlib.ui_text_width("home writable")
+  up_x := ContentW - 8 - stdlib.ui_text_width("home writable")
     - 8 - up_w;
-  up_y := rect.y + 2;
+  up_y := 2;
 end;
 
 procedure draw_marker(x: int; y: int; entry_kind: uint; color: uint);
@@ -1078,19 +1078,19 @@ var
   count_x: int;
 begin
   build_display_path();
-  st := syslib.draw_text(rect.x + 8, rect.y + 4, display_path, black);
+  st := syslib.draw_text(8, 4, display_path, black);
   path_width := stdlib.ui_text_width(display_path);
-  count_x := rect.x + 8 + path_width + 16;
-  if count_x < rect.x + 96 then
-    count_x := rect.x + 96;
+  count_x := 8 + path_width + 16;
+  if count_x < 96 then
+    count_x := 96;
   used := core.format_int_into(digits, entry_count, uint(10), uint(0));
-  st := syslib.draw_text(count_x, rect.y + 4, digits, black);
-  st := syslib.draw_text(count_x + used * 8, rect.y + 4, " entries", gray);
+  st := syslib.draw_text(count_x, 4, digits, black);
+  st := syslib.draw_text(count_x + used * 8, 4, " entries", gray);
   width := stdlib.ui_text_width("home writable");
   st := syslib.draw_text(
-    rect.x + ContentW - 8 - width, rect.y + 4, "home writable", gray);
+    ContentW - 8 - width, 4, "home writable", gray);
   st := stdlib.ui_button(up_x, up_y, up_w, up_h, "Up", false, false);
-  st := stdlib.ui_separator(rect.x, rect.y + PathH - 1, ContentW);
+  st := stdlib.ui_separator(0, PathH - 1, ContentW);
 end;
 
 procedure draw_list();
@@ -1230,12 +1230,12 @@ procedure draw_status();
 var
   width: int;
 begin
-  st := stdlib.ui_separator(rect.x, status_y - 6, ContentW);
-  st := syslib.draw_text(rect.x + 8, status_y, status_line, black);
+  st := stdlib.ui_separator(0, status_y - 6, ContentW);
+  st := syslib.draw_text(8, status_y, status_line, black);
   width := stdlib.ui_text_width(
     "Enter open  Ctrl+L launch  Bksp up  N new  Del delete");
   st := syslib.draw_text(
-    rect.x + ContentW - 8 - width, status_y,
+    ContentW - 8 - width, status_y,
     "Enter open  Ctrl+L launch  Bksp up  N new  Del delete", gray);
 end;
 
@@ -1253,14 +1253,16 @@ procedure preview_scrollbar();
 begin
   st := syslib.window_begin(id);
   draw_scrollbar_at(scroll_preview);
-  st := syslib.present(scroll_x, scroll_y, ScrollW, BodyH);
+  // `present` is a screen rectangle (spec 0026 C7), so it is the one call that
+  // still adds the content origin.
+  st := syslib.present(rect.x + scroll_x, rect.y + scroll_y, ScrollW, BodyH);
 end;
 
 // One complete frame; the caller presents once afterwards. While a thumb is
 // held the strip shows the preview and the list stays at `top` (M16.8).
 procedure draw_all();
 begin
-  st := syslib.fill_rect(rect.x, rect.y, ContentW, ContentH, white);
+  st := syslib.fill_rect(0, 0, ContentW, ContentH, white);
   draw_path();
   draw_list();
   if scroll_dragging then
@@ -1276,9 +1278,9 @@ begin
   st := syslib.window_present(id);
 end;
 
-// Re-reads the content rectangle after the service moved the window (spec
-// 0011, W12/W17/W28; ADR 0046). `draw_all` and the pointer/key handlers derive
-// their absolute coordinates from `rect`.
+// Re-reads the content rectangle. Drawing and hit-testing are window-local
+// (spec 0026 C8), so only `syslib.present`'s screen rectangle needs the origin
+// (C7); the layout itself never changes with a move.
 procedure refresh_rect();
 begin
   st := syslib.window_content_rect(id, rect);
@@ -1339,7 +1341,9 @@ end;
 
 procedure pointer_to(px: int; py: int);
 begin
-  st := inject.pointer_to(px, py);
+  // `px`/`py` are window-local; the pointer state is screen-coordinate
+  // (spec 0010 I35), so the content origin is added here.
+  st := inject.pointer_to(rect.x + px, rect.y + py);
   drain_events();
 end;
 
@@ -1360,8 +1364,10 @@ end;
 // directly through the debug pointer hook.
 procedure pointer_drag_to(px: int; py: int);
 begin
+  // `px`/`py` are window-local; the pointer state is screen-coordinate, so the
+  // content origin is added before the delta is computed (spec 0010 I35).
   st := syslib.inject_pointer(
-    px - syslib.pointer_x(), py - syslib.pointer_y(), uint(1));
+    rect.x + px - syslib.pointer_x(), rect.y + py - syslib.pointer_y(), uint(1));
   drain_events();
 end;
 
@@ -1781,9 +1787,9 @@ begin
   if row = 0 then
     other_row := 1;
   preview_text_y := preview_y + 26;
-  hint_x := rect.x + ContentW - 8 - stdlib.ui_text_width(
+  hint_x := ContentW - 8 - stdlib.ui_text_width(
     "Enter open  Ctrl+L launch  Bksp up  N new  Del delete");
-  verify("path rule", syslib.get_pixel(rect.x + 300, rect.y + PathH - 1) = black);
+  verify("path rule", syslib.get_pixel(300, PathH - 1) = black);
   verify("list border", syslib.get_pixel(list_x, list_y) = black);
   verify("selected row", syslib.get_pixel(list_x + 2, row_y + 3) = accent);
   verify("other row", syslib.get_pixel(
@@ -1812,7 +1818,7 @@ begin
   verify("preview divider",
     syslib.get_pixel(preview_x + 100, preview_y + 20) = black);
   verify("status rule",
-    syslib.get_pixel(rect.x + 300, status_y - 6) = black);
+    syslib.get_pixel(300, status_y - 6) = black);
   verify("scrollbar border", syslib.get_pixel(scroll_x, scroll_y) = black);
   // The thumb sits at `top`, so probe the computed thumb rather than the track.
   track_h := BodyH - 4;

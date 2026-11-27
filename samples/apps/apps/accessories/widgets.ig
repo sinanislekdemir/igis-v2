@@ -1157,35 +1157,35 @@ end;
 
 // ---- layout ------------------------------------------------------------
 
-// Re-reads the content rectangle after the service moved the window and
-// recomputes every cached absolute control origin (spec 0011, W12/W17/W28;
-// ADR 0046). The event handlers and drawing use these screen coordinates.
+// Sets the cached control origins. They are window-local (spec 0026 C8), so a
+// move changes nothing; the content rectangle is read only for the menu width,
+// which follows a display-mode reflow.
 procedure refresh_layout();
 begin
   status := syslib.window_content_rect(id, rect);
   if status = Ok then
   begin
-    menu_x := rect.x + 8;
-    menu_y := rect.y + 8;
+    menu_x := 8;
+    menu_y := 8;
     menu_w := rect.w - 16;
-    bx := rect.x + 16;
-    by := rect.y + 60;
-    cx := rect.x + 16;
-    cy := rect.y + 96;
-    tx := rect.x + 16;
-    ty := rect.y + 128;
-    lx := rect.x + 16;
-    ly := rect.y + 170;
-    docx := rect.x + 400;
-    docy := rect.y + 60;
-    sbx := rect.x + 728;
-    sby := rect.y + 60;
-    icx := rect.x + 400;
-    icy := rect.y + 232;
-    ttx := rect.x + 660;
-    tty := rect.y + 232;
-    dx := rect.x + 200;
-    dy := rect.y + 170;
+    bx := 16;
+    by := 60;
+    cx := 16;
+    cy := 96;
+    tx := 16;
+    ty := 128;
+    lx := 16;
+    ly := 170;
+    docx := 400;
+    docy := 60;
+    sbx := 728;
+    sby := 60;
+    icx := 400;
+    icy := 232;
+    ttx := 660;
+    tty := 232;
+    dx := 200;
+    dy := 170;
   end;
 end;
 
@@ -1245,9 +1245,11 @@ end;
 
 // Clamp the pointer to the origin, discard the queued move and place it on an
 // absolute screen point; the window service sees one move from a known state.
+// `x`/`y` are window-local, so the content origin is added here (the pointer
+// state stays in screen coordinates, spec 0010 I35).
 procedure pointer_to(x: int; y: int);
 begin
-  status := inject.pointer_to(x, y);
+  status := inject.pointer_to(rect.x + x, rect.y + y);
   drain_events();
 end;
 
@@ -1422,9 +1424,9 @@ end;
 
 procedure draw_status();
 begin
-  status := syslib.draw_text(rect.x + 16, rect.y + 512, status_text, black);
-  status := syslib.draw_text(rect.x + 16, rect.y + 530, "Focus: ", black);
-  status := syslib.draw_text(rect.x + 72, rect.y + 530, focus_text, black);
+  status := syslib.draw_text(16, 512, status_text, black);
+  status := syslib.draw_text(16, 530, "Focus: ", black);
+  status := syslib.draw_text(72, 530, focus_text, black);
 end;
 
 procedure draw_dialog();
@@ -1444,9 +1446,9 @@ end;
 procedure draw_all();
 begin
   sync_focus_text();
-  status := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, white);
-  status := stdlib.ui_separator(rect.x + 8, rect.y + 52, rect.w - 16);
-  status := syslib.draw_text(rect.x + 16, rect.y + 36, "M2.4.6 widgets", black);
+  status := syslib.fill_rect(0, 0, rect.w, rect.h, white);
+  status := stdlib.ui_separator(8, 52, rect.w - 16);
+  status := syslib.draw_text(16, 36, "M2.4.6 widgets", black);
   draw_controls();
   draw_document();
   draw_icons();
@@ -1470,7 +1472,7 @@ begin
   present_all();
 
   // Baseline: the client panel, the menu bar, every control and the icons.
-  verify("content filled", syslib.get_pixel(rect.x + 2, rect.y + 2) = white);
+  verify("content filled", syslib.get_pixel(2, 2) = white);
   verify("menu bar white", syslib.get_pixel(menu_x + 300, menu_y + 5) = white);
   verify("menu bar rule", syslib.get_pixel(menu_x + 300, menu_y + 21) = black);
   verify("button face", syslib.get_pixel(bx + 2, by + 2) = white);

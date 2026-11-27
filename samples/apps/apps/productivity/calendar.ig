@@ -16,10 +16,11 @@ unit calendar;
 // same leap/month/weekday/navigation logic with a disabled screen and prints
 // `calendar: host ok`.
 //
-// Geometry and drawing follow `clock_window`: client content only, one complete
-// frame before one `window_present`, an owner `Expose` repaints the whole
-// content after re-reading `window_content_rect`, and the live loop blocks in
-// `syslib.next_event` so blocked time is not charged to the task budget.
+// Geometry and drawing follow `clock_window`: client content only, in
+// window-local coordinates (spec 0026 C8), one complete frame before one
+// `window_present`; an owner `Expose` repaints the whole content, and the live
+// loop blocks in `syslib.next_event` so blocked time is not charged to the task
+// budget.
 
 uses core, stdlib, syslib, lib.out;
 
@@ -90,7 +91,6 @@ var
   screen_w: uint;
   screen_h: uint;
   id: int;
-  rect: Rect;
 
   black: uint;
   white: uint;
@@ -437,12 +437,12 @@ begin
   total := month_width + 8 + year_width;
   area_x := NavLeftX + NavW + 4;
   area_w := NavRightX - area_x;
-  x := rect.x + area_x;
+  x := area_x;
   if total < area_w then
     x := x + (area_w - total) div 2;
-  x := put_text(x, rect.y + HeaderY + 5, month_names[view_month - 1], black);
-  x := put_text(x, rect.y + HeaderY + 5, " ", black);
-  x := put_text(x, rect.y + HeaderY + 5, year_text, black);
+  x := put_text(x, HeaderY + 5, month_names[view_month - 1], black);
+  x := put_text(x, HeaderY + 5, " ", black);
+  x := put_text(x, HeaderY + 5, year_text, black);
 end;
 
 procedure draw_week_header();
@@ -453,8 +453,8 @@ begin
   while col < GridCols do
   begin
     ignored := syslib.draw_text(
-      rect.x + GridX + col * CellW + (CellW - 16) div 2,
-      rect.y + WeekY, week_names[col], black);
+      GridX + col * CellW + (CellW - 16) div 2,
+      WeekY, week_names[col], black);
     col := col + 1;
   end;
 end;
@@ -468,8 +468,8 @@ var
   width: int;
   color: uint;
 begin
-  x := rect.x + GridX + col * CellW;
-  y := rect.y + GridY + row * CellH;
+  x := GridX + col * CellW;
+  y := GridY + row * CellH;
   written := core.format_int_into(day_text, day, uint(10), uint(0));
   width := written * 8;
   color := black;
@@ -520,35 +520,35 @@ begin
     total := 56 + day_width + 8
              + stdlib.ui_text_width(month_names[today_month - 1])
              + 8 + stdlib.ui_text_width(year_text);
-    x := rect.x;
+    x := 0;
     if total < ContentW then
       x := x + (ContentW - total) div 2;
-    x := put_text(x, rect.y + FooterY, "Today: ", black);
-    x := put_text(x, rect.y + FooterY, day_text, black);
-    x := put_text(x, rect.y + FooterY, " ", black);
-    x := put_text(x, rect.y + FooterY, month_names[today_month - 1], black);
-    x := put_text(x, rect.y + FooterY, " ", black);
-    x := put_text(x, rect.y + FooterY, year_text, black);
+    x := put_text(x, FooterY, "Today: ", black);
+    x := put_text(x, FooterY, day_text, black);
+    x := put_text(x, FooterY, " ", black);
+    x := put_text(x, FooterY, month_names[today_month - 1], black);
+    x := put_text(x, FooterY, " ", black);
+    x := put_text(x, FooterY, year_text, black);
   end
   else
   begin
     total := 144;
-    x := rect.x + (ContentW - total) div 2;
-    ignored := syslib.draw_text(x, rect.y + FooterY, "Today: unavailable", black);
+    x := (ContentW - total) div 2;
+    ignored := syslib.draw_text(x, FooterY, "Today: unavailable", black);
   end;
   ignored := syslib.draw_text(
-    rect.x + (ContentW - 224) div 2, rect.y + HintY,
+    (ContentW - 224) div 2, HintY,
     "Arrows: month/year  H: today", black);
 end;
 
 procedure draw_calendar();
 begin
-  ignored := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, white);
-  ignored := stdlib.ui_frame(rect.x + Inset, rect.y + Inset,
+  ignored := syslib.fill_rect(0, 0, ContentW, ContentH, white);
+  ignored := stdlib.ui_frame(Inset, Inset,
                              ContentW - 2 * Inset, ContentH - 2 * Inset);
-  ignored := stdlib.ui_button(rect.x + NavLeftX, rect.y + HeaderY, NavW, NavH,
+  ignored := stdlib.ui_button(NavLeftX, HeaderY, NavW, NavH,
                               "<", pressed_nav = NavPrev, false);
-  ignored := stdlib.ui_button(rect.x + NavRightX, rect.y + HeaderY, NavW, NavH,
+  ignored := stdlib.ui_button(NavRightX, HeaderY, NavW, NavH,
                               ">", pressed_nav = NavNext, false);
   draw_title();
   draw_week_header();
@@ -557,19 +557,14 @@ begin
   ignored := syslib.window_present(id);
 end;
 
-procedure refresh_geometry();
-begin
-  status := syslib.window_content_rect(id, rect);
-end;
-
 // ---- input helpers ------------------------------------------------------
 
 // 1 for `<`, 2 for `>`, 0 for the rest of the header.
 function nav_hit(px: int; py: int): int;
 begin
-  if stdlib.ui_button_hit(rect.x + NavLeftX, rect.y + HeaderY, NavW, NavH, px, py) then
+  if stdlib.ui_button_hit(NavLeftX, HeaderY, NavW, NavH, px, py) then
     return NavPrev;
-  if stdlib.ui_button_hit(rect.x + NavRightX, rect.y + HeaderY, NavW, NavH, px, py) then
+  if stdlib.ui_button_hit(NavRightX, HeaderY, NavW, NavH, px, py) then
     return NavNext;
   return NavNone;
 end;
@@ -581,8 +576,8 @@ var
   rel_x: int;
   rel_y: int;
 begin
-  rel_x := px - (rect.x + GridX);
-  rel_y := py - (rect.y + GridY);
+  rel_x := px - (GridX);
+  rel_y := py - (GridY);
   if rel_x < 0 or rel_x >= GridW or rel_y < 0 or rel_y >= GridH then
     return 0;
   return day_for_cell(rel_y div CellH, rel_x div CellW);
@@ -727,29 +722,29 @@ begin
   pressed_nav := NavNone;
   draw_calendar();
 
-  verify("bezel outline", syslib.get_pixel(rect.x + Inset, rect.y + Inset) = black);
-  verify("content base", syslib.get_pixel(rect.x + 1, rect.y + 1) = white);
-  verify("prev frame", syslib.get_pixel(rect.x + NavLeftX, rect.y + HeaderY) = black);
+  verify("bezel outline", syslib.get_pixel(Inset, Inset) = black);
+  verify("content base", syslib.get_pixel(1, 1) = white);
+  verify("prev frame", syslib.get_pixel(NavLeftX, HeaderY) = black);
   verify("next frame",
-         syslib.get_pixel(rect.x + NavRightX + NavW - 1, rect.y + HeaderY) = black);
+         syslib.get_pixel(NavRightX + NavW - 1, HeaderY) = black);
 
   row := cell_row(FixedDay);
   col := cell_col(FixedDay);
   verify("today fill",
-         syslib.get_pixel(rect.x + GridX + col * CellW + 3,
-                          rect.y + GridY + row * CellH + 3) = black);
+         syslib.get_pixel(GridX + col * CellW + 3,
+                          GridY + row * CellH + 3) = black);
   verify("blank day base",
-         syslib.get_pixel(rect.x + GridX + 3, rect.y + GridY + 3) = white);
+         syslib.get_pixel(GridX + 3, GridY + 3) = white);
 
   verify("nav prev hit",
-         nav_hit(NavLeftX + 5 + rect.x, HeaderY + 5 + rect.y) = NavPrev);
+         nav_hit(NavLeftX + 5, HeaderY + 5) = NavPrev);
   verify("nav next hit",
-         nav_hit(NavRightX + 5 + rect.x, HeaderY + 5 + rect.y) = NavNext);
-  verify("nav miss", nav_hit(rect.x + 100, rect.y + 100) = NavNone);
-  px := rect.x + GridX + col * CellW + 16;
-  py := rect.y + GridY + row * CellH + 12;
+         nav_hit(NavRightX + 5, HeaderY + 5) = NavNext);
+  verify("nav miss", nav_hit(100, 100) = NavNone);
+  px := GridX + col * CellW + 16;
+  py := GridY + row * CellH + 12;
   verify("day hit", day_at_point(px, py) = FixedDay);
-  verify("grid miss", day_at_point(rect.x + 2, rect.y + 2) = 0);
+  verify("grid miss", day_at_point(2, 2) = 0);
 
   saved_month := view_month;
   ev.kind := KeyDown;
@@ -760,8 +755,8 @@ begin
   selected_day := 0;
 
   ev.kind := PointerDown;
-  ev.x := rect.x + NavRightX + 5;
-  ev.y := rect.y + HeaderY + 5;
+  ev.x := NavRightX + 5;
+  ev.y := HeaderY + 5;
   handle_pointer();
   verify("next pressed", pressed_nav = NavNext);
   ev.kind := PointerUp;
@@ -831,10 +826,7 @@ begin
       if ev.kind = Expose then
       begin
         if ev.window = id then
-        begin
-          refresh_geometry();
           draw_calendar();
-        end;
       end
       else if ev.kind = Close then
       begin
@@ -894,10 +886,7 @@ begin
       out.say("calendar: no window\n")
     else
     begin
-      refresh_geometry();
-      if status <> Ok then
-        out.say("calendar: no content rect\n")
-      else if stdlib.starts_with(args, "check") then
+      if stdlib.starts_with(args, "check") then
         check_mode()
       else if stdlib.starts_with(args, "shot") then
         shot_mode()

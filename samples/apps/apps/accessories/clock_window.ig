@@ -38,7 +38,7 @@ const
   BezelOuter = 4;
   BezelInner = 7;
 
-  // Analog face: centre at (rect.x + ContentW / 2, rect.y + FaceCenterDy).
+  // Analog face: centre at (ContentW / 2, FaceCenterDy).
   FaceCenterDy = 128;
   FaceRadius = 96;
   HourHandLen = 52;
@@ -46,7 +46,7 @@ const
   SecondHandLen = 88;
 
   // Digital readout: a framed 80x24 panel with `HH:MM:SS` in four cells per
-  // byte (8 px each) starting at (cx - 32, rect.y + DigitalY).
+  // byte (8 px each) starting at (cx - 32, DigitalY).
   DigitalY = 240;
   DigitalW = 80;
   DigitalH = 24;
@@ -498,17 +498,17 @@ begin
   ignored := syslib.draw_text(dx0 + 24, dy0, mm, black);
   ignored := syslib.draw_text(dx0 + 40, dy0, ":", black);
   ignored := syslib.draw_text(dx0 + 48, dy0, ss, black);
-  ignored := syslib.draw_text(dx0 + 16, rect.y + CaptionDy, "IGIS", black);
+  ignored := syslib.draw_text(dx0 + 16, CaptionDy, "IGIS", black);
 end;
 
 // One complete frame: content base, bezel, face, ticks, readout, hands. The
 // caller presents once afterwards, so no partial frame is ever shown.
 procedure draw_clock(value_hour: int; value_minute: int; value_second: int);
 begin
-  ignored := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, white);
-  ignored := stdlib.ui_frame(rect.x + BezelOuter, rect.y + BezelOuter,
+  ignored := syslib.fill_rect(0, 0, rect.w, rect.h, white);
+  ignored := stdlib.ui_frame(BezelOuter, BezelOuter,
                              ContentW - 2 * BezelOuter, ContentH - 2 * BezelOuter);
-  ignored := stdlib.ui_frame(rect.x + BezelInner, rect.y + BezelInner,
+  ignored := stdlib.ui_frame(BezelInner, BezelInner,
                              ContentW - 2 * BezelInner, ContentH - 2 * BezelInner);
   draw_circle(FaceRadius, black);
   draw_ticks();
@@ -522,28 +522,28 @@ begin
   ignored := syslib.window_present(id);
 end;
 
-// Re-reads the content rectangle and recomputes the absolute face/readout
-// geometry after the service moved the window (spec 0011, W12/W17/W28;
-// ADR 0046).
+// Sets the face/readout geometry. Coordinates are window-local (spec 0026
+// C8), so a move changes nothing the client computes; the content rectangle is
+// still read for its size, because a display-mode change reflows the window.
 procedure refresh_geometry();
 begin
   status := syslib.window_content_rect(id, rect);
   if status = Ok then
   begin
-    cx := rect.x + ContentW div 2;
-    cy := rect.y + FaceCenterDy;
+    cx := ContentW div 2;
+    cy := FaceCenterDy;
     dx0 := cx - DigitalCells * 4;
-    dy0 := rect.y + DigitalY;
+    dy0 := DigitalY;
   end;
 end;
 
 procedure check_pixels();
 begin
   // Client bezel: two frames with a white gap.
-  verify("bezel outline", syslib.get_pixel(rect.x + BezelOuter, rect.y + BezelOuter) = black);
-  verify("bezel gap", syslib.get_pixel(rect.x + BezelOuter + 1, rect.y + BezelOuter + 1) = white);
-  verify("bezel inner", syslib.get_pixel(rect.x + BezelInner, rect.y + BezelInner) = black);
-  verify("content base", syslib.get_pixel(rect.x + 10, rect.y + 10) = white);
+  verify("bezel outline", syslib.get_pixel(BezelOuter, BezelOuter) = black);
+  verify("bezel gap", syslib.get_pixel(BezelOuter + 1, BezelOuter + 1) = white);
+  verify("bezel inner", syslib.get_pixel(BezelInner, BezelInner) = black);
+  verify("content base", syslib.get_pixel(10, 10) = white);
 
   // Rim at the four cardinal points (the hour marks stop short of it).
   verify("circle 12", syslib.get_pixel(cx, cy - FaceRadius) = black);

@@ -28,9 +28,10 @@ begin
     status := syslib.window_content_rect(id, rect);
     if status = Ok then
     begin
-      status := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, uint(0x00EEDD66));
-      status := syslib.draw_rect(rect.x + 2, rect.y + 2, rect.w - 4, rect.h - 4, uint(0));
-      status := syslib.draw_text(rect.x + 16, rect.y + 20, "Close Target", uint(0));
+      // Window-local (spec 0026 C8); the rectangle is read only for its size.
+      status := syslib.fill_rect(0, 0, rect.w, rect.h, uint(0x00EEDD66));
+      status := syslib.draw_rect(2, 2, rect.w - 4, rect.h - 4, uint(0));
+      status := syslib.draw_text(16, 20, "Close Target", uint(0));
       status := syslib.window_present(id);
     end;
   end;

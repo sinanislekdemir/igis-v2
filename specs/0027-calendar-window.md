@@ -48,8 +48,8 @@ service.
   `Calendar` at screen `(300, 110)` and draws a white client panel, one
   one-pixel bezel, a header with a `<` and a `>` button, the month and year, a
   Monday-first weekday row, the six-row grid and two footer lines. It draws the
-  whole content and presents once; an owner `Expose` repaints the whole content
-  after re-reading `window_content_rect`.
+  whole content and presents once; an owner `Expose` repaints the whole content in
+  window-local coordinates (spec 0026 C8), with no origin refresh.
 - **C7 (MUST):** Today's cell is inverted (black fill, white number) only when
   the shown month is the host's month and the RTC read succeeded. A selected
   day that is not today gets a one-pixel accent rectangle; selection never

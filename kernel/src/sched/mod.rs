@@ -310,7 +310,14 @@ impl Host for KernelHost {
         self.drawing(|canvas| crate::gfx::blit_rgb_on(canvas, x, y, w, h, pixels, pw, ph))
     }
 
+    /// `syslib.get_pixel` (spec 0026, C6): inside a draw scope it reads the
+    /// scope surface in the surface's own coordinates (window-local, or screen
+    /// for a plane); with no scope it reads the composed shadow in screen
+    /// coordinates. The shadow never contains the cursor (spec 0010, I7).
     fn get_pixel(&mut self, x: i64, y: i64) -> u32 {
+        if let Some(pixel) = crate::window::scope_pixel(self.current, x, y) {
+            return pixel;
+        }
         crate::gfx::get_pixel(x, y)
     }
 
@@ -444,6 +451,25 @@ impl Host for KernelHost {
                 abi::EventKind::Expose => {}
                 abi::EventKind::Close => {}
                 _ => routed.window = crate::window::focus() as i64,
+            }
+        }
+        // Window-local event coordinates (spec 0026 C9, spec 0010 I35): a
+        // pointer event addressed to a window carries coordinates relative to
+        // that window's content rectangle. An unaddressed event, a plane
+        // owner's event (`window == 0`) and every key, expose and close record
+        // keep screen or zero coordinates. The machine-wide pointer state and
+        // `inject_pointer` stay in screen coordinates.
+        if routed.window != 0
+            && matches!(
+                routed.kind,
+                abi::EventKind::PointerMove
+                    | abi::EventKind::PointerDown
+                    | abi::EventKind::PointerUp
+            )
+        {
+            if let Ok(content) = crate::window::content_rect(routed.window as u64) {
+                routed.x = routed.x.saturating_sub(content.x);
+                routed.y = routed.y.saturating_sub(content.y);
             }
         }
         abi::layout::event::write(event, routed);

@@ -120,8 +120,9 @@ begin
 
   status := syslib.window_content_rect(id, rect);
   verify("content rect", status = Ok and rect.w = ContentW and rect.h = ContentH);
-  cx := rect.x;
-  cy := rect.y;
+  // Window-local (spec 0026 C8): a move changes nothing the client computes.
+  cx := 0;
+  cy := 0;
 
   // The window content is the drawing surface; the 8×8 body text elsewhere in
   // the desktop stays 8×8 by design, and the service chrome uses this font.
@@ -178,21 +179,25 @@ begin
   // outside; a partially visible glyph keeps its visible pixel.
   status := syslib.draw_text_prop(-100, -100, "WWWW", black);
   verify("negative origin ok", status = Ok);
-  status := syslib.draw_text_prop(int(screen_w) - 2, int(screen_h) - 12, "WWWW", black);
+  status := syslib.draw_text_prop(ContentW - 2, ContentH - 12, "WWWW", black);
   verify("past edge ok", status = Ok);
   status := syslib.draw_text_prop(cx - 1, cy + 160, "i", black);
   verify("partial glyph ok", status = Ok);
   status := syslib.window_present(id);
   verify("partial glyph stem", syslib.get_pixel(cx, cy + 169) = black);
 
+
   // The window service's own title bar uses the proportional font: "Font" is
   // centred in the band right of the close box, and the F's top bar starts at
   // the band's left edge on the first cap row (line top + 2).
   title_w := tw("Font");
   // The service centres the title in the band between the close and minimize
-  // boxes: 20 px on the left and 18 px on the right of the content width.
+  // boxes: 20 px on the left and 18 px on the right of the content width. The
+  // chrome is not in the canvas, so read the composed shadow with no scope.
   band_x := cx + 20 + (rect.w - 38 - title_w) div 2;
+  status := syslib.window_begin(0);
   verify("service title uses prop", syslib.get_pixel(band_x, cy - 12) = black);
+  status := syslib.window_begin(id);
 
   status := syslib.draw_text_prop(cx + 12, cy + 210, "The quick brown fox jumps over the lazy dog.", black);
   verify("final line drawn", status = Ok);
@@ -227,8 +232,8 @@ begin
     return;
   end;
   status := syslib.window_content_rect(id, rect);
-  cx := rect.x;
-  cy := rect.y;
+  cx := 0;
+  cy := 0;
   status := syslib.fill_rect(cx, cy, rect.w, rect.h, white);
   status := syslib.draw_text_prop(cx + 12, cy + 8, "Chicago-like 12 px", black);
   status := syslib.draw_text_prop(cx + 12, cy + 30, "ii MM Wi mw 0123456789", black);

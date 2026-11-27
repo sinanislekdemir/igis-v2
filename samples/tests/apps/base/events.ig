@@ -51,6 +51,9 @@ var
   baseline: int;
   win: int;
   plane: int;
+  content: Rect;
+  expect_x: int;
+  expect_y: int;
 
 // One line per step; the first failure names the step and stops the checks.
 procedure check(label: const string[0]; passed: bool);
@@ -120,6 +123,10 @@ begin
   // `Expose`; consume it before the queue checks. A disabled window service
   // (the host) leaves `win` 0 and the events untargeted, as before.
   win := 0;
+  // A window-addressed pointer event is content-local (spec 0026 C9); with no
+  // window service (the host) the events stay screen-coordinate.
+  expect_x := 40;
+  expect_y := 10;
   status := syslib.window_open(700, 420, 120, 60, "Events", win);
   if status = Ok then
   begin
@@ -127,6 +134,12 @@ begin
     check(
       "open expose is owner-only",
       status = Ok and ev.kind = Expose and ev.window = win);
+    status := syslib.window_content_rect(win, content);
+    if status = Ok then
+    begin
+      expect_x := 40 - content.x;
+      expect_y := 10 - content.y;
+    end;
   end;
   baseline := syslib.window_focus();
   if win > 0 then
@@ -154,8 +167,8 @@ begin
   status := syslib.next_event(ev);
   check(
     "pointer move event",
-    status = Ok and ev.kind = PointerMove and ev.x = 40 and ev.y = 10
-      and ev.code = uint(0) and ev.window = baseline);
+    status = Ok and ev.kind = PointerMove and ev.x = expect_x
+      and ev.y = expect_y and ev.code = uint(0) and ev.window = baseline);
 
   status := syslib.inject_pointer(0, 0, uint(1));
   status := syslib.next_event(ev);
@@ -168,8 +181,8 @@ begin
   status := syslib.next_event(ev);
   check(
     "pointer up event",
-    status = Ok and ev.kind = PointerUp and ev.x = 40 and ev.y = 10
-      and ev.code = uint(1) and ev.window = baseline);
+    status = Ok and ev.kind = PointerUp and ev.x = expect_x
+      and ev.y = expect_y and ev.code = uint(1) and ev.window = baseline);
 
   // 3. Injected key records come back with the whole packed value.
   make_key(KeyDown, uint(KeyAShift));

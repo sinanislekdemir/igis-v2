@@ -200,11 +200,11 @@ Buttons are a bit mask: bit 0 left, bit 1 right, bit 2 middle.
     the boot log. Overflow is a bounded failure, never a stall: the handler keeps draining
     the controller, so the level-triggered line still falls;
   - an unexpected or spurious `0x2C` with no aux byte waiting acknowledges and returns.
-- **I35 (DEFERRED to M17, spec 0026 C9):** event coordinates are window-local for a
-  window-addressed event. **M16 keeps screen coordinates for every event** (the pre-M16
-  model): a client converts with the content rectangle it reads on an `Expose`. The
-  `Event` layout is unchanged either way, and the machine-wide pointer state and
-  `inject_pointer` stay in screen coordinates.
+- **I35 (MUST, implemented in M17; spec 0026 C9):** a pointer event addressed to a window
+  (`window != 0`, kinds `PointerMove`/`PointerDown`/`PointerUp`) carries `x`/`y` relative
+  to that window's content rectangle. Unaddressed events, a plane owner's event and key
+  events keep screen or zero coordinates, and the machine-wide pointer state and
+  `inject_pointer` stay in screen coordinates. The `Event` layout is unchanged.
 - **I33 (MUST):** Bring-up is fail-safe and visible. The boot log names the route
   (`ioapic: version ..., IRQ12 -> vector 0x2c on apic N (level)` and
   `mouse: aux IRQ12 enabled (config ...)`) or the reason polling remains

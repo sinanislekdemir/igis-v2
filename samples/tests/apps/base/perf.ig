@@ -83,13 +83,13 @@ var
   span: int;
 begin
   span := ContentW - 16;
-  ignored := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, white);
-  ignored := syslib.draw_rect(rect.x + 2, rect.y + 2, rect.w - 4, rect.h - 4, black);
-  x := rect.x + 8 + (frame * 4) mod (ContentW - BarSide - 16);
-  ignored := syslib.fill_rect(x, rect.y + 8, BarSide, BarSide, black);
-  ignored := syslib.fill_rect(rect.x + 8, rect.y + ContentH - 24,
-                              (frame * 7) mod span, 6, red);
-  ignored := syslib.draw_text(rect.x + 8, rect.y + ContentH - 12, "perf frame", black);
+  // Window-local (spec 0026 C8); the content rectangle is read only for size.
+  ignored := syslib.fill_rect(0, 0, rect.w, rect.h, white);
+  ignored := syslib.draw_rect(2, 2, rect.w - 4, rect.h - 4, black);
+  x := 8 + (frame * 4) mod (ContentW - BarSide - 16);
+  ignored := syslib.fill_rect(x, 8, BarSide, BarSide, black);
+  ignored := syslib.fill_rect(8, ContentH - 24, (frame * 7) mod span, 6, red);
+  ignored := syslib.draw_text(8, ContentH - 12, "perf frame", black);
 end;
 
 // One complete frame; reports the elapsed nanoseconds of every sample and the
@@ -171,7 +171,7 @@ begin
     end;
     if got then
       out_delivered := out_delivered + 1;
-    ignored := syslib.fill_rect(rect.x + ContentW - 20, rect.y + 8, 8, 8, black);
+    ignored := syslib.fill_rect(ContentW - 20, 8, 8, 8, black);
     ignored := syslib.window_present(id);
     t1 := core.clock();
     elapsed := t1 - t0;

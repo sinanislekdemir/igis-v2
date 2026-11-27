@@ -66,7 +66,9 @@ begin
   status := syslib.window_content_rect(id, content);
   if status = Ok then
   begin
-    limit := content.x + content.w;
+    // Window-local (spec 0026 C8): A's content starts at (0, 0); B's left
+    // screen edge is translated into this window's space for the scan.
+    limit := content.w;
     a_pos := -1;
     b_pos := -1;
     saw_b := false;
@@ -100,20 +102,19 @@ begin
     if saw_b and a_pos >= 0 and b_pos >= 0 and b_pos < a_pos then
     begin
       if b_frame.x <= content.x then
-        limit := content.x
-      else if b_frame.x < limit then
-        limit := b_frame.x;
+        limit := 0
+      else if b_frame.x - content.x < limit then
+        limit := b_frame.x - content.x;
     end;
 
-    width := limit - content.x;
+    width := limit;
     if width > 0 then
     begin
-      status := syslib.fill_rect(content.x, content.y, width, content.h, uint(BaseColor));
+      status := syslib.fill_rect(0, 0, width, content.h, uint(BaseColor));
       if width >= 40 then
       begin
-        status := syslib.fill_rect(
-          content.x + 20, content.y + 20, 16, 16, uint(MarkColor));
-        status := syslib.draw_text(content.x + 20, content.y + 48, "A", uint(Ink));
+        status := syslib.fill_rect(20, 20, 16, 16, uint(MarkColor));
+        status := syslib.draw_text(20, 48, "A", uint(Ink));
       end;
     end;
     status := syslib.window_present(id);

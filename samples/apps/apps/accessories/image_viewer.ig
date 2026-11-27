@@ -22,8 +22,8 @@ unit image_viewer;
 //
 // The first frame is drawn and presented *before* `png.open`: opening stages
 // up to 512 KiB of IDAT payload, which takes visible time on the real corpus.
-// An owner `Expose` re-reads the content rectangle (W12/W28, ADR 0046) and
-// re-runs the draw; the PNG path uses `png.rewind` over the staged prefix and
+// An owner `Expose` re-runs the draw in window-local coordinates (spec 0026
+// C8); the PNG path uses `png.rewind` over the staged prefix and
 // the PPM path re-opens the header and reads rows again. There is no image
 // buffer to keep. Close/Escape leaves. Each output row reaches the window
 // through one `syslib.blit_rgb` call with `pw = ow, ph = 1`.
@@ -92,7 +92,6 @@ var
   content_w: int;
   content_h: int;
   id: int;
-  rect: Rect;
 
   // Decoder state: one PNG decoder, one PPM decoder, one source row, one
   // sampled preview row, the 2x2 PNG check preview and the detected format.
@@ -313,10 +312,11 @@ var
   pct: int;
   used: int;
 begin
-  top := rect.y + int(oh);
-  status := syslib.fill_rect(rect.x, top, content_w, StatusStripH, white);
-  status := syslib.fill_rect(rect.x, top, content_w, 1, gray);
-  bar_x := rect.x + 4;
+  // Window-local (spec 0026 C8): the strip starts right below the image.
+  top := int(oh);
+  status := syslib.fill_rect(0, top, content_w, StatusStripH, white);
+  status := syslib.fill_rect(0, top, content_w, 1, gray);
+  bar_x := 4;
   bar_w := content_w - 8;
   if bar_w > 0 then
   begin
@@ -336,18 +336,18 @@ begin
   if ready then
   begin
     if content_w >= 5 * 8 then
-      status := syslib.draw_text(rect.x + 4, top + 2, "Ready", black);
+      status := syslib.draw_text(4, top + 2, "Ready", black);
   end
   else if content_w >= 13 * 8 then
   begin
-    status := syslib.draw_text(rect.x + 4, top + 2, "Decoding ", black);
+    status := syslib.draw_text(4, top + 2, "Decoding ", black);
     pct := 0;
     if total > uint(0) then
       pct := (int(done) * 100) div int(total);
     used := core.format_int_into(digits, pct, uint(10), uint(0));
-    status := syslib.draw_text(rect.x + 4 + 9 * 8, top + 2, digits, black);
+    status := syslib.draw_text(4 + 9 * 8, top + 2, digits, black);
     status := syslib.draw_text(
-      rect.x + 4 + (9 + int(core.len(digits))) * 8, top + 2, "%", black);
+      4 + (9 + int(core.len(digits))) * 8, top + 2, "%", black);
   end;
 end;
 
@@ -377,12 +377,9 @@ var
   sx: uint;
   x: uint;
 begin
-  st := syslib.window_content_rect(id, rect);
-  if st <> Ok then
-    return st;
   if not decoded then
   begin
-    st := syslib.fill_rect(rect.x, rect.y, content_w, content_h, white);
+    st := syslib.fill_rect(0, 0, content_w, content_h, white);
     if st <> Ok then
       return st;
     draw_strip(uint(0), oh, false);
@@ -438,7 +435,7 @@ begin
         x := x + uint(1);
       end;
       st := syslib.blit_rgb(
-        rect.x, rect.y + int(y), int(ow), 1, preview_row, int(ow), 1);
+        0, int(y), int(ow), 1, preview_row, int(ow), 1);
       if st <> Ok then
         return st;
       y := y + uint(1);
@@ -486,7 +483,7 @@ begin
     st := png.next_row(dec, row, gw, at);
     if st <> Ok then
       return st;
-    st := syslib.blit_rgb(rect.x, rect.y + int(at), int(ow), 1, row, int(ow), 1);
+    st := syslib.blit_rgb(0, int(at), int(ow), 1, row, int(ow), 1);
     if st <> Ok then
       return st;
     y := y + uint(1);
@@ -513,15 +510,10 @@ begin
 end;
 
 procedure draw_error();
-var
-  r: Rect;
 begin
-  status := syslib.window_content_rect(id, r);
-  if status <> Ok then
-    return;
-  status := syslib.fill_rect(r.x, r.y, ErrorW, ErrorH, white);
-  status := syslib.draw_rect(r.x, r.y, ErrorW, ErrorH, black);
-  status := stdlib.ui_message(r.x + 8, r.y + 8, ErrorW - 16, ErrorH - 16, message);
+  status := syslib.fill_rect(0, 0, ErrorW, ErrorH, white);
+  status := syslib.draw_rect(0, 0, ErrorW, ErrorH, black);
+  status := stdlib.ui_message(8, 8, ErrorW - 16, ErrorH - 16, message);
   status := syslib.window_present(id);
 end;
 
@@ -815,7 +807,6 @@ end;
 function check_window(): bool;
 var
   st: Status;
-  r: Rect;
   p0: uint;
   p1: uint;
   ok: bool;
@@ -828,23 +819,18 @@ begin
     id := 0;
     return false;
   end;
-  check_where := "content rect";
-  st := syslib.window_content_rect(id, r);
+  check_where := "fill";
+  st := syslib.fill_rect(0, 0, MinContent, MinContent, white);
   if st = Ok then
   begin
-    check_where := "fill";
-    st := syslib.fill_rect(r.x, r.y, MinContent, MinContent, white);
+    check_where := "blit";
+    st := syslib.blit_rgb(0, 0, 2, 2, preview, 2, 2);
     if st = Ok then
     begin
-      check_where := "blit";
-      st := syslib.blit_rgb(r.x, r.y, 2, 2, preview, 2, 2);
-      if st = Ok then
-      begin
-        check_where := "pixels";
-        p0 := syslib.get_pixel(r.x, r.y);
-        p1 := syslib.get_pixel(r.x + 1, r.y);
-        ok := p0 = uint(0) and p1 = uint(0x800040);
-      end;
+      check_where := "pixels";
+      p0 := syslib.get_pixel(0, 0);
+      p1 := syslib.get_pixel(1, 0);
+      ok := p0 = uint(0) and p1 = uint(0x800040);
     end;
   end;
   status := syslib.window_close(id);

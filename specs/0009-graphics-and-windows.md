@@ -82,8 +82,10 @@ grows down. Colours are `0x00RRGGBB`.
   `draw_text_prop`). Runtime mode selection is the separate surface of spec 0022; it
   adds no drawing primitive.
 - **G11 (MUST):** `fill_dither` writes `color` to every other pixel of its extent — the
-  pixel `(X, Y)` when `(X + Y)` is even — and leaves the other pixels untouched. This
-  is the System 7 desktop background when a white `fill_rect` precedes it.
+  pixel `(X, Y)` when `(X + Y)` is even — and leaves the other pixels untouched. `X` and
+  `Y` are the coordinates passed to the primitive, i.e. the surface's own grid, so a
+  window's pattern is stable across moves (spec 0026 C4). This is the System 7 desktop
+  background when a white `fill_rect` precedes it.
 - **G12 (MUST):** `draw_rect` is a one-pixel outline inside the given extent; the
   interior is untouched.
 - **G13 (MUST):** `draw_text` draws 8×8 glyphs from the console font, one byte per
@@ -143,15 +145,16 @@ grows down. Colours are `0x00RRGGBB`.
   (G15/G16). No opcode is added.
 - **G23 (MUST):** A drawing primitive requires an open **surface draw scope**
   (`window_begin`/`plane_begin`) and writes that surface's canvas; with no open scope it
-  is `Status.Invalid` and draws nothing (spec 0026 C3/C4). Client coordinates stay
-  **absolute screen** coordinates and the kernel subtracts the surface's current origin
-  (M16; the surface-local model is deferred to M17). A rectangle is clipped to the
-  canvas; an off-surface coordinate is legal and draws nothing (G8). A canvas write never
-  presents; presentation is a recomposition (spec 0026 C14/C16).
-- **G24 (MUST):** `get_pixel` reads the **composed shadow** in screen coordinates and
-  returns the uncomposited pixel (spec 0010 I7). A client's pixels reach the shadow on
-  its `*_present` or a repair, so a pixel self-check runs after the present (spec 0026
-  C6).
+  is `Status.Invalid` and draws nothing (spec 0026 C3/C4). Client coordinates are
+  **window-local** for a window canvas and screen for a plane canvas (spec 0026
+  C4/C8/C11). A rectangle is clipped to the canvas; an off-surface coordinate is legal
+  and draws nothing (G8). A canvas write never presents; presentation is a recomposition
+  (spec 0026 C14/C16).
+- **G24 (MUST):** `get_pixel` reads the caller's open scope surface in its own coordinates
+  (window-local or plane-screen) and, with no scope, the **composed shadow** in screen
+  coordinates — always the uncomposited pixel (spec 0026 C6, spec 0010 I7). A client's
+  pixels reach the shadow on its `*_present` or a repair, so a shadow read of the
+  composition runs after the present (spec 0026 C6).
 
 ## Design
 
@@ -413,4 +416,5 @@ an `Info` (width, height, pitch, bpp, shadow address/size/frames, free-frame del
 | 2026-11-21 | Runtime display modes (spec 0022, ADR 0056): G2 now separates the boot mode from a later change; the Bochs VBE dispi changes the real mode, the shadow is reallocated and swapped under the graphics lock, and builtins 80–83 expose the mode list and `set_resolution`. No drawing primitive, opcode or boot-mode assumption is added. |
 | 2026-11-21 | Graphics: G22 adds `blit_rgb` (builtin 91, effect `(7,1)`), a nearest-neighbour scaled blit of a `pw × ph` RGB buffer into a destination rectangle. The interpreter rejects non-positive `w`/`h`/`pw`/`ph` and a buffer shorter than `pw * ph * 3` with `Invalid` before the host call; the kernel clips to the screen and the clip region and writes the shadow through the same path as `fill_rect`, so a fully clipped rectangle is `Ok`. No alpha, no colour conversion and no opcode; ABI v1 stays at 75. |
 | 2026-11-25 | Surface canvases and composition accepted (ADR 0060, spec 0026): G4 admits one rectangle-sized canvas per surface from the same frame allocator, G5 makes the shadow the compositor's **composed** image with no application write path, G6 turns `clear` into a scope-local fill, and G7/G23/G24 replace the global clip with a canvas-bounded draw. `syslib.present` becomes a recomposite request. No drawing primitive signature or opcode changes; ABI v1 stays at 75. |
-| 2026-11-26 | Implemented in M16.2/M16.4 (spec 0026 "Implementation status"): the `Surf` surface view, `Canvas`, per-window canvases, the draw scope (builtin 92), the compositor and recomposition. Client coordinates remain **absolute screen coordinates translated by the surface origin**; the surface-local model is deferred to M17 (G23/G24 amended accordingly). |
+| 2026-11-26 | Implemented in M16.2/M16.4 (spec 0026 "Implementation status"): the `Surf` surface view, `Canvas`, per-window canvases, the draw scope (builtin 92), the compositor and recomposition. Client coordinates remained absolute screen coordinates translated by the surface origin until M17. |
+| 2026-11-27 | M17 implements the local-coordinate model (spec 0026 "Implementation status (M17)"): client drawing, `get_pixel` inside a scope and window-addressed pointer events are window-local (G23/G24 amended). Because `fill_dither`'s parity is surface-local, the deterministic golden was re-baselined once (`c9546f45…79fbc65e` → `62e8140a…e809d83c`); the diff is the 130×100 dither patch in the `visual` specimen only. No drawing primitive signature, opcode or builtin change; ABI v1 stays at 75. |

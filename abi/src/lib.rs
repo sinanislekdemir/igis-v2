@@ -248,9 +248,12 @@ impl EventKind {
 pub struct Event {
     /// What happened.
     pub kind: EventKind,
-    /// Pointer `x` in screen pixels; 0 for key events.
+    /// Pointer `x` in pixels: screen coordinates for an unaddressed event or a
+    /// plane owner's event, and content-local for a pointer event addressed to
+    /// a window (spec 0026 C9); 0 for key events.
     pub x: i64,
-    /// Pointer `y` in screen pixels; 0 for key events.
+    /// Pointer `y` in pixels, in the same coordinate space as `x`; 0 for key
+    /// events.
     pub y: i64,
     /// Button mask (pointer) or packed key value (keyboard).
     pub code: u64,

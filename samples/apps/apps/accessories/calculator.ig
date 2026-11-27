@@ -104,9 +104,12 @@ var
   written: int;
   copied: int;
 
-  // Window and absolute geometry.
+  // Window and local geometry.
   id: int;
-  rect: Rect;
+  // The content rectangle. Coordinates are window-local (spec 0026 C8), but
+  // the debug pointer hook takes machine screen coordinates (spec 0010 I35),
+  // so the check mode adds this origin when it injects a click.
+  origin: Rect;
   disp_x: int;
   disp_y: int;
   disp_text_x: int;
@@ -543,8 +546,9 @@ begin
     col := 2;
     out_w := CellW * 2 + CellGap;
   end;
-  out_x := rect.x + GridX + col * (CellW + CellGap);
-  out_y := rect.y + GridTop + row * (CellH + CellGap);
+  // Window-local (spec 0026 C8): the grid is anchored at the content corner.
+  out_x := GridX + col * (CellW + CellGap);
+  out_y := GridTop + row * (CellH + CellGap);
 end;
 
 function button_at(px: int; py: int): int;
@@ -579,8 +583,8 @@ var
   h: int;
   label: string[8];
 begin
-  ignored := syslib.fill_rect(rect.x, rect.y, ContentW, ContentH, white);
-  ignored := stdlib.ui_frame(rect.x, rect.y, ContentW, ContentH);
+  ignored := syslib.fill_rect(0, 0, ContentW, ContentH, white);
+  ignored := stdlib.ui_frame(0, 0, ContentW, ContentH);
 
   ignored := syslib.fill_rect(disp_x, disp_y, DisplayW, DisplayH, white);
   ignored := stdlib.ui_frame(disp_x, disp_y, DisplayW, DisplayH);
@@ -603,21 +607,6 @@ end;
 procedure present_frame();
 begin
   ignored := syslib.window_present(id);
-end;
-
-// Re-reads the content rectangle after the service moved the window (spec
-// 0011, W12/W17/W28; ADR 0046). A topmost move copies a content snapshot to
-// the new origin, but drawing and hit-testing use absolute screen coordinates,
-// so the client must refresh its rectangle and every derived origin before a
-// repaint.
-procedure refresh_rect();
-begin
-  status := syslib.window_content_rect(id, rect);
-  if status = Ok then
-  begin
-    disp_x := rect.x + DisplayX;
-    disp_y := rect.y + DisplayY;
-  end;
 end;
 
 // ---- events -------------------------------------------------------------
@@ -705,7 +694,6 @@ begin
       begin
         if ev.window = id then
         begin
-          refresh_rect();
           dirty := true;
         end;
       end
@@ -753,7 +741,6 @@ begin
       begin
         if ev.window = id then
         begin
-          refresh_rect();
           draw_frame();
           present_frame();
         end;
@@ -787,7 +774,7 @@ var
   h: int;
 begin
   button_geometry(index, x, y, w, h);
-  status := inject.pointer_to(x + w div 2, y + h div 2);
+  status := inject.pointer_to(origin.x + x + w div 2, origin.y + y + h div 2);
   drain_events();
   status := inject.pointer_down();
   drain_events();
@@ -824,9 +811,9 @@ begin
   present_frame();
 
   // Baseline composition.
-  verify("content white", syslib.get_pixel(rect.x + 2, rect.y + 2) = white);
-  verify("bezel black", syslib.get_pixel(rect.x, rect.y + 20) = black);
-  verify("bezel inner white", syslib.get_pixel(rect.x + 1, rect.y + 20) = white);
+  verify("content white", syslib.get_pixel(2, 2) = white);
+  verify("bezel black", syslib.get_pixel(0, 20) = black);
+  verify("bezel inner white", syslib.get_pixel(1, 20) = white);
   verify("display frame", syslib.get_pixel(disp_x, disp_y + 20) = black);
   verify("display interior", syslib.get_pixel(disp_x + 2, disp_y + 20) = white);
   verify("zero ink", syslib.get_pixel(disp_text_x + 1, disp_text_y) = black);
@@ -841,7 +828,7 @@ begin
 
   // 1. A pointer press paints the pressed face; the release activates "1".
   button_geometry(12, c1x, c1y, w, h);
-  status := inject.pointer_to(c1x + w div 2, c1y + h div 2);
+  status := inject.pointer_to(origin.x + c1x + w div 2, origin.y + c1y + h div 2);
   drain_events();
   status := inject.pointer_down();
   drain_events();
@@ -957,7 +944,7 @@ begin
 
   // 10. Pressing a button, dragging off it and releasing there cancels.
   button_geometry(6, c9x, c9y, w, h);
-  status := inject.pointer_to(c9x + w div 2, c9y + h div 2);
+  status := inject.pointer_to(origin.x + c9x + w div 2, origin.y + c9y + h div 2);
   drain_events();
   status := inject.pointer_down();
   drain_events();
@@ -1182,13 +1169,11 @@ begin
       out.say("calculator: no window\n")
     else
     begin
-      status := syslib.window_content_rect(id, rect);
-      if status <> Ok then
-        out.say("calculator: no content rect\n")
-      else
       begin
-        disp_x := rect.x + DisplayX;
-        disp_y := rect.y + DisplayY;
+        // Window-local display origin (spec 0026 C8); a move changes nothing.
+        disp_x := DisplayX;
+        disp_y := DisplayY;
+        status := syslib.window_content_rect(id, origin);
         if args = "shot" then
           shot_mode()
         else if args = "check" then

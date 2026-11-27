@@ -409,7 +409,8 @@ procedure draw_screen();
 var
   st: Status;
 begin
-  st := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, white);
+  // Window-local (spec 0026 C8).
+  st := syslib.fill_rect(0, 0, rect.w, rect.h, white);
   draw_dialog();
 end;
 
@@ -423,7 +424,7 @@ procedure draw_shot();
 var
   st: Status;
 begin
-  st := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, white);
+  st := syslib.fill_rect(0, 0, rect.w, rect.h, white);
   st := stdlib.ui_alert(
     ax, ay, dw, AlertH, "Save Changes", alert_text, "Save", "Don't Save", 0);
   st := stdlib.ui_input_dialog(
@@ -471,9 +472,11 @@ end;
 
 // ---- injection ---------------------------------------------------------
 
+// `x`/`y` are window-local; the debug pointer hook takes screen coordinates
+// (spec 0010 I35), so the content origin is added here.
 procedure pointer_to(x: int; y: int);
 begin
-  status := inject.pointer_to(x, y);
+  status := inject.pointer_to(rect.x + x, rect.y + y);
   drain_events();
 end;
 
@@ -715,8 +718,8 @@ begin
         out.say("ui_dialogs: no content rect\n")
       else
       begin
-        ax := rect.x + 8;
-        ay := rect.y + 8;
+        ax := 8;
+        ay := 8;
         dw := rect.w - 16;
         fx := ax + 8;
         fy := ay + stdlib.ui_title_bar_height() + stdlib.ui_content_inset() + stdlib.ui_line_height() + 4;

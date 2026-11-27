@@ -129,7 +129,7 @@ end;
 // the helper under test.
 procedure check_pixels();
 begin
-  verify("content white", syslib.get_pixel(rect.x + 2, rect.y + 2) = white);
+  verify("content white", syslib.get_pixel(2, 2) = white);
   verify("dialog top border", syslib.get_pixel(dx, dy) = black);
   verify("dialog bottom border", syslib.get_pixel(dx + DialogW - 1, dy + DialogH - 1) = black);
   verify("focused stripe on", syslib.get_pixel(dx + 300, dy + 2) = black);
@@ -192,9 +192,10 @@ begin
         out.say("ui_layout: no content rect\n")
       else
       begin
-        status := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, white);
+        // Window-local (spec 0026 C8): the dialog is placed at (20, 20).
+        status := syslib.fill_rect(0, 0, rect.w, rect.h, white);
         verify("content fill ok", status = Ok);
-        draw_dialog(rect.x + 20, rect.y + 20);
+        draw_dialog(20, 20);
         status := syslib.window_present(id);
         verify("window present", status = Ok);
         check_pixels();

@@ -109,9 +109,9 @@ There is no kernel terminal window.
 - **T3 (MUST):** The emulator interprets at least CR, LF, BS, TAB and printable
   ASCII. It ignores other control bytes and leaves non-ASCII bytes blank.
   ANSI escape parsing is out of scope. It paints with `syslib` inside its own
-  content rectangle, re-reads the content rectangle on every owner `Expose`,
-  and draws a cursor marker. The screen is dark: black background, white text
-  and a white cursor underline.
+  content rectangle in window-local coordinates (spec 0026 C8), repaints the
+  whole grid on every owner `Expose`, and draws a cursor marker. The screen is
+  dark: black background, white text and a white cursor underline.
 - **T4 (MUST):** A window close request closes the emulator: it closes its
   session, kills its shell task, closes its window and exits. The system stays
   alive. If the shell exits first, the emulator drains the remaining output,

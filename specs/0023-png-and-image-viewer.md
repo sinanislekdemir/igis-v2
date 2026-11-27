@@ -392,8 +392,8 @@ run image_viewer check            deterministic check, `image_viewer: ok`
   watchdog. PPM is promoted the same way when admission allows and heartbeats
   once per output row; a refusal falls back to the normal class. Admission refusal (`Full`) is reported once and falls back to the normal
   class; it never faults on admission.
-- **Expose.** The owner `Expose` re-reads `window_content_rect` (ADR 0046) and
-  re-runs the draw/present; it deliberately skips the white fill and redraws
+- **Expose.** The owner `Expose` re-runs the draw/present in window-local coordinates
+  (spec 0026 C8); it deliberately skips the white fill and redraws
   only the status strip at 0% (without a present, so the last complete frame
   stays on screen until the first 8-row progress present). PNG uses
   `png.rewind` over the staged prefix; PPM re-opens the header and reads its

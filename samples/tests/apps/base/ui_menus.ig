@@ -294,9 +294,10 @@ procedure draw_menu();
 var
   st: Status;
 begin
-  st := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, white);
+  // Window-local (spec 0026 C8).
+  st := syslib.fill_rect(0, 0, rect.w, rect.h, white);
   st := stdlib.ui_center_text(
-    rect.x, rect.y + 60, rect.w, 16, "M2.4.3 menus", black);
+    0, 60, rect.w, 16, "M2.4.3 menus", black);
   st := stdlib.ui_menu_bar(mx, my, bar_w, titles, MenuBarCount, open_menu);
   if open_menu >= 0 then
   begin
@@ -417,9 +418,11 @@ end;
 
 // ---- injection ---------------------------------------------------------
 
+// `x`/`y` are window-local; the debug pointer hook takes screen coordinates
+// (spec 0010 I35), so the content origin is added here.
 procedure pointer_to(x: int; y: int);
 begin
-  status := inject.pointer_to(x, y);
+  status := inject.pointer_to(rect.x + x, rect.y + y);
   drain_events();
 end;
 
@@ -647,8 +650,8 @@ begin
         out.say("ui_menus: no content rect\n")
       else
       begin
-        mx := rect.x + 8;
-        my := rect.y + 8;
+        mx := 8;
+        my := 8;
         bar_w := rect.w - 16;
         dirty := false;
         flushed := syslib.event_flush();

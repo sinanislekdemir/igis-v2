@@ -73,10 +73,10 @@ second shell gets `Full`.
   still reach serial, nothing is drawn into a stale id, and the next successful
   attach works. With no attachment the console is serial-only: the kernel does
   not reopen a boot terminal automatically.
-- **T7 (MUST):** A window move is followed: writing checks the service's
-  visible-geometry generation and re-reads the content rectangle before painting
-  into the old origin; the service generation is also sampled at the service
-  opportunity, so a moved terminal repaints in its new position.
+- **T7 (MUST):** A window move is followed with no client work: the grid is drawn in
+  window-local coordinates (spec 0026 C8), so the service's origin change places the
+  retained canvas at the new position. The content rectangle is re-read only when its
+  size can change (a display-mode reflow).
 
 ### Expose and repair
 
@@ -166,7 +166,7 @@ opportunity.
 | Another live task holds the terminal | `Full`; the caller can fall back to serial or close its window |
 | Content rectangle below one cell | `Invalid`, terminal unchanged |
 | Terminal owner exits or closes its window | Detached at the next pump; bytes reach serial only; a later attach succeeds |
-| Window moved | Geometry is re-read (generation) and the grid repaints in the new content |
+| Window moved | The canvas is window-local; the compositor places it at the new origin |
 | Second shell while the boot shell lives | Its attach is `Full`; it prints the fallback line and its output still reaches the one machine-wide terminal |
 | Full-screen `syslib.clear` | The attached terminal's pixels are erased; its grid survives and the next expose/output repaints (spec 0012 D8) |
 

@@ -481,15 +481,18 @@ pub mod builtin {
     /// transparent background and no newline handling. Bytes outside
     /// `0x00..=0x7F` are blank cells. Clipped (G13).
     pub const DRAW_TEXT: u32 = 18;
-    /// `syslib.get_pixel(x, y) -> uint`: push the shadow pixel as
-    /// `0x00RRGGBB`, or `0` outside the screen. No error path (G9).
+    /// `syslib.get_pixel(x, y) -> uint`: push a pixel as `0x00RRGGBB`. Inside
+    /// a draw scope it reads the scope surface in surface-local coordinates
+    /// (spec 0026 C6/C8); with no scope it reads the composed shadow in screen
+    /// coordinates. `0` outside the surface. No error path (G9).
     pub const GET_PIXEL: u32 = 19;
     /// `syslib.present(x, y, w, h) -> Status`: copy the rectangle from the
     /// shadow to the framebuffer row by row, using the pitch, clipped.
     /// `w <= 0` or `h <= 0` pushes `Status::Invalid` (G5).
     pub const PRESENT: u32 = 20;
-    /// `syslib.clear(color) -> Status`: fill the whole screen in the shadow and
-    /// present it. An over-wide colour pushes `Status::Invalid` (G6).
+    /// `syslib.clear(color) -> Status`: fill the caller's open draw scope with
+    /// `color` (spec 0026 C5); `Invalid` with no scope. An over-wide colour is
+    /// `Status::Invalid` (G6).
     pub const CLEAR: u32 = 21;
     /// `syslib.pointer_x() -> int`: the pointer's screen `x` in pixels
     /// (spec 0010, I10). `0` when there is no pointer device.

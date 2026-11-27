@@ -158,13 +158,15 @@ impl Window {
 
     /// The canvas positioned at the window's current content origin. A move is
     /// an origin change here; the retained pixels do not move (spec 0026,
-    /// C10).
+    /// C10). The canvas is `local`, so the origin is placement only and the
+    /// client's drawing coordinates never change (C4/C8).
     fn canvas_at(&self) -> Option<gfx::Canvas> {
         self.canvas.map(|canvas| {
             let content = self.content();
             gfx::Canvas {
                 ox: content.x,
                 oy: content.y,
+                local: true,
                 ..canvas
             }
         })
@@ -193,8 +195,11 @@ impl Window {
 
 /// Allocates a zeroed canvas of `w × h` pixels from the frame allocator
 /// (spec 0026, C1/C2). There is no budget constant: a failed allocation is the
-/// only failure and the caller reports `Status::Full`.
-fn alloc_canvas(w: i64, h: i64) -> Option<gfx::Canvas> {
+/// only failure and the caller reports `Status::Full`. `local` selects
+/// window-local drawing coordinates (a window) or screen coordinates anchored
+/// at the canvas rectangle (a plane); the origin is set when the canvas is
+/// placed.
+fn alloc_canvas(w: i64, h: i64, local: bool) -> Option<gfx::Canvas> {
     if w <= 0 || h <= 0 {
         return None;
     }
@@ -215,6 +220,7 @@ fn alloc_canvas(w: i64, h: i64) -> Option<gfx::Canvas> {
         h,
         ox: 0,
         oy: 0,
+        local,
     })
 }
 
@@ -269,11 +275,14 @@ impl Plane {
         }
     }
 
-    /// The canvas positioned at the plane's current screen origin.
+    /// The canvas positioned at the plane's current screen origin. A plane
+    /// keeps screen coordinates (spec 0026 C11/C12), so it is not `local`; its
+    /// rectangle never moves, so the origin cannot go stale.
     fn canvas_at(&self) -> Option<gfx::Canvas> {
         self.canvas.map(|canvas| gfx::Canvas {
             ox: self.x,
             oy: self.y,
+            local: false,
             ..canvas
         })
     }
@@ -2013,7 +2022,7 @@ pub fn open(owner: u64, x: i64, y: i64, w: i64, h: i64, title: &[u8]) -> Result<
     // Validate before allocating so an invalid rectangle is `Invalid`, not
     // `Full`; a failed canvas allocation then opens nothing (spec 0026, C2).
     table.can_open(screen_w as i64, screen_h as i64, w, h)?;
-    let Some(canvas) = alloc_canvas(w, h) else {
+    let Some(canvas) = alloc_canvas(w, h, true) else {
         return Err(Status::Full);
     };
     let result = table.open(
@@ -2059,7 +2068,7 @@ pub(crate) fn open_bottom(
     let (screen_w, screen_h) = gfx::size();
     let mut table = TABLE.lock();
     table.can_open(screen_w as i64, screen_h as i64, w, h)?;
-    let Some(canvas) = alloc_canvas(w, h) else {
+    let Some(canvas) = alloc_canvas(w, h, true) else {
         return Err(Status::Full);
     };
     let result = table.open(
@@ -2506,7 +2515,7 @@ pub fn plane_create(owner: u64, x: i64, y: i64, w: i64, h: i64) -> Result<u64, S
     if planes.count == MAX_PLANES {
         return Err(Status::Full);
     }
-    let Some(canvas) = alloc_canvas(rect.w, rect.h) else {
+    let Some(canvas) = alloc_canvas(rect.w, rect.h, false) else {
         return Err(Status::Full);
     };
     let id = planes.create(owner, rect, Some(canvas))?;
@@ -2607,8 +2616,7 @@ pub fn work_area_reserve(height: i64) -> Status {
 /// wins; otherwise the caller's plane scope is used. `None` when `task` has no
 /// scope; `task == 0` (the kernel) never has one. Holding `WINDOW` across the
 /// closure is what keeps a concurrent close from freeing the canvas mid-write.
-pub(crate) fn with_canvas<T>(task: u64, f: impl FnOnce(&gfx::Canvas) -> T) -> Option<T> {
-    if task == 0 {
+pub(crate) fn with_canvas<T>(task: u64, f: impl FnOnce(&gfx::Canvas) -> T) -> Option<T> {    if task == 0 {
         return None;
     }
     let table = TABLE.lock();
@@ -2629,6 +2637,14 @@ pub(crate) fn with_canvas<T>(task: u64, f: impl FnOnce(&gfx::Canvas) -> T) -> Op
         }
     }
     None
+}
+
+/// Reads one pixel from the caller's open draw scope (spec 0026, C6/C8): a
+/// window canvas is read in window-local coordinates, a plane in screen ones.
+/// `None` when the task has no scope, so the host falls back to the composed
+/// shadow in screen coordinates.
+pub(crate) fn scope_pixel(task: u64, x: i64, y: i64) -> Option<u32> {
+    with_canvas(task, |canvas| gfx::read_pixel_on(canvas, x, y))
 }
 
 /// Paints into the canvas of `id` under the table lock without composing

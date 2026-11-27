@@ -1,6 +1,6 @@
 # 0060: Retain every window's content and compose the screen from surfaces
 
-- **Status:** Accepted; implemented by M16 on 2026-11-26, except the local-coordinate clause (spec 0026 C8–C10), which is deferred to M17
+- **Status:** Accepted; implemented by M16 (composition) on 2026-11-26 and by M17 (local client coordinates, spec 0026 C8–C10) on 2026-11-27
 - **Date:** 2026-11-25
 - **Deciders:** project owner
 - **Related specs:** 0026 (composition, surfaces and coordinate spaces — normative),

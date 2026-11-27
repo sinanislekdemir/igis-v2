@@ -14,8 +14,9 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Current state (M16):** **638 host tests**; specs 0001–0027 (0025 and 0026 implemented,
-  0027 implemented); ABI v1 at 75 opcodes with builtins 80–91; **M2–M15 complete**. Boot loads only
+- **Current state (M17):** **638 host tests**; specs 0001–0027 (0025, 0026 and 0027
+  implemented; 0026 now includes the M17 local-coordinate model); ABI v1 at 75 opcodes with
+  builtins 80–97; **M2–M17 complete**. Boot loads only
   `kernel.elf`: the ISO carries no application image, and the 128 MiB read-only ext2
   volume on `ide0` unit 1 is mounted on demand through `ext2w` (229 MiB free in a
   256 MiB guest), with `/home` on the primary master. On TCG/4 cores the desktop is
@@ -35,17 +36,21 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   image has top-level `apps/<category>/`, and the Apps pull-down is sectioned.
   `/home` is a separate 8 MiB ext2 image on the primary master, read-write through
   `ext2w`. `scripts/multi_terminal_qmp.py` proves two independent terminals.
-- **Next:** **M16 is implemented**: surface canvases, the `Surf` view, the draw scope
-  (`window_begin`, builtin 92), the compositor (recomposition replaced the erase/
-  `covers_from`/snapshot/visible-parts machinery), planes (93–96), `work_area_reserve`
-  (97), the region claim deleted, the desktop shell on planes, and the corpus inside
-  scopes. 638 host tests; golden `c9546f45…79fbc65e` (one intended re-baseline for the
-  22-pixel work area). Remaining: M16.7's `perf` re-take, then **M17 (local client
-  coordinates)**. M16.8 (deferred scrollbar drag in the editor, browser and
-  `/lib` file dialog), M16.9 (editor dark theme) and M16.10 (sparse line index
-  and per-run normal-task watchdog) landed on 2026-11-26, as did the Calendar
-  application (spec 0027). The deferred table below and
-  [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) hold the parked work.
+- **Next:** **M16 and M17 are implemented.** M16 shipped surface canvases, the `Surf`
+  view, the draw scope (`window_begin`, builtin 92), the compositor, planes (93–96),
+  `work_area_reserve` (97), the plane rule for menus and the work area, and its `perf`
+  re-take (numbers in M16.7 below). M17 then made client coordinates **window-local**
+  (spec 0026 C4/C6/C8–C10, spec 0010 I35, spec 0011 W36): window canvases draw at a zero
+  origin, `get_pixel` reads the open scope surface, window-addressed pointer events arrive
+  content-local, and the whole corpus (every app, `lib/file_dialog`, the shell's three
+  windows and the proofs) was converted. A plane canvas keeps screen coordinates
+  (C11/C12). The visual golden was re-baselined once because dither parity is now
+  surface-local: `62e8140a…e809d83c` (the diff is the 130×100 dither patch only).
+  `scripts/local_coords_qmp.py` drags a window whose owner is mid-frame; the new proof app
+  `samples/tests/apps/base/local_coords` checks the same rules with an injected drag.
+  M16.8 (deferred scrollbar drag), M16.9 (editor dark theme), M16.10 (sparse line index
+  and per-run watchdog) and the Calendar application landed on 2026-11-26. The deferred
+  table below and [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) hold the parked work.
 - **Historical context (M8–M10; counts below are from those slices):** **505 host
   tests**; specs 0001–0019 (0018 and 0019 Implemented); ABI v1 at 75 opcodes; M5,
   M6, M7.1 and **M8.1–M8.9 complete**, plus **M9.1–M9.4**. The
@@ -382,13 +387,16 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
   string editing (M2.4.1), controls (M2.4.2), menus (M2.4.3), dialogs (M2.4.4), icons
   (M2.4.5) and the one composed widgets demo (M2.4.6).
 - **Known sample sensitivity:** `windows_proof` must run in its own boot in this
-  environment. Its step 23 (`A old area restored to the terminal`) samples `(100, 350)`,
-  which can land on scrolled terminal text after several text apps; the same failure
-  reproduces on the M2.4.2 top commit `92b140c`, so it is a pre-existing sample-harness
-  sensitivity, not an M2.4.3 or M2.4.5 regression. On one loaded `-smp 4` boot its step 8
-  (`B content drawn`) failed before the child had painted and passed on a rerun in the
-  same build, so treat the whole proof as timing-sensitive. `mouse` likewise runs in its
-  own boot (a full-screen `syslib.clear` races a console repaint).
+  environment (two child busy-pollers plus a pointer click compete with the boot console).
+  Its two restoration checks used to expect a blank white pixel and could land on
+  scrolled System Log text; since M17 they sample the live window below (the log's paper
+  colour, or black for a text-ink cell), so they no longer depend on the log's contents.
+  The proof's `wait_pixel` deadlines are 5 s each: with the ADR 0061 **per-run**
+  watchdog, a proof that spins in several consecutive timeouts can fault
+  `BudgetExceeded` before it prints its failure, as it did at the M16 top commit; a proof
+  that busy-polls must keep its wait budget under one continuous run or block in
+  `core.sleep`. `mouse` likewise runs in its own boot (a full-screen `syslib.clear` races
+  a console repaint).
 
 ### Resuming from a fresh session (no chat history)
 
@@ -499,9 +507,11 @@ Trust the repository, not a summary. On a fresh start:
    - `python3 scripts/mouse_burst_qmp.py build/igis-shell.iso` → `600/600` px with a
      `mouse: aux IRQ12 delivered ...` line; `--cores 1` is the single-core variant.
    - `python3 scripts/visual_regression.py build/igis-shell.iso` → `visual: ok
-     (1024x768, sha256 3780…)` for the deterministic specimen; `--cores 1` must match
+     (1024x768, sha256 62e8…)` for the deterministic specimen; `--cores 1` must match
      the same golden, `--tamper` must report a mismatch and exit 0, and a wrong
      `--golden-dir` must exit 1 with a pixel/tile diff.
+   - `python3 scripts/local_coords_qmp.py build/igis-shell.iso` → `local_coords: ok`
+     (the M17 drag-while-mid-frame proof); `--cores 1` is the single-core variant.
 6. **M2 is complete.** M2.6.4 (spec 0017, ADR 0033) adds the desktop's System pull-down
    (About igis-v2, Restart, Halt), a modal About window, `core.halt`/`core.reboot`
    (builtins 48/49) with the wake-vector stop path, and the focus-scoped
@@ -2446,26 +2456,25 @@ flag, the persistent region claim, the console's explicit-clip paint path and th
   it; `apps_menu_qmp.py`, `minimize_qmp.py`, `desktop_shell check`. The visual golden is
   re-baselined once, deliberately, because a full-screen window no longer starts at
   `y = 0`.
-- [x] **M16.6 Local coordinates and the corpus conversion.** Delete the origin
-  translation; drawing, `get_pixel` and window-addressed events use window-local
-  coordinates (spec 0026 C4/C6/C8/C9, spec 0010 I35); `get_pixel` answers from the scope
-  surface inside a draw block. Convert every windowed application and library to local
-  layout and local hit-testing (calculator, minesweeper, editor, browser, terminal,
-  image viewer, settings, clock, widgets, `lib/file_dialog`, the desktop shell's own
-  windows, the proof apps), move each `verify` block inside its draw scope, and delete the
-  "draw only the visible strip" discipline. The test corpus needs the same treatment:
-  `samples/tests/apps/base/font.ig`, `mouse.ig` and `windows_demo.ig` draw the whole
-  screen today, so each gets a plane (or a window) instead of the removed free drawing. Acceptance: the whole QMP batch, goldens,
-  `desktop_shell check`, `terminal: ok`, `editor: ready`, `image_viewer: PASS` on
-  `-smp 4`/`-smp 1`, and a new `scripts/local_coords_qmp.py` that moves a window while
-  its owner is mid-frame and asserts the completed frame lands correctly.
-- [ ] **M16.7 Re-measure and document.** Re-take the `perf` frame-time and event-latency
-  baselines (one extra canvas→shadow copy plus painter's-order overdraw), capture the
-  desktop screenshot, update `AGENTS.md` (current state, builtins), `docs/HISTORY.md`,
-  the spec statuses and this file's resume point.**Docs are done** (2026-11-26); the
-  `perf` re-take stays open because the sample is a `--shell` test app and the number is
-  a documentation datum, not a gate. Landed so far: 637 host tests, builtins 92–97,
-  region claim 60/61 deleted, golden `c9546f45…79fbc65e`.
+- [ ] **M16.6 Local coordinates and the corpus conversion — moved to M17.1–M17.3.**
+  Planned under M16, deferred to the M17 milestone (below) so the composition model could
+  land and be measured first (M16.7). M16 therefore shipped the absolute-origin
+  translation in `gfx::Surf` and screen-coordinate events, exactly as spec 0026 C8–C10
+  record; the ticket body (local drawing and reading, local hit tests, `verify` blocks
+  inside the draw scope, and the full corpus conversion) is M17.1–M17.3.
+- [x] **M16.7 Re-measure and document.** Re-took the `perf` frame-time and event-latency
+  baselines on `build/igis-shell.iso` (`run perf`, TCG; one extra canvas→shadow copy plus
+  painter's-order overdraw, so the frame numbers are higher than M2.6.2's shared-shadow
+  ones). `-smp 4`: idle frames 60 total 99 ms (avg 1650 µs, min 1000, max 6000), idle
+  events 200 total 214 ms (avg 1070 µs, 200/200 delivered), load frames 60 total 348 ms
+  (avg 5800 µs, max 48000), load events 200 total 217 ms (avg 1085 µs, 200/200).
+  `-smp 1`: idle frames 60 total 71 ms (avg 1183 µs, max 3000), idle events 200 total
+  223 ms (avg 1115 µs, 200/200), load frames 60 total 453 ms (avg 7550 µs, max 384000),
+  load events 200 total 213 ms (avg 1065 µs, 200/200). Same slice: the desktop
+  screenshot was refreshed, `AGENTS.md`, `docs/HISTORY.md`, the spec statuses and the
+  resume point were updated, builtins are 92–97 and the region claim 60/61 is deleted.
+  637 host tests; golden `c9546f45…79fbc65e` at this point (re-baselined once in M17 for
+  the surface-local dither phase).
 - [x] **M16.8 Deferred scrollbar drag in the editor, browser and file dialog.**
   User request: "scrollbar önce çekilsin, mouse scrollbar'ı release ettiğinde
   scrollbar uygulamaya mevcut konumunu bildirsin, uygulama oraya gitsin. aktif
@@ -2535,25 +2544,41 @@ flag, the persistent region claim, the console's explicit-clip paint path and th
   menu, clicking next month, capturing `build/screenshots/igis-calendar.png` and closing
   on the close box on both core counts. No opcode, builtin, `Host` or `stdlib` change.
 
-### M17: local client coordinates
+### M17: local client coordinates (done, 2026-11-27)
 
-Normative: spec 0026 C4/C8–C10, spec 0011 W36, spec 0010 I35 (all marked DEFERRED).
+Normative: spec 0026 C4/C6/C8–C10, spec 0011 W36, spec 0010 I35 (now implemented).
 Goal: remove the absolute-coordinate translation and the origin cache from clients:
 drawing, `get_pixel` and window-addressed events become surface-local, so a move changes
 nothing a client computes and the W12/W28 "re-read the rectangle" discipline disappears.
 
-- [ ] **M17.1 Local drawing and reading.** Drop the origin translation in `gfx::Surf`
-  (canvas coordinates become the client's), and make `get_pixel` answer from the open
-  scope canvas. Convert the corpus: every windowed app's layout drops its `rect.x`/
-  `rect.y` offsets, and every pixel self-check moves inside its draw block.
-- [ ] **M17.2 Local events.** A window-addressed event carries `x`/`y` relative to the
-  content rectangle (`window != 0` is the discriminator); unaddressed and plane events
-  stay in screen coordinates. Convert every pointer handler (it drops the subtraction).
-- [ ] **M17.3 Retire W12/W28's re-read discipline** in the specs and delete the last
-  origin caches in `samples/apps/lib/file_dialog.ig` and the shell.
-  Acceptance: the visual golden is unchanged (layout does not move), the full QMP batch
-  passes, and a new `scripts/local_coords_qmp.py` moves a window while its owner is
-  mid-frame and asserts the completed frame lands correctly.
+- [x] **M17.1 Local drawing and reading.** `canvas_surf` builds a window canvas with
+  origin `(0, 0)` and its own size as clip and extent, so drawing, `clear` and `get_pixel`
+  are window-local; a plane canvas keeps its screen-anchored mapping (spec 0026 C11).
+  `Canvas` gained a `local` flag (`window_open` allocates local, `plane_create` does not);
+  `get_pixel` reads the open scope surface through `window::scope_pixel` →
+  `gfx::read_pixel_on` and falls back to the composed shadow with no scope. The console
+  paints its grid at `col * CELL`/`row * CELL`. The corpus was converted: calculator,
+  minesweeper, clock, image viewer, settings, calendar, widgets, browser, editor, terminal,
+  `lib/file_dialog`, the shell's own/window-list/About windows, `ui_*`, `font`, `mouse`,
+  `windows_demo`, `windows_drag`, `windows_events`, `windows_proof*`, `visual`, `events`,
+  `perf`. Content pixel checks run inside the scope; chrome/composition checks close it
+  with `window_begin(0)`. The test-injection helpers translate their local coordinates by
+  the content origin (the pointer state stays screen-coordinate, I35).
+- [x] **M17.2 Local events.** `KernelHost::poll_event` subtracts the target window's
+  content origin from a window-addressed `PointerMove`/`PointerDown`/`PointerUp` after
+  routing; unaddressed, plane-owner, key, expose and close records keep screen or zero
+  coordinates. Pointer handlers drop their origin subtraction; `events` and
+  `windows_events` assert the local values.
+- [x] **M17.3 Retire W12/W28's re-read discipline** in specs 0026/0011/0009/0010/0012/
+  0014/0018/0021/0023/0027 and ADR 0060; `lib/file_dialog` and the shell keep the content
+  rectangle only for `syslib.present`'s screen rectangle. Acceptance: `638` host tests;
+  the QMP batch and `desktop_shell check` on `-smp 4`/`-smp 1`; `windows_proof` on both
+  (its two "restored to the terminal" checks now sample the live window below instead of
+  assuming white); the golden re-baselined once
+  (`c9546f45…79fbc65e` → `62e8140a…e809d83c`, the dither patch only); the new
+  `scripts/local_coords_qmp.py` and `samples/tests/apps/base/local_coords` (drag a window
+  mid-frame, assert both corner marks at the new origin and a content-local pointer
+  event).
 
 ### M16 deferred
 
@@ -2565,7 +2590,7 @@ nothing a client computes and the W12/W28 "re-read the rectangle" discipline dis
 | Window resize on a canvas (reallocate, reflow, scale) | a resize ticket (open question 4) |
 | Per-task scope slots instead of a scan of the surface tables | the resolution cost shows in `perf` |
 
-## Deferred (not UI; pick up when they matter)## Deferred (not UI; pick up when they matter)
+## Deferred (not UI; pick up when they matter)
 
 | Item | Where | Trigger |
 |---|---|---|

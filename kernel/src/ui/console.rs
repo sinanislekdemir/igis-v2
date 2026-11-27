@@ -261,8 +261,10 @@ impl Terminal {
         let fg = self.fg;
         let bg = self.bg;
         let origin = window::draw_on_window(id, |canvas| {
-            let x = canvas.ox + col as i64 * CELL;
-            let y = canvas.oy + row as i64 * CELL;
+            // Window canvases are surface-local (spec 0026 C4/C8): the cell
+            // position is the grid index, not a screen coordinate.
+            let x = col as i64 * CELL;
+            let y = row as i64 * CELL;
             let _ = gfx::draw_cell_on(canvas, x, y, code, fg, bg);
             (x, y)
         });
@@ -293,9 +295,9 @@ impl Terminal {
         let grid = &self.grid;
         let _ = window::paint_window(id, |canvas| {
             for row in 0..rows {
-                let y = canvas.oy + row as i64 * CELL;
+                let y = row as i64 * CELL;
                 for col in 0..cols {
-                    let x = canvas.ox + col as i64 * CELL;
+                    let x = col as i64 * CELL;
                     let code = grid[row][col];
                     let _ = gfx::draw_cell_on(canvas, x, y, code, fg, bg);
                 }

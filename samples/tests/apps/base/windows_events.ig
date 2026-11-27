@@ -108,14 +108,15 @@ end;
 procedure draw_content(id: int; fill: uint; label: const string[0]);
 begin
   // One scope per task: opening a later window took it, so select the target
-  // explicitly (spec 0026, C3). Coordinates stay absolute screen values.
+  // explicitly (spec 0026, C3). Coordinates are window-local (C8); the
+  // rectangle is read only for its size.
   status := syslib.window_begin(id);
   status := syslib.window_content_rect(id, rect);
   if status = Ok then
   begin
-    status := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, fill);
-    status := syslib.draw_rect(rect.x + 2, rect.y + 2, rect.w - 4, rect.h - 4, black);
-    status := syslib.draw_text(rect.x + 10, rect.y + 12, label, black);
+    status := syslib.fill_rect(0, 0, rect.w, rect.h, fill);
+    status := syslib.draw_rect(2, 2, rect.w - 4, rect.h - 4, black);
+    status := syslib.draw_text(10, 12, label, black);
   end;
 end;
 
@@ -160,10 +161,12 @@ begin
     // Pointer move while B is focused: routed to B.
     status := syslib.inject_pointer(150, 120, uint(0));
     status := syslib.next_event(ev);
+    // A window-addressed pointer event is content-local (spec 0026 C9).
+    status := syslib.window_content_rect(b, rect);
     verify(
       "pointer move routed to focus",
       status = Ok and ev.kind = PointerMove and ev.window = b
-        and ev.x = 150 and ev.y = 120);
+        and ev.x = 150 - rect.x and ev.y = 120 - rect.y);
 
     // 2. Click inside A: A is raised and focused before delivery.
     status := syslib.inject_pointer(0, 0, uint(1));
@@ -199,6 +202,8 @@ begin
     draw_content(a, marker, "alpha repaint");
     present_status := syslib.window_present(a);
     verify("present A", present_status = Ok);
+    // Composition checks read the composed shadow (spec 0026, C6).
+    status := syslib.window_begin(0);
     verify("A repainted", syslib.get_pixel(100, 120) = marker);
     verify("A chrome intact", syslib.get_pixel(80, 150) = black);
     pump();
@@ -230,7 +235,7 @@ begin
             seen := true;
             verify("A expose fields", ev.x = 0 and ev.y = 0 and ev.code = uint(0));
             status := syslib.window_begin(a);
-            status := syslib.fill_rect(90, 110, 80, 40, marker);
+            status := syslib.fill_rect(9, 14, 80, 40, marker);
             status := syslib.window_present(a);
           end
           else
@@ -242,6 +247,7 @@ begin
         more := false;
     end;
     verify("A exposed under C", seen);
+    status := syslib.window_begin(0);
     verify("marker visible", syslib.get_pixel(100, 120) = marker);
     verify("C content intact", syslib.get_pixel(300, 220) = yellow);
     verify("C border intact", syslib.get_pixel(270, 190) = black);
@@ -302,7 +308,7 @@ begin
           begin
             seen := true;
             status := syslib.window_begin(a);
-            status := syslib.fill_rect(90, 110, 80, 40, marker);
+            status := syslib.fill_rect(9, 14, 80, 40, marker);
             status := syslib.window_present(a);
           end
           else

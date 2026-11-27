@@ -26,10 +26,9 @@ unit windows_drag;
 //      a press in its close box delivers `Close`, the victim closes its own
 //      window and exits `Ok` (it is never killed).
 //
-// The underlay is repainted in the four bands around the target's current
-// frame, because M2 has no per-task clip: a whole-content repaint of a lower
-// window would overwrite the higher one. This is the same rule the M2.3.5
-// proof uses.
+// The underlay is a retained canvas below the target; the compositor paints it
+// first, so a whole-content repaint of the lower window cannot overwrite the
+// higher one (spec 0026 C14/C15).
 //
 // With graphics disabled the app prints `windows_drag: host ok`; `langhost`
 // runs exactly that path.
@@ -157,64 +156,20 @@ begin
     status := syslib.fill_rect(x, y, w, h, color);
 end;
 
-// Paints the "Underlay" window in the four bands around the target's current
-// frame, so a lower window never overwrites the higher target. The content is
-// otherwise a solid colour, which makes the old-area check exact.
+// Paints the "Underlay" window. Since M16 the compositor paints the retained
+// canvases bottom to top, so filling the whole content is safe: the target's
+// canvas is composited above it and a client never overwrites another window
+// (spec 0026 C14/C15).
 procedure paint_underlay();
 var
   c: Rect;
-  t: Rect;
   st: Status;
-  top_h: int;
-  bottom_y: int;
-  bottom_h: int;
-  mid_y: int;
-  mid_h: int;
-  left_w: int;
-  right_x: int;
-  right_w: int;
 begin
   st := syslib.window_begin(under);
   st := syslib.window_content_rect(under, c);
   if st = Ok then
   begin
-    st := syslib.window_frame_rect(id, t);
-    if st = Ok then
-    begin
-      // Top band: content rows above the target frame.
-      top_h := t.y - c.y;
-      if top_h > c.h then
-        top_h := c.h;
-      fill_if(c.x, c.y, c.w, top_h, under_color);
-
-      // Bottom band: content rows below the target frame.
-      bottom_y := t.y + t.h;
-      bottom_h := c.y + c.h - bottom_y;
-      if bottom_h > c.h then
-        bottom_h := c.h;
-      fill_if(c.x, bottom_y, c.w, bottom_h, under_color);
-
-      // Middle bands: the rows the target frame spans, left and right of it.
-      mid_y := t.y;
-      if mid_y < c.y then
-        mid_y := c.y;
-      mid_h := t.y + t.h;
-      if mid_h > c.y + c.h then
-        mid_h := c.y + c.h;
-      mid_h := mid_h - mid_y;
-      if mid_h > 0 then
-      begin
-        left_w := t.x - c.x;
-        if left_w > c.w then
-          left_w := c.w;
-        fill_if(c.x, mid_y, left_w, mid_h, under_color);
-        right_x := t.x + t.w;
-        right_w := c.x + c.w - right_x;
-        if right_w > c.w then
-          right_w := c.w;
-        fill_if(right_x, mid_y, right_w, mid_h, under_color);
-      end;
-    end;
+    st := syslib.fill_rect(0, 0, c.w, c.h, under_color);
     st := syslib.window_present(under);
   end;
 end;
@@ -230,16 +185,17 @@ begin
   st := syslib.window_content_rect(id, content);
   if st = Ok then
   begin
-    st := syslib.fill_rect(content.x, content.y, content.w, content.h, base);
-    st := syslib.fill_rect(content.x + 20, content.y + 20, 16, 16, mark);
-    st := syslib.draw_rect(content.x + 2, content.y + 2, content.w - 4, content.h - 4, black);
-    st := syslib.draw_text(content.x + 20, content.y + 48, "Drag Target", black);
+    // Window-local (spec 0026 C8); the rectangle is read only for its size.
+    st := syslib.fill_rect(0, 0, content.w, content.h, base);
+    st := syslib.fill_rect(20, 20, 16, 16, mark);
+    st := syslib.draw_rect(2, 2, content.w - 4, content.h - 4, black);
+    st := syslib.draw_text(20, 48, "Drag Target", black);
     // Repaint marker (W28 proof): a 4x4 patch at content+(2,2), after the
     // outline, alternating between two colours on every repaint. The service
     // copy moves the current colour to the new origin; the client's refreshed
     // repaint must replace it with the other one.
     last_marker := marker_color;
-    st := syslib.fill_rect(content.x + 2, content.y + 2, 4, 4, marker_color);
+    st := syslib.fill_rect(2, 2, 4, 4, marker_color);
     if marker_color = marker_a then
       marker_color := marker_b
     else
@@ -445,6 +401,8 @@ begin
       //    repaint-marker colour are there before any client repaint. Then the
       //    refreshed `Expose` repaint must replace the marker at the new origin
       //    and restore the old area to the underlay.
+      // The composition checks read the composed shadow (spec 0026 C6).
+      status := syslib.window_begin(0);
       status := syslib.window_content_rect(id, content);
       verify("service copy has the mark", status = Ok
         and syslib.get_pixel(content.x + 28, content.y + 28) = mark);
@@ -452,6 +410,7 @@ begin
       verify("service copy carries the marker", copied_marker = last_marker);
       repaints_before := paint_count;
       pump();
+      status := syslib.window_begin(0);
       status := syslib.window_content_rect(id, content);
       verify("refresh repainted the client", paint_count > repaints_before);
       verify("new content mark", status = Ok

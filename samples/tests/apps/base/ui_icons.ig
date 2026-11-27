@@ -285,8 +285,9 @@ var
   ix: int;
   iy: int;
 begin
-  st := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, white);
-  st := syslib.fill_dither(rect.x, rect.y, rect.w, rect.h, black);
+  // Window-local (spec 0026 C8), including the dither parity (G11).
+  st := syslib.fill_rect(0, 0, rect.w, rect.h, white);
+  st := syslib.fill_dither(0, 0, rect.w, rect.h, black);
   i := 0;
   while i < ItemCount do
   begin
@@ -387,14 +388,14 @@ begin
     drag_moved := true;
     status := stdlib.ui_icon_follow(
       ev.x, ev.y, drag_dx, drag_dy, drag_x, drag_y);
-    if drag_x < rect.x then
-      drag_x := rect.x;
-    if drag_x > rect.x + rect.w - IconSize then
-      drag_x := rect.x + rect.w - IconSize;
-    if drag_y < rect.y then
-      drag_y := rect.y;
-    if drag_y > rect.y + rect.h - IconSize then
-      drag_y := rect.y + rect.h - IconSize;
+    if drag_x < 0 then
+      drag_x := 0;
+    if drag_x > rect.w - IconSize then
+      drag_x := rect.w - IconSize;
+    if drag_y < 0 then
+      drag_y := 0;
+    if drag_y > rect.h - IconSize then
+      drag_y := rect.h - IconSize;
   end
   else if selecting then
   begin
@@ -486,11 +487,13 @@ end;
 
 // Clamp the pointer to the origin, discard the queued move and place it on an
 // absolute screen point; the window service sees one move from a known state.
+// `x`/`y` are window-local; the debug pointer hook takes screen coordinates
+// (spec 0010 I35), so the content origin is added here.
 procedure pointer_to(x: int; y: int);
 begin
   status := syslib.inject_pointer(-100000, -100000, uint(0));
   flushed := syslib.event_flush();
-  status := syslib.inject_pointer(x, y, uint(0));
+  status := syslib.inject_pointer(rect.x + x, rect.y + y, uint(0));
   drain_events();
 end;
 
@@ -499,7 +502,7 @@ procedure pointer_to_held(x: int; y: int);
 begin
   status := syslib.inject_pointer(-100000, -100000, uint(1));
   flushed := syslib.event_flush();
-  status := syslib.inject_pointer(x, y, uint(1));
+  status := syslib.inject_pointer(rect.x + x, rect.y + y, uint(1));
   drain_events();
 end;
 
@@ -614,6 +617,7 @@ var
   label_x: int;
   label_y: int;
   text_w: int;
+  band_clear: uint;
 begin
   draw_desktop();
   folder_x := icon_x_at(0);
@@ -630,8 +634,8 @@ begin
   cell3_probe := dither_white_x(cell3_x + 8, cell3_y + 8);
 
   // 1. The dithered desktop, the three icon plates/bitmaps and the trash.
-  probe_x := rect.x + 400;
-  probe_y := rect.y + 20;
+  probe_x := 400;
+  probe_y := 20;
   if (probe_x + probe_y) mod 2 = 0 then
   begin
     verify("dither dark", syslib.get_pixel(probe_x, probe_y) = black);
@@ -693,6 +697,9 @@ begin
   band_y1 := grid_y + 9;
   band_x2 := grid_x + 2 * CellW - 9;
   band_y2 := grid_y + 2 * CellH - 9;
+  // The dither parity is surface-local (spec 0009 G11), so remember what the
+  // desktop shows at the band's far corner instead of assuming white.
+  band_clear := syslib.get_pixel(band_x2, band_y2);
   pointer_to(band_x1, band_y1);
   pointer_down();
   verify("band starts", selecting);
@@ -703,7 +710,7 @@ begin
   verify("band selects two", selected_count() = 2);
   verify("band outline", syslib.get_pixel(band_x2, band_y2) = black);
   pointer_up();
-  verify("band cleared", syslib.get_pixel(band_x2, band_y2) = white);
+  verify("band cleared", syslib.get_pixel(band_x2, band_y2) = band_clear);
 
   // The selected labels are accent bands with white text.
   text_w := stdlib.ui_text_width(labels[1]);
@@ -950,10 +957,10 @@ begin
         out.say("ui_icons: no content rect\n")
       else
       begin
-        grid_x := rect.x + GridX;
-        grid_y := rect.y + GridY;
-        trash_x := rect.x + rect.w - TrashMargin - TrashSize;
-        trash_y := rect.y + rect.h - TrashMargin - TrashSize;
+        grid_x := GridX;
+        grid_y := GridY;
+        trash_x := rect.w - TrashMargin - TrashSize;
+        trash_y := rect.h - TrashMargin - TrashSize;
         dirty := false;
         flushed := syslib.event_flush();
         if shot then

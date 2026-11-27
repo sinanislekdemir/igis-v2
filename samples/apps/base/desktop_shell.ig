@@ -490,21 +490,22 @@ begin
     status := syslib.window_content_rect(own, rect);
     if status = Ok then
     begin
-      status := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, white);
-      status := syslib.draw_text(rect.x + 12, rect.y + 12, "igis-v2", black);
-      status := syslib.draw_text(rect.x + 12, rect.y + 28, "M2.3.4 desktop shell", black);
-      status := syslib.draw_text(rect.x + 12, rect.y + 52, "File: list windows", black);
-      status := syslib.draw_text(rect.x + 12, rect.y + 68, "Apps: application menu", black);
-      status := syslib.draw_text(rect.x + 12, rect.y + 84, "Windows: raise terminal", black);
-      status := syslib.draw_text(rect.x + 12, rect.y + 100, "Terminal: launch shell", black);
-      status := syslib.draw_text(rect.x + 12, rect.y + 116, "focus:", black);
+      // Window-local content (spec 0026 C8): a move changes nothing here; the
+      // rectangle is read only for its size.
+      status := syslib.fill_rect(0, 0, rect.w, rect.h, white);
+      status := syslib.draw_text(12, 12, "igis-v2", black);
+      status := syslib.draw_text(12, 28, "M2.3.4 desktop shell", black);
+      status := syslib.draw_text(12, 52, "File: list windows", black);
+      status := syslib.draw_text(12, 68, "Apps: application menu", black);
+      status := syslib.draw_text(12, 84, "Windows: raise terminal", black);
+      status := syslib.draw_text(12, 100, "Terminal: launch shell", black);
+      status := syslib.draw_text(12, 116, "focus:", black);
       focus := syslib.window_focus();
       used := core.format_int_into(digits, focus, uint(10), uint(0));
-      status := syslib.draw_text(rect.x + 68, rect.y + 116, digits, black);
+      status := syslib.draw_text(68, 116, digits, black);
       // A small black mark in the content, used by the check-mode pixel test
       // and visible as the shell's own content marker.
-      status := syslib.fill_rect(
-        rect.x + rect.w - 8, rect.y + rect.h - 8, 8, 8, black);
+      status := syslib.fill_rect(rect.w - 8, rect.h - 8, 8, 8, black);
     end;
     status := syslib.window_present(own);
   end;
@@ -596,8 +597,8 @@ begin
   end;
 end;
 
-// Paints the desktop-owned window list. It re-reads the content rectangle on
-// every call so a dragged list follows its frame (spec 0011, W28).
+// Paints the desktop-owned window list in window-local coordinates (spec 0026
+// C8); the content rectangle is read only for its size.
 procedure draw_window_list();
 begin
   if winlist_id <= 0 or syslib.window_minimized(winlist_id) then
@@ -606,13 +607,12 @@ begin
   status := syslib.window_content_rect(winlist_id, winlist_rect);
   if status <> Ok then
     return;
-  status := syslib.fill_rect(
-    winlist_rect.x, winlist_rect.y, winlist_rect.w, winlist_rect.h, white);
+  status := syslib.fill_rect(0, 0, winlist_rect.w, winlist_rect.h, white);
   pos := 0;
   while pos < win_line_count do
   begin
     status := syslib.draw_text(
-      winlist_rect.x + 8, winlist_rect.y + 8 + pos * 16, win_lines[pos], black);
+      8, 8 + pos * 16, win_lines[pos], black);
     pos := pos + 1;
   end;
   status := syslib.window_present(winlist_id);
@@ -667,9 +667,10 @@ begin
   status := syslib.window_content_rect(winlist_id, winlist_rect);
   if status <> Ok then
     return;
-  if px < winlist_rect.x or px >= winlist_rect.x + winlist_rect.w then
+  // A window-addressed pointer event is content-local (spec 0026 C9).
+  if px < 0 or px >= winlist_rect.w then
     return;
-  row := (py - winlist_rect.y - 8) div 16;
+  row := (py - 8) div 16;
   if row < 0 or row >= win_line_count then
     return;
   status := syslib.window_raise(win_ids[row]);
@@ -1387,17 +1388,14 @@ begin
   status := syslib.window_content_rect(about_id, about_rect);
   if status = Ok then
   begin
-    status := syslib.fill_rect(
-      about_rect.x, about_rect.y, about_rect.w, about_rect.h, white);
-    status := syslib.draw_text_prop(
-      about_rect.x + 14, about_rect.y + 10, "igis-v2", black);
+    status := syslib.fill_rect(0, 0, about_rect.w, about_rect.h, white);
+    status := syslib.draw_text_prop(14, 10, "igis-v2", black);
     status := stdlib.ui_message(
-      about_rect.x + 14, about_rect.y + 32, about_rect.w - 28,
-      about_rect.h - 32 - 44,
+      14, 32, about_rect.w - 28, about_rect.h - 32 - 44,
       "Interpreted desktop at ring 0.\nWindows, terminal, text and files.\nFonts, menus and a golden frame.\nM2, 2026.\n\nSinan Islekdemir - sinan@islekdemir.com");
-    row_top := about_rect.y + about_rect.h - 34;
+    row_top := about_rect.h - 34;
     status := stdlib.ui_dialog_button(
-      about_rect.x + (about_rect.w - 80) div 2, row_top, 80, 24,
+      (about_rect.w - 80) div 2, row_top, 80, 24,
       "OK", true, true);
     status := syslib.window_present(about_id);
   end;
@@ -1651,6 +1649,9 @@ begin
     verify("menu baseline", syslib.get_pixel(700, 21) = black);
     verify("apple square", syslib.get_pixel(10, 10) = black);
 
+    // Chrome and the composed shadow are read with no draw scope (spec 0026
+    // C6): the bar plane's scope would answer from the bar's canvas instead.
+    status := syslib.window_begin(0);
     status := syslib.window_frame_rect(own, rect);
     verify(
       "frame geometry",
@@ -1897,21 +1898,18 @@ begin
     verify(
       "about content white",
       status = Ok
-        and syslib.get_pixel(about_rect.x + 2, about_rect.y + about_rect.h - 2)
-          = white);
+        and syslib.get_pixel(2, about_rect.h - 2) = white);
     verify(
       "about button border",
-      syslib.get_pixel(
-        about_rect.x + (about_rect.w - 80) div 2,
-        about_rect.y + about_rect.h - 34) = black);
+      syslib.get_pixel((about_rect.w - 80) div 2, about_rect.h - 34) = black);
     // The prop face's exact ink pixels are not a contract; any ink in the
     // title band proves the panel text was drawn.
     ink_found := false;
-    yy := about_rect.y + 8;
-    while yy < about_rect.y + 24 and not ink_found do
+    yy := 8;
+    while yy < 24 and not ink_found do
     begin
-      xx := about_rect.x + 12;
-      while xx < about_rect.x + 140 and not ink_found do
+      xx := 12;
+      while xx < 140 and not ink_found do
       begin
         if syslib.get_pixel(xx, yy) = black then ink_found := true;
         xx := xx + 1;
@@ -1991,8 +1989,7 @@ begin
     verify(
       "desktop marker restored",
       status = Ok
-        and syslib.get_pixel(about_rect.x + about_rect.w - 4, about_rect.y + about_rect.h - 4)
-          = black);
+        and syslib.get_pixel(about_rect.w - 4, about_rect.h - 4) = black);
 
     close_window_list();
     if probe_term > 0 then

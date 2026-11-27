@@ -8,10 +8,10 @@ unit settings;
 //   run settings shot       // set 800x600, draw the window, print
 //                           // `settings: ready` and hold for the screenshot
 //
-// The app is a client of the window service: it draws only its content and
-// presents once per frame. `syslib.set_resolution` changes the real device
-// mode; the service scales and clamps the window, marks it for an `Expose`,
-// and this app re-reads its content rectangle before the next paint.
+// The app is a client of the window service: it draws its content in
+// window-local coordinates and presents once per frame. `syslib.set_resolution`
+// changes the real device mode; the service scales and clamps the window and
+// marks it for an `Expose`, which just repaints the fixed-size content.
 
 uses core, stdlib, syslib, lib.out;
 
@@ -40,7 +40,6 @@ const
 
 var
   id: int;
-  rect: Rect;
   status: Status;
   ev: Event;
   running: bool;
@@ -131,28 +130,25 @@ end;
 
 // ---- drawing ------------------------------------------------------------
 
-procedure refresh_rect();
-begin
-  status := syslib.window_content_rect(id, rect);
-end;
-
 procedure draw_frame();
 begin
-  status := syslib.fill_rect(rect.x, rect.y, ContentW, ContentH, white);
-  status := syslib.draw_rect(rect.x, rect.y, ContentW, ContentH, black);
-  status := syslib.draw_text(rect.x + 12, rect.y + 10, "Display", black);
-  status := syslib.draw_text(rect.x + 12, rect.y + 28, "Resolution", black);
+  // Window-local coordinates (spec 0026 C8): the frame never moves in the
+  // client's space, so no origin is cached.
+  status := syslib.fill_rect(0, 0, ContentW, ContentH, white);
+  status := syslib.draw_rect(0, 0, ContentW, ContentH, black);
+  status := syslib.draw_text(12, 10, "Display", black);
+  status := syslib.draw_text(12, 28, "Resolution", black);
   status := stdlib.ui_list(
-    rect.x + ListX, rect.y + ListY, ListW, ListH,
+    ListX, ListY, ListW, ListH,
     items, count, selected, top, list_focus);
   status := stdlib.ui_button(
-    rect.x + ApplyX, rect.y + ApplyY, ApplyW, ApplyH,
+    ApplyX, ApplyY, ApplyW, ApplyH,
     "Apply", apply_pressed, not list_focus);
-  status := syslib.draw_text(rect.x + CurrentX, rect.y + CurrentY, current_text, black);
+  status := syslib.draw_text(CurrentX, CurrentY, current_text, black);
   if core.len(message) > uint(0) then
-    status := syslib.draw_text(rect.x + 12, rect.y + MessageY, message, black);
+    status := syslib.draw_text(12, MessageY, message, black);
   status := syslib.draw_text(
-    rect.x + 12, rect.y + HintY, "Changes the real display mode.", black);
+    12, HintY, "Changes the real display mode.", black);
 end;
 
 procedure present_frame();
@@ -163,8 +159,7 @@ end;
 // ---- actions ------------------------------------------------------------
 
 // Applies the selected row; on success the window service has already resized
-// the screen and marked this window for an Expose, so the caller refreshes its
-// rectangle and repaints.
+// the screen and marked this window for an Expose.
 procedure apply_selected();
 var
   width: uint;
@@ -184,7 +179,6 @@ begin
     screen_h := height;
     message := "Applied.";
     update_current();
-    refresh_rect();
   end
   else if status = NotFound then
     message := "Mode not available."
@@ -204,12 +198,12 @@ var
   inside: bool;
 begin
   hit := stdlib.ui_list_hit(
-    rect.x + ListX, rect.y + ListY, ListW, ListH,
+    ListX, ListY, ListW, ListH,
     ev.x, ev.y, count, top);
   if ev.kind = PointerDown then
   begin
     apply_pressed := stdlib.ui_button_hit(
-      rect.x + ApplyX, rect.y + ApplyY, ApplyW, ApplyH, ev.x, ev.y);
+      ApplyX, ApplyY, ApplyW, ApplyH, ev.x, ev.y);
     if hit >= 0 then
     begin
       selected := hit;
@@ -222,7 +216,7 @@ begin
   else if ev.kind = PointerUp then
   begin
     inside := stdlib.ui_button_hit(
-      rect.x + ApplyX, rect.y + ApplyY, ApplyW, ApplyH, ev.x, ev.y);
+      ApplyX, ApplyY, ApplyW, ApplyH, ev.x, ev.y);
     if stdlib.ui_button_pressed(apply_pressed, inside) then
       apply_selected();
     apply_pressed := false;
@@ -257,7 +251,6 @@ begin
       begin
         if ev.window = id then
         begin
-          refresh_rect();
           draw_frame();
           present_frame();
         end;
@@ -384,7 +377,6 @@ begin
     out.say("settings: no window\n");
     return;
   end;
-  refresh_rect();
   update_modes();
   update_current();
   if args = "shot" then

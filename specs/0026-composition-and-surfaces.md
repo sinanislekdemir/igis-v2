@@ -1,6 +1,6 @@
 # 0026: Composition, surfaces and coordinate spaces
 
-- **Status:** Accepted; implemented in M16. The local-coordinate and window-local-event clauses (C4's surface-local wording, C8–C10) are **deferred to M17**: M16 translates absolute client coordinates by the surface origin and keeps screen-coordinate events.
+- **Status:** Accepted; implemented in M16 (composition, surfaces, planes) and M17 (local client coordinates: C4's surface-local drawing, C6's scoped read-back, C8–C10 and window-local events).
 - **Scope:** `abi`, `compiler`, `interpreter`, `kernel` (`gfx`, `window`, `console`, `sched`),
   `syslib`, `samples/apps`; display model for M16
 - **Supersedes:** the one-shadow drawing model of spec 0009 (G5), the region claim of
@@ -68,16 +68,21 @@ damage tracking, hardware cursors, a wallpaper.
   graphics.
 - **C4 (MUST):** Every application drawing primitive requires an open scope. Inside it
   the primitive writes the scope surface's canvas, and coordinates are **surface-local**:
-  `(0, 0)` is the canvas top-left. With no open scope a drawing primitive returns
-  `Status.Invalid` and writes nothing. A rectangle is clipped to the canvas and never
-  faults; an off-surface coordinate is legal and draws nothing. Canvas writes never
-  present.
+  `(0, 0)` is the canvas top-left. A **window** canvas is window-local, so a move changes
+  nothing the client computes; a **plane** canvas keeps screen coordinates anchored at
+  its screen rectangle (C11/C12) and never moves. With no open scope a drawing primitive
+  returns `Status.Invalid` and writes nothing. A rectangle is clipped to the canvas and
+  never faults; an off-surface coordinate is legal and draws nothing. Canvas writes never
+  present. `fill_dither`'s `(X + Y)` parity (spec 0009 G11) uses the surface's own
+  coordinates, so a window's dither is stable across moves.
 - **C5 (MUST):** `syslib.clear(color)` fills the **scope surface** with `color`. It is
   `Status.Invalid` with no open scope. It is no longer a screen-wide operation.
-- **C6 (MUST):** `syslib.get_pixel(x, y)` answers from the **composed shadow** in screen
-  coordinates (uncomposited cursor, spec 0010 I7). A client's pixels reach the shadow on
-  `window_present`/`plane_present` or on a repair, so a pixel self-check runs after the
-  present. Reading a canvas directly is deferred with the local-coordinate model (M17).
+- **C6 (MUST):** `syslib.get_pixel(x, y)` answers from the caller's open scope surface in
+  that surface's coordinates: window-local for a window canvas, screen for a plane. With
+  no scope it answers from the **composed shadow** in screen coordinates (uncomposited
+  cursor, spec 0010 I7). A client's pixel self-check therefore runs inside its draw scope
+  and needs no present first; a check of the composition or of service chrome closes the
+  scope with `window_begin(0)` and reads the shadow.
 - **C7 (MUST):** `syslib.present(x, y, w, h)` is a **recomposite** request: the service
   repaints that screen rectangle from the surface stack and presents it. It is
   idempotent, needs no scope, and is always correct because it recomputes the pixels
@@ -85,24 +90,23 @@ damage tracking, hardware cursors, a wallpaper.
 
 ### Coordinate spaces
 
-- **C8 (MUST):** Client drawing uses **absolute screen coordinates**, translated into
-  the surface canvas by its current origin; `window_frame_rect` and
-  `window_content_rect` report absolute screen rectangles. A client therefore reads the
-  content rectangle from the service when it needs its origin (on an `Expose`, W12/W28),
-  exactly as before M16. An origin is a value the client caches, so a move followed by a
-  stale-cache draw lands offset inside its own canvas; the next `Expose` repaint
-  corrects it. The surface-local model (no origin, `(0,0)` at the canvas top-left) is
-  deferred to M17.
-- **C9 (MUST):** Event coordinates are **screen coordinates** for every event, whatever
-  its target (the M16 model, unchanged from before). Window-local coordinates
-  (`x`/`y` relative to the content rectangle for a window-addressed event) are deferred
-  to M17 with C8; the `Event` layout is unchanged either way (spec 0010 I19).
+- **C8 (MUST):** Client drawing, reading and window-addressed events use **window-local
+  coordinates**: `(0, 0)` is the content canvas top-left, whatever the frame's screen
+  position. A client never adds or caches a screen origin. `window_frame_rect` and
+  `window_content_rect` still report **absolute screen rectangles** — they are geometry
+  queries (placement, clamping, `window_info`), not a coordinate space a client draws in —
+  and `syslib.present(x, y, w, h)` (C7) still takes a screen rectangle. A display-mode
+  change keeps the client's content size, so its local layout is unchanged there too.
+- **C9 (MUST):** A **window-addressed pointer event** (`window != 0`, kinds `PointerMove`,
+  `PointerDown`, `PointerUp`) carries `x`/`y` relative to that window's content
+  rectangle. Unaddressed events, a plane owner's event (C12) and key events keep screen or
+  zero coordinates; the machine-wide pointer state and `inject_pointer` stay in screen
+  coordinates (spec 0010 I35). The `Event` layout is unchanged (spec 0010 I19).
 - **C10 (MUST):** A move, raise, minimize or restore is an origin change in the service
-  only: the canvas keeps its pixels and the compositor places it at the new origin, so
-  the content follows the frame with no pixel copy. Because client coordinates are
-  absolute (C8), the owner MUST re-read `window_content_rect` on an `Expose` before
-  drawing or hit-testing; a client that keeps the old origin draws offset by the move.
-  M17 removes that discipline together with C8.
+  only: the canvas keeps its pixels and the compositor places it at the new origin, so the
+  content follows the frame with no pixel copy. Because client coordinates are local
+  (C8), the owner MUST NOT re-read or recompute an origin on an `Expose`; a frame that
+  spans a move lands correctly as long as the client drew it in local coordinates.
 
 ### Planes
 
@@ -232,7 +236,8 @@ clip no longer exists, because a client never draws the shadow.
 
 ## Verification
 
-- Self-checks: `gfx::surface_self_check` (translated surface read-back and clipping),
+- Self-checks: `gfx::surface_self_check` (surface-local and plane-origin drawing,
+  scoped read-back and clipping),
   `window::canvas_self_check` (alloc/free/reuse, `Full` on exhaustion, scope lifetime),
   `window::compose_self_check` (painter's order on scratch surfaces: a lower window
   repainting cannot change a higher window's pixels; a plane covers a window; destroying
@@ -241,8 +246,14 @@ clip no longer exists, because a client never draws the shadow.
   higher window on top; the higher window's pixels are unchanged), a pointer sweep across
   window and plane boundaries with no trail, a menu plane over a window that is then
   destroyed, and a work-area clamp on drag and mode change.
-- The visual golden is re-baselined exactly once, at the work-area cutover, with an
-  explicit reviewed `--update`.
+- QMP: `scripts/local_coords_qmp.py` drags a window whose owner is mid-frame and asserts
+  the completed frame lands at the new origin (both corner marks at their local offsets,
+  the old origin repainted).
+- The visual golden is re-baselined deliberately, with an explicit reviewed `--update`:
+  once at the work-area cutover (a 22-pixel layout shift) and once at the M17 cutover,
+  because `fill_dither`'s parity became surface-local (C4, spec 0009 G11).
+- The proof app `samples/tests/apps/base/local_coords` self-checks the same rules with an
+  injected mid-frame drag and a window-local pointer event.
 
 ## Implementation status (M16, 2026-11-26)
 
@@ -261,8 +272,31 @@ clip no longer exists, because a client never draws the shadow.
   reserved with `work_area_reserve(22)` and window frames clamp below it. The visual
   golden was re-baselined once for that 22-pixel shift
   (`686d0330…de52754c` → `c9546f45…79fbc65e`); the diff is that shift only.
-- Deferred to M17: C4's surface-local coordinates, C8–C10, spec 0010 I35 (window-local
-  events) and spec 0011 W36.
+## Implementation status (M17, 2026-11-27)
+
+- The origin translation is gone from the client-facing path: a window canvas surface is
+  built with origin `(0, 0)` and its own size as clip and extent, so drawing, `clear` and
+  `get_pixel` are window-local. A plane canvas keeps its screen-anchored mapping (C11).
+- `get_pixel` reads the open scope surface (`window::scope_pixel` → `gfx::read_pixel_on`)
+  and falls back to the composed shadow only with no scope.
+- `syslib.poll_event` (and therefore `next_event`) translates a window-addressed pointer
+  record by the target's content origin; unaddressed, plane-owner, key, expose and close
+  records are unchanged.
+- The whole corpus was converted to local layout and local hit-testing (calculator,
+  minesweeper, clock, image viewer, settings, calendar, widgets, browser, editor, terminal,
+  `lib/file_dialog`, the desktop shell's three windows, the proof apps, `ui_*`, `font`,
+  `mouse`, `windows_demo`, `windows_drag`, `windows_events`, `windows_proof*`, `visual`,
+  `events`, `perf`). The `verify`/pixel blocks that inspect client content run inside the
+  scope; the ones that inspect chrome or the composition close the scope first.
+- The W12/W28 "re-read the content rectangle on an `Expose`" discipline is retired: a
+  client re-reads the rectangle only for its size (a display-mode reflow) and for
+  `syslib.present`'s screen rectangle. `window_present` still presents the window.
+- The dither parity moved from the screen grid to the surface grid (C4, spec 0009 G11),
+  which is the one visual change: the golden was re-baselined
+  (`c9546f45…79fbc65e` → `62e8140a…e809d83c`), and the diff is the 130×100 dither patch in
+  the `visual` specimen.
+- Spec 0010 I35 and spec 0011 W36 are implemented; there is no deferred clause left in
+  this spec.
 
 ## Open questions
 

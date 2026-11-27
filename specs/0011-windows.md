@@ -109,11 +109,10 @@ an `int`; `0` is never a valid id.
   the machine-wide queue. The service never blocks on a client: one that does not repaint
   leaves its previous pixels (stale content), and the repair pass still presents the union.
   A client that ignores an expose is not closed in M2 (see W18).
-  The content rectangle is **dynamic**: after a move the owner MUST re-read
-  `window_content_rect` on the `Expose` before drawing or hit-testing (W28), because the
-  kernel translates its absolute client coordinates by the current content origin. M17's
-  local-coordinate model (spec 0026 C8–C10, W36) retires this. The `Expose` record carries
-  no geometry (`x = y = code = 0`); the service call is authoritative.
+  The content rectangle is **dynamic** in screen space, but client coordinates are
+  window-local (W36), so an `Expose` needs no origin refresh before drawing or
+  hit-testing: the owner re-reads the rectangle only when it needs its size. The `Expose`
+  record carries no geometry (`x = y = code = 0`); the service call is authoritative.
 - **W13 (MUST):** With graphics disabled (`screen_width() == 0`), `window_open` is
   `Status.Invalid`, `close`/`raise`/`move` are `Status.NotFound` (no window can exist),
   `window_frame_rect`/`window_content_rect`/`window_present` are `Status.Invalid`,
@@ -295,10 +294,9 @@ an `int`; `0` is never a valid id.
 - **W28 (MUST):** A move copies no pixels: the canvas is window-local (W33), so a move —
   in progress or completed, topmost or not — is a pure origin change and the content
   follows the frame immediately. There is no shadow-to-shadow snapshot and no "topmost
-  only" rule; `gfx::copy_rect` and ADR 0046 are retired (ADR 0060). Because client
-  coordinates are absolute, the owner MUST still re-read `window_content_rect` on its
-  `Expose` (W12) and redraw at the new origin; a client that never processes the `Expose`
-  keeps its canvas content but draws with a stale origin afterwards. M17 removes this.
+  only" rule; `gfx::copy_rect` and ADR 0046 are retired (ADR 0060). Client coordinates are
+  window-local (W36), so the owner MUST NOT cache or refresh an origin: a frame that spans
+  a move already draws at the right local coordinates and lands at the new origin.
 - **W29 (MUST):** Queued input is delivered to the task that owns its **window target**
   (M8.6; ADR 0047; spec 0010 I34). One kernel-internal rule,
   `window::input_target(event) -> Option<u64>`, is used by both consumption and
@@ -392,11 +390,11 @@ an `int`; `0` is never a valid id.
   never needs visible-part subtraction; a higher window simply overwrites a lower one. A
   client's content change needs no damage bookkeeping of its own: it appears at the next
   `window_present` or repair.
-- **W36 (DEFERRED to M17, spec 0026 C8–C10):** client coordinates become window-local
-  (`(0,0)` at the content top-left) for drawing, reading back and window-addressed events.
-  **M16 keeps absolute screen coordinates**, translated by the current content origin, so
-  the W12/W28 re-read discipline still applies. No behaviour depends on the deferred
-  clause.
+- **W36 (MUST, implemented in M17; spec 0026 C8–C10):** client coordinates are
+  window-local (`(0, 0)` at the content top-left) for drawing, `get_pixel` inside the draw
+  scope and window-addressed pointer events. `window_frame_rect` and
+  `window_content_rect` report absolute screen rectangles (geometry queries), and
+  `syslib.present` takes a screen rectangle. The W12/W28 re-read discipline is retired.
 
 ### Implementation note (M16, 2026-11-26)
 
@@ -405,8 +403,8 @@ The compositor, canvases, planes and the work area are implemented (spec 0026
 behaviour (W27's body, W29's region clause, the language/Host/kernel surface tables and
 the failure-mode rows), read the **plane** rule of spec 0026 C12: builtins 60/61 and the
 claim field are deleted. The erase/`covers_from` language survives only as the damage
-rectangle source; painting is recomposition. Client coordinates are absolute until M17
-(W36).
+rectangle source; painting is recomposition. Client coordinates are window-local since M17
+(W36, spec 0026 "Implementation status").
 
 ## Design
 

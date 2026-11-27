@@ -30,19 +30,25 @@ decisions in `adr/`, and work items in `PLAN.md`.
 
 ## Current state
 
-- Specs 0001–0027 are accepted; **M2–M16 are complete** (desktop, language,
+- Specs 0001–0027 are accepted; **M2–M17 are complete** (desktop, language,
   filesystems, networking, terminal emulator, runtime display modes, PNG/PPM image
-  viewer, kernel-only boot with the application volume on disk, and the composition
-  model). Current milestone work is tracked in `PLAN.md`. **M16 (composition and
-  surfaces)** is implemented: every window owns a content-sized canvas, drawing requires
-  a `window_begin`/`plane_begin` scope (`Status.Invalid` without one), the compositor is
-  the only writer of the shadow and recomposes damaged rectangles (desktop pattern →
-  windows bottom-to-top → planes → cursor), planes (builtins 93–96) carry the shell's
-  menu bar, pull-downs and halt screen above windows, `work_area_reserve` (97) keeps
-  frames below the bar strip, and the erase/`covers_from`/snapshot/visible-parts
-  machinery and the persistent region claim (60/61) are deleted. Client coordinates are
-  still absolute screen coordinates translated by the surface origin; **M17 (local
-  coordinates and window-local events)** is the deferred remainder.
+  viewer, kernel-only boot with the application volume on disk, the composition model
+  and local client coordinates). Current milestone work is tracked in `PLAN.md`.
+  **M16 (composition and surfaces)** is implemented: every window owns a content-sized
+  canvas, drawing requires a `window_begin`/`plane_begin` scope (`Status.Invalid` without
+  one), the compositor is the only writer of the shadow and recomposes damaged
+  rectangles (desktop pattern → windows bottom-to-top → planes → cursor), planes
+  (builtins 93–96) carry the shell's menu bar, pull-downs and halt screen above windows,
+  `work_area_reserve` (97) keeps frames below the bar strip, and the
+  erase/`covers_from`/snapshot/visible-parts machinery and the persistent region claim
+  (60/61) are deleted. **M17 (local client coordinates)** makes a window canvas
+  window-local (`(0, 0)` is the content top-left): drawing, `get_pixel` inside a scope
+  and window-addressed pointer events are local (spec 0026 C4/C6/C8–C10), a plane canvas
+  keeps screen coordinates (C11/C12), `window_frame_rect`/`window_content_rect` stay
+  absolute screen geometry, and the W12/W28 "re-read the origin on `Expose`" discipline
+  is retired. `fill_dither`'s parity is surface-local, so the visual golden was
+  re-baselined once (`62e8140a…e809d83c`); `scripts/local_coords_qmp.py` drags a window
+  whose owner is mid-frame.
 - **638 host tests** (557 language + 56 `net` + 23 `ext2w` + 2 builtin tests); ABI v1 has
   **75 opcodes** (runtime display modes add builtins 80–83; the machine-level bit and
   bulk buffer primitives are builtins 84–90, `syslib.blit_rgb` is 91, the surface model

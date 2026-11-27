@@ -215,8 +215,9 @@ procedure draw_panel();
 var
   st: Status;
 begin
-  st := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, white);
-  st := stdlib.ui_frame(rect.x + 8, rect.y + 8, rect.w - 16, rect.h - 16);
+  // Window-local (spec 0026 C8).
+  st := syslib.fill_rect(0, 0, rect.w, rect.h, white);
+  st := stdlib.ui_frame(8, 8, rect.w - 16, rect.h - 16);
   st := stdlib.ui_button(
     bx, by, ButtonW, ButtonH, "Press", button_down, focus_index = 0);
   st := stdlib.ui_checkbox(cx, cy, "Enable", checked, focus_index = 1);
@@ -464,9 +465,11 @@ end;
 
 // Clamp the pointer to the origin, discard the queued move and place it on an
 // absolute screen point; the window service sees one move from a known state.
+// `x`/`y` are window-local; the debug pointer hook takes screen coordinates
+// (spec 0010 I35), so the content origin is added here.
 procedure pointer_to(x: int; y: int);
 begin
-  status := inject.pointer_to(x, y);
+  status := inject.pointer_to(rect.x + x, rect.y + y);
   drain_events();
 end;
 
@@ -494,7 +497,7 @@ procedure kernel_proof();
 begin
   // Initial composition and baseline pixels.
   present_panel();
-  verify("content filled", syslib.get_pixel(rect.x + 2, rect.y + 2) = white);
+  verify("content filled", syslib.get_pixel(2, 2) = white);
   verify("button face", syslib.get_pixel(bx + 2, by + 2) = white);
   verify("button border", syslib.get_pixel(bx, by) = black);
   verify("button focus ring", syslib.get_pixel(bx + 3, by + 3) = black);
@@ -671,15 +674,15 @@ begin
         out.say("ui_controls: no content rect\n")
       else
       begin
-        bx := rect.x + Gap;
-        by := rect.y + Gap;
-        cx := rect.x + Gap;
-        cy := rect.y + Gap + 40;
-        tx := rect.x + Gap;
-        ty := rect.y + Gap + 72;
-        lx := rect.x + Gap;
-        ly := rect.y + Gap + 110;
-        sx := rect.x + Gap + ListW + 40;
+        bx := Gap;
+        by := Gap;
+        cx := Gap;
+        cy := Gap + 40;
+        tx := Gap;
+        ty := Gap + 72;
+        lx := Gap;
+        ly := Gap + 110;
+        sx := Gap + ListW + 40;
         sy := by;
         dirty := false;
 

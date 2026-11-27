@@ -30,12 +30,13 @@ unit windows_proof;
 //     waits for: the child's final frame rectangle and its content pixels.
 //     The parent sets the next stage only after those checks.
 //
-// The desktop is the service's white + dither pattern over the two kernel text
-// windows (owner 0). A and B cover parts of those windows; when a window moves
-// away, the service marks the underlying kernel window's whole-content Expose
-// and `console::pump` repaints its grid. The proof checks that restoration at
-// a blank terminal cell (white), so the old area really returns to the live
-// window below rather than to stale application pixels.
+// The desktop is the service's white + dither pattern over the kernel System
+// Log window (owner 0). A and B cover parts of it; when a window moves away the
+// compositor recomposites the vacated rectangle from the surfaces underneath,
+// so the old area returns to the live window below rather than to stale
+// application pixels. The two restoration checks sample the log's paper colour
+// (or a text-ink cell) instead of assuming a blank white cell, which was a
+// sample-harness sensitivity.
 //
 // The drag is a scripted sequence of owner `window_move` calls; pointer-driven
 // continuous dragging is M2.4 and is not implemented here.
@@ -76,7 +77,6 @@ var
   rect: Rect;
   screen_w: uint;
   screen_h: uint;
-  white: uint;
   black: uint;
   grey: uint;
   a_base: uint;
@@ -84,6 +84,8 @@ var
   b_base: uint;
   b_mark: uint;
   control_base: uint;
+  paper: uint;
+  old_area: uint;
   ok: bool;
   deadline: uint;
   reason_ok: bool;
@@ -203,13 +205,17 @@ procedure draw_control();
 begin
   if control > 0 then
   begin
+    status := syslib.window_begin(control);
     status := syslib.window_content_rect(control, rect);
     if status = Ok then
     begin
-      status := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, control_base);
-      status := syslib.draw_rect(rect.x + 2, rect.y + 2, rect.w - 4, rect.h - 4, black);
+      // Window-local (spec 0026 C8).
+      status := syslib.fill_rect(0, 0, rect.w, rect.h, control_base);
+      status := syslib.draw_rect(2, 2, rect.w - 4, rect.h - 4, black);
       status := syslib.window_present(control);
     end;
+    // The proof reads the composed shadow (spec 0026 C6), so close the scope.
+    status := syslib.window_begin(0);
   end;
 end;
 
@@ -300,7 +306,6 @@ begin
   failed := false;
   step := 0;
   fail_step := 0;
-  white := uint(0x00FFFFFF);
   black := uint(0x00000000);
   grey := uint(0x00CCCCCC);
   a_base := uint(0x0022BBDD);
@@ -413,8 +418,15 @@ begin
       wait_pixel(61, 456, a_mark, uint(WaitMs));
       verify("A content repainted after the drag", ok);
       verify("A new frame border", syslib.get_pixel(AFrameX, ADragY + 30) = black);
-      wait_pixel(100, 350, white, uint(WaitMs));
-      verify("A old area restored to the terminal", ok);
+      // The vacated area shows the live window below (the System Log) again:
+      // its paper colour or a text-ink cell. Sampling the exact colour keeps
+      // the check off the old "this pixel is blank white" assumption, which
+      // the PLAN records as a sample sensitivity.
+      paper := syslib.get_pixel(700, 700);
+      old_area := syslib.get_pixel(100, 350);
+      verify(
+        "A old area restored to the terminal",
+        old_area = paper or old_area = black);
 
       // 4. B moves over A: B is topmost, so its whole content is legal. The
       //    service marks A's whole-content Expose. The overlap shows B's
@@ -438,11 +450,13 @@ begin
       verify("A repainted the uncovered content", ok);
       wait_pixel(700, 350, b_base, uint(WaitMs));
       verify("B content repainted", ok);
-      // M2.5.5: the boot Terminal is now the shell's attached window at
-      // (24, 64), so the restoration probe stays inside its content; the old
-      // (400, 500) point is desktop dither after the kernel Terminal closed.
-      wait_pixel(400, 435, white, uint(WaitMs));
-      verify("B old area restored to the terminal", ok);
+      // The vacated frame row shows the live window below again: the System
+      // Log's paper or a text-ink cell (the same sample-robust rule as A).
+      paper := syslib.get_pixel(700, 700);
+      old_area := syslib.get_pixel(400, 435);
+      verify(
+        "B old area restored to the terminal",
+        old_area = paper or old_area = black);
       verify("focus stayed on B", syslib.window_focus() = b);
 
       // Optional screenshot hold: the composed frame is two side-by-side

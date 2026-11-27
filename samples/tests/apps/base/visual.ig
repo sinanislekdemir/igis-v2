@@ -86,13 +86,13 @@ begin
   status := syslib.draw_rect(x0, y0, 32, 32, black);
 end;
 
-// The whole fixed composition, drawn relative to the window's content
-// rectangle. At 1024x768 the content is (1, 38, 1022, 729), below the 22-row
-// work area.
+// The whole fixed composition, drawn in window-local coordinates (spec 0026
+// C8). At 1024x768 the content is (1, 38, 1022, 729), below the 22-row work
+// area, so the local origin is the screen position (1, 38).
 procedure compose();
 begin
-  x := rect.x;
-  y := rect.y;
+  x := 0;
+  y := 0;
   status := syslib.fill_rect(x, y, rect.w, rect.h, white);
 
   // Header band and 8x8 title.
@@ -169,12 +169,14 @@ begin
   verify("content width", rect.w = int(screen_w) - 2);
   verify("content height", rect.h = int(screen_h) - WorkAreaTop - 17);
 
-  // Service chrome, read from the shadow (the cursor is composited into the
-  // framebuffer only, so get_pixel sees the uncomposited shadow).
+  // Service chrome, read from the composed shadow: close the draw scope first
+  // (spec 0026 C6), then reopen it for the content checks.
+  status := syslib.window_begin(0);
   verify("left border", syslib.get_pixel(0, 200) = black);
   verify("title fill", syslib.get_pixel(1, WorkAreaTop + 1) = white);
   verify("title stripe", syslib.get_pixel(1, WorkAreaTop + 2) = black);
   verify("title stripe gap", syslib.get_pixel(1, WorkAreaTop + 3) = white);
+  status := syslib.window_begin(id);
 
   // Content background, header band and text.
   verify("content white", syslib.get_pixel(x + rect.w - 4, y + rect.h - 4) = white);
@@ -196,11 +198,11 @@ begin
   verify("swatch green", syslib.get_pixel(x + 228, y + 200) = green);
   verify("swatch blue", syslib.get_pixel(x + 268, y + 200) = blue);
 
-  // Dither parity: inside the patch (the outline is black) the absolute sum
-  // (382 + 193) is odd, so the pixel stays white; one to the right the sum is
-  // even and the pixel is inked.
-  verify("dither odd white", syslib.get_pixel(x + 381, y + 177) = white);
-  verify("dither even ink", syslib.get_pixel(x + 382, y + 177) = black);
+  // Dither parity is surface-local (spec 0026 C8, spec 0009 G11): inside the
+  // patch (the outline is black) the local sum (381 + 177) is even, so the
+  // pixel is inked; one to the right the sum is odd and the pixel stays white.
+  verify("dither even ink", syslib.get_pixel(x + 381, y + 177) = black);
+  verify("dither odd white", syslib.get_pixel(x + 382, y + 177) = white);
 
   // Control box and diagonal raster.
   verify("box border", syslib.get_pixel(x + 12, y + 300) = black);

@@ -124,14 +124,14 @@ resize. Those are M2.4/M2.5.
 - **D12 (MUST):** The shell may own one window of its own ("Desktop"). A close-box
   request for that window closes only the help panel; the shell keeps running, the menu
   bar and every launched application stay live, and the Apple square reopens the window
-  (M8.7). The shell's own window is not the shell's lifetime. It draws the
-  window content on open and on every `Expose` for that id, calls `window_present`, and
-  ignores exposes for windows it does not own. Every repaint re-reads
-  `window_content_rect` first, because the frame origin is dynamic after a drag or move
-  (spec 0011, W12/W28; ADR 0046); the About panel's `draw_about` does the same. It repaints
-  the content only while it is the topmost window; when another window is above it, it
-  presents without redrawing, so a client with no per-task clip (M2) cannot overwrite the
-  window above. It never draws in another window's content rectangle.
+  (M8.7). The shell's own window is not the shell's lifetime. It draws the window content
+  in window-local coordinates (spec 0026 C8) on open and on every `Expose` for that id,
+  reads the content rectangle only for its size, calls `window_present`, and ignores
+  exposes for windows it does not own. The About panel and the window list do the same.
+  A move is an origin change in the service, so nothing in the shell recomputes an origin
+  on a drag (spec 0011 W28/W36). The compositor composes the retained canvases bottom to
+  top, so the shell repaints its whole content whenever it is asked and cannot overwrite
+  a window above it.
 - **D13 (MUST):** `check` mode is deterministic and headless: draw the bar and window,
   check menu-bar and plane pixels with `get_pixel` inside their draw blocks (scope-local,
   spec 0026 C6), call each menu item's handler

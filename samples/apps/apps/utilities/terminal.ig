@@ -76,10 +76,10 @@ begin
 end;
 
 // Erases the whole content and paints every visible row, then the cursor
-// underline. The content rectangle is re-read on every call because a drag or
-// a move changes the origin (spec 0011, W28). It repaints whether or not it is
-// topmost: `window_present` clips the presentation to the visible parts, so a
-// window below another can rebuild the pixels a move uncovered (W31).
+// underline. Coordinates are window-local (spec 0026 C8), so a drag or a move
+// changes nothing the client computes; the content rectangle is re-read only
+// for its size. It repaints whether or not it is topmost: the compositor
+// paints the retained canvas (W35).
 procedure draw_screen();
 begin
   if term <= 0 then
@@ -88,17 +88,17 @@ begin
   if st <> Ok then
     return;
   // Dark screen: black paper, white ink and a white cursor underline.
-  st := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, black);
+  st := syslib.fill_rect(0, 0, rect.w, rect.h, black);
   i := 0;
   while i < rows do
   begin
-    st := syslib.draw_text(rect.x, rect.y + i * CellH, lines[phys(i)], white);
+    st := syslib.draw_text(0, i * CellH, lines[phys(i)], white);
     i := i + 1;
   end;
   if row >= 0 and row < rows and col >= 0 and col < cols then
   begin
     st := syslib.fill_rect(
-      rect.x + col * CellW, rect.y + row * CellH + CellH - 2, CellW - 2, 2, white);
+      col * CellW, row * CellH + CellH - 2, CellW - 2, 2, white);
   end;
   st := syslib.window_present(term);
 end;

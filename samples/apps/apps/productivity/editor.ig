@@ -1967,7 +1967,9 @@ begin
           // M16.8: only the strip. The retained canvas keeps the old text
           // rows, and `syslib.present` recomposites just this rectangle.
           draw_scrollbar_at(scroll_preview, drag_total);
-          st := syslib.present(scroll_x, scroll_y, ScrollW, ScrollH);
+          // `present` takes a screen rectangle (spec 0026 C7): the one call
+          // that still adds the content origin.
+          st := syslib.present(rect.x + scroll_x, rect.y + scroll_y, ScrollW, ScrollH);
         end;
       end;
       return false;
@@ -1977,7 +1979,7 @@ begin
 
   if ev.kind = PointerDown then
   begin
-    bar := stdlib.ui_menu_bar_hit(rect.x, rect.y, ContentW, titles, 1, ev.x, ev.y);
+    bar := stdlib.ui_menu_bar_hit(0, 0, ContentW, titles, 1, ev.x, ev.y);
     if bar = 0 then
     begin
       if open_menu = 0 then
@@ -1990,7 +1992,7 @@ begin
     begin
       was_selected := selected;
       row := stdlib.ui_menu_hit(
-        rect.x + 4, rect.y + MenuBarH, MenuW, file_items, FileItemCount,
+        4, MenuBarH, MenuW, file_items, FileItemCount,
         ev.x, ev.y);
       if row >= 0 then
       begin
@@ -2027,7 +2029,7 @@ begin
     begin
       was_menu := open_menu;
       row := stdlib.ui_menu_hit(
-        rect.x + 4, rect.y + MenuBarH, MenuW, file_items, FileItemCount,
+        4, MenuBarH, MenuW, file_items, FileItemCount,
         ev.x, ev.y);
       if row >= 0 and row = selected and
          stdlib.ui_menu_selectable(file_items[row], file_disabled, row) then
@@ -2044,7 +2046,7 @@ begin
     begin
       was_selected := selected;
       row := stdlib.ui_menu_hit(
-        rect.x + 4, rect.y + MenuBarH, MenuW, file_items, FileItemCount,
+        4, MenuBarH, MenuW, file_items, FileItemCount,
         ev.x, ev.y);
       if row >= 0 and stdlib.ui_menu_selectable(file_items[row], file_disabled, row) then
         selected := row;
@@ -2059,16 +2061,16 @@ end;
 
 procedure compute_layout();
 begin
-  text_x := rect.x + TextLeft;
-  text_y := rect.y + TextTop;
-  scroll_x := rect.x + ScrollLeft;
-  scroll_y := rect.y + ScrollTop;
-  status_y := rect.y + StatusTop;
+  text_x := TextLeft;
+  text_y := TextTop;
+  scroll_x := ScrollLeft;
+  scroll_y := ScrollTop;
+  status_y := StatusTop;
 end;
 
-// Re-reads the content rectangle after the service moved the window and
-// recomputes the cached layout (spec 0011, W12/W17/W28; ADR 0046). The app
-// draws and hit-tests in absolute screen coordinates.
+// Re-reads the content rectangle. Drawing and hit-testing are window-local
+// (spec 0026 C8), so the layout never changes with a move; only
+// `syslib.present`'s screen rectangle needs the origin.
 procedure refresh_layout();
 begin
   st := syslib.window_content_rect(id, rect);
@@ -2323,15 +2325,15 @@ var
   width: int;
 begin
   if int(core.len(path)) = 0 then
-    st := syslib.draw_text(rect.x + 8, rect.y + PathTop + 4, "(no file)", dim)
+    st := syslib.draw_text(8, PathTop + 4, "(no file)", dim)
   else
-    st := syslib.draw_text(rect.x + 8, rect.y + PathTop + 4, path, ink);
+    st := syslib.draw_text(8, PathTop + 4, path, ink);
   width := stdlib.ui_text_width("Ctrl+S save");
   st := syslib.draw_text(
-    rect.x + ContentW - 8 - width, rect.y + PathTop + 4, "Ctrl+S save", dim);
+    ContentW - 8 - width, PathTop + 4, "Ctrl+S save", dim);
   // The separator is a palette pixel in both themes, not the fixed black
   // `stdlib.ui_separator` (which would vanish on the dark base).
-  st := syslib.fill_rect(rect.x, rect.y + PathTop + PathH - 1, ContentW, 1, rule);
+  st := syslib.fill_rect(0, PathTop + PathH - 1, ContentW, 1, rule);
 end;
 
 procedure draw_status();
@@ -2342,8 +2344,8 @@ var
   label_w: int;
   x: int;
 begin
-  st := syslib.fill_rect(rect.x, status_y - 2, ContentW, 1, rule);
-  st := syslib.draw_text(rect.x + 8, status_y + 4, status_line, ink);
+  st := syslib.fill_rect(0, status_y - 2, ContentW, 1, rule);
+  st := syslib.draw_text(8, status_y + 4, status_line, ink);
 
   line := line_of_pos(text, caret);
   start := line_start_of(text, line);
@@ -2351,7 +2353,7 @@ begin
   used := core.format_int_into(digits_line, line + 1, uint(10), uint(0));
   used := core.format_int_into(digits_col, column + 1, uint(10), uint(0));
   label_w := (3 + int(core.len(digits_line)) + 6 + int(core.len(digits_col))) * 8;
-  x := rect.x + ContentW - 8 - label_w;
+  x := ContentW - 8 - label_w;
   st := syslib.draw_text(x, status_y + 4, "Ln ", dim);
   st := syslib.draw_text(x + 24, status_y + 4, digits_line, ink);
   st := syslib.draw_text(
@@ -2388,20 +2390,20 @@ var
   label_w: int;
 begin
   if not dark then
-    st := stdlib.ui_menu_bar(rect.x, rect.y, ContentW, titles, 1, open_menu)
+    st := stdlib.ui_menu_bar(0, 0, ContentW, titles, 1, open_menu)
   else
   begin
-    st := syslib.fill_rect(rect.x, rect.y, ContentW, MenuBarH, bg);
+    st := syslib.fill_rect(0, 0, ContentW, MenuBarH, bg);
     label_w := stdlib.ui_text_width(titles[0]);
     if open_menu = 0 then
     begin
       st := syslib.fill_rect(
-        rect.x + 4, rect.y + 2, label_w + 8, MenuBarH - 4, sel_bg);
-      st := syslib.draw_text(rect.x + 8, rect.y + 7, titles[0], sel_ink);
+        4, 2, label_w + 8, MenuBarH - 4, sel_bg);
+      st := syslib.draw_text(8, 7, titles[0], sel_ink);
     end
     else
-      st := syslib.draw_text(rect.x + 8, rect.y + 7, titles[0], ink);
-    st := syslib.fill_rect(rect.x, rect.y + MenuBarH - 1, ContentW, 1, rule);
+      st := syslib.draw_text(8, 7, titles[0], ink);
+    st := syslib.fill_rect(0, MenuBarH - 1, ContentW, 1, rule);
   end;
 end;
 
@@ -2419,8 +2421,8 @@ var
   ink_color: uint;
   shortcut_w: int;
 begin
-  x := rect.x + 4;
-  y := rect.y + MenuBarH;
+  x := 4;
+  y := MenuBarH;
   height := FileItemCount * 16 + 2;
   st := syslib.fill_rect(x + 1, y + 1, MenuW - 2, height - 2, bg);
   st := syslib.draw_rect(x, y, MenuW, height, rule);
@@ -2463,7 +2465,7 @@ begin
     draw_dark_dropdown()
   else
     st := stdlib.ui_menu_dropdown(
-      rect.x + 4, rect.y + MenuBarH, MenuW, file_items, file_keys,
+      4, MenuBarH, MenuW, file_items, file_keys,
       FileItemCount, selected, file_checked, file_disabled, true);
 end;
 
@@ -2513,7 +2515,7 @@ begin
   // one per-task draw scope (spec 0026, C3/C20). Re-opening our own window at
   // the start of every frame keeps the editor drawable after the dialog closes.
   st := syslib.window_begin(id);
-  st := syslib.fill_rect(rect.x, rect.y, ContentW, ContentH, bg);
+  st := syslib.fill_rect(0, 0, ContentW, ContentH, bg);
   draw_menu_bar_themed();
   draw_path_line();
   draw_lines();
@@ -2840,7 +2842,9 @@ end;
 
 procedure pointer_to(px: int; py: int);
 begin
-  st := inject.pointer_to(px, py);
+  // `px`/`py` are window-local; the pointer state is screen-coordinate
+  // (spec 0010 I35), so the content origin is added here.
+  st := inject.pointer_to(rect.x + px, rect.y + py);
   pump_pointer_events();
 end;
 
@@ -2860,8 +2864,10 @@ end;
 // button, so the delta goes directly through the debug pointer hook (M9.2).
 procedure pointer_drag_to(px: int; py: int);
 begin
+  // `px`/`py` are window-local; the pointer state is screen-coordinate, so the
+  // content origin is added before the delta is computed (spec 0010 I35).
   st := syslib.inject_pointer(
-    px - syslib.pointer_x(), py - syslib.pointer_y(), uint(1));
+    rect.x + px - syslib.pointer_x(), rect.y + py - syslib.pointer_y(), uint(1));
   pump_pointer_events();
 end;
 
@@ -2990,8 +2996,8 @@ begin
   draw_all();
   present_frame();
 
-  verify("menu rule", syslib.get_pixel(rect.x + 300, rect.y + 21) = rule);
-  verify("path rule", syslib.get_pixel(rect.x + 300, rect.y + 37) = rule);
+  verify("menu rule", syslib.get_pixel(300, 21) = rule);
+  verify("path rule", syslib.get_pixel(300, 37) = rule);
   verify("glyph ink", syslib.get_pixel(text_x + 1, text_y + 4) = ink);
   verify("glyph hole", syslib.get_pixel(text_x + 4, text_y + 5) = bg);
   verify("caret", syslib.get_pixel(text_x, text_y + 8) = ink);
@@ -3007,7 +3013,7 @@ begin
 
   verify("scrollbar border", syslib.get_pixel(scroll_x, scroll_y) = rule);
   verify("scrollbar thumb", syslib.get_pixel(scroll_x + 4, scroll_y + 3) = dim);
-  verify("status rule", syslib.get_pixel(rect.x + 300, status_y - 2) = rule);
+  verify("status rule", syslib.get_pixel(300, status_y - 2) = rule);
 
   // Dark theme: the row and its check bit, then every themed region by exact
   // pixel. The direct toggle is exercised here; Ctrl+D goes through the
@@ -3027,8 +3033,8 @@ begin
   verify("dark base", bg = uint(0x001E1E1E) and ink = uint(0x00D4D4D4));
   verify("dark background",
     syslib.get_pixel(text_x + 500, text_y + 300) = bg);
-  verify("dark menu rule", syslib.get_pixel(rect.x + 300, rect.y + 21) = rule);
-  verify("dark path rule", syslib.get_pixel(rect.x + 300, rect.y + 37) = rule);
+  verify("dark menu rule", syslib.get_pixel(300, 21) = rule);
+  verify("dark path rule", syslib.get_pixel(300, 37) = rule);
   verify("dark glyph ink", syslib.get_pixel(text_x + 1, text_y + 4) = ink);
   verify("dark glyph hole", syslib.get_pixel(text_x + 4, text_y + 5) = bg);
   verify("dark caret", syslib.get_pixel(text_x, text_y + 8) = ink);
@@ -3045,7 +3051,7 @@ begin
   verify("dark scrollbar thumb",
     syslib.get_pixel(scroll_x + 4, scroll_y + 3) = dim);
   verify("dark status rule",
-    syslib.get_pixel(rect.x + 300, status_y - 2) = rule);
+    syslib.get_pixel(300, status_y - 2) = rule);
 
   // The dark menu bar and pull-down: the active "File" cell is the selection
   // colour, the open pull-down frames a dark interior, the chosen Dark row is
@@ -3056,19 +3062,19 @@ begin
   draw_all();
   present_frame();
   verify("dark menu active cell",
-    syslib.get_pixel(rect.x + 6, rect.y + 10) = sel_bg);
+    syslib.get_pixel(6, 10) = sel_bg);
   verify("dark dropdown frame",
-    syslib.get_pixel(rect.x + 4, rect.y + MenuBarH) = rule);
+    syslib.get_pixel(4, MenuBarH) = rule);
   verify("dark dropdown row",
-    syslib.get_pixel(rect.x + 84, rect.y + MenuBarH + 1 + FileDarkItem * 16 + 8) = sel_bg);
+    syslib.get_pixel(84, MenuBarH + 1 + FileDarkItem * 16 + 8) = sel_bg);
   verify("dark dropdown plain row",
-    syslib.get_pixel(rect.x + 84, rect.y + MenuBarH + 1 + 8) = bg);
+    syslib.get_pixel(84, MenuBarH + 1 + 8) = bg);
   verify("dark dropdown check",
-    syslib.get_pixel(rect.x + 12 + 4, rect.y + MenuBarH + 1 + FileDarkItem * 16 + 7) = sel_ink);
+    syslib.get_pixel(12 + 4, MenuBarH + 1 + FileDarkItem * 16 + 7) = sel_ink);
   verify("dark dropdown hit",
     stdlib.ui_menu_hit(
-      rect.x + 4, rect.y + MenuBarH, MenuW, file_items, FileItemCount,
-      rect.x + 84, rect.y + MenuBarH + 1 + FileDarkItem * 16 + 8) = FileDarkItem);
+      4, MenuBarH, MenuW, file_items, FileItemCount,
+      84, MenuBarH + 1 + FileDarkItem * 16 + 8) = FileDarkItem);
   close_menu();
   draw_all();
   present_frame();

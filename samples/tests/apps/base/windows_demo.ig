@@ -85,16 +85,16 @@ procedure draw_content(id: int; fill: uint; label: const string[0]);
 begin
   // Every draw goes through the window's own scope (spec 0026, C3): opening a
   // later window takes the one per-task scope, so the painter selects its
-  // target explicitly. Coordinates stay absolute screen values, translated by
-  // the service into the canvas.
+  // target explicitly. Coordinates are window-local (C8); the rectangle is read
+  // only for its size.
   status := syslib.window_begin(id);
   status := syslib.window_content_rect(id, rect);
   if status = Ok then
   begin
-    status := syslib.fill_rect(rect.x, rect.y, rect.w, rect.h, fill);
-    status := syslib.draw_rect(rect.x + 2, rect.y + 2, rect.w - 4, rect.h - 4, black);
-    status := syslib.draw_text(rect.x + 10, rect.y + 12, label, black);
-    status := syslib.draw_text(rect.x + 10, rect.y + 28, "M2.3.2 composition", black);
+    status := syslib.fill_rect(0, 0, rect.w, rect.h, fill);
+    status := syslib.draw_rect(2, 2, rect.w - 4, rect.h - 4, black);
+    status := syslib.draw_text(10, 12, label, black);
+    status := syslib.draw_text(10, 28, "M2.3.2 composition", black);
     // The first present makes the canvas part of the composition (spec 0026,
     // C15); `syslib.present` alone would only repaint already-valid surfaces.
     status := syslib.window_present(id);
@@ -164,6 +164,9 @@ begin
   begin
     // Compose and check without printing between steps.
     compose();
+    // The composition checks read the composed shadow in screen coordinates:
+    // close the draw scope first (spec 0026, C6).
+    status := syslib.window_begin(0);
     verify("open Alpha", a > 0);
     verify("focus Alpha", syslib.window_focus() = a);
     verify("focused title white", syslib.get_pixel(61, 71) = white);

@@ -53,11 +53,10 @@ begin
   status := syslib.window_content_rect(id, content);
   if status = Ok then
   begin
-    status := syslib.fill_rect(
-      content.x, content.y, content.w, content.h, uint(BaseColor));
-    status := syslib.fill_rect(
-      content.x + 20, content.y + 20, 16, 16, uint(MarkColor));
-    status := syslib.draw_text(content.x + 20, content.y + 48, "B", uint(Ink));
+    // Window-local (spec 0026 C8); the rectangle is read only for its size.
+    status := syslib.fill_rect(0, 0, content.w, content.h, uint(BaseColor));
+    status := syslib.fill_rect(20, 20, 16, 16, uint(MarkColor));
+    status := syslib.draw_text(20, 48, "B", uint(Ink));
     status := syslib.window_present(id);
   end;
 end;

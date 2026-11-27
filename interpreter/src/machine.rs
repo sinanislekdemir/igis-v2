@@ -325,8 +325,9 @@ pub trait Host {
         Status::Invalid
     }
 
-    /// Reads one shadow pixel as `0x00RRGGBB`; 0 outside the screen
-    /// (`syslib.get_pixel`, G9).
+    /// Reads one pixel as `0x00RRGGBB` (`syslib.get_pixel`, spec 0026 C6/C8):
+    /// the open draw scope's surface in its own coordinates, else the composed
+    /// shadow in screen coordinates; 0 outside the surface.
     fn get_pixel(&mut self, _x: i64, _y: i64) -> u32 {
         0
     }

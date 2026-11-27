@@ -114,7 +114,9 @@ var
 
   // Window and absolute geometry.
   id: int;
-  rect: Rect;
+  // The content rectangle: drawing is window-local (spec 0026 C8), but the
+  // debug pointer hook takes screen coordinates (spec 0010 I35).
+  origin: Rect;
 
   // Palette and event pump.
   black: uint;
@@ -561,8 +563,9 @@ end;
 
 procedure cell_rect(index: int; x: var int; y: var int);
 begin
-  x := rect.x + FieldX + (index mod GridN) * CellSize;
-  y := rect.y + FieldY + (index div GridN) * CellSize;
+  // Window-local (spec 0026 C8): cells and header derive from the constants.
+  x := FieldX + (index mod GridN) * CellSize;
+  y := FieldY + (index div GridN) * CellSize;
 end;
 
 // Closed cell: gray face, white top/left bevel, black outline.
@@ -634,19 +637,19 @@ procedure draw_frame();
 var
   i: int;
 begin
-  ignored := syslib.fill_rect(rect.x, rect.y, ContentW, ContentH, white);
-  ignored := stdlib.ui_frame(rect.x, rect.y, ContentW, ContentH);
+  ignored := syslib.fill_rect(0, 0, ContentW, ContentH, white);
+  ignored := stdlib.ui_frame(0, 0, ContentW, ContentH);
 
   update_status();
   update_face();
   format_counter(counter_text, MineCount - flags);
   ignored := syslib.draw_text(
-    rect.x + CounterX, rect.y + CounterY, counter_text, black);
+    CounterX, CounterY, counter_text, black);
   ignored := stdlib.ui_button(
-    rect.x + FaceX, rect.y + FaceY, FaceSize, FaceSize, face_text, false, focus = 0);
+    FaceX, FaceY, FaceSize, FaceSize, face_text, false, focus = 0);
   format_time(timer_text, timer_seconds());
   ignored := syslib.draw_text(
-    rect.x + TimerX, rect.y + TimerY, timer_text, black);
+    TimerX, TimerY, timer_text, black);
 
   i := 0;
   while i < CellCount do
@@ -660,23 +663,15 @@ begin
   else
     flag_text := "Flag";
   ignored := stdlib.ui_button(
-    rect.x + FlagX, rect.y + FlagY, FlagW, FlagH, flag_text, flag_mode, focus = 1);
+    FlagX, FlagY, FlagW, FlagH, flag_text, flag_mode, focus = 1);
 
   ignored := syslib.draw_text(
-    rect.x + StatusX, rect.y + StatusY, status_text, black);
+    StatusX, StatusY, status_text, black);
 end;
 
 procedure present_frame();
 begin
   ignored := syslib.window_present(id);
-end;
-
-// Re-reads the content rectangle after the service moved the window (spec
-// 0011, W12/W17/W28; ADR 0046): every cell and header coordinate derives from
-// `rect`, so a refreshed rectangle is all the repaint and hit-testing need.
-procedure refresh_rect();
-begin
-  status := syslib.window_content_rect(id, rect);
 end;
 
 // ---- input ---------------------------------------------------------------
@@ -701,23 +696,23 @@ var
   index: int;
 begin
   if stdlib.ui_button_hit(
-    rect.x + FaceX, rect.y + FaceY, FaceSize, FaceSize, px, py) then
+    FaceX, FaceY, FaceSize, FaceSize, px, py) then
   begin
     focus := 0;
     restart();
   end
   else if stdlib.ui_button_hit(
-    rect.x + FlagX, rect.y + FlagY, FlagW, FlagH, px, py) then
+    FlagX, FlagY, FlagW, FlagH, px, py) then
   begin
     focus := 1;
     flag_mode := not flag_mode;
     update_status();
   end
   else if stdlib.ui_rect_hit(
-    rect.x + FieldX, rect.y + FieldY, GridN * CellSize, GridN * CellSize, px, py) then
+    FieldX, FieldY, GridN * CellSize, GridN * CellSize, px, py) then
   begin
-    r := (py - (rect.y + FieldY)) div CellSize;
-    c := (px - (rect.x + FieldX)) div CellSize;
+    r := (py - FieldY) div CellSize;
+    c := (px - FieldX) div CellSize;
     index := r * GridN + c;
     if right or flag_mode then
       toggle_flag(index)
@@ -775,7 +770,6 @@ begin
       begin
         if ev.window = id then
         begin
-          refresh_rect();
           dirty := true;
         end;
       end
@@ -824,7 +818,6 @@ begin
       begin
         if ev.window = id then
         begin
-          refresh_rect();
           draw_frame();
           present_frame();
         end;
@@ -862,7 +855,9 @@ end;
 
 procedure click_at(px: int; py: int);
 begin
-  status := inject.pointer_to(px, py);
+  // `px`/`py` are window-local; the pointer state is screen-coordinate
+  // (spec 0010 I35), so the content origin is added here.
+  status := inject.pointer_to(origin.x + px, origin.y + py);
   drain_events();
   status := inject.pointer_down();
   drain_events();
@@ -887,7 +882,7 @@ var
   y: int;
 begin
   cell_center(index, x, y);
-  status := inject.pointer_to(x, y);
+  status := inject.pointer_to(origin.x + x, origin.y + y);
   drain_events();
   status := syslib.inject_pointer(0, 0, uint(2));
   drain_events();
@@ -993,22 +988,22 @@ begin
   present_frame();
 
   // Baseline: empty board, header, face and status.
-  verify("content white", syslib.get_pixel(rect.x + 2, rect.y + 2) = white);
-  verify("bezel black", syslib.get_pixel(rect.x, rect.y + 20) = black);
+  verify("content white", syslib.get_pixel(2, 2) = white);
+  verify("bezel black", syslib.get_pixel(0, 20) = black);
   cell_rect(0, x, y);
   verify("closed outline", syslib.get_pixel(x, y) = black);
   verify("closed face", syslib.get_pixel(x + 5, y + 5) = gray);
   verify("closed bevel", syslib.get_pixel(x + 2, y + 2) = white);
   verify("counter text", counter_text = "010");
-  verify("counter ink", syslib.get_pixel(rect.x + CounterX + 1, rect.y + CounterY) = black);
+  verify("counter ink", syslib.get_pixel(CounterX + 1, CounterY) = black);
   verify("timer text", timer_text = "00:00");
-  verify("timer ink", syslib.get_pixel(rect.x + TimerX + 1, rect.y + TimerY) = black);
+  verify("timer ink", syslib.get_pixel(TimerX + 1, TimerY) = black);
   verify("face playing", face_text = ":)");
-  verify("face border", syslib.get_pixel(rect.x + FaceX, rect.y + FaceY) = black);
-  verify("face interior", syslib.get_pixel(rect.x + FaceX + 2, rect.y + FaceY + 2) = white);
-  verify("face ink", syslib.get_pixel(rect.x + FaceX + 9, rect.y + FaceY + 12) = black);
+  verify("face border", syslib.get_pixel(FaceX, FaceY) = black);
+  verify("face interior", syslib.get_pixel(FaceX + 2, FaceY + 2) = white);
+  verify("face ink", syslib.get_pixel(FaceX + 9, FaceY + 12) = black);
   verify("status start", status_text = "Click to start");
-  verify("status ink", syslib.get_pixel(rect.x + StatusX + 2, rect.y + StatusY) = black);
+  verify("status ink", syslib.get_pixel(StatusX + 2, StatusY) = black);
   verify("flag button off", not flag_mode);
 
   // 1. The fixed board: ten mines, a zero cell and a numbered cell.
@@ -1039,7 +1034,7 @@ begin
   cell_rect(2, x, y);
   verify("closed mine gray", syslib.get_pixel(x + 10, y + 10) = gray);
   verify("play status", status_text = "Flags: 0");
-  verify("play status ink", syslib.get_pixel(rect.x + StatusX, rect.y + StatusY) = black);
+  verify("play status ink", syslib.get_pixel(StatusX, StatusY) = black);
   verify("timer running", timer_seconds() >= 0);
 
   // 3. First-click safety: clicking a known mine moves it to the first free
@@ -1059,7 +1054,7 @@ begin
   first_closed_cell();
   verify("flag target closed", test_cell >= 0 and not opened[test_cell]);
   cell_center(test_cell, x, y);
-  status := inject.pointer_to(x, y);
+  status := inject.pointer_to(origin.x + x, origin.y + y);
   drain_events();
   status := syslib.inject_pointer(0, 0, uint(2));
   verify("right mask", syslib.pointer_buttons() = uint(2));
@@ -1077,18 +1072,18 @@ begin
   verify("flag gone", syslib.get_pixel(x + 16, y + 7) = gray);
 
   // 5. Flag mode: the button turns it on and a left click flags.
-  click_at(rect.x + FlagX + FlagW div 2, rect.y + FlagY + FlagH div 2);
+  click_at(FlagX + FlagW div 2, FlagY + FlagH div 2);
   verify("flag mode on", flag_mode and focus = 1);
-  verify("flag button pressed", syslib.get_pixel(rect.x + FlagX + 2, rect.y + FlagY + 2) = gray);
+  verify("flag button pressed", syslib.get_pixel(FlagX + 2, FlagY + 2) = gray);
   first_closed_cell();
   cell_center(test_cell, x, y);
   click_at(x, y);
   verify("mode flags", flagged[test_cell] and not opened[test_cell] and flags = 1);
   click_at(x, y);
   verify("mode unflags", not flagged[test_cell] and flags = 0);
-  click_at(rect.x + FlagX + FlagW div 2, rect.y + FlagY + FlagH div 2);
+  click_at(FlagX + FlagW div 2, FlagY + FlagH div 2);
   verify("flag mode off", not flag_mode);
-  verify("flag button released", syslib.get_pixel(rect.x + FlagX + 2, rect.y + FlagY + 2) = white);
+  verify("flag button released", syslib.get_pixel(FlagX + 2, FlagY + 2) = white);
 
   // 6. Flags are capped at ten.
   prepare_known();
@@ -1130,7 +1125,7 @@ begin
   verify("loss shows every mine", ok);
   cell_rect(test_cell, x, y);
   verify("mine ink", syslib.get_pixel(x + 15, y + 15) = black);
-  verify("boom ink", syslib.get_pixel(rect.x + StatusX, rect.y + StatusY) = black);
+  verify("boom ink", syslib.get_pixel(StatusX, StatusY) = black);
   t0 := timer_seconds();
   at := 0;
   while at < 200000 do
@@ -1163,7 +1158,7 @@ begin
   verify("win status", status_text = "You win");
   draw_frame();
   present_frame();
-  verify("win ink", syslib.get_pixel(rect.x + StatusX, rect.y + StatusY) = black);
+  verify("win ink", syslib.get_pixel(StatusX, StatusY) = black);
   t0 := timer_seconds();
   at := 0;
   while at < 200000 do
@@ -1172,7 +1167,7 @@ begin
   verify("win freezes the timer", t1 = t0);
 
   // 9. The face restarts: counters and timer reset.
-  click_at(rect.x + FaceX + FaceSize div 2, rect.y + FaceY + FaceSize div 2);
+  click_at(FaceX + FaceSize div 2, FaceY + FaceSize div 2);
   verify("restart state", not mines_placed and not started and not lost and not won);
   verify("restart flags", flags = 0 and safe_open = 0);
   verify("restart timer", timer_seconds() = 0 and timer_text = "00:00");
@@ -1382,10 +1377,8 @@ begin
       out.say("minesweeper: no window\n")
     else
     begin
-      status := syslib.window_content_rect(id, rect);
-      if status <> Ok then
-        out.say("minesweeper: no content rect\n")
-      else if args = "check" then
+      status := syslib.window_content_rect(id, origin);
+      if args = "check" then
       begin
         fixed_seed := true;
         restart();

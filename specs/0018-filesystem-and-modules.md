@@ -277,9 +277,9 @@ the scrollbar track pages and the thumb drags, and the close box cancels through
 the owner `EventKind.Close` request. The thumb drag is deferred (M16.8): held
 primary-button moves move only a preview thumb and recomposite just the
 scrollbar strip, and the release applies the dropped position to `top` once and
-repaints the listing. An owner `Expose` re-reads
-`window_content_rect` so a dragged dialog redraws at its new origin, and only a
-visible change repaints.
+repaints the listing. The dialog draws in window-local coordinates (spec 0026 C8), so an
+owner `Expose` repaints without refreshing an origin (the content rectangle is kept only
+for `syslib.present`'s screen rectangle), and only a visible change repaints.
 
 `Ok` publishes the whole regular-file path into `chosen` with one
 `core.substr_into`; a cancel is `Invalid` and a path that does not fit is

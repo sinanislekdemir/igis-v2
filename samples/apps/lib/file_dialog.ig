@@ -475,14 +475,16 @@ begin
     d.rect := r;
 end;
 
+// Drawing and hit-testing are window-local (spec 0026 C8); `d.rect` is kept
+// only for `syslib.present`'s screen rectangle (C7).
 function list_x(d: const Dialog): int;
 begin
-  return d.rect.x + ListLeft;
+  return ListLeft;
 end;
 
 function list_y(d: const Dialog): int;
 begin
-  return d.rect.y + ListTop;
+  return ListTop;
 end;
 
 // `igis:/` plus the current directory; a path too wide for the line keeps the
@@ -563,11 +565,11 @@ var
   st: Status;
 begin
   build_display_path(d, display);
-  st := syslib.draw_text(d.rect.x + 8, d.rect.y + 4, display, uint(ColorBlack));
-  up_x := d.rect.x + ContentW - 8 - UpW;
-  up_y := d.rect.y + 3;
+  st := syslib.draw_text(8, 4, display, uint(ColorBlack));
+  up_x := ContentW - 8 - UpW;
+  up_y := 3;
   st := stdlib.ui_button(up_x, up_y, UpW, UpH, "Up", false, false);
-  st := stdlib.ui_separator(d.rect.x, d.rect.y + PathH - 1, ContentW);
+  st := stdlib.ui_separator(0, PathH - 1, ContentW);
 end;
 
 procedure draw_list(d: const Dialog);
@@ -645,7 +647,7 @@ var
   hint: string[32];
   st: Status;
 begin
-  st := stdlib.ui_separator(d.rect.x, d.rect.y + StatusTop - 6, ContentW);
+  st := stdlib.ui_separator(0, StatusTop - 6, ContentW);
   to := int(core.len(d.status));
   if to > MaxStatusBytes then
     to := MaxStatusBytes;
@@ -654,11 +656,11 @@ begin
   copied := core.substr_into(text, d.status, 0, to);
   if copied > 0 then
     st := syslib.draw_text(
-      d.rect.x + 8, d.rect.y + StatusTop, text, uint(ColorBlack));
+      8, StatusTop, text, uint(ColorBlack));
   hint := "Enter open  Bksp up  Esc cancel";
   width := stdlib.ui_text_width(hint);
   st := syslib.draw_text(
-    d.rect.x + ContentW - 8 - width, d.rect.y + StatusTop,
+    ContentW - 8 - width, StatusTop,
     hint, uint(ColorGray));
 end;
 
@@ -669,8 +671,8 @@ var
   y: int;
   st: Status;
 begin
-  y := d.rect.y + ButtonTop;
-  cancel_x := d.rect.x + ContentW - 8 - ButtonW;
+  y := ButtonTop;
+  cancel_x := ContentW - 8 - ButtonW;
   open_x := cancel_x - 12 - ButtonW;
   st := stdlib.ui_dialog_button(
     open_x, y, ButtonW, ButtonH, "Open", false, true);
@@ -684,7 +686,7 @@ var
   st: Status;
 begin
   st := stdlib.ui_scrollbar(
-    d.rect.x + ScrollLeft, d.rect.y + ListTop, ScrollW, BodyH,
+    ScrollLeft, ListTop, ScrollW, BodyH,
     position, ListRows, d.count, false);
 end;
 
@@ -697,6 +699,8 @@ var
 begin
   st := syslib.window_begin(d.id);
   draw_scrollbar_at(d, d.scroll_preview);
+  // `present` takes a screen rectangle (spec 0026 C7): the one call that still
+  // adds the content origin.
   st := syslib.present(
     d.rect.x + ScrollLeft, d.rect.y + ListTop, ScrollW, BodyH);
 end;
@@ -708,8 +712,7 @@ procedure draw_dialog(d: const Dialog);
 var
   st: Status;
 begin
-  st := syslib.fill_rect(
-    d.rect.x, d.rect.y, ContentW, ContentH, uint(ColorWhite));
+  st := syslib.fill_rect(0, 0, ContentW, ContentH, uint(ColorWhite));
   draw_path(d);
   draw_list(d);
   if d.scroll_dragging then
@@ -779,9 +782,9 @@ begin
   if max < 0 then
     max := 0;
   pos := stdlib.ui_scrollbar_clamp(d.top, ListRows, d.count);
-  thumb_y := d.rect.y + ListTop + 2;
+  thumb_y := ListTop + 2;
   if max > 0 and travel > 0 then
-    thumb_y := d.rect.y + ListTop + 2 + (travel * pos) div max;
+    thumb_y := ListTop + 2 + (travel * pos) div max;
 end;
 
 // Ends a thumb drag and applies the preview to the view (M16.8): the listing
@@ -852,7 +855,7 @@ begin
       if travel > 0 and max_top > 0 then
       begin
         desired := ev.y - d.scroll_grab_dy;
-        top_y := d.rect.y + ListTop + 2;
+        top_y := ListTop + 2;
         if desired < top_y then
           desired := top_y;
         if desired > top_y + travel then
@@ -874,14 +877,14 @@ begin
     return false;
 
   if stdlib.ui_button_hit(
-       d.rect.x + ContentW - 8 - UpW, d.rect.y + 3, UpW, UpH, ev.x, ev.y) then
+       ContentW - 8 - UpW, 3, UpW, UpH, ev.x, ev.y) then
   begin
     go_up(d);
     return true;
   end;
 
   if stdlib.ui_button_hit(
-       d.rect.x + ContentW - 8 - ButtonW, d.rect.y + ButtonTop,
+       ContentW - 8 - ButtonW, ButtonTop,
        ButtonW, ButtonH, ev.x, ev.y) then
   begin
     cancel(d);
@@ -889,7 +892,7 @@ begin
   end;
 
   if stdlib.ui_button_hit(
-       d.rect.x + ContentW - 8 - ButtonW - 12 - ButtonW, d.rect.y + ButtonTop,
+       ContentW - 8 - ButtonW - 12 - ButtonW, ButtonTop,
        ButtonW, ButtonH, ev.x, ev.y) then
   begin
     activate(d);
@@ -897,10 +900,10 @@ begin
   end;
 
   if stdlib.ui_rect_hit(
-       d.rect.x + ScrollLeft, d.rect.y + ListTop, ScrollW, BodyH, ev.x, ev.y) then
+       ScrollLeft, ListTop, ScrollW, BodyH, ev.x, ev.y) then
   begin
     action := stdlib.ui_scrollbar_hit(
-      d.rect.x + ScrollLeft, d.rect.y + ListTop, ScrollW, BodyH,
+      ScrollLeft, ListTop, ScrollW, BodyH,
       ev.x, ev.y, d.top, ListRows, d.count);
     if action = 3 then
     begin
