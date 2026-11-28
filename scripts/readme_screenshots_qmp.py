@@ -64,14 +64,14 @@ def menu_row(index):
 
 # Apps item order (`samples/apps/base/desktop_shell.ig`, spec 0012 D20):
 #  0 #Accessories  1 Calculator   2 Clock        3 Widgets   4 Image Viewer
-#  5 #Games        6 Minesweeper  7 #Productivity 8 Editor   9 File Browser
-# 10 Calendar     11 #Utilities  12 Terminal    13 Settings
+#  5 Music        6 #Games        7 Minesweeper   8 #Productivity
+#  9 Editor       10 File Browser 11 Calendar     12 #Utilities 13 Terminal 14 Settings
 ROW_CALCULATOR = 1
 ROW_CLOCK = 2
 ROW_WIDGETS = 3
-ROW_EDITOR = 8
-ROW_BROWSER = 9
-ROW_TERMINAL = 12
+ROW_EDITOR = 9
+ROW_BROWSER = 10
+ROW_TERMINAL = 13
 
 # `window_open` arguments (frame origin and content size), from each sample.
 LOG = (8, 26, 1002, 729)          # kernel System Log, content + chrome, opened bottom

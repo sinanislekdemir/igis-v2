@@ -7543,6 +7543,116 @@ impl<'a, 'b, 'p> FnCompiler<'a, 'b, 'p> {
             "syslib.plane_begin" => self.plane_id_call(builtin::PLANE_BEGIN, target, args, line, column),
             "syslib.plane_present" => self.plane_id_call(builtin::PLANE_PRESENT, target, args, line, column),
             "syslib.work_area_reserve" => self.work_area_reserve_call(args, line, column),
+            // Audio output (spec 0030). `sound_write` takes a `string` or
+            // `bytes` buffer, like `core.write`; the rest are scalars.
+            "syslib.sound_open" => {
+                if args.len() != 3 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`syslib.sound_open` expects 3 arguments, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                for (index, name) in ["rate", "channels", "bits"].iter().enumerate() {
+                    let value = self.expr_scalar(args[index])?;
+                    if value.kind != Kind::Int {
+                        return Err(self.err_at(
+                            args[index],
+                            format_args!(
+                                "`syslib.sound_open` expects an `int` {name}, found `{value}`"
+                            ),
+                        ));
+                    }
+                }
+                self.one(opcodes::BUILTIN, builtin::SOUND_OPEN)?;
+                self.pop(3)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "syslib.sound_write" => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`syslib.sound_write` expects 1 argument, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                let data = self.emit_ref(args[0], None)?;
+                if data.kind != Kind::Bytes && data.kind != Kind::String {
+                    let found = self.type_name(data);
+                    return Err(self.err_at(
+                        args[0],
+                        format_args!(
+                            "`syslib.sound_write` expects a `string` or `bytes`, found `{found}`"
+                        ),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::SOUND_WRITE)?;
+                self.pop(1)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "syslib.sound_close" => {
+                if !args.is_empty() {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`syslib.sound_close` expects 0 arguments, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::SOUND_CLOSE)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "syslib.sound_volume" | "syslib.sound_mute" => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!("`{target}` expects 1 argument, got {}", args.len()),
+                    ));
+                }
+                let value = self.expr_scalar(args[0])?;
+                if value.kind != Kind::Int {
+                    return Err(self.err_at(
+                        args[0],
+                        format_args!("`{target}` expects an `int`, found `{value}`"),
+                    ));
+                }
+                let id = if target == "syslib.sound_volume" {
+                    builtin::SOUND_VOLUME
+                } else {
+                    builtin::SOUND_MUTE
+                };
+                self.one(opcodes::BUILTIN, id)?;
+                self.pop(1)?;
+                self.push();
+                Ok(Some(Type::enumeration(STATUS_ENUM)))
+            }
+            "syslib.sound_queued" => {
+                if !args.is_empty() {
+                    return Err(self.err(
+                        line,
+                        column,
+                        format_args!(
+                            "`syslib.sound_queued` expects 0 arguments, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                self.one(opcodes::BUILTIN, builtin::SOUND_QUEUED)?;
+                self.push();
+                Ok(Some(Type::scalar(Kind::Uint)))
+            }
             // Ring operations (spec 0003, "Rings") are compiler-recognised
             // built-in procedures, not host builtins: they lower to the
             // ordinary reference/copy/branch instructions over the ring's

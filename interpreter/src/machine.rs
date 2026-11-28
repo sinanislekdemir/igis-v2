@@ -759,6 +759,52 @@ pub trait Host {
         Err(Status::Invalid)
     }
 
+    // ---- audio output (spec 0030; ADR 0063/0064) ------------------------
+    //
+    // One machine-wide playback stream. The kernel host binds it to the calling
+    // task as the owner; the machine never sees the id. Defaults model a host
+    // with no sound device (`Invalid` / `0`), so `langhost` and mocks compile
+    // and report the disabled service.
+
+    /// Opens the stream for the calling task (`syslib.sound_open`). Pushes a
+    /// `Status`: `Ok`, `Invalid` for an unsupported format, `Full` when another
+    /// task owns it, `IoError` when no device exists. The default is `Invalid`.
+    fn sound_open(&mut self, _rate: u64, _channels: u64, _bits: u64) -> u64 {
+        Status::Invalid as u64
+    }
+
+    /// Enqueues one buffer (`syslib.sound_write`). Returns the `Status`
+    /// ordinal; `WouldBlock` makes the machine block on [`WaitKind::Audio`]
+    /// and retry the same instruction with its operands intact. The default is
+    /// `Invalid`.
+    fn sound_write(&mut self, _bytes: &[u8]) -> u64 {
+        Status::Invalid as u64
+    }
+
+    /// Stops the stream and clears the owner (`syslib.sound_close`). The
+    /// default is `Invalid`.
+    fn sound_close(&mut self) -> u64 {
+        Status::Invalid as u64
+    }
+
+    /// Sets both channels from a percentage (`syslib.sound_volume`). The
+    /// machine validates `0..=100`; the default is `Invalid`.
+    fn sound_volume(&mut self, _percent: u64) -> u64 {
+        Status::Invalid as u64
+    }
+
+    /// Mutes or unmutes both channels (`syslib.sound_mute`). The machine
+    /// validates `0`/`1`; the default is `Invalid`.
+    fn sound_mute(&mut self, _on: u64) -> u64 {
+        Status::Invalid as u64
+    }
+
+    /// Bytes enqueued but not yet consumed (`syslib.sound_queued`). The
+    /// default is `0`.
+    fn sound_queued(&mut self) -> u64 {
+        0
+    }
+
     /// Reports selector readiness for a socket (`core.next_any` source tag,
     /// spec 0020; ADR 0050). Data, EOF, an error, a pending listener connection
     /// or an expired deadline is ready; a bare completed connect is not, because
@@ -910,6 +956,9 @@ pub enum WaitKind {
     /// Wait until the monotonic clock reaches this nanosecond value (the
     /// generic deadline arm; the 1 kHz service opportunity marks expiry).
     Deadline(u64),
+    /// Wait for room in the audio ring (`syslib.sound_write`, spec 0030, C4).
+    /// A wake is a hint: the retried builtin re-checks the exact length.
+    Audio,
 }
 
 /// Result of [`Host::wait`].
@@ -2429,6 +2478,46 @@ impl Machine {
                             let status = host.work_area_reserve(height as i64);
                             self.push(stack, status as u64)?;
                         }
+                    }
+                    // Audio output (spec 0030; ADR 0063/0064). `sound_write`
+                    // blocks on a full ring: the instruction is retried with its
+                    // operands intact after `audio::service` frees a period.
+                    builtin::SOUND_OPEN => {
+                        let bits = self.pop(stack)?;
+                        let channels = self.pop(stack)?;
+                        let rate = self.pop(stack)?;
+                        let status = host.sound_open(rate, channels, bits);
+                        self.push(stack, status)?;
+                    }
+                    builtin::SOUND_WRITE => {
+                        let data_bits = self.pop(stack)?;
+                        let data = self.resolve_text(data_bits, state, stack, constants, args)?;
+                        match host.sound_write(data) {
+                            status if status == Status::WouldBlock as u64 => {
+                                self.pc = pc;
+                                self.sp = saved_sp;
+                                return Ok(Step::Blocked(WaitKind::Audio));
+                            }
+                            status => self.push(stack, status)?,
+                        }
+                    }
+                    builtin::SOUND_CLOSE => {
+                        let status = host.sound_close();
+                        self.push(stack, status)?;
+                    }
+                    builtin::SOUND_VOLUME => {
+                        let percent = self.pop(stack)?;
+                        let status = host.sound_volume(percent);
+                        self.push(stack, status)?;
+                    }
+                    builtin::SOUND_MUTE => {
+                        let on = self.pop(stack)?;
+                        let status = host.sound_mute(on);
+                        self.push(stack, status)?;
+                    }
+                    builtin::SOUND_QUEUED => {
+                        let queued = host.sound_queued();
+                        self.push(stack, queued)?;
                     }
                     // System control (spec 0017). No operands: the host owns
                     // the stop/reset path and the status is only observable on

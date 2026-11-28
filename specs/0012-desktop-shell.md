@@ -199,15 +199,16 @@ resize. Those are M2.4/M2.5.
   Calculator drag/click proof. A boot desktop cannot halt the system by losing its own
   window.
 - **D20 (MUST):** The `Apps` item is the application-selection pull-down (M8.3, updated
-  by M11, the PNG viewer slice and the calendar). It has one 16-pixel row per item,
-  14 rows in four sections led by non-selectable header rows:
+  by M11, the PNG viewer slice, the calendar and the music player). It has one
+  16-pixel row per item, 15 rows in four sections led by non-selectable header rows:
   `Accessories` → `apps/accessories/calculator`, `apps/accessories/clock_window`,
-  `apps/accessories/widgets`, `apps/accessories/image_viewer`;
+  `apps/accessories/widgets`, `apps/accessories/image_viewer`,
+  `apps/accessories/music_player`;
   `Games` → `apps/games/minesweeper`;
   `Productivity` → `apps/productivity/editor`, `apps/productivity/browser`,
   `apps/productivity/calendar`;
   `Utilities` → `apps/utilities/terminal`, `apps/utilities/settings`. The frame is
-  `(menu_apps_x - 4, MenuHeight, 220, 14 * 16 + 2)` (226 pixels tall); it is drawn with
+  `(menu_apps_x - 4, MenuHeight, 220, 15 * 16 + 2)` (242 pixels tall); it is drawn with
   the M2.4.3 menu helpers, and a section header is a `#`-prefixed label that the helpers
   draw as plain non-selectable text. Opening the menu takes the modal popup input grab
   (spec 0011, W26) with the frame as the advisory rectangle and launches nothing;
@@ -217,12 +218,13 @@ resize. Those are M2.4/M2.5.
   never waits in normal mode. Every Terminal activation spawns a new emulator; there is
   no raise-first path. `F9` toggles Apps, `F10` toggles System, Up/Down move the
   highlight across selectable rows, Enter activates and Left/Right switch between the
-  two pull-downs. The check mode verifies the item table (rows 0–13; `Image Viewer` is
-  row 4 and selectable but is not launched, because its file dialog would block), the
+  two pull-downs. The check mode verifies the item table (rows 0–14; `Image Viewer` is
+  row 4, `Music` row 5, both selectable but neither is launched, because the viewer's
+  file dialog would block), the
   section headers, both menus' grab/open/close, one real launch (the `clock_window`
   deterministic check exits on its own and is reaped with `core.wait`), the outside-click
-  dismissal, the key switching and the pixels; the Settings row (13) is part of the item
-  table and is selectable, and the Terminal row is index 12. `scripts/apps_menu_qmp.py`
+  dismissal, the key switching and the pixels; the Settings row (14) is part of the item
+  table and is selectable, and the Terminal row is index 13. `scripts/apps_menu_qmp.py`
   proves a real `Clock` click on the boot desktop and a second Terminal activation.
   The shell also claims the persistent pointer-region claim
   `(0, 0, screen_w, MenuHeight)` at startup, in normal and check mode, and releases it on
@@ -442,3 +444,4 @@ while that id is its own; otherwise it presents what the service last left.
 | 2026-11-26 | The calendar (spec 0027) adds `Productivity` → `Calendar` at row 10. The Apps menu is now 14 rows (226 pixels): the `#Utilities` header moves to 11, Terminal to 12 and Settings to 13; Calendar is row 10. `scripts/apps_menu_qmp.py` and `scripts/boot_desktop_qmp.py` move the Terminal row to y = 223, and `scripts/settings_desktop_qmp.py` uses Settings row 13 (y = 239). No opcode, builtin or `stdlib` helper changes. |
 | 2026-11-27 | The cwd-aware file-command group gains `touch` (create an empty `home/` file, spec 0019 E3) and `httpserver` (serve the shell's current directory, spec 0020 N19). Both are ordinary `base/` apps; `help` lists `touch`. No shell builtin, opcode, builtin or kernel change. |
 | 2026-11-27 | The hardcoded `is_file_command` list is replaced by the L11 command convention (spec 0018): a bare `base/` (or `system/`) command always receives `"<cwd display>\n<tail>"`, while an `apps/<category>/` GUI application and `run` keep the raw tail. `lib.path.split_cwd` is the shared parser; `nc`, `purl`, `child`, `text`, `floats`, `ifconfig`, `nslookup` and `net_probe` now read only the tail. No shell builtin, opcode, builtin or kernel change. |
+| 2026-11-28 | The music player (spec 0031) adds `Accessories` → `Music` at row 5. The Apps menu is now 15 rows (242 pixels): `#Games` moves to 6, Minesweeper 7, `#Productivity` 8, Text Editor 9, File Browser 10, Calendar 11, `#Utilities` 12, Terminal 13 and Settings 14. The check item table and the QMP harness row constants move (Browser y = 191, Calendar 207, Terminal 239, Settings 255); `scripts/apps_menu_qmp.py` passes. No opcode, builtin or `stdlib` helper changes. |

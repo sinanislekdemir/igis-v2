@@ -82,6 +82,9 @@ pub enum WaitFor {
     /// spec 0020, N13). The 1 kHz tick marks expiry in the service opportunity;
     /// the timer path never takes a slot lock.
     Deadline(u64),
+    /// Room for a blocked `syslib.sound_write` in the audio ring (spec 0030,
+    /// C4). A single variant: the wake is a hint and the retry re-checks.
+    Audio,
 }
 
 /// The scheduling class of a task (spec 0007, ADR 0016).
@@ -625,6 +628,7 @@ fn waits_on_source(wait: WaitFor, source: u64) -> bool {
         WaitFor::Any(set) => set.contains(source),
         WaitFor::Child(_) => false,
         WaitFor::Deadline(_) => false,
+        WaitFor::Audio => false,
     }
 }
 
@@ -747,6 +751,13 @@ pub fn wake_input() {
 /// slot locks are never nested inside the network lock.
 pub fn wake_net(handle: u64) {
     wake_source(socket_source(handle));
+}
+
+/// Makes every task blocked on audio ring space runnable (spec 0030, C4).
+/// Called by `audio::service` after it consumes at least one period; the retry
+/// re-checks the exact write length, so a spurious wake is harmless.
+pub fn wake_audio() {
+    wake_matching(|wait| wait == WaitFor::Audio);
 }
 
 /// Makes every task blocked on session `id`'s output source runnable

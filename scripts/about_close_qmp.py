@@ -48,7 +48,7 @@ SYSTEM_LABEL = (170, 10)
 ABOUT_ROW = (260, 24)
 # The desktop's direct `Terminal` item (x range 180..256, y 0..22).
 APPS_LABEL = (64, 10)
-TERMINAL_ROW = (140, 191)
+TERMINAL_ROW = (140, 239)
 
 MENU_HEIGHT = 22
 ABOUT_W = 420

@@ -2306,6 +2306,19 @@ fn clock_window_compiles_and_reports_the_host_path() {
 /// month lengths, weekday/lead/row math, navigation clamping and the host
 /// verdict run with no window.
 #[test]
+/// The M21 WAV player compiles against the six `syslib.sound_*` builtins and
+/// `lib.wav`, then reports the host path: `langhost` has no audio device and
+/// the host tree has no `audio/` corpus, so `check` stops at `host ok`.
+#[test]
+fn the_music_player_compiles_and_reports_the_host_path() {
+    let path = app_path("music_player");
+    let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let package = langhost::compile(&source, "music_player").expect("compiles");
+    let result = langhost::run(&package.code, b"check", langhost::DEFAULT_BUDGET).expect("verifies");
+    assert_eq!(result.reason, ExitReason::Ok);
+    assert_eq!(result.output, b"music_player: host ok\n".to_vec());
+}
+
 fn calendar_compiles_and_reports_the_host_path() {
     let path = app_path("calendar");
     let source = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));

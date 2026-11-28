@@ -23,7 +23,8 @@ non-interlaced stream. A raw format removes that work: a row is a direct read,
 and any row can be sought by index. The four source images are 3776×2832,
 3000×2000, 4000×2667 and 4608×2963; as uncompressed P6 RGB they are 32.1, 18.0,
 32.0 and 41.0 MB, **123.0 MB in total**. The applications image therefore grows
-from 64 MiB to **128 MiB** for both the product and the `--shell` image.
+from 64 MiB to **160 MiB** for both the product and the `--shell` image (128 MiB
+when the corpus landed; raised for the audio samples, spec 0031).
 
 This specification covers the P6 corpus, the `lib.ppm` header/row contract, the
 viewer dispatch between PNG and PPM, and the row-sampling preview. It does not
@@ -41,7 +42,7 @@ add a kernel codec, compression, or any Netpbm format other than P6.
   resized, cropped or colour-managed.
 - **C2 (MUST):** The four generated corpus files are 3776×2832, 3000×2000,
   4000×2667 and 4608×2963. The generated corpus is about 123.0 MB; the tracked
-  JPEG sources are about 5.2 MB; the applications image is **128 MiB** for both
+  JPEG sources are about 5.2 MB; the applications image is **160 MiB** for both
   the product and the `--shell` image.
 - **C3 (MUST):** The PNG decoder and its corpus requirements stay in the tree
   for PNG input (spec 0023); the PNG path is not removed or reduced. An
@@ -230,3 +231,4 @@ holds the path and geometry.
 | 2026-11-22 | `samples/apps/lib/ppm.ig` is implemented and proved by `ppm_probe` on `langhost` and in the `--shell` image: `probe`/`open`/`info`/`read_row`, 256-byte header refills with absolute offsets and comments, one whitespace separator after maxval, P6/maxval-255 only, and the status set `NotFound`/`Invalid`/`CapacityExceeded`/`IoError`. |
 | 2026-11-22 | The dual-format viewer is implemented (`apps/accessories/image_viewer`): `.png` keeps the spec 0023 `lib.png` path (normal-class open, realtime row loop, `png.rewind` on `Expose`), `.ppm` uses `lib.ppm` with `ceil(w/8) x ceil(h/8)` row-seek/nearest-column sampling into a 3,072-byte `preview_row` and a per-row realtime heartbeat (needed under TCG), and a suffix-less path tries PPM then PNG. The 20 px status strip is shared and ends at `Ready`. `check` adds the 8x8 `system/ppm_rgb.ppm` formula fixture. The `image_viewer_qmp.py` proof now opens `image/simon-twukN12EN7c-unsplash.ppm`; the Desktop capture is 1024x768 with the `Ready` strip. |
 | 2026-11-27 | Image viewer: the opening window's queued Expose is answered with `window_present` instead of a second PPM open/row-seek preview pass (spec V6). `image_viewer shot` no longer consumes and re-renders that Expose; `Ready` still follows the one complete pass. No ABI, builtin, kernel or file-API change. |
+| 2026-11-28 | C2 raises the applications image from 128 MiB to **160 MiB** for both the product and the `--shell` image, so the classical audio corpus (spec 0031) fits with headroom; the PPM corpus itself is unchanged at 123.0 MB. No kernel, format or reader change; `e2fsck -fn` is clean. |

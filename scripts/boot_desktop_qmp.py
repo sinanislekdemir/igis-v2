@@ -41,7 +41,7 @@ DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-boot-desktop.png")
 # Apps row (row 12: y = 22 + 1 + 12*16 + 8 = 223). Row 11 is the `#Utilities`
 # section header and is not selectable.
 APPS_LABEL = (64, 10)
-TERMINAL_ROW = (140, 223)
+TERMINAL_ROW = (140, 239)
 
 
 def hid_axis(pixel, extent):

@@ -31,7 +31,7 @@ os.makedirs(SHOT_DIR, exist_ok=True)
 DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-desktop-800x600.png")
 
 APPS_LABEL = (64, 10)
-SETTINGS_ROW = (140, 239)
+SETTINGS_ROW = (140, 255)
 MODE_800X600 = (400, 186)
 APPLY = (320, 315)
 

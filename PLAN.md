@@ -14,14 +14,17 @@ one commit. Behaviour changes still start in `specs/` (ground rule 1).
 
 ## Resume point (update this when a session ends)
 
-- **Current state (M19):** **639 host tests**; specs 0001–0029 (0025–0029 implemented;
-  0026 includes the M17 local-coordinate model; 0028 is the M18 icon grid; 0029 is the
-  M19 browser actions); ABI v1 at 75 opcodes with builtins 80–97; **M2–M19 complete**.
-  The 128 MiB application volume carries the read-only `icons/` directory (four
+- **Current state (M21):** **645 host tests**; specs 0001–0031 (0025–0029
+  implemented; 0026 includes the M17 local-coordinate model; 0028 is the M18 icon
+  grid; 0029 is the M19 browser actions; 0030 is the M20 audio output spec); ABI v1
+  at 75 opcodes with builtins 80–103; **M2–M21 complete** (HDA playback driver,
+  discovery, cyclic BDL, LPIB accounting, boot self-test, the `syslib.sound_*`
+  surface, blocking write, `lib/wav.ig` and `apps/accessories/music_player`).
+  The 160 MiB application volume carries the read-only `icons/` directory (four
   committed 32×32 PPM icons), the browser is a full-width icon grid, and `.ppm`/`.png`,
   `.txt` and the context menu open the viewer/editor or offer editor/terminal/cut/copy/
   paste/delete. Boot loads only
-  `kernel.elf`: the ISO carries no application image, and the 128 MiB read-only ext2
+  `kernel.elf`: the ISO carries no application image, and the 160 MiB read-only ext2
   volume on `ide0` unit 1 is mounted on demand through `ext2w` (229 MiB free in a
   256 MiB guest), with `/home` on the primary master. On TCG/4 cores the desktop is
   ready in ~1.8 s (10.4 s while the image was a GRUB module) and the PPM preview opens
@@ -2657,8 +2660,75 @@ context menu with editor/terminal/cut/copy/paste/delete.
   rows); browser clipboard check copies `base/child` to `home/child`, verifies
   the bytes, deletes it, and stays green. No kernel/ABI/opcode change.
 
-### M16 deferred
+## M20: audio output
 
+Normative: spec 0030 (A1–A11, B1–B7, C1–C6, V1–V4); ADR 0063. Goal: one Intel
+HDA playback stream with discovery-based codec handling, a blocking application
+write and volume/mute.
+
+- [x] **M20.1 Decision and spec.** Spec 0030 accepted and ADR 0063 recorded;
+  owner decisions: playback + volume/mute, blocking write, discovery-based codec
+  with QEMU proven first.
+- [x] **M20.2 HDA bring-up and self-test.** `platform/x86_64/hda.rs` resets the
+  controller, starts CORB/RIRB, discovers the DAC and an output pin, binds them
+  to `SD4`, programs an 8 × 4 KiB cyclic BDL and a 48 kHz/16-bit/stereo format;
+  `audio::service` accounts whole periods from `SD_LPIB`. `igis.audio_selftest=1`
+  streams three rings of 440 Hz. **Done (2026-11-27):** 643 host tests; `-smp 4`
+  and `-smp 1` both log `dac 2 pin 3 sd 4` and `24 periods, 98304 bytes,
+  0 underruns`; `build/audio.wav` verifies at 48 kHz/stereo/s16, 0.512 s, rms
+  5998, peak 6000, ~439 Hz (`scripts/audio_wav_check.py`); the no-device boot
+  still reaches `desktop_shell: ready`. **2026-11-28:** ADR 0064 adds 44.1 kHz;
+  the self-test takes a rate and proves both (`44100 Hz` → 0.558 s captured WAV,
+  `48000 Hz` on `-smp 1` → 0.513 s).
+- [x] **M20.3 Application surface.** Builtins 98–103, `Host` defaults,
+  `WaitKind::Audio`/`WaitFor::Audio`/`task::wake_audio`, compiler names, owner
+  checks and the facade's open/write/close/volume/mute/queued calls.
+  `sound_open` accepts 44100 and 48000 (spec 0030 A8, ADR 0064) through the
+  driver's format field. **Done (2026-11-28):** `music_player: host ok` on
+  `langhost`; the guest proof plays through the builtins.
+- [x] **M20.4 Blocking write.** `sound_write` blocks on a full ring, retries the
+  same instruction after `audio::service` wakes it, and never spins in the
+  interpreter. **Done (2026-11-28):** the player check blocks and wakes through
+  1 s of 44.1 kHz audio; no watchdog fault, no underrun.
+- [x] **M20.5 Proof application and harness.** `apps/accessories/music_player
+  check` parses the sample and plays one second; `scripts/audio_qmp.py` boots the
+  shell image with the WAV backend, quits QEMU cleanly and runs
+  `scripts/audio_wav_check.py`. **Done (2026-11-28):** `music_player: ok` and a
+  1.027 s captured stereo WAV (rms 1923, peak 12373) on `-smp 4` and `-smp 1`.
+  The home image is 256 MiB (spec 0019 H1); an existing smaller image grows in
+  place.
+- [x] **M20.6 Docs and status.** Spec 0030 Implemented, AGENTS/HISTORY rows, the
+  final host-test count (645) and the deferred list. **Done (2026-11-28).**
+
+## M21: WAV playback and the music player
+
+Normative: spec 0031. Goal: `lib/wav.ig` parses RIFF/PCM and the player streams
+it through `syslib.sound_*`; the browser opens `.wav` in it.
+
+Known limitation: `mke2fs` writes an all-zero 1 KiB block as an ext2 hole and
+`ext2w` rejects a zero block pointer (spec 0031, "Known limitation"). The shipped
+excerpt trims its digital-silence lead-in; the follow-up is hole-as-zeros support
+in `ext2w` (spec 0025 B19).
+
+- [x] **M21.1 Sample corpus.** One public-domain classical excerpt under
+  `samples/audio/` (Chopin, Nocturne No. 21), 44.1 kHz/16-bit/stereo WAV, 10 s,
+  staged read-only as `audio/`; provenance and license in
+  `samples/audio/readme.txt`. **Done (2026-11-28):** 1.7 MB (the 160 MiB image
+  keeps headroom); peaks near -1.5 dBFS.
+- [x] **M21.2 Spec and parser.** Spec 0031 accepted and implemented;
+  `lib/wav.ig` (RIFF/WAVE, `fmt ` PCM 16-bit stereo at 44.1/48 kHz, `data`, odd
+  chunk padding, streaming `core.fs_read`; other tags/rates `Invalid`).
+  **Done (2026-11-28).**
+- [x] **M21.3 Player and browser mapping.** `apps/accessories/music_player`
+  (play/pause, volume/mute, progress); the browser maps `.wav` to it.
+  **Done (2026-11-28):** the Apps pull-down also has `Music` (Accessories), a
+  failed open keeps the window open with the reason, and `cargo xtask run`
+  defaults to the host audio backend. `apps_menu_qmp.py` passes.
+- [x] **M21.4 Proof.** The host compiles the player (`music_player: host ok`);
+  `scripts/audio_qmp.py` captures a 1.027 s stereo WAV and checks it on `-smp 4`
+  and `-smp 1`. **Done (2026-11-28).**
+
+### M16 deferred
 | Item | Trigger |
 |---|---|
 | A wallpaper/icon layer below windows (a plane layer or a service image) | the desktop gets a background image (spec 0026 open question 1) |
@@ -2676,6 +2746,7 @@ context menu with editor/terminal/cut/copy/paste/delete.
 | virtio-blk behind `SectorDevice` | spec 0019 | when the ATA path is measured |
 | A journal or an atomic-replace primitive | spec 0019 | when the editor must save without `<target>.tmp` |
 | A file handle / open-once model (Q51) | OPEN-QUESTIONS Q51 | if the per-call path walk measures badly |
+| ext2 holes read as zeros | spec 0025 B19 | the staged tree has a file with a full 1 KiB zero block (audio silence, sparse fixtures) |
 | Recovery from a hardware guard hit (Q47) | OPEN-QUESTIONS Q47 | when a task must survive a kernel-bug guard hit |
 | MMIO/DMA/block handles (Q45/Q9) | OPEN-QUESTIONS | first real block device or MMIO peripheral |
 | Debug/introspection primitive (Q8) | OPEN-QUESTIONS Q8 | when the desktop needs task/system info |

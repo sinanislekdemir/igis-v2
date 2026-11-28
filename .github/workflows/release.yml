@@ -70,18 +70,26 @@ jobs:
           mkdir -p dist
           cp build/igis.iso build/apps.img build/home.img dist/
           install -m 0755 scripts/run-release.sh dist/run.sh
-          (cd dist && sha256sum igis.iso apps.img home.img run.sh > SHA256SUMS)
           ls -lh dist
 
       - name: Boot the assembled release headless
         # The ISO carries only the kernel (spec 0025): the application volume
-        # and /home are the two disk images. Prove the four-file set boots.
+        # and /home are the two disk images. Prove the four-file set boots before
+        # /home is compressed, so the check never depends on the expansion path.
         run: |
           cd dist
           timeout 90 ./run.sh --headless > boot.log 2>&1 || true
           grep -q "desktop_shell: ready" boot.log
           grep -q "apps: volume ok" boot.log
           tail -n 8 boot.log
+
+      - name: Compress the images and checksum the assets
+        # The 256 MiB home image is almost entirely holes and the PPM corpus
+        # roughly halves, so both disks ship gzipped. run.sh expands each once.
+        run: |
+          gzip -9 -f dist/home.img dist/apps.img
+          (cd dist && sha256sum igis.iso apps.img.gz home.img.gz run.sh > SHA256SUMS)
+          ls -lh dist
 
       - name: Publish the release
         env:
@@ -99,8 +107,8 @@ jobs:
           | File | Purpose |
           |------|---------|
           | \`igis.iso\` | kernel + GRUB (the boot medium) |
-          | \`apps.img\` | read-only 128 MiB ext2 application volume (primary slave) |
-          | \`home.img\` | writable 8 MiB ext2 \`/home\` seed (primary master) |
+          | \`apps.img.gz\` | gzipped read-only 160 MiB ext2 application volume (primary slave) |
+          | \`home.img.gz\` | gzipped writable 256 MiB ext2 \`/home\` seed (primary master) |
           | \`run.sh\` | QEMU launcher for the four files |
           | \`SHA256SUMS\` | checksums of the files above |
 
@@ -111,9 +119,10 @@ jobs:
           IGIS_ACCEL=kvm ./run.sh  # use KVM when available
           \`\`\`
 
-          Requires \`qemu-system-x86_64\`. Keep all files in one directory;
-          \`apps.img\` is opened with \`snapshot=on\` (never modified) and
-          \`home.img\` is attached writable, so edits persist there.
+          Requires \`qemu-system-x86_64\` (and \`gunzip\` for the first run). Keep
+          all files in one directory; \`apps.img.gz\` and \`home.img.gz\` are
+          expanded once to \`.img\`, then \`apps.img\` is opened with \`snapshot=on\`
+          (never modified) and \`home.img\` is attached writable, so edits persist.
           EOF
           gh release view "$tag" >/dev/null 2>&1 || \
             gh release create "$tag" --draft \
@@ -121,7 +130,7 @@ jobs:
               --notes-file release-notes.md \
               --verify-tag
           gh release upload "$tag" \
-            dist/igis.iso dist/apps.img dist/home.img dist/run.sh \
+            dist/igis.iso dist/apps.img.gz dist/home.img.gz dist/run.sh \
             dist/SHA256SUMS --clobber
           gh release edit "$tag" --draft=false
 
@@ -136,7 +145,7 @@ jobs:
               echo '|---|---|'
               (
                 cd dist
-                for file in igis.iso apps.img home.img run.sh SHA256SUMS; do
+                for file in igis.iso apps.img.gz home.img.gz run.sh SHA256SUMS; do
                   if [ -f "$file" ]; then
                     echo "| \`$file\` | $(du -h --apparent-size "$file" | cut -f1) |"
                   fi

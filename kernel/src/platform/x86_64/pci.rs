@@ -47,6 +47,13 @@ const E1000_82574L: u16 = 0x10D3;
 const E1000_I217: u16 = 0x153A;
 const E1000_I219: u16 = 0x15B8;
 
+/// Multimedia audio (`04.03`), the class of the HDA controller (spec 0030, A1).
+const CLASS_MULTIMEDIA: u8 = 0x04;
+const SUBCLASS_AUDIO: u8 = 0x03;
+/// The QEMU and ICH6/ICH9 HDA controller ids this driver accepts.
+const HDA_ICH6: u16 = 0x2668;
+const HDA_ICH9: u16 = 0x293E;
+
 /// Command-register bits: I/O space, memory space and bus mastering.
 const COMMAND_IO_SPACE: u16 = 1 << 0;
 const COMMAND_MEMORY_SPACE: u16 = 1 << 1;
@@ -100,6 +107,18 @@ pub struct E1000Controller {
     pub slot: u8,
     pub function: u8,
     /// Physical base of the MMIO register window (BAR0, low four bits masked).
+    pub mmio_base: u64,
+}
+
+/// The Intel HDA function the audio driver owns (spec 0030, A1).
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+pub struct HdaController {
+    pub vendor: u16,
+    pub device: u16,
+    pub slot: u8,
+    pub function: u8,
+    /// Physical base of the 16 KiB MMIO register window (BAR0).
     pub mmio_base: u64,
 }
 
@@ -340,6 +359,51 @@ pub fn find_e1000() -> Option<E1000Controller> {
         enable_memory_and_bus_master(device);
 
         found = Some(E1000Controller {
+            vendor: device.vendor,
+            device: device.device,
+            slot: device.slot,
+            function: device.function,
+            mmio_base,
+        });
+    });
+
+    found
+}
+
+/// Finds an Intel HDA controller on bus 0 and enables memory space plus bus
+/// mastering (spec 0030, A1).
+///
+/// Only the multimedia-audio class (`04.03`) with an Intel ICH6/ICH9 device id
+/// is accepted; BAR0 is the 16 KiB MMIO window. A 64-bit BAR takes its upper
+/// half from BAR1. The scan is silent: [`init`] already logged every function.
+pub fn find_hda() -> Option<HdaController> {
+    let mut found = None;
+
+    scan(|device| {
+        if found.is_some()
+            || device.vendor != INTEL_VENDOR
+            || device.base_class != CLASS_MULTIMEDIA
+            || device.subclass != SUBCLASS_AUDIO
+            || !matches!(device.device, HDA_ICH6 | HDA_ICH9)
+        {
+            return;
+        }
+        let bar0 = device.bars[0];
+        if bar0 & 1 != 0 {
+            return;
+        }
+        let mmio_base = match (bar0 >> 1) & 0b11 {
+            0b00 => u64::from(bar0 & !0xF),
+            0b10 => u64::from(bar0 & !0xF) | (u64::from(device.bars[1]) << 32),
+            _ => return,
+        };
+        if mmio_base == 0 {
+            return;
+        }
+
+        enable_memory_and_bus_master(device);
+
+        found = Some(HdaController {
             vendor: device.vendor,
             device: device.device,
             slot: device.slot,

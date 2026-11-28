@@ -60,7 +60,7 @@ DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-input-routing.png")
 # its pull-down frame starts at y = 22 with 16-pixel rows. `File Browser` is
 # row 9 (centre y = 31 + 9*16 = 175); `Calculator` is row 1 (centre y = 47).
 APPS_LABEL = (64, 10)
-BROWSER_ROW = (140, 175)
+BROWSER_ROW = (140, 191)
 CALCULATOR_ROW = (140, 47)
 # The `System` label starts at x = 208; its pull-down frame is
 # (204, 22, 224, 66) and row 0 (`About igis-v2`) is y 23..38. Row 0 is clicked

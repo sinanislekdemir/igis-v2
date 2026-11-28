@@ -35,9 +35,9 @@ os.makedirs(SHOT_DIR, exist_ok=True)
 
 DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-calendar.png")
 
-# Apps rows: first row centre y = 31, 16 pixels each. Calendar is row 10.
+# Apps rows: first row centre y = 31, 16 pixels each. Calendar is row 11.
 APPS_LABEL = (64, 10)
-CALENDAR_ROW = (140, 191)
+CALENDAR_ROW = (140, 207)
 # `window_open(300, 110, 252, 240)`: content origin (301, 126). The next-month
 # button is content-relative (224, 8) and 20x18; the close box is frame + (9, 8).
 NEXT_MONTH = (535, 143)

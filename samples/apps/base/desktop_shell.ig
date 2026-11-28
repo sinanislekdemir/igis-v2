@@ -58,7 +58,7 @@ const
   SysMenuWidth = 224;
   SysMenuCount = 4;
   AppMenuWidth = 220;
-  AppMenuCount = 14;
+  AppMenuCount = 15;
   WindowMenuWidth = 220;
   WindowListCapacity = 16;
   AboutContentW = 420;
@@ -970,15 +970,16 @@ begin
   app_items[2] := "Clock";
   app_items[3] := "Widgets";
   app_items[4] := "Image Viewer";
-  app_items[5] := "#Games";
-  app_items[6] := "Minesweeper";
-  app_items[7] := "#Productivity";
-  app_items[8] := "Text Editor";
-  app_items[9] := "File Browser";
-  app_items[10] := "Calendar";
-  app_items[11] := "#Utilities";
-  app_items[12] := "Terminal";
-  app_items[13] := "Settings";
+  app_items[5] := "Music";
+  app_items[6] := "#Games";
+  app_items[7] := "Minesweeper";
+  app_items[8] := "#Productivity";
+  app_items[9] := "Text Editor";
+  app_items[10] := "File Browser";
+  app_items[11] := "Calendar";
+  app_items[12] := "#Utilities";
+  app_items[13] := "Terminal";
+  app_items[14] := "Settings";
   pos := 0;
   while pos < AppMenuCount do
   begin
@@ -1143,20 +1144,22 @@ begin
     launch_app("apps/accessories/widgets", "Widgets")
   else if action = 4 then
     launch_app("apps/accessories/image_viewer", "Image Viewer")
-  else if action = 6 then
+  else if action = 5 then
+    launch_app("apps/accessories/music_player", "Music")
+  else if action = 7 then
     launch_app("apps/games/minesweeper", "Minesweeper")
-  else if action = 8 then
-    launch_app("apps/productivity/editor", "Text Editor")
   else if action = 9 then
-    launch_app("apps/productivity/browser", "File Browser")
+    launch_app("apps/productivity/editor", "Text Editor")
   else if action = 10 then
+    launch_app("apps/productivity/browser", "File Browser")
+  else if action = 11 then
     launch_app("apps/productivity/calendar", "Calendar")
-  else if action = 12 then
+  else if action = 13 then
   begin
     terminal_runs := terminal_runs + 1;
     launch_shell();
   end
-  else if action = 13 then
+  else if action = 14 then
     launch_app("apps/utilities/settings", "Settings");
 end;
 
@@ -1685,17 +1688,17 @@ begin
     verify(
       "apps section headers",
       stdlib.ui_menu_is_header(app_items[0])
-        and stdlib.ui_menu_is_header(app_items[5])
-        and stdlib.ui_menu_is_header(app_items[7])
-        and stdlib.ui_menu_is_header(app_items[11]));
+        and stdlib.ui_menu_is_header(app_items[6])
+        and stdlib.ui_menu_is_header(app_items[8])
+        and stdlib.ui_menu_is_header(app_items[12]));
     verify(
       "apps item labels",
       app_items[1] = "Calculator" and app_items[2] = "Clock"
         and app_items[3] = "Widgets" and app_items[4] = "Image Viewer"
-        and app_items[6] = "Minesweeper"
-        and app_items[8] = "Text Editor" and app_items[9] = "File Browser"
-        and app_items[10] = "Calendar"
-        and app_items[12] = "Terminal" and app_items[13] = "Settings");
+        and app_items[5] = "Music" and app_items[7] = "Minesweeper"
+        and app_items[9] = "Text Editor" and app_items[10] = "File Browser"
+        and app_items[11] = "Calendar"
+        and app_items[13] = "Terminal" and app_items[14] = "Settings");
     verify(
       "apps image viewer item",
       app_items[4] = "Image Viewer"
@@ -1703,15 +1706,16 @@ begin
     verify(
       "apps headers not selectable",
       not stdlib.ui_menu_selectable(app_items[0], uint(0), 0)
-        and not stdlib.ui_menu_selectable(app_items[5], uint(0), 5)
-        and not stdlib.ui_menu_selectable(app_items[11], uint(0), 11));
+        and not stdlib.ui_menu_selectable(app_items[6], uint(0), 6)
+        and not stdlib.ui_menu_selectable(app_items[12], uint(0), 12));
     verify(
       "apps items are selectable",
       stdlib.ui_menu_selectable(app_items[1], uint(0), 1)
         and stdlib.ui_menu_selectable(app_items[4], uint(0), 4)
-        and stdlib.ui_menu_selectable(app_items[10], uint(0), 10)
-        and stdlib.ui_menu_selectable(app_items[12], uint(0), 12)
-        and stdlib.ui_menu_selectable(app_items[13], uint(0), 13));
+        and stdlib.ui_menu_selectable(app_items[5], uint(0), 5)
+        and stdlib.ui_menu_selectable(app_items[11], uint(0), 11)
+        and stdlib.ui_menu_selectable(app_items[13], uint(0), 13)
+        and stdlib.ui_menu_selectable(app_items[14], uint(0), 14));
     // Opening the menu takes the modal grab and launches nothing.
     handle_menu(menu_apps_x + 4, 10);
     verify("apps menu open", handled and app_open and not system_open);
@@ -1771,12 +1775,12 @@ begin
     // emulator so no long-lived child is left behind.
     handle_menu(menu_apps_x + 4, 10);
     pos := 0;
-    while app_selected <> 12 and pos < AppMenuCount do
+    while app_selected <> 13 and pos < AppMenuCount do
     begin
       handle_apps_key(uint(0x1130000));
       pos := pos + 1;
     end;
-    verify("apps terminal selected", app_selected = 12);
+    verify("apps terminal selected", app_selected = 13);
     handle_apps_key(uint(0x1030000));
     verify(
       "apps terminal launches",

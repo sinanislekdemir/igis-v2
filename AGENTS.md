@@ -30,7 +30,7 @@ decisions in `adr/`, and work items in `PLAN.md`.
 
 ## Current state
 
-- Specs 0001–0029 are accepted; **M2–M19 are complete** (desktop, language,
+- Specs 0001–0031 are accepted; **M2–M21 are complete** (desktop, language,
   filesystems, networking, terminal emulator, runtime display modes, PNG/PPM image
   viewer, kernel-only boot with the application volume on disk, the composition model,
   local client coordinates, the icon grid and the browser open-with/menu/clipboard
@@ -60,20 +60,35 @@ decisions in `adr/`, and work items in `PLAN.md`.
   cut, copy, paste, delete). The clipboard is browser-local, writes only under `home/`
   and never overwrites; `Run in terminal` passes `run <path>` to the terminal, which now
   forwards one optional initial command to its shell (spec 0029).
-- **639 host tests** (558 language + 56 `net` + 23 `ext2w` + 2 builtin tests); ABI v1 has
+- **M20/M21 (audio)** are complete: spec 0030 and 0031, ADR 0063 and 0064.
+  `platform/x86_64/hda.rs` brings up one Intel HDA (ICH6/ICH9) playback stream:
+  discovery-based DAC and output-pin selection, CORB/RIRB, an 8 × 4 KiB cyclic
+  BDL on `SD4`, 48 kHz and 44.1 kHz 16-bit stereo, and `SD_LPIB` whole-period
+  accounting from the scheduler. `syslib.sound_open/write/close/volume/mute/
+  queued` (builtins 98–103) are owner-checked; a full ring blocks
+  `sound_write` and the service wakes it. `lib/wav.ig` streams PCM WAV in
+  256-byte pieces; `apps/accessories/music_player` plays/pauses, changes
+  volume/mute and draws progress, and the browser opens `.wav` in it. The boot
+  self-test (`igis.audio_selftest=44100|48000`) and `scripts/audio_qmp.py`
+  (1.027 s captured stereo, 4 and 1 cores) prove both rates. A 44.1 kHz
+  public-domain excerpt (Chopin, Nocturne No. 21; 1.7 MB) is staged read-only as
+  `audio/`. Known limitation: `mke2fs` writes an all-zero 1 KiB block as an ext2
+  hole and `ext2w` rejects zero block pointers (spec 0031); the sample trims
+  digital silence, and hole support is a deferred ticket.
+- **645 host tests** (564 language + 56 `net` + 23 `ext2w` + 2 builtin tests); ABI v1 has
   **75 opcodes** (runtime display modes add builtins 80–83; the machine-level bit and
   bulk buffer primitives are builtins 84–90, `syslib.blit_rgb` is 91, the surface model
-  adds 92–97, no opcode).
+  adds 92–97 and the audio surface 98–103, no opcode).
 - Boot: GRUB/multiboot2 → `system/entrypoint` (the desktop shell), falling back to
   `base/shell`; a graphics-less boot keeps a serial REPL.
-- Filesystems: a read-only 128 MiB ext2 application volume (`lib`, `base`, `apps`,
-  `home`, `system`, `image`, `icons`) on `ide0` unit 1, mounted on demand by the kernel
+- Filesystems: a read-only 160 MiB ext2 application volume (`lib`, `base`, `apps`,
+  `home`, `system`, `image`, `icons`, `audio`) on `ide0` unit 1, mounted on demand by the kernel
   through `ext2w`; boot loads only `kernel.elf` and the ISO carries no image. The
   full-resolution PPM P6 corpus at `image/` is generated from the tracked
   `samples/image-src/` sources (the generated `.ppm` files are git-ignored; the PNG
   decoder is retained for PNG files). The four committed 32×32 icon PPMs live under
   `samples/icons/ppm/` and are staged as `icons/` by `scripts/make_icons.py`. A
-  persistent 8 MiB ext2 `/home` is the primary master (`ext2w`, `e2fsck -fn` clean). GUI
+  persistent 256 MiB ext2 `/home` is the primary master (`ext2w`, `e2fsck -fn` clean). GUI
   applications live under `apps/<category>/`.
 - Networking: virtio-net and e1000/e1000e, IPv4/UDP/TCP, with DHCP/DNS/HTTP/`nc`/`purl`
   in `/lib` and `base/`.
@@ -82,7 +97,8 @@ decisions in `adr/`, and work items in `PLAN.md`.
   (`apps/utilities/terminal`) over kernel console sessions, a Settings app
   (`apps/utilities/settings`) that changes the real mode through the Bochs VBE dispi
   (spec 0022, ADR 0056), and source apps (`editor`, `browser`, `calculator`,
-  `minesweeper`, `clock_window`, `calendar`, `widgets`, `image_viewer`). The editor's File >
+  `minesweeper`, `clock_window`, `calendar`, `widgets`, `image_viewer`, `music_player`).
+  The editor's File >
   Dark row (`Ctrl+D`) switches the whole client content to a dark palette
   (spec 0013); light mode is unchanged. The image viewer
   opens PNG (Adam7 pass-1 stream) and PPM (fixed-stride row seek and 1/8
@@ -201,18 +217,21 @@ The kernel is cross-built for `x86_64-unknown-none`; `xtask` itself builds for t
 |---------|---------|
 | `cargo xtask build` | build the kernel ELF (release) |
 | `cargo xtask image` | generate the PPM corpus if missing, then build and assemble `build/igis.iso` with GRUB and ensure `build/home.img` |
-| `cargo xtask run` | image + QEMU with a display and the home disk, serial on stdio; host `127.0.0.1:18080` is forwarded to guest `8080` (`httpserver`) |
+| `cargo xtask run` | image + QEMU with a display and the home disk, serial on stdio; host `127.0.0.1:18080` is forwarded to guest `8080` (`httpserver`); audio defaults to the host PulseAudio/PipeWire (`--audio pa\|pipewire\|alsa\|wav\|none`) |
 | `cargo xtask run --headless` | image + QEMU with no display (serial only); same 18080→8080 forward |
+| `cargo xtask run --headless --audio wav --audio-selftest [44100\|48000]` | boot with the HDA controller, the WAV backend and the three-ring 440 Hz self-test at the selected rate (`build/audio.wav`); check it with `scripts/audio_wav_check.py` |
+| `python3 scripts/audio_qmp.py [--cores N]` | boot the `--shell` image with HDA + WAV, run `apps/accessories/music_player check` and verify the captured 1 s stereo WAV |
 | `cargo xtask clean` | remove build artifacts |
-| `scripts/run-release.sh` | boot an assembled release (`igis.iso` + `apps.img` + `home.img`) in QEMU; shipped as `run.sh` |
+| `scripts/run-release.sh` | boot an assembled release (`igis.iso` + `apps.img`/`apps.img.gz` + `home.img`/`home.img.gz`) in QEMU; shipped as `run.sh` |
 | `cargo test -p abi -p compiler -p interpreter -p langhost -p ext2w -p net` | host language, filesystem and network-stack tests (the kernel crates have no test harness) |
 | `cargo run -p langhost -- samples/lang/hello.ig` | compile and run one unit on the host |
 
 `.cargo/config.toml` pins the linker script, `code-model=kernel`, and the static
 relocation model for the bare-metal target. The workspace has no default target, so
 host tools are unaffected. Pushing a tag publishes a GitHub release of the kernel,
-`apps.img`, `home.img` and `run.sh` through `.github/workflows/release.yml`; the Ubuntu
-runner ships the Debian GRUB name, which `xtask` resolves, and the host tests run first.
+`apps.img.gz`, `home.img.gz` and `run.sh` through `.github/workflows/release.yml`; the
+Ubuntu runner ships the Debian GRUB name, which `xtask` resolves, and the host tests run
+first.
 
 ## Document conventions
 

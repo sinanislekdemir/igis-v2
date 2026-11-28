@@ -61,8 +61,8 @@ format, the `/home` volume, the ABI, or the desktop's boot order (ADR 0029).
 
   | Bus / unit | Ports | Drive | Device | Mode |
   |---|---|---|---|---|
-  | `ide0` unit 0 | `0x1F0..=0x1F7`, `0x3F6` | `0xE0` | `/home`, 8 MiB (spec 0019) | read-write |
-  | `ide0` unit 1 | `0x1F0..=0x1F7`, `0x3F6` | `0xF0` | application image, 128 MiB | read-only |
+  | `ide0` unit 0 | `0x1F0..=0x1F7`, `0x3F6` | `0xE0` | `/home`, 256 MiB (spec 0019) | read-write |
+  | `ide0` unit 1 | `0x1F0..=0x1F7`, `0x3F6` | `0xF0` | application image, 160 MiB | read-only |
   | `ide1` unit 0 | `0x170..=0x177`, `0x376` | `0xE0` | boot CD | bootloader only |
 
 - **B4 (MUST):** The image is the same ext2 tree as today: 1 KiB blocks, revision 1,
@@ -205,7 +205,7 @@ kind), mapped from `ext2w::Entry`; callers do not change.
 | `ide0` unit 1 absent | `apps: no image`, then `no entry` halt (B11) |
 | Superblock bad or subset unsupported | `apps: mount FAIL (Invalid)`, then B11 |
 | PIO timeout or device error during a read | the call returns `IoError`; the compiler reports it as a diagnostic |
-| Image larger than LBA28 addresses | the driver refuses the device (128 GiB limit; the image is 128 MiB) |
+| Image larger than LBA28 addresses | the driver refuses the device (128 GiB limit; the image is 160 MiB) |
 | Host writes to the image | impossible: `readonly=on` (B12) and a read-only mount |
 | IRQ handler calls the file API | deadlock; forbidden by B9 and documented at the mount |
 
@@ -223,7 +223,7 @@ kind), mapped from `ext2w::Entry`; callers do not change.
 
 | # | Question | Trigger / owner |
 |---|----------|-----------------|
-| 1 | Is the 1 KiB block size still the right choice for a 128 MiB volume? | after the change, if reads measure badly |
+| 1 | Is the 1 KiB block size still the right choice for a 160 MiB volume? | after the change, if reads measure badly |
 
 ## Changelog
 
@@ -236,3 +236,4 @@ kind), mapped from `ext2w::Entry`; callers do not change.
 | 2026-11-22 | Implemented (M15.5): 1.8 s to `desktop_shell: ready`, 229 MiB free, the viewer opens the full-resolution sample in 45-48 s, `--no-apps` halts with `apps: no image`, and the visual golden is unchanged. |
 | 2026-11-22 | B21 added (open question 1 resolved): `xtask image` fsck-checks the volume it just built, validates the primary superblock, and fails the build on any inconsistency. |
 | 2026-11-27 | M18 stages the committed 32×32 PPM icon set at the new read-only top-level `icons/` directory (spec 0028); the boot tree check now expects seven directories. No kernel, ABI or block-device change. |
+| 2026-11-28 | B3 raises the application image from 128 MiB to **160 MiB**: the PPM corpus plus the new read-only `audio/` corpus fills the old volume (the `--shell` image had ~200 KiB left). The `ide0` unit 1 layout, the read-only mount, the `snapshot=on` host protection and the LBA28 driver are unchanged; both images build with `e2fsck -fn` clean and the boot lists `audio/`. |

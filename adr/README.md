@@ -87,3 +87,5 @@ Four digits, monotonic, never reused: `0007-uefi-boot.md`.
 | 0060 | [Retain every window's content and compose the screen from surfaces](0060-per-window-canvas-and-service-compositor.md) | Accepted (implemented M16; local coordinates deferred) | 2026-11-25 |
 | 0061 | [The normal-task budget covers one continuous run, reset on block](0061-per-run-normal-task-budget.md) | Accepted | 2026-11-26 |
 | 0062 | [Pre-rasterize the icon set to 32×32 PPM P6](0062-pre-rasterized-ppm-icons.md) | Accepted | 2026-11-27 |
+| 0063 | [Intel HDA with a cyclic BDL and polled period accounting for audio output](0063-intel-hda-audio-output.md) | Accepted | 2026-11-27 |
+| 0064 | [Accept 44.1 kHz as well as 48 kHz on the HDA playback stream](0064-44k1-and-48k-audio-formats.md) | Accepted | 2026-11-28 |

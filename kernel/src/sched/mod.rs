@@ -793,6 +793,35 @@ impl Host for KernelHost {
         crate::net::timed_out(handle, self.current)
     }
 
+    // Audio output (spec 0030). The facade binds the stream to the calling task,
+    // so the interpreter never carries the owner id.
+    fn sound_open(&mut self, rate: u64, channels: u64, bits: u64) -> u64 {
+        crate::audio::open(rate, channels, bits, self.current) as u64
+    }
+
+    fn sound_write(&mut self, bytes: &[u8]) -> u64 {
+        match crate::audio::write(self.current, bytes) {
+            Ok(()) => Status::Ok as u64,
+            Err(status) => status as u64,
+        }
+    }
+
+    fn sound_close(&mut self) -> u64 {
+        crate::audio::close(self.current) as u64
+    }
+
+    fn sound_volume(&mut self, percent: u64) -> u64 {
+        crate::audio::volume(self.current, percent) as u64
+    }
+
+    fn sound_mute(&mut self, on: u64) -> u64 {
+        crate::audio::mute(self.current, on) as u64
+    }
+
+    fn sound_queued(&mut self) -> u64 {
+        crate::audio::queued()
+    }
+
     fn socket_arm_wait(&mut self, handle: u64) -> Status {
         crate::net::arm_read_wait(handle, self.current)
     }
@@ -1007,9 +1036,14 @@ fn loop_body(core: usize) -> ! {
                             // admission slot while blocked. A child termination
                             // wakes `ChildExit`; console bytes wake a matching
                             // `Any` source `0` (Sch9).
+                            //
+                            // Blocking is not logged. A desktop shell blocks on
+                            // input every event-loop turn, the player on audio
+                            // every period and a terminal on its session, so a
+                            // line per block floods the serial transcript. The
+                            // exit line carries the claim/yield/heartbeat counts.
                             match kind {
                                 WaitKind::ChildExit(child) => {
-                                    println!("sched: task {} blocked on task {}", task.id, child);
                                     task::block(task, WaitFor::Child(child));
                                     // The child may have recorded its exit
                                     // between the failed `wait` and the block
@@ -1020,10 +1054,6 @@ fn loop_body(core: usize) -> ! {
                                     }
                                 }
                                 WaitKind::Stream(handle) => {
-                                    println!(
-                                        "sched: task {} blocked on stream {handle:#x}",
-                                        task.id
-                                    );
                                     let id = task.id;
                                     task::block(task, WaitFor::Stream(handle));
                                     // Space/data/close may have arrived between
@@ -1034,7 +1064,6 @@ fn loop_body(core: usize) -> ! {
                                     }
                                 }
                                 WaitKind::Input => {
-                                    println!("sched: task {} blocked on input", task.id);
                                     let id = task.id;
                                     task::block(task, WaitFor::Input);
                                     // An event may have been queued, or an
@@ -1053,11 +1082,6 @@ fn loop_body(core: usize) -> ! {
                                     }
                                 }
                                 WaitKind::Any(set) => {
-                                    println!(
-                                        "sched: task {} blocked on {} source(s)",
-                                        task.id,
-                                        set.len()
-                                    );
                                     let id = task.id;
                                     let session = task.session;
                                     task::block(task, WaitFor::Any(set));
@@ -1069,10 +1093,6 @@ fn loop_body(core: usize) -> ! {
                                     }
                                 }
                                 WaitKind::Net(handle) => {
-                                    println!(
-                                        "sched: task {} blocked on socket {handle:#x}",
-                                        task.id
-                                    );
                                     let id = task.id;
                                     task::block(task, WaitFor::Net(handle));
                                     // Data/space/EOF/close may have arrived
@@ -1088,6 +1108,15 @@ fn loop_body(core: usize) -> ! {
                                     let now = clock::now_ns();
                                     if now >= ns {
                                         task::wake_deadlines(now);
+                                    }
+                                }
+                                WaitKind::Audio => {
+                                    task::block(task, WaitFor::Audio);
+                                    // A period may have been consumed between the
+                                    // failed write and the block, in which case
+                                    // the wake found nobody. Re-probe the ring.
+                                    if crate::audio::has_space() {
+                                        task::wake_audio();
                                     }
                                 }
                             }
@@ -1256,6 +1285,10 @@ fn terminate(core: usize, mut task: Task, reason: ExitReason) {
     }
 
     repl::record_exit(id, reason);
+    // A task that owned the playback stream closes it; the ring is zeroed and
+    // the owner cleared so the device does not replay stale samples (spec 0030,
+    // B4).
+    crate::audio::owner_exit(id);
     task::wake(id);
     task.reclaim();
 }
@@ -1272,6 +1305,7 @@ fn service() {
     crate::mouse::poll();
     crate::usb::poll();
     crate::net::service();
+    crate::audio::service();
     task::wake_deadlines(clock::now_ns());
     if console::has_byte() {
         task::wake_console_input();
@@ -1306,6 +1340,7 @@ fn idle(core: usize) {
         crate::mouse::poll();
         crate::usb::poll();
         crate::net::service();
+        crate::audio::service();
         task::wake_deadlines(clock::now_ns());
 
         // Interrupts off for the check; `sti; hlt` is one atomic idle step, so

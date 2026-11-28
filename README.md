@@ -40,10 +40,13 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The release carries `igis.iso`, `apps.img`, `home.img`, `run.sh` and
-`SHA256SUMS`. Keep them in one directory and run `./run.sh` (QEMU required).
-The ISO contains only the kernel — the application volume and `/home` are the
-two disk images — so all three files are needed to boot the desktop.
+The release carries `igis.iso`, `apps.img.gz`, `home.img.gz`, `run.sh` and
+`SHA256SUMS`. Keep them in one directory and run `./run.sh` (QEMU and `gunzip`
+required on the first run, which expands the two disks to their 160 MiB and
+256 MiB forms). Sound uses PulseAudio/PipeWire when a server is reachable; set
+`IGIS_AUDIO=none` for a silent machine. The ISO contains only the kernel — the application volume and
+`/home` are the two disk images — so all three files are needed to boot the
+desktop.
 
 ## Implementation
 
@@ -61,7 +64,7 @@ start others through a `run`/`spawn` request queue ([ADR 0017](adr/0017-repl-spa
 PNG/PPM image viewer, retained-surface composition, local client coordinates, the
 large-icon file browser and its open-with/context-menu actions), 639 host tests pass, and
 ABI v1 has 75 opcodes. The read-only
-128 MiB image tree carries a full-resolution PPM P6 corpus generated from the tracked
+160 MiB image tree carries a full-resolution PPM P6 corpus generated from the tracked
 `samples/image-src` JPEGs (the generated PPMs are not committed; the PNG decoder is
 retained), and `apps/accessories/image_viewer` opens both PNG (Adam7 pass-1) and PPM
 (fixed-stride 1/8 sampling) without a full-image buffer. The four committed 32×32 icon

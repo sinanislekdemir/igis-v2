@@ -45,6 +45,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod audio;
 pub mod fs;
 pub mod layout;
 pub mod net;

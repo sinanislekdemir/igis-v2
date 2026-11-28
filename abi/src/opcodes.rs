@@ -1106,6 +1106,50 @@ pub mod builtin {
     /// below the strip. Operands: `[height]`.
     pub const WORK_AREA_RESERVE: u32 = 97;
 
+    // ---- audio output (spec 0030; ADR 0063/0064) -----------------------
+    //
+    // One machine-wide playback stream. The kernel facade owns the 32 KiB
+    // ring, the ownership check and the blocking write; the driver owns the
+    // device. `sound_write` blocks on a full ring (`WaitKind::Audio`) and is
+    // retried with its operands intact.
+
+    /// `syslib.sound_open(rate, channels, bits) -> Status`: open the playback
+    /// stream for the calling task. `rate` is 44100 or 48000, `channels` is 2
+    /// and `bits` is 16; anything else is `Invalid`. The first open records the
+    /// caller as the owner; another task is `Full`; the owner may reopen. No
+    /// device is `IoError` (spec 0030, A8/B1/C3). Operands:
+    /// `[rate][channels][bits]`.
+    pub const SOUND_OPEN: u32 = 98;
+
+    /// `syslib.sound_write(samples) -> Status`: enqueue the caller's whole
+    /// buffer (a `string` or `bytes`, `1..=32768` bytes) into the ring. A
+    /// larger buffer is `CapacityExceeded`, an empty one `Invalid`. When the
+    /// ring has less free space than the buffer the call blocks and is retried;
+    /// `Invalid` for a task that does not own the stream (spec 0030, B2/C2).
+    /// Operands: `[samples reference]`.
+    pub const SOUND_WRITE: u32 = 99;
+
+    /// `syslib.sound_close() -> Status`: stop the stream, zero the ring and
+    /// clear the owner. Owner-only (spec 0030, B4/C2). No operands.
+    pub const SOUND_CLOSE: u32 = 100;
+
+    /// `syslib.sound_volume(percent) -> Status`: set both channels from
+    /// `0..=100`; the codec's amplifier range is discovered at bring-up. A
+    /// percentage above 100 is `Invalid`; a codec without an output amplifier
+    /// accepts the call as a no-op (spec 0030, B6/B7). Owner-only.
+    /// Operands: `[percent]`.
+    pub const SOUND_VOLUME: u32 = 101;
+
+    /// `syslib.sound_mute(on) -> Status`: mute (`1`) or unmute (`0`) both
+    /// channels at the current volume; any other value is `Invalid`.
+    /// Owner-only (spec 0030, B6). Operands: `[on]`.
+    pub const SOUND_MUTE: u32 = 102;
+
+    /// `syslib.sound_queued() -> uint`: bytes enqueued but not yet consumed;
+    /// `0` when no stream is open or no device exists. No owner check, so a
+    /// diagnostic or proof can read it (spec 0030, C2). No operands.
+    pub const SOUND_QUEUED: u32 = 103;
+
     /// `core.sleep(ms)`: block the caller until at least `ms` milliseconds of
     /// wall time have passed, then push `Ok`. The wait is the scheduler's
     /// generic deadline (`WaitFor::Deadline`), so blocked time does not count
@@ -1209,6 +1253,12 @@ pub mod builtin {
             PLANE_BEGIN => Some((1, 1)),
             PLANE_PRESENT => Some((1, 1)),
             WORK_AREA_RESERVE => Some((1, 1)),
+            SOUND_OPEN => Some((3, 1)),
+            SOUND_WRITE => Some((1, 1)),
+            SOUND_CLOSE => Some((0, 1)),
+            SOUND_VOLUME => Some((1, 1)),
+            SOUND_MUTE => Some((1, 1)),
+            SOUND_QUEUED => Some((0, 1)),
             _ => None,
         }
     }

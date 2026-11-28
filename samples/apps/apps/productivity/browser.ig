@@ -38,7 +38,8 @@ unit browser;
 // kind-1 entry is descended into (`dir := dir + "/" + name`, or the name at
 // the root); a `.ppm`/`.png` file (ASCII case-insensitive) is opened in
 // `apps/accessories/image_viewer`; a `.txt` file is opened in
-// `apps/productivity/editor`; a source application (`.ig`, or an extensionless
+// `apps/productivity/editor`; a `.wav` file is opened in
+// `apps/accessories/music_player`; a source application (`.ig`, or an extensionless
 // file in `base`/`system`/`apps`/`apps/<category>`) keeps the M18 blocking
 // `core.spawn` + `core.wait` launch. The viewer, the editor and the terminal
 // are spawned WITHOUT waiting, so the browser stays usable while they run. Any
@@ -161,6 +162,7 @@ const
   ActionEditor = 2;
   ActionImage = 3;
   ActionMenu = 4;
+  ActionMusic = 5;
 
   // The browser-local clipboard modes (spec 0029, C1).
   ClipNone = 0;
@@ -453,6 +455,8 @@ begin
     return ActionImage;
   if has_suffix(name, ".txt") then
     return ActionEditor;
+  if has_suffix(name, ".wav") then
+    return ActionMusic;
   if has_suffix(name, ".ig") then
     return ActionRun;
   if not has_dot(name) and is_source_dir(where) then
@@ -821,6 +825,8 @@ begin
     return spawn_detached("apps/accessories/image_viewer", path_buf);
   if action = ActionEditor then
     return spawn_detached("apps/productivity/editor", path_buf);
+  if action = ActionMusic then
+    return spawn_detached("apps/accessories/music_player", path_buf);
   return launch_path(path_buf, "");
 end;
 

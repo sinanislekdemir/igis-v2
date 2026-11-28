@@ -35,7 +35,7 @@ colour, gamma/colour-management or a kernel codec.
 - **P2 (MUST):** The PNG decoder is retained for PNG files and the PNG
   requirements in this specification still apply to PNG input. The active
   shipped corpus is uncompressed PPM P6 under `image/` per spec 0024, staged
-  from `samples/image`; the apps image is 128 MiB for both the product and the
+  from `samples/image`; the apps image is 160 MiB for both the product and the
   `--shell` image.
 - **P3 (MUST):** When the corpus is PNG, every corpus file is an 8-bit RGB
   (colour type 2), non-premultiplied, full-resolution PNG with Adam7 interlace.

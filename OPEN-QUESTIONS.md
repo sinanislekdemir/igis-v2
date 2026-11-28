@@ -98,7 +98,7 @@ self-check proves the rule (`stack: layout ok`). Spec 0004 C6, spec 0002 H2.
 
 **One ext2 reader and a kernel-only boot medium (spec 0025, ADR 0059; resolves Q59).**
 The application image no longer travels as a GRUB module: `grub.cfg` loads only
-`kernel.elf`, and the 128 MiB ext2 volume sits on `ide0` unit 1 (read-only) where the
+`kernel.elf`, and the 160 MiB ext2 volume sits on `ide0` unit 1 (read-only) where the
 kernel mounts it with `ext2w` on demand. `/home` keeps `ide0` unit 0 and the boot CD
 `ide1` unit 0. `vfs/ext2` and the module byte-slice path are retired, so both mounts use
 the host-tested reader; `ext2w`'s `RefCell` cache is shared across cores behind the

@@ -44,7 +44,7 @@ DEFAULT_OUTPUT = os.path.join(SHOT_DIR, "igis-terminal-scroll.png")
 
 # `desktop_shell` menu geometry: Terminal is row 10, y = 22 + 1 + 10*16 + 8.
 APPS_LABEL = (64, 10)
-TERMINAL_ROW = (140, 191)
+TERMINAL_ROW = (140, 239)
 LARGE_SOURCE = "apps/productivity/browser"
 PROMPT = r"(?:shell> |igis:/[^>]*> )"
 ALIVE = "terminal-alive"

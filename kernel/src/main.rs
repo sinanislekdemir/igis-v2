@@ -8,6 +8,7 @@ mod net;
 mod repl;
 mod stream;
 mod sync;
+mod audio;
 
 mod mm;
 mod platform;
@@ -18,7 +19,7 @@ mod vfs;
 // The crate keeps the flat `crate::name` paths its modules already use while
 // the files live in their subject directories (ADR 0052).
 pub(crate) use mm::{frame, guard};
-pub(crate) use platform::x86_64::{ata, mouse, pci, smp, usb};
+pub(crate) use platform::x86_64::{ata, hda, mouse, pci, smp, usb};
 pub(crate) use sched::task;
 pub(crate) use ui::{console, display, font, font8x8, gfx, session, window};
 pub(crate) use vfs::fs;
@@ -388,12 +389,20 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
     // line, which GRUB carries in its command-line tag. Nothing else changes,
     // so the polled proof runs the same kernel and the same image.
     let mut net_poll_only = false;
+    let mut audio_selftest = 0u32;
     mb2::for_each_command_line(mb2_info as usize, |line| {
-        if line
-            .split(|byte| *byte == b' ')
-            .any(|word| word == b"igis.net_irq=poll")
-        {
-            net_poll_only = true;
+        for word in line.split(|byte| *byte == b' ') {
+            if word == b"igis.net_irq=poll" {
+                net_poll_only = true;
+            }
+            // `=1` keeps the old 48 kHz form; a rate selects the stream format
+            // (spec 0030, A8/V1; ADR 0064).
+            if word == b"igis.audio_selftest=1" || word == b"igis.audio_selftest=48000" {
+                audio_selftest = 48_000;
+            }
+            if word == b"igis.audio_selftest=44100" {
+                audio_selftest = 44_100;
+            }
         }
     });
     net::init();
@@ -436,6 +445,15 @@ pub extern "C" fn kmain(mb2_info: u64) -> ! {
         println!("net: irq ok (vector {:#x})", apic::NET_VECTOR);
     } else if !net_poll_only {
         println!("net: polling");
+    }
+
+    // The HDA controller (spec 0030, ADR 0063): one playback stream, polled
+    // from the service opportunity. Absent or unusable hardware is one log
+    // line, never a boot failure. The optional self-test runs here, before the
+    // scheduler, so it owns the machine while it streams three rings.
+    audio::init();
+    if audio_selftest != 0 {
+        audio::selftest(audio_selftest);
     }
 
     println!("memory map:");

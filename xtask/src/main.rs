@@ -36,20 +36,21 @@ fn main() -> ExitCode {
 
     match command {
         "build" => build(),
-        "image" => match net_irq(&args) {
-            Ok(mode) => image(
+        "image" => match (net_irq(&args), audio_selftest(&args)) {
+            (Ok(mode), Ok(selftest)) => image(
                 args.iter().any(|arg| arg == "--shell"),
                 args.iter().any(|arg| arg == "--reset-home"),
                 mode,
+                selftest,
             ),
-            Err(code) => code,
+            _ => ExitCode::FAILURE,
         },
         "run" => run(&args[1..]),
         "clean" => clean(),
         other => {
             eprintln!("unknown command: {other}");
             eprintln!(
-                "usage: cargo xtask <build|image [--shell] [--reset-home] [--net-irq intx|poll]|run [--headless] [--no-tablet] [--no-net] [--net-device virtio|e1000|e1000e] [--net-irq intx|poll] [--no-home] [--no-apps] [--reset-home] [--shell] [--cores N]|clean>"
+                "usage: cargo xtask <build|image [--shell] [--reset-home] [--net-irq intx|poll] [--audio-selftest [44100|48000]]|run [--headless] [--no-tablet] [--no-net] [--net-device virtio|e1000|e1000e] [--net-irq intx|poll] [--audio none|wav|pa|pipewire|alsa] [--audio-selftest [44100|48000]] [--no-home] [--no-apps] [--reset-home] [--shell] [--cores N]|clean>"
             );
             ExitCode::FAILURE
         }
@@ -71,6 +72,47 @@ fn net_irq(args: &[String]) -> Result<&'static str, ExitCode> {
                 eprintln!("--net-irq needs one of intx, poll");
                 Err(ExitCode::FAILURE)
             }
+        },
+    }
+}
+
+/// The audio backend selected by `--audio` (spec 0030, V1/V2).
+///
+/// `pa` is the default: an Intel HDA controller with an output codec on the
+/// host's PulseAudio/PipeWire server, so the desktop player is audible.
+/// `pipewire` and `alsa` select those servers explicitly; `wav` captures to
+/// `build/audio.wav` for the headless proof; `none` adds no sound card and
+/// exercises the absent path.
+fn audio_backend(args: &[String]) -> Result<&'static str, ExitCode> {
+    match args.iter().position(|arg| arg == "--audio") {
+        None => Ok("pa"),
+        Some(position) => match args.get(position + 1).map(String::as_str) {
+            Some("none") => Ok("none"),
+            Some("wav") => Ok("wav"),
+            Some("pa") => Ok("pa"),
+            Some("pipewire") => Ok("pipewire"),
+            Some("alsa") => Ok("alsa"),
+            _ => {
+                eprintln!("--audio needs one of none, wav, pa, pipewire, alsa");
+                Err(ExitCode::FAILURE)
+            }
+        },
+    }
+}
+
+/// The audio self-test rate selected by `--audio-selftest [44100|48000]`
+/// (spec 0030, V1; ADR 0064). A bare flag is the 48 kHz default; the optional
+/// next token selects 44.1 kHz.
+fn audio_selftest(args: &[String]) -> Result<Option<u32>, ExitCode> {
+    match args.iter().position(|arg| arg == "--audio-selftest") {
+        None => Ok(None),
+        Some(position) => match args.get(position + 1).and_then(|value| value.parse::<u32>().ok()) {
+            Some(rate @ (44_100 | 48_000)) => Ok(Some(rate)),
+            Some(_) => {
+                eprintln!("--audio-selftest rate must be 44100 or 48000");
+                Err(ExitCode::FAILURE)
+            }
+            None => Ok(Some(48_000)),
         },
     }
 }
@@ -97,7 +139,7 @@ fn kernel_elf() -> PathBuf {
         .join(KERNEL_ELF)
 }
 
-fn image(shell: bool, reset_home: bool, net_irq: &str) -> ExitCode {
+fn image(shell: bool, reset_home: bool, net_irq: &str, audio_selftest: Option<u32>) -> ExitCode {
     if build() == ExitCode::FAILURE {
         return ExitCode::FAILURE;
     }
@@ -131,11 +173,13 @@ fn image(shell: bool, reset_home: bool, net_irq: &str) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let cmdline = if net_irq == "poll" {
-        "multiboot2 /boot/kernel.elf igis.net_irq=poll"
-    } else {
-        "multiboot2 /boot/kernel.elf"
-    };
+    let mut cmdline = String::from("multiboot2 /boot/kernel.elf");
+    if net_irq == "poll" {
+        cmdline.push_str(" igis.net_irq=poll");
+    }
+    if let Some(rate) = audio_selftest {
+        cmdline.push_str(&format!(" igis.audio_selftest={rate}"));
+    }
     let config = format!(
         "serial --unit=0 --speed=115200\n\
          terminal_input serial\n\
@@ -183,7 +227,7 @@ fn image(shell: bool, reset_home: bool, net_irq: &str) -> ExitCode {
 /// git-ignored build input, not source. The corpus is served read-only at
 /// `image/` (spec 0024; the PNG decoder is retained for PNG files). The
 /// staging directory and the image live under `build/`; `mke2fs -d` copies the
-/// staged tree into a fresh 128 MiB ext2 filesystem with 1 KiB blocks. The
+/// staged tree into a fresh 160 MiB ext2 filesystem with 1 KiB blocks. The
 /// image carries application source (ADR 0019) and the image corpus, and
 /// preserves the source tree (spec 0018, X1): `lib`, `base`, `apps`, `home`,
 /// `system`, `image` and `icons` become real directories, and no file sits at
@@ -200,7 +244,8 @@ fn image(shell: bool, reset_home: bool, net_irq: &str) -> ExitCode {
 /// `samples/tests/apps/` into the same directories so proofs and negative
 /// fixtures are reachable with their usual names, and it omits the
 /// `system/entrypoint` alias so the REPL falls back to `base/shell`, exactly as
-/// an older image would. The product image never carries the test corpus.
+/// an older image would. The product image never carries the test corpus. The
+/// read-only roots also include `image/`, `icons/` and `audio/`.
 fn apps_image(shell: bool) -> Result<PathBuf, String> {
     let source = root().join("samples").join("apps");
     if !source.is_dir() {
@@ -209,8 +254,10 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
     // Spec 0018, L1: the source root holds only image directories.
     let top_level = ["lib", "base", "apps", "home", "system"];
     // The staged image also carries the read-only PPM corpus (spec 0024; the
-    // PNG decoder is retained for PNG files).
-    let staged_dirs = ["lib", "base", "apps", "home", "system", "image", "icons"];
+    // PNG decoder is retained for PNG files) and the classical sample corpus.
+    let staged_dirs = [
+        "lib", "base", "apps", "home", "system", "image", "icons", "audio",
+    ];
     let entries =
         fs::read_dir(&source).map_err(|error| format!("{}: {error}", source.display()))?;
     for entry in entries {
@@ -288,6 +335,15 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
     }
     stage_tree(&image_seed, &staging.join("image"), false)?;
 
+    // The small public-domain classical corpus is served read-only at `audio/`
+    // (spec 0031, M21). The excerpts are already 44.1 kHz/16-bit/stereo, the
+    // second format the HDA driver programs (spec 0030, A8; ADR 0064).
+    let audio_seed = root().join("samples").join("audio");
+    if !audio_seed.is_dir() {
+        return Err(format!("{} is not a directory", audio_seed.display()));
+    }
+    stage_tree(&audio_seed, &staging.join("audio"), false)?;
+
     // X2: the test corpus is present only in the `--shell` image.
     if shell {
         let tests = root().join("samples").join("tests").join("apps");
@@ -315,7 +371,7 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
         stage_apps(&tests, &staging, true)?;
     }
 
-    // The seven top-level directories exist even when empty.
+    // The eight top-level directories exist even when empty.
     for name in staged_dirs {
         fs::create_dir_all(staging.join(name))
             .map_err(|error| format!("{}: {error}", staging.join(name).display()))?;
@@ -352,7 +408,7 @@ fn apps_image(shell: bool) -> Result<PathBuf, String> {
         .arg(&staging)
         .arg("-F")
         .arg(&image)
-        .arg("128M")
+        .arg("160M")
         .status()
         .map_err(|error| format!("failed to run mke2fs: {error}"))?;
     if !status.success() {
@@ -439,14 +495,23 @@ fn has_ppm(dir: &Path) -> bool {
     })
 }
 
+/// The writable home image size (spec 0019, H1): 256 MiB of 1 KiB-block ext2.
+///
+/// Raised from 8 MiB on 2026-11-28 so a music/WAV corpus and ordinary user
+/// files fit. Existing images are grown, never deleted (H2).
+const HOME_IMAGE_MIB: u64 = 256;
+const HOME_IMAGE_BYTES: u64 = HOME_IMAGE_MIB * 1024 * 1024;
+
 /// Ensures the writable home image exists (spec 0019, H1/H2).
 ///
-/// The image is 8 MiB of 1 KiB-block ext2 with an initial tree from
+/// The image is 256 MiB of 1 KiB-block ext2 with an initial tree from
 /// `samples/home/`. It is created only when missing; an existing image is
-/// user data and is never overwritten unless `reset` is set (`--reset-home`).
+/// user data, so it is grown in place to the current size and is never
+/// overwritten unless `reset` is set (`--reset-home`).
 fn home_image(reset: bool) -> Result<PathBuf, String> {
     let image = root().join("build").join("home.img");
     if image.exists() && !reset {
+        grow_home_image(&image)?;
         return Ok(image);
     }
     if image.exists() {
@@ -476,14 +541,61 @@ fn home_image(reset: bool) -> Result<PathBuf, String> {
         .arg(&staging)
         .arg("-F")
         .arg(&image)
-        .arg("8M")
+        .arg(format!("{HOME_IMAGE_MIB}M"))
         .status()
         .map_err(|error| format!("failed to run mke2fs: {error}"))?;
     if !status.success() {
         return Err(format!("mke2fs failed with {status}"));
     }
-    println!("home image: {}", image.display());
+    check_image(&image)?;
+    println!(
+        "home image: {} ({} MiB, e2fsck clean)",
+        image.display(),
+        HOME_IMAGE_MIB
+    );
     Ok(image)
+}
+
+/// Grows an existing home image to [`HOME_IMAGE_MIB`] without touching its
+/// contents (spec 0019, H1/H2).
+///
+/// The file is extended first and `resize2fs` grows the filesystem to the file
+/// size. `e2fsck -fn` runs before and after, so a damaged image is reported
+/// instead of silently enlarged. An image that is already large enough is left
+/// alone.
+fn grow_home_image(image: &Path) -> Result<(), String> {
+    let length = fs::metadata(image)
+        .map_err(|error| format!("{}: {error}", image.display()))?
+        .len();
+    if length >= HOME_IMAGE_BYTES {
+        return Ok(());
+    }
+    check_image(image)?;
+
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(image)
+        .map_err(|error| format!("{}: {error}", image.display()))?;
+    file.set_len(HOME_IMAGE_BYTES)
+        .map_err(|error| format!("{}: cannot grow: {error}", image.display()))?;
+    drop(file);
+
+    let status = Command::new("resize2fs")
+        .arg(image)
+        .status()
+        .map_err(|error| format!("failed to run resize2fs (is e2fsprogs installed?): {error}"))?;
+    if !status.success() {
+        return Err(format!("resize2fs failed with {status}"));
+    }
+    check_image(image)?;
+
+    println!(
+        "home image: grown {} -> {} MiB ({})",
+        length / (1024 * 1024),
+        HOME_IMAGE_MIB,
+        image.display()
+    );
+    Ok(())
 }
 
 /// Stages an application tree (spec 0018, L3/X1): `lib` and `home` keep their
@@ -601,7 +713,15 @@ fn run(args: &[String]) -> ExitCode {
         Ok(mode) => mode,
         Err(code) => return code,
     };
-    if image(shell, reset_home, net_irq) == ExitCode::FAILURE {
+    let audio = match audio_backend(args) {
+        Ok(mode) => mode,
+        Err(code) => return code,
+    };
+    let audio_selftest = match audio_selftest(args) {
+        Ok(rate) => rate,
+        Err(code) => return code,
+    };
+    if image(shell, reset_home, net_irq, audio_selftest) == ExitCode::FAILURE {
         return ExitCode::FAILURE;
     }
 
@@ -724,6 +844,39 @@ fn run(args: &[String]) -> ExitCode {
     }
     if !no_net {
         println!("run: host 127.0.0.1:18080 -> guest 8080 (httpserver)");
+    }
+
+    // Audio (spec 0030, ADR 0063). The HDA controller plus an output codec is
+    // added for every backend except `none`; `pa` (the default) is audible on a
+    // normal PulseAudio/PipeWire desktop, `wav` captures for the headless proof,
+    // and `pipewire`/`alsa` select those servers explicitly.
+    match audio {
+        "wav" => {
+            qemu.arg("-audiodev")
+                .arg(
+                    "wav,id=snd0,path=build/audio.wav,out.frequency=48000,out.channels=2,out.format=s16",
+                );
+            println!("run: audio hda-output -> build/audio.wav (48 kHz stereo s16)");
+        }
+        "pa" => {
+            qemu.arg("-audiodev").arg("pa,id=snd0");
+            println!("run: audio hda-output -> PulseAudio/PipeWire");
+        }
+        "pipewire" => {
+            qemu.arg("-audiodev").arg("pipewire,id=snd0");
+            println!("run: audio hda-output -> PipeWire");
+        }
+        "alsa" => {
+            qemu.arg("-audiodev").arg("alsa,id=snd0");
+            println!("run: audio hda-output -> ALSA");
+        }
+        _ => {}
+    }
+    if audio != "none" {
+        qemu.arg("-device")
+            .arg("ich9-intel-hda")
+            .arg("-device")
+            .arg("hda-output,audiodev=snd0");
     }
 
     if headless {

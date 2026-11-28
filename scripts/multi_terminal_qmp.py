@@ -28,9 +28,9 @@ sys.dont_write_bytecode = True
 from tablet_qmp import Qmp, Serial, apps_drive  # noqa: E402
 
 # Measured menu bar: Apps at x = 56, pull-down (52, 22, 220, 178).
-# Terminal is row 10: y = 22 + 1 + 10*16 + 8 = 191.
+# Terminal is row 13: y = 22 + 1 + 13*16 + 8 = 239.
 APPS_LABEL = (64, 10)
-TERMINAL_ROW = (140, 191)
+TERMINAL_ROW = (140, 239)
 # First emulator content origin (24, 64); second cascades by 28 pixels.
 FIRST_FOCUS = (30, 200)
 SECOND_FOCUS = (680, 200)
